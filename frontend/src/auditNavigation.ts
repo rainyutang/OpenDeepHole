@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import { getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
+import { getScanFpReviewResult, getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
+import { hasFpReviewRecord } from "./fpReview";
 import { mergeIndexedVulnerabilities } from "./scanRuntime";
-import type { IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, Vulnerability } from "./types";
+import type { FpReviewJob, FpReviewResult, IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, Vulnerability } from "./types";
 
 export interface ListFocusRequest<K> { key: K; revision: number }
 export type AuditFocus = (
-  | { kind: "issue" | "static_candidate"; key: number }
+  | { kind: "issue" | "static_candidate" | "fp_review"; key: number }
   | { kind: "threat_audit"; key: string }
 ) & { revision: number };
 export type AuditTarget =
   | { kind: "issue"; vulnerability: IndexedVulnerability }
+  | { kind: "fp_review"; vulnerability: IndexedVulnerability; result: FpReviewResult }
   | { kind: "threat_audit"; task: ThreatAuditTask }
   | { kind: "static_candidate"; candidate: ScanCandidate };
-export interface AuditNavigationRequest { kind: "issue" | "source"; index: number }
+export interface AuditNavigationRequest { kind: "issue" | "source" | "fp_review"; index: number }
 
 export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "static_candidate" | null {
   if ([vuln.analysis_source, vuln.engine_id, vuln.vuln_type].includes("threat_audit")) return "threat_audit";
@@ -29,10 +31,22 @@ export async function resolveAuditNavigation(
   scan: ScanStatus,
   request: AuditNavigationRequest,
   signal: AbortSignal,
+  fpReview: FpReviewJob | null = null,
 ): Promise<AuditTarget> {
   const { index } = request;
   if (!Number.isInteger(index) || index < 0) throw new Error("问题索引无效");
-  const known = scan.vulnerabilities.find((vuln) => vuln.vuln_index === index);
+  const review = fpReview?.scan_id === scan.scan_id ? fpReview : null;
+  const known = scan.vulnerabilities.find((vuln) => vuln.vuln_index === index)
+    ?? review?.result_vulnerabilities?.find((vuln) => vuln.vuln_index === index);
+  if (request.kind === "fp_review") {
+    const cached = review?.results.find((result) => result.vuln_index === index);
+    const [issue, result] = await Promise.all([
+      resolveAuditNavigation(scan, { kind: "issue", index }, signal, review),
+      hasFpReviewRecord(cached) ? cached : getScanFpReviewResult(scan.scan_id, index, signal),
+    ]);
+    if (issue.kind !== "issue" || !hasFpReviewRecord(result)) throw new Error("该问题尚无去误报详情");
+    return { kind: "fp_review", vulnerability: issue.vulnerability, result };
+  }
   if (request.kind === "issue") {
     if (known) return { kind: "issue", vulnerability: known };
     const page = await getScanVulnerabilitiesPage(scan.scan_id, index - 1, signal, 1);
@@ -62,10 +76,10 @@ export async function resolveAuditNavigation(
 /** Targeted reads must never advance the cursor used to load intervening rows. */
 export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanStatus {
   // A live update can arrive while the targeted read is in flight. Keep it.
-  if (target.kind === "issue" && scan.vulnerabilities.some((item) => item.vuln_index === target.vulnerability.vuln_index)) return scan;
+  if ((target.kind === "issue" || target.kind === "fp_review") && scan.vulnerabilities.some((item) => item.vuln_index === target.vulnerability.vuln_index)) return scan;
   if (target.kind === "static_candidate" && scan.candidates.some((item) => item.idx === target.candidate.idx)) return scan;
   if (target.kind === "threat_audit" && scan.threat_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
-  if (target.kind === "issue") return {
+  if (target.kind === "issue" || target.kind === "fp_review") return {
     ...scan,
     vulnerabilities: mergeIndexedVulnerabilities(scan.vulnerabilities, [{
       index: target.vulnerability.vuln_index, vulnerability: target.vulnerability,
@@ -88,7 +102,11 @@ export function useAuditNavigation(
   scanRef: MutableRefObject<ScanStatus | null>,
   setScan: Dispatch<SetStateAction<ScanStatus | null>>,
   onNavigate: (kind: AuditTarget["kind"]) => void,
+  fpReview: FpReviewJob | null = null,
+  setFpReview?: Dispatch<SetStateAction<FpReviewJob | null>>,
 ) {
+  const fpReviewRef = useRef(fpReview);
+  fpReviewRef.current = fpReview;
   const [focus, setFocus] = useState<AuditFocus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -121,12 +139,26 @@ export function useAuditNavigation(
     setLoading(true);
     setError("");
     try {
-      const target = await resolveAuditNavigation(scan, request, pending.signal);
+      const review = fpReviewRef.current;
+      if (request.kind === "fp_review" && (review?.scan_id !== scanId || !setFpReview)) {
+        throw new Error("去误报状态尚未加载，请稍后重试");
+      }
+      const target = await resolveAuditNavigation(scan, request, pending.signal, review);
       if (pending.signal.aborted || scanRef.current?.scan_id !== scanId) return;
-      setScan((previous) => previous?.scan_id === scanId ? mergeAuditTarget(previous, target) : previous);
+      if (target.kind === "fp_review") {
+        const sameReview = (job: FpReviewJob | null) => job?.scan_id === scanId
+          && job.review_id === review?.review_id && job.execution_revision === review?.execution_revision;
+        if (!sameReview(fpReviewRef.current)) return;
+        setFpReview?.((previous) => {
+          if (pending.signal.aborted || !previous || !sameReview(previous)
+            || previous.results.some((result) => result.vuln_index === request.index && hasFpReviewRecord(result))) return previous;
+          return { ...previous, results: [...previous.results.filter((result) => result.vuln_index !== request.index), target.result] };
+        });
+      }
+      setScan((previous) => !pending.signal.aborted && previous?.scan_id === scanId ? mergeAuditTarget(previous, target) : previous);
       const nextRevision = ++revision.current;
-      setFocus(target.kind === "issue"
-        ? { kind: "issue", key: target.vulnerability.vuln_index, revision: nextRevision }
+      setFocus(target.kind === "issue" || target.kind === "fp_review"
+        ? { kind: target.kind, key: target.vulnerability.vuln_index, revision: nextRevision }
         : target.kind === "static_candidate"
           ? { kind: "static_candidate", key: target.candidate.idx, revision: nextRevision }
           : { kind: "threat_audit", key: target.task.task_id, revision: nextRevision });
@@ -136,12 +168,13 @@ export function useAuditNavigation(
     } finally {
       if (!pending.signal.aborted) setLoading(false);
     }
-  }, [scanId, scanRef, setScan, onNavigate]);
+  }, [scanId, scanRef, setScan, onNavigate, setFpReview]);
 
   return {
     focus, loading, error, cancel,
     openIssue: (index: number) => { void open({ kind: "issue", index }); },
     openSource: (index: number) => { void open({ kind: "source", index }); },
+    openFpReview: (index: number) => { void open({ kind: "fp_review", index }); },
     retry: () => { if (lastRequest.current) void open(lastRequest.current); },
   };
 }

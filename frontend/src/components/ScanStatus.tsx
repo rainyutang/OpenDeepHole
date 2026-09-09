@@ -23,7 +23,7 @@ import type { CandidateAuditTaskResult } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
-import { isEffectiveFpReviewResult } from "../fpReview";
+import { hasFpReviewRecord, isEffectiveFpReviewResult } from "../fpReview";
 import {
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   STATIC_CANDIDATE_ENGINE_LABEL,
@@ -60,6 +60,7 @@ import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
 
 const MAX_LOG_LINES = 200;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
+const FP_REVIEW_PAGE_SIZE = 20;
 const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
@@ -725,12 +726,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setSidebarOpen(false);
     if (kind === "issue") setActiveTab("issues");
     else if (kind === "static_candidate") setActiveTab("static");
+    else if (kind === "fp_review") setActiveTab("fp_review");
     else {
       setActiveEngineId(THREAT_ENGINE_ID);
       setActiveTab("mining");
     }
   }, []);
-  const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget);
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -761,6 +762,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget, fpReview, setFpReview);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewPageLoading, setFpReviewPageLoading] = useState(false);
@@ -1389,6 +1391,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         current_vuln_index: null,
         current_vuln_indices: [],
         results: prev?.results ?? [],
+        // Results span review jobs; a restart must not drop an unfinished page chain.
+        next_cursor: prev?.next_cursor === undefined ? -1 : prev.next_cursor,
+        result_vulnerabilities: prev?.result_vulnerabilities ?? [],
         error_message: null,
         created_at: prev?.created_at ?? new Date().toISOString(),
       }));
@@ -1532,11 +1537,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     });
   }, [activeEngineId, activeTab, logOpen]);
 
-  // The issues list and its filters need every finding, review and validation.
+  // Both paginated lists need every finding/review; issues also need validations.
   // Follow each cursor automatically, retaining completed pages for retries.
   useEffect(() => {
-    if (activeTab !== "issues" || scan?.scan_id !== scanId) return;
-    for (const resource of ISSUE_DETAIL_RESOURCES) {
+    if ((activeTab !== "issues" && activeTab !== "fp_review") || scan?.scan_id !== scanId) return;
+    const resources: DetailResource[] = activeTab === "issues" ? ISSUE_DETAIL_RESOURCES : ["vulnerabilities"];
+    for (const resource of resources) {
       if (detailCursor(scan, resource) != null
         && !detailLoadingResources.has(resource)
         && !detailFailedResources.has(resource)) {
@@ -1548,7 +1554,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   useEffect(() => {
     setFpReviewPageFailed(false);
     const cursor = fpReview?.next_cursor;
-    if (activeTab !== "issues" || fpReview?.scan_id !== scanId || cursor == null) {
+    if ((activeTab !== "issues" && activeTab !== "fp_review") || fpReview?.scan_id !== scanId || cursor == null) {
       setFpReviewPageLoading(false);
       return;
     }
@@ -1924,14 +1930,17 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     isDone: !!isDone,
     isFpReviewing,
   });
+  const showsFpResults = activeTab === "issues" || activeTab === "fp_review";
+  const automaticListResources: DetailResource[] = activeTab === "issues" ? ISSUE_DETAIL_RESOURCES
+    : activeTab === "fp_review" ? ["vulnerabilities"] : [];
   const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource))
-    || (activeTab === "issues" && (!fpReviewHydrated || fpReviewPageLoading
+    || (showsFpResults && (!fpReviewHydrated || fpReviewPageLoading
       || (!fpReviewPageFailed && fpReview?.next_cursor != null)
-      || ISSUE_DETAIL_RESOURCES.some((resource) => detailCursor(scan, resource) != null && !detailFailedResources.has(resource))));
+      || automaticListResources.some((resource) => detailCursor(scan, resource) != null && !detailFailedResources.has(resource))));
   const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource))
-    || (activeTab === "issues" && fpReviewPageFailed);
+    || (showsFpResults && fpReviewPageFailed);
   const manualDetailResources = requiredDetailResources.filter((resource) => detailCursor(scan, resource) != null
-    && (activeTab !== "issues" || !ISSUE_DETAIL_RESOURCES.includes(resource)));
+    && !automaticListResources.includes(resource));
   const issuesView = (
     <VulnerabilityList
       scanId={scanId}
@@ -1947,6 +1956,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       viewMode="final_tp"
       focusRequest={auditNavigation.focus?.kind === "issue" ? auditNavigation.focus : undefined}
       onOpenAuditSource={auditNavigation.openSource}
+      onOpenFpReview={auditNavigation.openFpReview}
       staticRuleTypeLabels={staticRuleTypeLabels}
       validations={scan.validations ?? []}
       validatingIndices={launchingValidations}
@@ -2197,14 +2207,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           >
             {activeDetailFailed
               ? "部分详情加载失败，可点击下方按钮重试。"
-              : activeTab === "issues" ? "正在加载全部问题…" : "正在加载下一页详情…"}
-            {activeTab === "issues" && activeDetailFailed && (
+              : activeTab === "issues" ? "正在加载全部问题…"
+                : activeTab === "fp_review" ? "正在加载全部复核记录…" : "正在加载下一页详情…"}
+            {showsFpResults && activeDetailFailed && (
               <button type="button" className="ml-3 text-blue-300 underline" onClick={() => {
-                for (const resource of ISSUE_DETAIL_RESOURCES) {
+                for (const resource of automaticListResources) {
                   if (detailFailedResources.has(resource)) void loadDetailResource(resource);
                 }
                 if (fpReviewPageFailed) setFpReviewPageRetry((value) => value + 1);
-              }}>重试加载问题</button>
+              }}>{activeTab === "fp_review" ? "重试加载复核记录" : "重试加载问题"}</button>
             )}
           </div>
         )}
@@ -2352,13 +2363,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <FpReviewPanel
             vulnerabilities={scan.vulnerabilities}
             scanId={scanId}
-            reviewDataLoaded={fpReviewHydrated}
-            onLoadResults={(page) => setFpReview((previous) => previous?.scan_id === scanId ? {
-              ...previous,
-              results: [...new Map([...previous.results, ...page.items].map((item) => [item.vuln_index, item])).values()],
-              result_vulnerabilities: mergeIndexedVulnerabilities(previous.result_vulnerabilities ?? [], page.vulnerabilities.map((v) => ({ index: v.vuln_index, vulnerability: v }))),
-              next_cursor: page.next_cursor,
-            } : previous)}
+            reviewDataLoaded={fpReviewHydrated && !fpReviewPageLoading && !fpReviewPageFailed
+              && fpReview?.next_cursor == null && detailCursor(scan, "vulnerabilities") == null
+              && !detailFailedResources.has("vulnerabilities")}
+            focusRequest={auditNavigation.focus?.kind === "fp_review" ? auditNavigation.focus : undefined}
+            onOpenIssue={auditNavigation.openIssue}
             fpReview={fpReview}
             methodLabel={fpReviewMethodLabel(selectedFpReviewMethod, selectedFpReviewSelection)}
             methodDescription={selectedFpReviewSelection?.description ?? "按漏洞粒度逐条执行去误报复核。"}
@@ -6050,11 +6059,12 @@ function AuditTaskPanel({
   );
 }
 
-function FpReviewPanel({
+export function FpReviewPanel({
   vulnerabilities,
   scanId,
-  onLoadResults,
   reviewDataLoaded,
+  focusRequest,
+  onOpenIssue,
   fpReview,
   methodLabel,
   methodDescription,
@@ -6068,8 +6078,9 @@ function FpReviewPanel({
 }: {
   vulnerabilities: IndexedVulnerability[];
   scanId: string;
-  onLoadResults: (page: Awaited<ReturnType<typeof getFpReviewResultsPage>>) => void;
   reviewDataLoaded: boolean;
+  focusRequest?: ListFocusRequest<number>;
+  onOpenIssue?: (index: number) => void;
   fpReview: FpReviewJob | null;
   methodLabel: string;
   methodDescription: string;
@@ -6081,30 +6092,54 @@ function FpReviewPanel({
   onTrigger: () => void | Promise<void>;
   onStop: () => void | Promise<void>;
 }) {
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(focusRequest?.key ?? null);
+  const [currentPage, setCurrentPage] = useState(1);
   const [pageLoading, setPageLoading] = useState(false);
   const [pageError, setPageError] = useState("");
+  const [pageRetry, setPageRetry] = useState(0);
   const [unstartedPage, setUnstartedPage] = useState<Awaited<ReturnType<typeof getFpReviewResultsPage>> | null>(null);
   useEffect(() => {
-    let cancelled = false;
     setUnstartedPage(null);
-    if (!fpReview) getFpReviewResultsPage(scanId).then((page) => { if (!cancelled) setUnstartedPage(page); }).catch(() => { if (!cancelled) setPageError("待复核问题读取失败"); });
-    return () => { cancelled = true; };
+    setPageError("");
   }, [scanId, Boolean(fpReview)]);
-  const nextCursor = fpReview?.next_cursor ?? (fpReview ? null : unstartedPage?.next_cursor);
-  const confirmed = useMemo(
-    () => mergeIndexedVulnerabilities(vulnerabilities, (fpReview?.result_vulnerabilities ?? unstartedPage?.vulnerabilities ?? []).map((v) => ({ index: v.vuln_index, vulnerability: v })))
-      .map((vuln) => ({ vuln, index: vuln.vuln_index }))
-      .filter(({ vuln }) => (
-        !vuln.provisional
-        && isAiConfirmed(vuln)
-        && !hasFinalUserVerdict(vuln)
-      )),
+  // Before a job exists, the same endpoint pages through its waiting candidates.
+  useEffect(() => {
+    const cursor = unstartedPage ? unstartedPage.next_cursor : -1;
+    if (fpReview || !reviewDataLoaded || cursor == null) {
+      setPageLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setPageLoading(true);
+    setPageError("");
+    getFpReviewResultsPage(scanId, cursor, 50, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        if (page.next_cursor != null && page.next_cursor <= cursor) throw new Error("复核结果游标未前进");
+        setUnstartedPage((previous) => controller.signal.aborted ? previous : {
+          ...page,
+          items: [...new Map([...(previous?.items ?? []), ...page.items].map((item) => [item.vuln_index, item])).values()],
+          vulnerabilities: mergeIndexedVulnerabilities(previous?.vulnerabilities ?? [],
+            page.vulnerabilities.map((vulnerability) => ({ index: vulnerability.vuln_index, vulnerability }))),
+        });
+      })
+      .catch(() => { if (!controller.signal.aborted) setPageError("待复核问题读取失败，请重试"); })
+      .finally(() => { if (!controller.signal.aborted) setPageLoading(false); });
+    return () => controller.abort();
+  }, [scanId, Boolean(fpReview), reviewDataLoaded, unstartedPage?.next_cursor, pageRetry]);
+  const dataComplete = reviewDataLoaded && ((fpReview !== null && fpReview.next_cursor == null)
+    || (unstartedPage !== null && unstartedPage.next_cursor == null && !pageError && !pageLoading));
+  const records = useMemo(
+    // Current scan data contains newer human feedback than a review page snapshot.
+    () => mergeIndexedVulnerabilities(fpReview?.result_vulnerabilities ?? unstartedPage?.vulnerabilities ?? [],
+      vulnerabilities.map((vulnerability) => ({ index: vulnerability.vuln_index, vulnerability })))
+      .map((vuln) => ({ vuln, index: vuln.vuln_index,
+        eligible: !vuln.provisional && isAiConfirmed(vuln) && !hasFinalUserVerdict(vuln) })),
     [vulnerabilities, fpReview?.result_vulnerabilities, unstartedPage],
   );
   const resultByIndex = useMemo(
-    () => new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result])),
-    [fpReview],
+    () => new Map((fpReview?.results ?? unstartedPage?.items ?? []).map((result) => [result.vuln_index, result])),
+    [fpReview?.results, unstartedPage],
   );
   const currentIndices = useMemo(() => {
     if (!isFpReviewing) return new Set<number>();
@@ -6117,29 +6152,33 @@ function FpReviewPanel({
   }, [fpReview, isFpReviewing]);
   const items = useMemo(
     () =>
-      confirmed
-        .map(({ vuln, index }) => ({
+      records
+        .filter(({ index, eligible }) => eligible || hasFpReviewRecord(resultByIndex.get(index)))
+        .map(({ vuln, index, eligible }) => ({
           vuln,
           index,
+          eligible,
           result: resultByIndex.get(index),
           running: currentIndices.has(index),
         }))
         .sort((a, b) => fpReviewSortRank(a.result, a.running) - fpReviewSortRank(b.result, b.running) || a.index - b.index),
-    [confirmed, currentIndices, resultByIndex],
+    [records, currentIndices, resultByIndex],
   );
-  const waitingCount = fpReview?.result_counts?.unresolved ?? items.filter(
+  const eligibleItems = items.filter((item) => item.eligible);
+  const waitingCount = (!dataComplete ? fpReview?.result_counts?.unresolved : undefined) ?? eligibleItems.filter(
     (item) => !isEffectiveFpReviewResult(item.result) && !item.running,
   ).length;
-  const allReviewed = reviewDataLoaded && (fpReview?.result_counts ? (fpReview.result_counts.tp + fpReview.result_counts.fp > 0 && fpReview.result_counts.unresolved === 0) : items.length > 0 && items.every((item) => isEffectiveFpReviewResult(item.result)));
-  const tpCount = fpReview?.result_counts?.tp ?? items.filter(
+  const allReviewed = dataComplete && items.some((item) => isEffectiveFpReviewResult(item.result))
+    && eligibleItems.every((item) => isEffectiveFpReviewResult(item.result));
+  const tpCount = (!dataComplete ? fpReview?.result_counts?.tp : undefined) ?? items.filter(
     (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "tp",
   ).length;
-  const fpCount = fpReview?.result_counts?.fp ?? items.filter(
+  const fpCount = (!dataComplete ? fpReview?.result_counts?.fp : undefined) ?? items.filter(
     (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "fp",
   ).length;
   const status = isFpReviewing
     ? "复核中"
-    : !reviewDataLoaded
+    : !dataComplete
       ? "加载中"
       : fpReview?.status === "error"
         ? "异常"
@@ -6147,7 +6186,7 @@ function FpReviewPanel({
           ? "已停止"
           : allReviewed
             ? "已完成"
-            : confirmed.length > 0
+            : eligibleItems.length > 0
               ? "等待"
               : "无目标";
   const tone: TaskTone = isFpReviewing
@@ -6160,12 +6199,19 @@ function FpReviewPanel({
           ? "green"
           : "slate";
   const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
-  const canTrigger = confirmed.length > 0
-    && reviewDataLoaded
+  const canTrigger = eligibleItems.length > 0
+    && dataComplete
     && !isFpReviewing
     && !loading;
 
+  const totalPages = Math.max(1, Math.ceil(items.length / FP_REVIEW_PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paged = items.slice((safePage - 1) * FP_REVIEW_PAGE_SIZE, safePage * FP_REVIEW_PAGE_SIZE);
+  const listFocus = useListFocus(focusRequest, items.map((item) => item.index), FP_REVIEW_PAGE_SIZE,
+    setSelectedIndex, setCurrentPage, () => {});
+
   useEffect(() => {
+    if (listFocus.pinned !== null || listFocus.pending) return;
     if (items.length === 0) {
       if (selectedIndex !== null) setSelectedIndex(null);
       return;
@@ -6173,7 +6219,7 @@ function FpReviewPanel({
     if (selectedIndex === null || !items.some((item) => item.index === selectedIndex)) {
       setSelectedIndex(items[0].index);
     }
-  }, [items, selectedIndex]);
+  }, [items, selectedIndex, listFocus.pinned, listFocus.pending]);
 
   return (
     <TaskPanel
@@ -6183,19 +6229,19 @@ function FpReviewPanel({
       summary={methodDescription}
     >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-        <MiniMetric label="确认问题" value={fpReview?.result_counts ? tpCount + fpCount + waitingCount : confirmed.length} tone="red" />
+        <MiniMetric label="确认问题" value={!dataComplete && fpReview?.result_counts ? tpCount + fpCount + waitingCount : items.length} tone="red" />
         <MiniMetric label="等待复核" value={waitingCount} />
         <MiniMetric label="复核中" value={currentIndices.size} tone="amber" />
         <MiniMetric label="保留正报" value={tpCount} tone="red" />
         <MiniMetric label="判定误报" value={fpCount} tone="green" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        {confirmed.length > 0 && (
+        {eligibleItems.length > 0 && (
           <button
             type="button"
             onClick={onTrigger}
             disabled={!canTrigger}
-            title={!reviewDataLoaded
+            title={!dataComplete
               ? "正在加载复核状态"
               : allReviewed
                 ? "全部问题均已形成有效结论，点击后重新复核全部问题"
@@ -6206,7 +6252,7 @@ function FpReviewPanel({
               ? "启动中..."
               : isFpReviewing
                 ? "复核中..."
-                : !reviewDataLoaded
+                : !dataComplete
                   ? "加载中..."
                   : allReviewed
                     ? "重新复核"
@@ -6227,20 +6273,26 @@ function FpReviewPanel({
           <span className="text-xs text-red-300">{fpReview.error_message}</span>
         )}
       </div>
-      {confirmed.length === 0 ? (
-        <EmptyState text="当前没有允许进入去误报的确认问题。" />
+      {!dataComplete && !pageError && <div role="status" className="text-xs text-slate-400">复核记录尚未加载完整，已加载 {items.length} 条。</div>}
+      {pageError && <div role="alert" className="text-sm text-red-300">{pageError}
+        <button type="button" onClick={() => setPageRetry((value) => value + 1)} className="ml-3 underline">重试</button>
+      </div>}
+      {items.length === 0 ? (
+        <EmptyState text={dataComplete ? "当前没有复核记录或待复核问题。" : "正在加载复核记录…"} />
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
           <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
-            <div className="max-h-[70vh] flex-1 overflow-y-auto">
+            <div className="max-h-[24rem] flex-1 overflow-y-auto lg:max-h-[70vh]">
               <ul className="divide-y divide-slate-800">
-                {items.map(({ vuln, index, result, running }) => {
+                {paged.map(({ vuln, index, result, running }) => {
                   const active = selectedIndex === index;
                   return (
                     <li key={`${index}-${vuln.file}-${vuln.line}`}>
                       <button
                         type="button"
-                        onClick={() => setSelectedIndex(index)}
+                        ref={listFocus.pinned === index ? listFocus.targetRef : undefined}
+                        aria-current={active ? "true" : undefined}
+                        onClick={() => { listFocus.release(); setSelectedIndex(index); }}
                         className={`w-full px-3 py-2.5 text-left transition-colors ${
                           active ? "bg-amber-500/15" : running ? "bg-amber-500/10 hover:bg-amber-500/15" : "hover:bg-slate-800/60"
                         }`}
@@ -6266,27 +6318,29 @@ function FpReviewPanel({
                   );
                 })}
               </ul>
-              {nextCursor != null && <button type="button" disabled={pageLoading} className="m-3 rounded border border-slate-600 px-3 py-2 text-sm" onClick={async () => {
-                setPageLoading(true); setPageError("");
-                try {
-                  const page = await getFpReviewResultsPage(scanId, nextCursor);
-                  if (fpReview) onLoadResults(page);
-                  else setUnstartedPage((previous) => ({ ...page, vulnerabilities: [...(previous?.vulnerabilities ?? []), ...page.vulnerabilities], items: [...(previous?.items ?? []), ...page.items] }));
-                }
-                catch { setPageError("复核结果加载失败，请重试"); }
-                finally { setPageLoading(false); }
-              }}>{pageLoading ? "加载中..." : "加载更多复核结果"}</button>}
-              {pageError && <div className="p-3 text-red-300">{pageError}</div>}
             </div>
+            {items.length > FP_REVIEW_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-3 py-2">
+                <button type="button" disabled={safePage === 1}
+                  onClick={() => { listFocus.release(); setCurrentPage(Math.max(1, safePage - 1)); }}
+                  className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30">上一页</button>
+                <span className="text-xs text-slate-500">第 {safePage}/{totalPages} 页 · {dataComplete ? "共" : "已加载"} {items.length} 条</span>
+                <button type="button" disabled={safePage === totalPages}
+                  onClick={() => { listFocus.release(); setCurrentPage(Math.min(totalPages, safePage + 1)); }}
+                  className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30">下一页</button>
+              </div>
+            )}
           </div>
           <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
             {selected ? (
               <FpReviewDetail
+                key={selected.index}
                 index={selected.index}
                 vulnerability={selected.vuln}
                 result={selected.result}
                 running={selected.running}
                 stages={stages}
+                onOpenIssue={onOpenIssue}
               />
             ) : (
               <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
@@ -6307,12 +6361,14 @@ function FpReviewDetail({
   result,
   running,
   stages,
+  onOpenIssue,
 }: {
   index: number;
   vulnerability: Vulnerability;
   result?: FpReviewJob["results"][number];
   running: boolean;
   stages: FpReviewStageConfig[];
+  onOpenIssue?: (index: number) => void;
 }) {
   const stageLabels = Object.fromEntries(stages.map((stage) => [stage.key, stage.label]));
   const stageOrder = new Map(stages.map((stage, index) => [stage.key, index]));
@@ -6335,6 +6391,12 @@ function FpReviewDetail({
             <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerabilityFunctionLabel(vulnerability)}</div>
           </div>
           <div className="flex items-center gap-2">
+            {onOpenIssue && isEffectiveFpReviewResult(result) && result.verdict === "tp" && (
+              <button type="button" onClick={() => onOpenIssue(index)}
+                className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300 hover:bg-cyan-500/20">
+                查看疑似问题
+              </button>
+            )}
             {running && <span className="h-3 w-3 rounded-full border border-amber-500/30 border-t-amber-300 animate-spin" />}
             <StatusPill label={fpReviewItemLabel(result, running)} tone={fpReviewItemTone(result, running)} />
           </div>

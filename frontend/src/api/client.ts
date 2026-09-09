@@ -1024,11 +1024,24 @@ export async function getFpReviewOverview(scanId: string): Promise<FpReviewJob> 
   return job;
 }
 
-export async function getScanDetailItem(scanId: string, resource: string, index: number, includeBody = true) {
+export async function getScanDetailItem(scanId: string, resource: string, index: number, includeBody = true, signal?: AbortSignal) {
   const { data } = await api.get(scanV2Path(scanId, `/details/${resource}/${index}`), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), include_body: includeBody },
+    signal,
   });
   return data;
+}
+
+export async function getScanFpReviewResult(scanId: string, index: number, signal?: AbortSignal) {
+  if (!Number.isInteger(index) || index < 0) throw new Error("问题索引无效");
+  const data = await getScanDetailItem(scanId, "fp-review", index, true, signal).catch((error) => {
+    if (axios.isAxiosError(error) && error.response?.status === 404) throw new Error("未找到对应的去误报记录");
+    throw error;
+  });
+  if (!data || data.vuln_index !== index || !["tp", "fp", "uncertain"].includes(data.verdict)) {
+    throw new Error("去误报详情响应无效");
+  }
+  return normalizeFpReviewJob({ review_id: "", scan_id: scanId, results: [data] })!.results[0];
 }
 
 export async function getFpReviewResultsPage(scanId: string, after = -1, limit = 50, signal?: AbortSignal) {

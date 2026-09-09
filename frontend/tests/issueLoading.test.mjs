@@ -7,7 +7,7 @@ import { createServer } from "vite";
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
-const { default: ScanStatus } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
+const { default: ScanStatus, FpReviewPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const originalAdapter = client.api.defaults.adapter;
@@ -67,6 +67,11 @@ async function mount(scanId = "s") {
   return root;
 }
 async function openIssues(root) { await act(async () => button(root, "疑似问题").props.onClick()); }
+async function openReviews(root) {
+  const target = root.root.findAllByType("button").find((node) => text(node).startsWith("adversarial"));
+  assert.ok(target, "Missing review navigation button");
+  await act(async () => target.props.onClick());
+}
 
 function fixture(count = 105, scanId = "s") {
   const vulnerabilities = Array.from({ length: count }, (_, ordinal) => ({
@@ -258,4 +263,69 @@ test("a live review received during pagination takes precedence over the older p
   assert.equal(props.fpReview.results.length, 105);
   assert.equal(props.fpReview.results.find((r) => r.vuln_index === 150).reason, "最新实时结论");
   assert.match(text(root.toJSON()), /疑似问题\s*54/);
+});
+
+for (const publicAccess of [false, true]) {
+  test(`review page loads all records and round-trips to a human-confirmed issue across pages (${publicAccess ? "public" : "authenticated"})`, async () => {
+    if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });
+    const calls = installApi();
+    const root = await mount();
+    await openReviews(root);
+    const review = root.root.findByType(FpReviewPanel);
+    assert.equal(review.props.fpReview.results.length, 105);
+    assert.equal(review.props.reviewDataLoaded, true);
+    assert.match(text(root.toJSON()), /第 1\/6 页 · 共 105 条/);
+    assert.deepEqual(calls.filter((c) => c.url.endsWith("/fp-review/results")).map((c) => c.params.after), [-1, 147, 297]);
+    for (let i = 0; i < 5; i += 1) await act(async () => button(root, "下一页").props.onClick());
+    const target = root.root.findAllByType("button").find((node) => node.parent?.type === "li" && text(node).startsWith("#312"));
+    assert.ok(target);
+    await act(async () => target.props.onClick());
+    await act(async () => button(root, "查看疑似问题").props.onClick());
+    assert.equal(issueProps(root).focusRequest.key, 312);
+    assert.match(text(root.toJSON()), /第 3\/3 页/);
+    const count = calls.length;
+    await act(async () => button(root, "查看去误报详情").props.onClick());
+    assert.match(text(root.toJSON()), /第 6\/6 页 · 共 105 条/);
+    assert.match(text(root.toJSON()), /有效结论 104/);
+    assert.equal(calls.length, count, "A round trip should reuse the loaded review and finding");
+  });
+}
+
+test("review page retries a failed result page without losing prior pages", async () => {
+  let fail = true;
+  const calls = installApi([fixture()], async (config) => {
+    if (config.url.endsWith("/fp-review/results") && config.params.after === 297 && fail) throw new Error("offline");
+  });
+  const root = await mount();
+  await openReviews(root);
+  assert.equal(root.root.findByType(FpReviewPanel).props.fpReview.results.length, 100);
+  assert.equal(root.root.findByType(FpReviewPanel).props.reviewDataLoaded, false);
+  assert.match(text(root.toJSON()), /部分详情加载失败/);
+  fail = false;
+  await act(async () => button(root, "重试加载复核记录").props.onClick());
+  assert.equal(root.root.findByType(FpReviewPanel).props.fpReview.results.length, 105);
+  assert.equal(root.root.findByType(FpReviewPanel).props.reviewDataLoaded, true);
+  assert.deepEqual(calls.filter((c) => c.url.endsWith("/fp-review/results")).map((c) => c.params.after), [-1, 147, 297, 297]);
+});
+
+test("a review starting during pagination retains the cursor and ignores the previous request", async () => {
+  const pending = deferred();
+  let oldSignal;
+  installApi([fixture()], async (config) => {
+    if (config.url.endsWith("/fp-review/results") && config.params.after === 147 && !oldSignal) {
+      oldSignal = config.signal;
+      await pending.promise;
+    }
+  });
+  const root = await mount();
+  await openReviews(root);
+  assert.equal(root.root.findByType(FpReviewPanel).props.fpReview.results.length, 50);
+  await act(async () => streams[0].emit("fp_review_started", { review_id: "next-review", status: "running", total: 105 }));
+  assert.equal(oldSignal.aborted, true);
+  assert.equal(root.root.findByType(FpReviewPanel).props.fpReview.results.length, 105);
+  await act(async () => pending.resolve());
+  const job = root.root.findByType(FpReviewPanel).props.fpReview;
+  assert.equal(job.review_id, "next-review");
+  assert.equal(job.results.length, 105);
+  assert.equal(job.next_cursor, null);
 });

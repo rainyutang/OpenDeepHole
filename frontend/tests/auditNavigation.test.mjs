@@ -10,7 +10,7 @@ const navigation = await server.ssrLoadModule("/src/auditNavigation.ts");
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const runtime = await server.ssrLoadModule("/src/scanRuntime.ts");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
-const { StaticTaskPanel, ThreatAuditPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
+const { StaticTaskPanel, ThreatAuditPanel, FpReviewPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { AuditResults } = await server.ssrLoadModule("/src/features/auditResults/AuditResults.tsx");
 const originalAdapter = client.api.defaults.adapter;
 const roots = [];
@@ -517,4 +517,193 @@ test("navigation ignores late clicks, cancels on scan change and supports retry"
   await act(async () => current.retry());
   assert.equal(current.focus.key, 207);
   assert.equal(current.error, "");
+});
+
+function reviewJob(vulnerabilities, overrides = {}) {
+  return { review_id: "r", scan_id: "s", execution_revision: 1, status: "complete", next_cursor: null,
+    results: vulnerabilities.map((item) => ({ vuln_index: item.vuln_index, verdict: "tp", reason: "最终正报" })),
+    result_vulnerabilities: vulnerabilities, ...overrides };
+}
+function reviewProps(vulnerabilities, overrides = {}) {
+  return { vulnerabilities, scanId: "s", reviewDataLoaded: true, fpReview: reviewJob(vulnerabilities),
+    methodLabel: "复核", methodDescription: "", stages: [], isFpReviewing: false, loading: false,
+    stopping: false, events: [], onTrigger() {}, onStop() {}, ...overrides };
+}
+
+for (const count of [0, 20, 21, 105]) {
+  test(`review list paginates ${count} sparse records in groups of 20`, async () => {
+    const vulnerabilities = Array.from({ length: count }, (_, i) => vuln(i * 3));
+    const root = await mount(FpReviewPanel, reviewProps(vulnerabilities));
+    assert.equal(staticRows(root).length, Math.min(20, count));
+    if (count <= 20) {
+      assert.ok(!root.root.findAllByType("button").some((item) => textContent(item) === "下一页"));
+      return;
+    }
+    assert.equal(button(root, "上一页").props.disabled, true);
+    const pages = Math.ceil(count / 20);
+    for (let page = 2; page <= pages; page += 1) {
+      await act(async () => button(root, "下一页").props.onClick());
+      assert.match(text(root), new RegExp(`第 ${page}/${pages} 页 · 共 ${count} 条`));
+      assert.deepEqual(staticIndexes(root), vulnerabilities.slice((page - 1) * 20, page * 20).map((item) => item.vuln_index));
+    }
+    assert.equal(button(root, "下一页").props.disabled, true);
+    await act(async () => button(root, "上一页").props.onClick());
+    assert.match(text(root), new RegExp(`第 ${pages - 1}/${pages} 页`));
+  });
+}
+
+test("review history survives human feedback, stale snapshots and a fresh mount without becoming executable", async () => {
+  const snapshots = [vuln(0), vuln(8), vuln(207), vuln(208)];
+  const vulnerabilities = snapshots.map((item, i) => ({ ...item, user_verdict: i % 2 ? "false_positive" : "confirmed" }));
+  const job = reviewJob(snapshots, { result_counts: { tp: 1, fp: 1, unresolved: 2 }, results: [
+    { vuln_index: 0, verdict: "tp", reason: "有效正报" },
+    { vuln_index: 8, verdict: "fp", reason: "有效误报" },
+    { vuln_index: 207, verdict: "uncertain", stage_outputs: { prove_bug: "已保存阶段" } },
+    { vuln_index: 208, verdict: "uncertain", reason: "", created_at: "" },
+  ] });
+  for (const resultVulnerabilities of [snapshots, vulnerabilities]) {
+    const root = await mount(FpReviewPanel, reviewProps(vulnerabilities,
+      { fpReview: { ...job, result_vulnerabilities: resultVulnerabilities } }));
+    assert.deepEqual([...staticIndexes(root)].sort((a, b) => a - b), [0, 8, 207]);
+    assert.doesNotMatch(text(root), /启动复核|重新复核/);
+    assert.match(text(root), /等待复核0/);
+  }
+});
+
+test("review focus follows its exact page as more records arrive, scrolls and releases on manual pagination", async () => {
+  const vulnerabilities = [...Array.from({ length: 45 }, (_, i) => vuln(i)), vuln(207, { user_verdict: "confirmed" })];
+  const opened = [];
+  let scrolls = 0;
+  const extraProps = { focusRequest: { key: 207, revision: 1 }, onOpenIssue: (index) => opened.push(index) };
+  const root = await mount(FpReviewPanel, reviewProps(vulnerabilities, extraProps), {
+    createNodeMock: () => ({ scrollIntoView() { scrolls += 1; } }),
+  });
+  assert.match(text(root), /第 3\/3 页 · 共 46 条/);
+  assert.match(textContent(root.root.findByProps({ "aria-current": "true" })), /^#207/);
+  assert.equal(scrolls, 1);
+  await act(async () => button(root, "查看疑似问题").props.onClick());
+  assert.deepEqual(opened, [207]);
+  const complete = [...vulnerabilities, ...Array.from({ length: 21 }, (_, i) => vuln(45 + i))];
+  await act(async () => root.update(createElement(FpReviewPanel, reviewProps(complete, extraProps))));
+  assert.match(text(root), /第 4\/4 页 · 共 67 条/);
+  await act(async () => button(root, "上一页").props.onClick());
+  await act(async () => root.update(createElement(FpReviewPanel, reviewProps([...complete, vuln(66)], extraProps))));
+  assert.match(text(root), /第 3\/4 页/);
+});
+
+test("forward review action requires effective TP and reverse action requires a real review record", async () => {
+  for (const [result, forward, reverse] of [
+    [{ verdict: "tp", reason: "最终正报" }, true, true],
+    [{ verdict: "tp", vulnerability_report: "仅报告" }, true, true],
+    [{ verdict: "fp", reason: "最终误报" }, false, true],
+    [{ verdict: "tp", reason: "Review incomplete", vulnerability_report: "无效报告" }, false, true],
+    [{ verdict: "uncertain", stage_outputs: { prove_bug: "阶段输出" } }, false, true],
+    [{ verdict: "uncertain", reason: "", created_at: "" }, false, false],
+    [{ verdict: "tp", reason: "", vulnerability_report: "" }, false, false],
+  ]) {
+    const vulnerabilities = [vuln(0)];
+    const job = reviewJob(vulnerabilities, { results: [{ vuln_index: 0, ...result }] });
+    const opened = [];
+    const panel = await mount(FpReviewPanel, reviewProps(vulnerabilities, { fpReview: job, onOpenIssue: (index) => opened.push(index) }));
+    assert.equal(panel.root.findAllByType("button").some((item) => textContent(item) === "查看疑似问题"), forward);
+    const issues = await mount(VulnerabilityList, { scanId: "s", vulnerabilities, fpReview: job, viewMode: "final_tp",
+      focusRequest: { key: 0, revision: 1 }, onOpenFpReview: (index) => opened.push(index) });
+    assert.equal(issues.root.findAllByType("button").some((item) => textContent(item) === "查看去误报详情"), reverse);
+    if (reverse) {
+      await act(async () => button(issues, "查看去误报详情").props.onClick());
+      assert.deepEqual(opened, [0]);
+    }
+  }
+});
+
+test("unstarted review pages load automatically and retry only the failed cursor", async () => {
+  const vulnerabilities = Array.from({ length: 105 }, (_, i) => vuln(i * 3));
+  const calls = [];
+  let fail = true;
+  client.api.defaults.adapter = async (config) => {
+    assert.equal(config.url, "/api/v2/scans/s/fp-review/results");
+    assert.equal(config.params.limit, 50);
+    assert.ok(config.signal);
+    calls.push(config.params.after);
+    if (config.params.after === 297 && fail) throw new Error("offline");
+    const remaining = vulnerabilities.filter((item) => item.vuln_index > config.params.after);
+    const page = remaining.slice(0, 50);
+    return response(config, { items: page.map((item) => ({ vuln_index: item.vuln_index, verdict: "uncertain", reason: "", created_at: "" })),
+      vulnerabilities: page, next_cursor: remaining.length > 50 ? page.at(-1).vuln_index : null });
+  };
+  const root = await mount(FpReviewPanel, reviewProps([], { fpReview: null }));
+  assert.deepEqual(calls, [-1, 147, 297]);
+  assert.match(text(root), /待复核问题读取失败/);
+  assert.equal(button(root, "加载中...").props.disabled, true);
+  assert.match(text(root), /已加载 100 条/);
+  fail = false;
+  await act(async () => button(root, "重试").props.onClick());
+  assert.deepEqual(calls, [-1, 147, 297, 297]);
+  assert.match(text(root), /第 1\/6 页 · 共 105 条/);
+  assert.equal(button(root, "启动复核").props.disabled, false);
+  assert.doesNotMatch(text(root), /加载更多复核结果/);
+});
+
+test("cached review navigation can use review finding snapshots without requests", async () => {
+  client.api.defaults.adapter = () => assert.fail("cached review navigation made an HTTP request");
+  const job = reviewJob([vuln(0)]);
+  const signal = new AbortController().signal;
+  const review = await navigation.resolveAuditNavigation(scan(), { kind: "fp_review", index: 0 }, signal, job);
+  assert.equal(review.kind, "fp_review");
+  assert.equal(review.result.vuln_index, 0);
+  assert.equal((await navigation.resolveAuditNavigation(scan(), { kind: "issue", index: 0 }, signal, job)).vulnerability.vuln_index, 0);
+});
+
+for (const publicAccess of [false, true]) {
+  test(`single review detail forwards cancellation and validates identity (${publicAccess ? "public" : "authenticated"})`, async () => {
+    if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });
+    const signal = new AbortController().signal;
+    client.api.defaults.adapter = async (config) => {
+      assert.equal(config.url, `${publicAccess ? "/api/public/scans" : "/api/v2/scans"}/s/details/fp-review/207`);
+      assert.equal(config.signal, signal);
+      if (publicAccess) assert.equal(config.params.token, "public-token");
+      return response(config, { vuln_index: 207, verdict: "tp", reason: "已保存详情" });
+    };
+    const target = await navigation.resolveAuditNavigation(scan({ vulnerabilities: [vuln(207)] }), { kind: "fp_review", index: 207 }, signal);
+    assert.equal(target.result.reason, "已保存详情");
+    client.api.defaults.adapter = async (config) => response(config, { vuln_index: 208, verdict: "tp", reason: "错误记录" });
+    await assert.rejects(client.getScanFpReviewResult("s", 207), /响应无效/);
+    client.api.defaults.adapter = async () => { throw Object.assign(new Error("404"), { isAxiosError: true, response: { status: 404 } }); };
+    await assert.rejects(client.getScanFpReviewResult("s", 207), /未找到对应的去误报记录/);
+  });
+}
+
+test("targeted review reads preserve live results and cursors and discard an obsolete review execution", async () => {
+  let current, latestJob, changeJob;
+  const destinations = [];
+  function Harness() {
+    const [loaded, setLoaded] = useState(scan({ vulnerabilities: [vuln(0), vuln(207), vuln(208)] }));
+    const [job, setJob] = useState(reviewJob([], { next_cursor: 49 }));
+    const ref = useRef(loaded);
+    ref.current = loaded;
+    latestJob = job;
+    changeJob = setJob;
+    current = navigation.useAuditNavigation("s", ref, setLoaded, useCallback((kind) => destinations.push(kind), []), job, setJob);
+    return null;
+  }
+  const pending = [];
+  client.api.defaults.adapter = (config) => new Promise((resolve) => pending.push({ config, resolve }));
+  await mount(Harness, {});
+  await act(async () => current.openFpReview(207));
+  await act(async () => changeJob((job) => ({ ...job, results: [{ vuln_index: 207, verdict: "fp", reason: "实时最新结果" }] })));
+  await act(async () => pending[0].resolve(response(pending[0].config, { vuln_index: 207, verdict: "tp", reason: "较旧结果" })));
+  assert.equal(latestJob.results[0].reason, "实时最新结果");
+  assert.equal(latestJob.next_cursor, 49);
+  assert.deepEqual(current.focus, { kind: "fp_review", key: 207, revision: 1 });
+  await act(async () => current.openFpReview(208));
+  await act(async () => changeJob((job) => ({ ...job, execution_revision: 2 })));
+  await act(async () => pending[1].resolve(response(pending[1].config, { vuln_index: 208, verdict: "tp", reason: "过期执行" })));
+  assert.equal(latestJob.results.length, 1);
+  assert.deepEqual(destinations, ["fp_review"]);
+  await act(async () => current.openFpReview(208));
+  await act(async () => current.openIssue(0));
+  assert.equal(pending[2].config.signal.aborted, true);
+  await act(async () => pending[2].resolve(response(pending[2].config, { vuln_index: 208, verdict: "tp", reason: "已取消" })));
+  assert.equal(current.focus.kind, "issue");
+  assert.equal(latestJob.results.length, 1);
 });

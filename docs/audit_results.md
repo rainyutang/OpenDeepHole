@@ -1,14 +1,19 @@
 # 审计结果与问题报告定位
 
-扫描详情中的威胁审计任务、静态分析候选点与问题报告支持双向定位：
+扫描详情中的威胁审计任务、静态分析候选点、去误报详情与问题报告支持双向定位：
 
 - 威胁审计任务的每条最终确认结果都有“查看问题报告”按钮。
 - 静态分析候选点在关联问题得到最终确认后显示“发现问题”，详情展示问题简介、位置和判定来源，并提供“查看问题报告”。
 - 问题报告中的“查看威胁审计任务”或“查看静态候选点”会打开对应来源，自动调整筛选、分页并选中目标。
+- 去误报详情中有效最终 TP 显示“查看疑似问题”，打开对应问题报告；FP、未完成结果及 `Review incomplete` 不提供此按钮。问题报告中存在复核结果或阶段记录时显示“查看去误报详情”，自动打开去误报列表的对应页并选中记录。
 
 标签的判定顺序为明确人工判定优先，其次为扫描内最近一次有效去误报结论。仅有原始审计发现时不添加问题标签；新一轮复核未形成有效结论时，保留之前的有效结论。候选点重新进入待执行、排队或运行状态时，不沿用上次审计的问题标签。执行状态标签仍表示任务是否成功完成。
 
 定向打开报告时，页面显示“当前定位：结果 #索引”。即使目标不属于默认问题列表，也能查看原始报告、复核内容和人工判定；“返回问题列表”恢复默认列表范围。
+
+去误报左侧列表每页 20 条，使用“上一页 / 下一页 / 第 X/Y 页 · 共 N 条”，右侧展示选中记录的完整详情。打开页面后自动沿现有游标补齐问题和复核记录；尚未启动复核时也会补齐待复核列表。数据未齐时提示已加载数量，读取失败保留已有页并支持重试。排序继续采用复核中、未完成、已完成的顺序，同组按问题索引排列；定向跳转期间后续页到达仍保持目标可见，手动翻页或选择记录后解除自动定位。
+
+已有复核结果与阶段记录在人工确认或标为误报后继续保留，刷新前后保持一致；仅有等待占位且已被人工最终判定的记录不作为历史复核展示。当前问题中的人工判定优先于复核分页附带的旧快照。复核启动资格及等待数量仍排除人工最终判定，不会因为历史记录可见而将其重新加入任务。每个问题沿用最近有效结论和当前阶段输出的既有合并规则，不增加历次执行版本列表。
 
 ## 按需读取与接口
 
@@ -20,6 +25,8 @@
 | `/candidate-audit-results?candidate_indexes=...` | 当前可见候选点及选中候选点的结果摘要 |
 | `/vulnerabilities/{idx}/audit-source` | 返回问题唯一对应的审计任务或候选点 |
 | `/vulnerabilities?after={idx-1}&limit=1` | 补充尚未加载的指定问题；客户端严格核对返回索引 |
+| `/details/fp-review/{idx}` | 补充尚未加载的单条去误报详情；客户端严格核对返回索引 |
+| `/fp-review/results?after={idx}&limit=50` | 分批补齐复核结果、阶段输出及待复核问题 |
 | `/tasks?task_name={name}` | 按精确任务名称分页读取历史摘要，选择最近一次执行 |
 | `/tasks/{task_id}?record_id={record_id}` | 按需读取该次执行的完整 Prompt 和 Session 记录 |
 
@@ -37,4 +44,4 @@
 PYTHONPATH=. python3 -m pytest -q tests/test_threat_audit_results.py
 ```
 
-在 `frontend/` 中运行 `npm run test:audit-navigation`、`npm run test:threat-audit`、`npm run test:static-audit`、`npm run test:scan-runtime` 和 `npm run build`。导航测试覆盖实际 React 组件的分页、筛选、选中状态、滚动定位、结果刷新和过期响应处理。PostgreSQL 回归通过 `OPENDEEPHOLE_TEST_POSTGRES_DSN` 显式启用。
+在 `frontend/` 中运行 `npm run test:audit-navigation`、`npm run test:issue-loading`、`npm run test:threat-audit`、`npm run test:static-audit`、`npm run test:scan-runtime` 和 `npm run build`。导航与加载测试覆盖实际 React 组件的分页、筛选、双向选中、滚动定位、人工判定后历史保留、失败重试、公开访问、复核重启和过期响应处理。PostgreSQL 回归通过 `OPENDEEPHOLE_TEST_POSTGRES_DSN` 显式启用。
