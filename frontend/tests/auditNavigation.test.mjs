@@ -530,6 +530,69 @@ function reviewProps(vulnerabilities, overrides = {}) {
     stopping: false, events: [], onTrigger() {}, onStop() {}, ...overrides };
 }
 
+test("review details merge live stage reports and show verdict badges without duplicating reports", async () => {
+  const vulnerabilities = [vuln(0)];
+  const stages = [
+    { key: "prove_bug", label: "确认漏洞" }, { key: "prove_fp", label: "证明误报" }, { key: "final_judge", label: "最终裁定" },
+  ];
+  const result = { vuln_index: 0, verdict: "tp", reason: "已保存的最终结论", vulnerability_report: "完整报告独有正文",
+    stage_outputs: {
+      final_judge: "Verdict: true_positive\n\n上一轮裁定报告",
+      prove_fp: "Verdict:\nLIKELY_FALSE_POSITIVE\n\n上一轮反方报告",
+      prove_bug: "Verdict:\nREAL_BUG\n\n上一轮正方报告",
+    },
+    pending_stage_outputs: { prove_bug: "**Verdict:** false_positive\n\n本轮正方报告", prove_fp: "  " },
+  };
+  const job = reviewJob(vulnerabilities, { status: "running", current_vuln_indices: [0], results: [result] });
+  const props = reviewProps(vulnerabilities, { fpReview: job, stages, isFpReviewing: true });
+  const root = await mount(FpReviewPanel, props);
+  const section = (label) => root.root.findAllByType("h4").find((item) => textContent(item) === label).parent;
+  assert.deepEqual(root.root.findAllByType("h4").map(textContent), ["问题摘要", "复核结论", "阶段输出"]);
+  assert.match(textContent(section("问题摘要")), /问题简介 0/);
+  assert.match(textContent(section("复核结论")), /正报.*已保存的最终结论/);
+  assert.doesNotMatch(text(root), /完整报告独有正文|当前复核|上一轮正方报告|Verdict:/);
+  const stageSection = section("阶段输出");
+  const reports = stageSection.findAllByType("div").filter((item) => item.parent === stageSection);
+  assert.deepEqual(reports.map((item) => textContent(item.children[0])), [
+    "确认漏洞false_positive", "证明误报LIKELY_FALSE_POSITIVE", "最终裁定true_positive",
+  ]);
+  for (const [verdict, tone] of [["false_positive", "green"], ["LIKELY_FALSE_POSITIVE", "amber"], ["true_positive", "red"]]) {
+    const badges = stageSection.findAllByType("span").filter((item) => textContent(item) === verdict);
+    assert.equal(badges.length, 1);
+    assert.match(badges[0].props.className, new RegExp(`border-${tone}-`));
+  }
+  assert.match(textContent(reports[0]), /本轮正方报告/);
+  assert.match(textContent(reports[1]), /上一轮反方报告/);
+
+  const complete = reviewJob(vulnerabilities, { results: [{ ...result, verdict: "fp", reason: "本轮最终误报结论",
+    pending_stage_outputs: {}, stage_outputs: { prove_bug: "Verdict: false_positive\n\n本轮正方报告" } }] });
+  await act(async () => root.update(createElement(FpReviewPanel, { ...props, isFpReviewing: false, fpReview: complete })));
+  assert.match(textContent(section("复核结论")), /误报.*本轮最终误报结论/);
+  assert.doesNotMatch(text(root), /上一轮|已保存的最终结论/);
+  assert.match(textContent(section("阶段输出")), /本轮正方报告/);
+});
+
+test("review details keep conclusion and stage placeholders while waiting for the first reports", async () => {
+  const vulnerabilities = [vuln(0)];
+  const stages = [{ key: "prove_bug", label: "确认漏洞" }];
+  const root = await mount(FpReviewPanel, reviewProps(vulnerabilities, {
+    fpReview: reviewJob(vulnerabilities, { results: [] }), stages,
+  }));
+  assert.deepEqual(root.root.findAllByType("h4").map(textContent), ["问题摘要", "复核结论", "阶段输出"]);
+  assert.match(text(root), /暂无阶段输出/);
+  const runningJob = reviewJob(vulnerabilities, { status: "running", current_vuln_indices: [0], results: [] });
+  const props = reviewProps(vulnerabilities, { fpReview: runningJob, stages, isFpReviewing: true });
+  await act(async () => root.update(createElement(FpReviewPanel, props)));
+  assert.match(text(root), /复核中，等待结论/);
+  assert.match(text(root), /复核中，等待阶段输出/);
+  const partial = { vuln_index: 0, verdict: "uncertain", reason: "",
+    stage_outputs: { prove_bug: "Verdict: INSUFFICIENT_EVIDENCE\n\n首份阶段报告" } };
+  await act(async () => root.update(createElement(FpReviewPanel, { ...props, fpReview: { ...runningJob, results: [partial] } })));
+  assert.match(text(root), /复核中，等待结论/);
+  assert.match(text(root), /确认漏洞INSUFFICIENT_EVIDENCE.*首份阶段报告/s);
+  assert.doesNotMatch(text(root), /等待阶段输出|当前复核/);
+});
+
 for (const count of [0, 20, 21, 105]) {
   test(`review list paginates ${count} sparse records in groups of 20`, async () => {
     const vulnerabilities = Array.from({ length: count }, (_, i) => vuln(i * 3));
