@@ -1,7 +1,9 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from backend.api import scan, integration
@@ -11,14 +13,22 @@ from backend.pagination import encode_cursor
 from test_storage_history import make_store, task
 
 
-def test_authenticated_and_public_pages_keep_history_bounded(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_authenticated_and_public_pages_keep_history_bounded(tmp_path, monkeypatch, legacy):
     store = make_store(tmp_path)
     store._conn.execute("UPDATE scans SET user_id = 'owner', public_access_token = 'public-test'")
+    tasks = []
     for index in range(105):
         finished = datetime(2026, 9, 8, tzinfo=timezone.utc) + timedelta(seconds=(index * 37) % 105)
-        store._store_task_version_locked("s", {**task(index), "finished_at": finished.isoformat(),
+        tasks.append({**task(index), "finished_at": finished.isoformat(),
             "outcome": "failure" if index % 2 else "success",
             "task_name": "candidate-audit-s-0" if index in {5, 57, 104} else "other"})
+    if legacy:
+        store._conn.execute("UPDATE scans SET history_version = 0, opencode_pool = ? WHERE scan_id = 's'",
+                            (json.dumps({"completed_tasks": tasks}),))
+    else:
+        for value in tasks:
+            store._store_task_version_locked("s", value)
     store._conn.commit()
     store.upsert_vulnerability_validation("s", VulnerabilityValidation(vuln_index=42, status="verified", final_output="complete evidence"))
     monkeypatch.setattr(scan, "get_scan_store", lambda: store)
@@ -37,10 +47,15 @@ def test_authenticated_and_public_pages_keep_history_bounded(tmp_path, monkeypat
                 expected = sorted(range(105), key=lambda i: (i * 37) % 105, reverse=True)
                 assert [item["task_id"] for item in page["items"]] == [task(i)["task_id"] for i in expected[:50]]
                 assert all("prompt" not in item for item in page["items"])
-                next_page = (await client.get(prefix + "/tasks", params={**params, "cursor": page["next_cursor"]})).json()
+                response = await client.get(prefix + "/tasks", params={**params, "cursor": page["next_cursor"]})
+                assert response.status_code == 200, response.text
+                next_page = response.json()
                 assert len(next_page["items"]) == 50
                 assert not {item["task_id"] for item in page["items"]} & {item["task_id"] for item in next_page["items"]}
-                last_page = (await client.get(prefix + "/tasks", params={**params, "cursor": next_page["next_cursor"]})).json()
+                response = await client.get(prefix + "/tasks", params={**params, "cursor": next_page["next_cursor"]})
+                assert response.status_code == 200, response.text
+                last_page = response.json()
+                assert len(last_page["items"]) == 5
                 assert [item["task_id"] for item in page["items"] + next_page["items"] + last_page["items"]] == [task(i)["task_id"] for i in expected]
                 assert last_page["next_cursor"] is None
                 for invalid_cursor in (encode_cursor("old-task-id"), encode_cursor("not-a-time", "t"), "malformed"):

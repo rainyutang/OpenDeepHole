@@ -177,3 +177,86 @@ test("an obsolete cursor resets to the newest page once and ordinary errors rema
   assert.equal(firstPageCalls, 2);
   assert.deepEqual(ids(root), ["newest", "older"]);
 });
+
+test("repeated cursor errors retain history and the retry boundary through refresh and recovery", async () => {
+  const values = Array.from({ length: 105 }, (_, index) => task(`task-${index}`,
+    new Date(Date.UTC(2026, 8, 9, 0, 0, 105 - index)).toISOString()));
+  let firstPageCalls = 0;
+  let rejectPages = true;
+  const cursors = [];
+  client.api.defaults.adapter = async (config) => {
+    const cursor = config.params.cursor;
+    if (!cursor) {
+      firstPageCalls += 1;
+      return response(config, { items: values.slice(0, 50),
+        next_cursor: firstPageCalls === 1 ? "obsolete" : firstPageCalls === 2 ? "50" : "refresh-boundary" });
+    }
+    cursors.push(cursor);
+    if (cursor === "obsolete" || rejectPages) {
+      throw { isAxiosError: true, response: { status: 400, data: { detail: "Invalid cursor" } } };
+    }
+    const offset = Number(cursor);
+    return response(config, { items: values.slice(offset, offset + 50), next_cursor: offset === 50 ? "100" : null });
+  };
+  const root = await mount(pool({ completed_task_count: 105 }));
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(firstPageCalls, 2);
+  assert.match(text(root.toJSON()), /已加载 50 条/);
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(firstPageCalls, 2);
+  assert.match(text(root.toJSON()), /历史任务加载失败/);
+  assert.match(text(root.toJSON()), /共 50 条/);
+
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "refresh" }) })));
+  assert.match(text(root.toJSON()), /历史任务加载失败/);
+  await act(async () => button(root, "重试加载历史任务").props.onClick());
+  assert.equal(firstPageCalls, 3);
+  assert.equal(cursors.at(-1), "50");
+  rejectPages = false;
+  await act(async () => button(root, "重试加载历史任务").props.onClick());
+  assert.match(text(root.toJSON()), /已加载 100 条/);
+  assert.doesNotMatch(text(root.toJSON()), /历史任务加载失败/);
+
+  // A successful page must not grant another automatic reset in this scan.
+  rejectPages = true;
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(firstPageCalls, 3);
+  assert.match(text(root.toJSON()), /历史任务加载失败/);
+  assert.match(text(root.toJSON()), /共 100 条/);
+  rejectPages = false;
+  await act(async () => button(root, "重试加载历史任务").props.onClick());
+  assert.equal(cursors.at(-1), "100");
+  assert.match(text(root.toJSON()), /共 105 条/);
+  assert.doesNotMatch(text(root.toJSON()), /加载更多历史任务|重试加载历史任务|历史任务加载失败/);
+  const loadedIds = ids(root);
+  for (let page = 1; page < Math.ceil(values.length / 12); page += 1) {
+    await act(async () => button(root, "下一页").props.onClick());
+    loadedIds.push(...ids(root));
+  }
+  assert.deepEqual(loadedIds, values.map((value) => value.task_id));
+});
+
+test("changing scans renews cursor recovery and ignores an old scan's pending error", async () => {
+  const firstPageCalls = { s: 0, other: 0 };
+  let rejectOldPage;
+  client.api.defaults.adapter = async (config) => {
+    const scanId = config.url.includes("/other/") ? "other" : "s";
+    if (config.params.cursor === "pending") return new Promise((_, reject) => { rejectOldPage = reject; });
+    if (config.params.cursor) throw { isAxiosError: true, response: { status: 400, data: { detail: "Invalid cursor" } } };
+    firstPageCalls[scanId] += 1;
+    return response(config, { items: [task(scanId, "2026-09-09T00:00:00Z")],
+      next_cursor: scanId === "s" && firstPageCalls.s === 2 ? "pending" : "obsolete" });
+  };
+  const root = await mount();
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(firstPageCalls.s, 2);
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(button(root, "加载中").props.disabled, true);
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "other", pool: pool() })));
+  assert.equal(button(root, "加载更多历史任务").props.disabled, false);
+  await act(async () => rejectOldPage({ isAxiosError: true, response: { status: 400, data: { detail: "Invalid cursor" } } }));
+  assert.doesNotMatch(text(root.toJSON()), /历史任务加载失败/);
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.equal(firstPageCalls.other, 2);
+  assert.deepEqual(ids(root), ["other"]);
+});

@@ -18,10 +18,19 @@ MISSING_TASK_TIME = "-"
 def task_sort_time(finished_at: object, started_at: object = None) -> str:
     """Return fixed-width UTC microseconds, or a key older than valid times."""
     for value in (finished_at, started_at):
-        if not isinstance(value, str) or not re.fullmatch(TASK_TIME_PATTERN, value):
+        if not isinstance(value, str):
+            continue
+        match = re.fullmatch(TASK_TIME_PATTERN, value)
+        if not match:
             continue
         try:
-            parsed = datetime.fromisoformat(value)
+            # Python 3.10 accepts neither trailing Z nor fractions other than
+            # three/six digits. Keep the public key canonical, but normalize
+            # the parser input so generated cursors round-trip on that runtime.
+            fraction, offset = match.groups()
+            compatible = value[:19] + (fraction.ljust(7, "0") if fraction else "")
+            compatible += "+00:00" if offset == "Z" else (offset or "")
+            parsed = datetime.fromisoformat(compatible)
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

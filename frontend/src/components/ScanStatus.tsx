@@ -4716,6 +4716,8 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   const [detailLoading, setDetailLoading] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const loadedMore = useRef(false);
+  const cursorResetUsed = useRef(false);
+  const historyPageFailed = useRef(false);
   const historyCount = useRef(0);
   const nextCursorRef = useRef<string | null>(null);
   const historyGeneration = useRef(0);
@@ -4729,7 +4731,11 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     setDetails({});
     setExpandedTaskId(null);
     setNextCursor(null);
+    setHistoryLoading(false);
+    setHistoryError(false);
     loadedMore.current = false;
+    cursorResetUsed.current = false;
+    historyPageFailed.current = false;
     historyCount.current = 0;
     nextCursorRef.current = null;
     historyGeneration.current += 1;
@@ -4761,11 +4767,15 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         setHistoryGaps((previous) => [gap, ...previous]);
       }
       mergeHistory(result.items);
-      if (!loadedMore.current || (nextCursorRef.current == null && (pool?.completed_task_count ?? 0) > historyCount.current)) {
+      if (!historyPageFailed.current && (
+        !loadedMore.current
+        || (nextCursorRef.current == null && (pool?.completed_task_count ?? 0) > historyCount.current)
+      )) {
         nextCursorRef.current = result.next_cursor;
         setNextCursor(result.next_cursor);
       }
-      setHistoryError(false);
+      // A successful first-page refresh does not repair a failed older page.
+      setHistoryError(historyPageFailed.current);
     }).catch(() => { if (!cancelled && generation === historyGeneration.current) setHistoryError(true); });
     return () => { cancelled = true; };
   }, [scanId, pool]);
@@ -4775,18 +4785,21 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     setHistoryError(false);
     const gap = historyGaps[0];
     const requestedCursor = gap?.cursor ?? nextCursor;
+    let generation = historyGeneration.current;
+    const isCurrent = () => activeScanId.current === scanId && generation === historyGeneration.current;
     try {
       let result;
       let reset = false;
       try {
         result = await getScanTasksPage(scanId, requestedCursor);
       } catch (error) {
-        if (!requestedCursor || !isInvalidTaskCursorError(error)) throw error;
-        if (activeScanId.current !== scanId) return;
+        if (!isCurrent()) return;
+        if (!requestedCursor || !isInvalidTaskCursorError(error) || cursorResetUsed.current) throw error;
         // An open page may still hold the old task-ID-only cursor at deploy.
         // Restart once, and invalidate any older first-page request in flight.
         reset = true;
-        historyGeneration.current += 1;
+        cursorResetUsed.current = true;
+        generation = ++historyGeneration.current;
         loadedMore.current = false;
         historyCount.current = 0;
         nextCursorRef.current = null;
@@ -4798,8 +4811,10 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         setExpandedTaskId(null);
         result = await getScanTasksPage(scanId);
       }
-      if (activeScanId.current !== scanId) return;
+      if (!isCurrent()) return;
       mergeHistory(result.items);
+      historyPageFailed.current = false;
+      setHistoryError(false);
       loadedMore.current = !reset;
       if (gap && !reset) {
         const last = result.items[result.items.length - 1];
@@ -4812,8 +4827,12 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         nextCursorRef.current = result.next_cursor;
         setNextCursor(result.next_cursor);
       }
-    } catch { if (activeScanId.current === scanId) setHistoryError(true); }
-    finally { if (activeScanId.current === scanId) setHistoryLoading(false); }
+    } catch {
+      if (isCurrent()) {
+        historyPageFailed.current = true;
+        setHistoryError(true);
+      }
+    } finally { if (isCurrent()) setHistoryLoading(false); }
   };
   const loadTask = async (task: Record<string, unknown>) => {
     const key = cacheKey(task);
