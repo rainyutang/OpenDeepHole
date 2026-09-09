@@ -45,6 +45,10 @@ export async function getScanTasksPage(scanId: string, cursor?: string | null, t
   return data;
 }
 
+export function isInvalidTaskCursorError(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 400 && error.response.data?.detail === "Invalid cursor";
+}
+
 export async function getScanTaskDetail(scanId: string, task: Record<string, unknown>, signal?: AbortSignal) {
   const { data } = await api.get<Record<string, unknown>>(
     scanV2Path(scanId, `/tasks/${encodeURIComponent(String(task.task_id))}`),

@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefCallback } from "react";
+import { isInvalidTaskCursorError } from "../api/client";
+import { compareTaskHistory, shouldMergeTaskHistory, taskHistorySortTime } from "../taskOrder";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
@@ -4298,9 +4300,7 @@ function AuditPromptSection({ scan, taskName, runtime, pending = false }: {
           if (page.next_cursor && page.next_cursor === cursor) throw new Error("任务游标未前进");
           cursor = page.next_cursor;
         } while (cursor && !controller.signal.aborted);
-        task = matches.sort((a, b) => compareScanQueueTime(
-          String(b.finished_at || b.started_at || ""), String(a.finished_at || a.started_at || ""),
-        ))[0] ?? null;
+        task = matches.sort(compareTaskHistory)[0] ?? null;
       }
       const detail = task && !controller.signal.aborted
         ? await getScanTaskDetail(scan.scan_id, task, controller.signal) : null;
@@ -4694,10 +4694,12 @@ function ScanTokenUsagePanel({ usage }: { usage: OpenCodeTokenUsage | null }) {
   </section>;
 }
 
-function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null }) {
+export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null }) {
   const [page, setPage] = useState(1);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [history, setHistory] = useState<Record<string, unknown>[]>([]);
+  const historyRef = useRef<Record<string, unknown>[]>([]);
+  const [historyGaps, setHistoryGaps] = useState<{ cursor: string; boundary: Record<string, unknown> }[]>([]);
   const [details, setDetails] = useState<Record<string, Record<string, unknown>>>({});
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -4707,57 +4709,102 @@ function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePo
   const loadedMore = useRef(false);
   const historyCount = useRef(0);
   const nextCursorRef = useRef<string | null>(null);
+  const historyGeneration = useRef(0);
   const activeScanId = useRef(scanId);
   activeScanId.current = scanId;
   useEffect(() => {
     setPage(1);
     setHistory([]);
+    historyRef.current = [];
+    setHistoryGaps([]);
     setDetails({});
     setExpandedTaskId(null);
     setNextCursor(null);
     loadedMore.current = false;
     historyCount.current = 0;
     nextCursorRef.current = null;
+    historyGeneration.current += 1;
   }, [scanId]);
   const cacheKey = (task: Record<string, unknown>) => String(task.record_id || `${task.task_id}:${task.revision || 1}`);
   const mergeHistory = (incoming: Record<string, unknown>[]) => {
-    setHistory((previous) => {
-      const merged = new Map(previous.map((task) => [String(task.task_id), task]));
-      incoming.forEach((task) => {
-        const previousTask = merged.get(String(task.task_id));
-        if (!previousTask || Number(task.revision || 1) >= Number(previousTask.revision || 1)) merged.set(String(task.task_id), task);
-      });
-      historyCount.current = merged.size;
-      return [...merged.values()];
+    const merged = new Map(historyRef.current.map((task) => [String(task.task_id), task]));
+    incoming.forEach((task) => {
+      const previousTask = merged.get(String(task.task_id));
+      if (shouldMergeTaskHistory(previousTask, task)) merged.set(String(task.task_id), task);
     });
+    historyCount.current = merged.size;
+    historyRef.current = [...merged.values()];
+    setHistory(historyRef.current);
   };
   useEffect(() => {
     let cancelled = false;
+    const generation = historyGeneration.current;
     if (document.hidden) return;
     getScanTasksPage(scanId).then((result) => {
-      if (cancelled) return;
+      if (cancelled || generation !== historyGeneration.current) return;
+      const newestKnown = historyRef.current.reduce<Record<string, unknown> | null>(
+        (newest, task) => !newest || compareTaskHistory(task, newest) < 0 ? task : newest, null);
+      const last = result.items[result.items.length - 1];
+      if (loadedMore.current && newestKnown && last && result.next_cursor && compareTaskHistory(last, newestKnown) < 0) {
+        // A refresh can contain more than 50 new completions. Fill this new
+        // interval before continuing from the older history page boundary.
+        const gap = { cursor: result.next_cursor, boundary: newestKnown };
+        setHistoryGaps((previous) => [gap, ...previous]);
+      }
       mergeHistory(result.items);
       if (!loadedMore.current || (nextCursorRef.current == null && (pool?.completed_task_count ?? 0) > historyCount.current)) {
         nextCursorRef.current = result.next_cursor;
         setNextCursor(result.next_cursor);
       }
       setHistoryError(false);
-    }).catch(() => { if (!cancelled) setHistoryError(true); });
+    }).catch(() => { if (!cancelled && generation === historyGeneration.current) setHistoryError(true); });
     return () => { cancelled = true; };
   }, [scanId, pool]);
   const loadHistory = async () => {
     if (historyLoading) return;
     setHistoryLoading(true);
     setHistoryError(false);
+    const gap = historyGaps[0];
+    const requestedCursor = gap?.cursor ?? nextCursor;
     try {
-      const result = await getScanTasksPage(scanId, nextCursor);
+      let result;
+      let reset = false;
+      try {
+        result = await getScanTasksPage(scanId, requestedCursor);
+      } catch (error) {
+        if (!requestedCursor || !isInvalidTaskCursorError(error)) throw error;
+        if (activeScanId.current !== scanId) return;
+        // An open page may still hold the old task-ID-only cursor at deploy.
+        // Restart once, and invalidate any older first-page request in flight.
+        reset = true;
+        historyGeneration.current += 1;
+        loadedMore.current = false;
+        historyCount.current = 0;
+        nextCursorRef.current = null;
+        setNextCursor(null);
+        setHistory([]);
+        historyRef.current = [];
+        setHistoryGaps([]);
+        setPage(1);
+        setExpandedTaskId(null);
+        result = await getScanTasksPage(scanId);
+      }
       if (activeScanId.current !== scanId) return;
       mergeHistory(result.items);
-      loadedMore.current = true;
-      nextCursorRef.current = result.next_cursor;
-      setNextCursor(result.next_cursor);
-    } catch { setHistoryError(true); }
-    finally { setHistoryLoading(false); }
+      loadedMore.current = !reset;
+      if (gap && !reset) {
+        const last = result.items[result.items.length - 1];
+        const cursor = last && compareTaskHistory(last, gap.boundary) < 0 ? result.next_cursor : null;
+        setHistoryGaps((previous) => previous.flatMap((item) => {
+          if (item !== gap) return [item];
+          return cursor ? [{ ...gap, cursor }] : [];
+        }));
+      } else {
+        nextCursorRef.current = result.next_cursor;
+        setNextCursor(result.next_cursor);
+      }
+    } catch { if (activeScanId.current === scanId) setHistoryError(true); }
+    finally { if (activeScanId.current === scanId) setHistoryLoading(false); }
   };
   const loadTask = async (task: Record<string, unknown>) => {
     const key = cacheKey(task);
@@ -4774,7 +4821,7 @@ function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePo
     const merged = new Map((pool?.completed_tasks ?? []).map((task) => [String(task.task_id), task]));
     history.forEach((task) => {
       const previous = merged.get(String(task.task_id));
-      if (!previous || Number(task.revision || 1) >= Number(previous.revision || 1)) merged.set(String(task.task_id), details[cacheKey(task)] ?? task);
+      if (shouldMergeTaskHistory(previous, task)) merged.set(String(task.task_id), details[cacheKey(task)] ?? task);
     });
     const combined = { scope_id: scanId, global_running: 0, global_queued: 0, total_tasks: 0,
       completed_task_count: 0, models: [], queued_tasks: [], planned_tasks: [], updated_at: "", ...pool,
@@ -4811,7 +4858,7 @@ function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePo
         <div>
           <h3 className="text-sm font-semibold text-slate-200">任务队列</h3>
           <p className="mt-1 text-xs text-slate-500">
-            当前扫描的 OpenCode Session 计划、排队、运行和历史任务
+            当前扫描的 OpenCode Session 任务；进行中任务置顶，历史任务按执行结束时间从新到旧加载
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -4824,7 +4871,7 @@ function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePo
       </div>
 
       {historyError && <p className="my-2 text-xs text-amber-300">历史任务加载失败，请重试。</p>}
-      {(nextCursor || historyError) && <button type="button" onClick={() => void loadHistory()} disabled={historyLoading}
+      {(nextCursor || historyGaps.length > 0 || historyError) && <button type="button" onClick={() => void loadHistory()} disabled={historyLoading}
         className="my-3 rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 disabled:opacity-40">
         {historyLoading ? "加载中…" : historyError ? "重试加载历史任务" : `加载更多历史任务（已加载 ${history.length} 条）`}
       </button>}
@@ -5139,13 +5186,13 @@ function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueueTask[]
       modelId: String(task.model_id || task.model || ""),
       scopeId: String(task.scope_id || pool.scope_id || ""),
       task,
-      timestamp: String(task.finished_at || task.started_at || ""),
+      timestamp: taskHistorySortTime(task),
     });
   }
   return out.sort((a, b) => {
     const rank = scanQueueStatusRank(a.status) - scanQueueStatusRank(b.status);
     if (rank !== 0) return rank;
-    if (scanQueueStatusRank(a.status) >= 3) return compareScanQueueTime(b.timestamp, a.timestamp);
+    if (scanQueueStatusRank(a.status) >= 3) return compareTaskHistory(a.task, b.task);
     return compareScanQueueTime(a.timestamp, b.timestamp);
   });
 }

@@ -63,6 +63,7 @@ from backend.models import (
     canonical_mining_engine_label,
 )
 from backend.vulnerability_identity import vulnerability_report_identity
+from backend.task_order import task_sort_time
 
 from .base import DuplicateScanNameError, ScanStoreBase
 from .audit_results import audit_source_kind, read_candidate_audit_results
@@ -1012,6 +1013,7 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
         # 统一在此设置一次 Row 工厂；连接被多线程共享，
         # 各读方法中反复赋值属于对共享状态的无锁突变。
         self._conn.row_factory = sqlite3.Row
+        self._conn.create_function("task_sort_time", 2, task_sort_time, deterministic=True)
         self._lock = _SqliteTransactionLock(self._conn)
         if not readonly:
             self._conn.execute("PRAGMA journal_mode=WAL")

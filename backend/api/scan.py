@@ -101,6 +101,7 @@ from backend.store.base import DuplicateScanNameError
 from backend.store.summaries import metrics_from_totals
 from backend.vulnerability_identity import vulnerability_report_identity
 from backend.pagination import decode_cursor, encode_cursor
+from backend.task_order import MISSING_TASK_TIME, task_sort_time
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 from deephole_client.scan_modes import (
     BUILTIN_PROFILE_ENGINE_IDS,
@@ -127,15 +128,20 @@ async def get_scan_tasks_page(scan_id: str, cursor: str | None = None,
                               current_user: User = Depends(get_current_user),
                               task_name: str | None = None) -> dict:
     await _check_scan_owner(scan_id, current_user)
+    before_sort_time, before_task_id = None, ""
     try:
-        after_task_id = decode_cursor(cursor, size=1)[0] if cursor else ""
+        if cursor:
+            before_sort_time, before_task_id = decode_cursor(cursor, size=2)
+            if before_sort_time != MISSING_TASK_TIME and task_sort_time(before_sort_time) != before_sort_time:
+                raise ValueError("Invalid task time")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid cursor") from exc
     rows = await run_store_call(get_scan_store(), "list_task_page", scan_id,
-                                limit=limit + 1, after_task_id=after_task_id, task_name=task_name)
+                                limit=limit + 1, before_sort_time=before_sort_time,
+                                before_task_id=before_task_id, task_name=task_name)
     more = len(rows) > limit
     items = rows[:limit]
-    return {"items": items, "next_cursor": encode_cursor(items[-1]["task_id"]) if more else None}
+    return {"items": items, "next_cursor": encode_cursor(items[-1]["sort_time"], items[-1]["task_id"]) if more else None}
 
 
 @router.get("/api/v2/scans/{scan_id}/tasks/{task_id}")

@@ -37,6 +37,10 @@ def receipt(store, value):
     )
 
 
+def task_page_cursor(item):
+    return {"before_sort_time": item["sort_time"], "before_task_id": item["task_id"]}
+
+
 def test_receipt_body_once_and_old_revision_does_not_replace_current(tmp_path):
     store = make_store(tmp_path)
     try:
@@ -133,7 +137,7 @@ def test_task_page_has_no_bodies_and_stable_cursor(tmp_path):
         for i in range(107):
             receipt(store, task(i))
         first = store.list_task_page("s", limit=50)
-        second = store.list_task_page("s", limit=50, after_task_id=first[-1]["task_id"])
+        second = store.list_task_page("s", limit=50, **task_page_cursor(first[-1]))
         assert len(first) == len(second) == 50
         assert {x["task_id"] for x in first}.isdisjoint({x["task_id"] for x in second})
         assert len(json.dumps(first)) < 20000
@@ -160,10 +164,10 @@ def test_task_name_filter_matches_exact_history_without_report_bodies(tmp_path, 
             for value in values:
                 receipt(store, value)
         first = store.list_task_page("s", task_name=name, limit=1)
-        second = store.list_task_page("s", task_name=name, after_task_id=first[0]["task_id"])
-        assert [item["task_id"] for item in first + second] == [values[0]["task_id"], values[2]["task_id"]]
+        second = store.list_task_page("s", task_name=name, **task_page_cursor(first[0]))
+        assert [item["task_id"] for item in first + second] == [values[2]["task_id"], values[0]["task_id"]]
         assert all("prompt" not in item and "session_events" not in item for item in first + second)
-        assert store.get_task_detail("s", second[0]["task_id"])["prompt"] == values[2]["prompt"]
+        assert store.get_task_detail("s", second[0]["task_id"])["prompt"] == values[0]["prompt"]
         assert store.list_task_page("s", task_name="candidate-audit-other-0") == []
     finally:
         store.close()

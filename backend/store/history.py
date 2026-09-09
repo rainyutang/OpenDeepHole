@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from backend.models import OpenCodePoolStatus
 from backend.scan_runtime import is_terminal_scan_status, terminal_opencode_pool_status
+from backend.task_order import task_sort_time, task_sort_time_sql
 
 
 HISTORY_COLUMNS = {
@@ -325,7 +326,8 @@ class ScanHistoryMixin:
         pool.completed_tasks = []
         return pool
 
-    def list_task_page(self, scan_id: str, *, limit: int = 50, after_task_id: str = "",
+    def list_task_page(self, scan_id: str, *, limit: int = 50, before_sort_time: str | None = None,
+                       before_task_id: str = "",
                        task_name: str | None = None) -> list[dict]:
         legacy = self._conn.execute("SELECT history_version FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
         if legacy and not legacy["history_version"]:
@@ -333,23 +335,37 @@ class ScanHistoryMixin:
             tasks = []
             for task in pool.completed_tasks if pool else []:
                 key, revision = task_identity(task)
-                if key > after_task_id and (task_name is None or task.get("task_name") == task_name):
-                    tasks.append({**{k: v for k, v in task.items() if k in TASK_METADATA_FIELDS}, "task_id": key, "revision": revision})
-            return sorted(tasks, key=lambda item: item["task_id"])[:max(1, min(101, limit))]
+                sort_time = task_sort_time(task.get("finished_at"), task.get("started_at"))
+                if before_sort_time is not None and (sort_time, key) >= (before_sort_time, before_task_id):
+                    continue
+                if task_name is None or task.get("task_name") == task_name:
+                    tasks.append({**{k: v for k, v in task.items() if k in TASK_METADATA_FIELDS},
+                                  "task_id": key, "revision": revision, "sort_time": sort_time})
+            return sorted(tasks, key=lambda item: (item["sort_time"], item["task_id"]), reverse=True)[:max(1, min(101, limit))]
         name_filter = ""
-        params: list[object] = [scan_id, after_task_id]
+        params: list[object] = [scan_id]
+        postgres = bool(getattr(self, "distributed", False))
         if task_name is not None:
             name_expression = "CAST(v.metadata_json AS jsonb) ->> 'task_name'" if getattr(self, "distributed", False) else "json_extract(v.metadata_json, '$.task_name')"
             name_filter = f" AND ({name_expression}) = ?"
             params.append(task_name)
+        cursor_filter = ""
+        if before_sort_time is not None:
+            cursor_filter = " WHERE (sort_time, task_id) < (?, ?)"
+            params.extend((before_sort_time, before_task_id))
         params.append(max(1, min(101, limit)))
+        collation = '"C"' if postgres else "BINARY"
         rows = self._conn.execute(
-            "SELECT v.metadata_json FROM scan_task_current c "
+            "SELECT metadata_json, sort_time FROM ("
+            f"SELECT v.metadata_json, c.task_id COLLATE {collation} AS task_id, "
+            f"{task_sort_time_sql(postgres=postgres)} COLLATE {collation} AS sort_time "
+            "FROM scan_task_current c "
             "JOIN scan_task_versions v ON v.record_id = c.record_id "
-            "WHERE c.scan_id = ? AND c.task_id > ?" + name_filter + " ORDER BY c.task_id LIMIT ?",
+            "WHERE c.scan_id = ?" + name_filter + ") ordered" + cursor_filter
+            + " ORDER BY sort_time DESC, task_id DESC LIMIT ?",
             params,
         ).fetchall()
-        return [json.loads(row["metadata_json"]) for row in rows]
+        return [{**json.loads(row["metadata_json"]), "sort_time": row["sort_time"]} for row in rows]
 
     def _legacy_pool(self, scan_id: str):
         row = self._conn.execute("SELECT opencode_pool FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
