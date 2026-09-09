@@ -497,6 +497,87 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             3,
         )
 
+    async def test_multi_version_dedup_prints_progress_without_advancing_audits(self) -> None:
+        from deephole_client.vulnerability_mining.engines.multi_version import engine
+
+        reporter = _reporter()
+        manifest = SimpleNamespace(
+            engine_id="multi_version", label="Multi-version", fp_review=False,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[], manifests=lambda: [manifest], get=lambda _engine_id: loaded,
+        )
+
+        def compare(*_args):
+            threading.Event().wait(0.05)
+            return 0.8
+
+        async def run_engine(_loaded, **kwargs):
+            groups = await engine._group_candidates_async(
+                [[{"version_name": "v1"}], [{"version_name": "v2"}]],
+                output=kwargs["output"], cancel_event=kwargs["cancel_event"],
+            )
+            return {
+                "status": "success", "error_message": "",
+                "total_candidates": len(groups), "processed_candidates": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = project / "code_index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch("deephole_client.scanner.load_mining_engines", return_value=registry),
+                patch("deephole_client.scanner.run_mining_engine", side_effect=run_engine),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success", "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch.object(engine, "_candidate_similarity", side_effect=compare),
+                patch.object(engine, "_DEDUP_PROGRESS_SECONDS", 0.01),
+                patch.object(engine, "_DEDUP_POLL_SECONDS", 0.005),
+                patch("builtins.print") as terminal,
+            ):
+                await run_scan(
+                    config=AgentConfig(), project_path=project, code_scan_path=project,
+                    reporter=reporter, scan_name="dedup-progress", product="",
+                    validation_environment="", checker_names=[], scan_id="scan-dedup-progress",
+                    cancel_event=threading.Event(), scan_mode="multi_version",
+                    mining_engines=[{
+                        "engine_id": "multi_version", "engine_label": "Multi-version",
+                        "enabled": True,
+                    }],
+                )
+
+        lines = [call.args[0] for call in terminal.call_args_list if call.args]
+        self.assertTrue(any("[multi_version] 开始跨版本候选去重" in line for line in lines))
+        self.assertTrue(any("[multi_version] 跨版本候选去重：已处理 0/2" in line for line in lines))
+        self.assertTrue(any(
+            "跨版本候选去重完成：已处理 2/2，已完成 1 组，比较 1 次" in line
+            for line in lines
+        ))
+        snapshots = [
+            call.args[1] for call in reporter.report_mining_engine_run.await_args_list
+        ]
+        self.assertTrue(all(
+            snapshot["processed_candidates"] in (None, 0) for snapshot in snapshots
+        ))
+        self.assertEqual(snapshots[-1]["processed_candidates"], 0)
+        self.assertEqual(snapshots[-1]["total_candidates"], 1)
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
     def test_scan_path_must_stay_inside_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
