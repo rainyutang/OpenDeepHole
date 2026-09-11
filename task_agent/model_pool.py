@@ -160,7 +160,6 @@ class _PendingLeaseRequest:
     priority: int
     revision: int
     cli_config: Any
-    global_concurrency: int | Any
     required_capability: str
     prefer_high: bool
     cancel_event: Any
@@ -311,8 +310,9 @@ def _bool_value(value: object, default: bool = False) -> bool:
     return bool(value)
 
 
-def configured_global_concurrency(config: Any) -> int:
-    return _safe_int(_cfg_value(config, "opencode_concurrency", 1), 1, 1)
+def configured_model_capacity(cli_config: Any) -> int:
+    """Configured capacity of enabled, valid models, before time/capability filters."""
+    return sum(option.max_concurrency for option in model_options(cli_config))
 
 
 def _configured_model_pool_enabled(cli_config: Any) -> bool:
@@ -551,17 +551,15 @@ def _apply_model_health_outcome_locked(
 def total_model_capacity(
     cli_config: Any,
     *,
-    global_concurrency: int,
     required_capability: str = "any",
 ) -> int:
     """Sum of max_concurrency across enabled models satisfying the requirement.
 
-    This is the number of OpenCode messages that can actually run in parallel.
-    When a model pool is configured, the top-level concurrency is a hard cap
-    over all currently time-eligible models.
+    Honor capability and time windows, retaining one worker to surface an
+    unavailable model pool or wait for a configured model's time window.
     """
     required = normalize_requirement(required_capability)
-    options = model_options(cli_config, global_concurrency=global_concurrency)
+    options = model_options(cli_config)
     if _configured_model_pool_enabled(cli_config):
         options = _active_options(options)
     eligible = [
@@ -569,7 +567,7 @@ def total_model_capacity(
         if capability_satisfies(option.capability, required)
     ]
     if not eligible:
-        all_options = model_options(cli_config, global_concurrency=global_concurrency)
+        all_options = model_options(cli_config)
         configured_match = _eligible_options(all_options, required_capability=required)
         if not _configured_model_pool_enabled(cli_config) or not configured_match:
             # Mirror acquire_model_lease(): an over-restrictive requirement falls
@@ -577,12 +575,10 @@ def total_model_capacity(
             # but currently out-of-window matching model should still be waited on.
             eligible = options
     capacity = sum(option.max_concurrency for option in eligible)
-    if _configured_model_pool_enabled(cli_config):
-        capacity = min(global_concurrency, capacity)
     return max(1, capacity)
 
 
-def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOption]:
+def model_options(cli_config: Any) -> list[ModelOption]:
     raw_models = _cfg_value(cli_config, "models", None) or []
     configured_tool = "opencode"
     configured_executable = str(
@@ -612,8 +608,8 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
                 capability=normalize_capability(_cfg_value(raw, "capability", "high")),
                 weight=_safe_float(_cfg_value(raw, "weight", 1), 1.0),
                 max_concurrency=_safe_int(
-                    _cfg_value(raw, "max_concurrency", global_concurrency),
-                    global_concurrency,
+                    _cfg_value(raw, "max_concurrency", 1),
+                    1,
                 ),
                 tool=configured_tool,
                 executable=configured_executable,
@@ -647,12 +643,10 @@ def _eligible_options(
 def _choose_available(
     options: list[ModelOption],
     *,
-    global_concurrency: int,
     prefer_high: bool = False,
 ) -> ModelOption | None:
     available = _available_options(
         options,
-        global_concurrency=global_concurrency,
         prefer_high=prefer_high,
     )
     return available[0] if available else None
@@ -661,12 +655,9 @@ def _choose_available(
 def _available_options(
     options: list[ModelOption],
     *,
-    global_concurrency: int,
     prefer_high: bool = False,
     prefer_lowest_capability: bool = False,
 ) -> list[ModelOption]:
-    if _global_running >= global_concurrency:
-        return []
     available = [
         option for option in options
         if _running_by_model.get(option.id, 0) < option.max_concurrency
@@ -700,33 +691,23 @@ def _current_request_cli_config(request: _PendingLeaseRequest) -> Any:
     return request.cli_config() if callable(request.cli_config) else request.cli_config
 
 
-def _current_request_global_concurrency(request: _PendingLeaseRequest) -> int:
-    value = (
-        request.global_concurrency()
-        if callable(request.global_concurrency)
-        else request.global_concurrency
-    )
-    return max(1, int(value or 1))
-
-
 def _request_options_locked(
     request: _PendingLeaseRequest,
-) -> tuple[Any, int, list[ModelOption], list[ModelOption], bool]:
+) -> tuple[list[ModelOption], list[ModelOption], bool]:
     active_cli_config = _current_request_cli_config(request)
-    hard_global_concurrency = _current_request_global_concurrency(request)
     pool_enabled = _configured_model_pool_enabled(active_cli_config)
-    all_options = model_options(active_cli_config, global_concurrency=hard_global_concurrency)
+    all_options = model_options(active_cli_config)
     _ensure_global_models_locked(all_options)
     if request.stats_scope_id:
         _ensure_scope_models_locked(request.stats_scope_id, all_options)
     active_options = _active_options(all_options) if pool_enabled else all_options
-    return active_cli_config, hard_global_concurrency, all_options, active_options, pool_enabled
+    return all_options, active_options, pool_enabled
 
 
 def _eligible_options_for_request_locked(
     request: _PendingLeaseRequest,
-) -> tuple[list[ModelOption], int, list[ModelOption]]:
-    _active_cli_config, hard_global_concurrency, all_options, active_options, pool_enabled = (
+) -> tuple[list[ModelOption], list[ModelOption]]:
+    all_options, active_options, pool_enabled = (
         _request_options_locked(request)
     )
     eligible = _eligible_options(
@@ -747,13 +728,13 @@ def _eligible_options_for_request_locked(
         # back to all currently time-eligible models, but never use a model that
         # is outside its configured time window.
         eligible = active_options
-    return eligible, hard_global_concurrency, all_options
+    return eligible, all_options
 
 
 def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
-    eligible, hard_global_concurrency, all_options = _eligible_options_for_request_locked(request)
+    eligible, all_options = _eligible_options_for_request_locked(request)
     now = time.monotonic()
     circuit_available = [
         option
@@ -771,7 +752,6 @@ def _choose_available_for_request_locked(
     selection_options = untried or circuit_available
     for option in _available_options(
         selection_options,
-        global_concurrency=hard_global_concurrency,
         prefer_high=request.prefer_high,
         prefer_lowest_capability=request.prefer_lowest_capability,
     ):
@@ -783,7 +763,7 @@ def _choose_available_for_request_locked(
 def _request_blocked_by_quota_circuits_locked(
     request: _PendingLeaseRequest,
 ) -> bool:
-    eligible, _, _ = _eligible_options_for_request_locked(request)
+    eligible, _ = _eligible_options_for_request_locked(request)
     if not eligible:
         return False
     now = time.monotonic()
@@ -1202,7 +1182,6 @@ def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelR
 async def acquire_model_lease(
     cli_config: Any,
     *,
-    global_concurrency: int | Any,
     required_capability: str = "any",
     prefer_high: bool = False,
     cancel_event=None,
@@ -1255,7 +1234,6 @@ async def acquire_model_lease(
                     priority=normalize_priority(priority),
                     revision=max(1, int(revision or 1)),
                     cli_config=cli_config,
-                    global_concurrency=global_concurrency,
                     required_capability=required,
                     prefer_high=prefer_high,
                     cancel_event=cancel_event,
@@ -1300,7 +1278,7 @@ async def acquire_model_lease(
                 _condition.notify_all()
                 notify_queued = True
             else:
-                _, _, all_options, _, _ = _request_options_locked(request)
+                all_options, _, _ = _request_options_locked(request)
                 if not all_options and not request.wait_when_unavailable:
                     _fail_no_available_model_locked(request)
                     raise NoAvailableModelError()
@@ -1613,8 +1591,7 @@ def _pending_request_matches_scope(request: _PendingLeaseRequest, scope_id: str)
 
 def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
     cli_config = _current_request_cli_config(request)
-    global_concurrency = _current_request_global_concurrency(request)
-    all_options = model_options(cli_config, global_concurrency=global_concurrency)
+    all_options = model_options(cli_config)
     active_options = (
         _active_options(all_options)
         if _configured_model_pool_enabled(cli_config)
@@ -1759,7 +1736,7 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
     }
 
 
-async def refresh_configured_model_pool(cli_config: Any, *, global_concurrency: int) -> None:
+async def refresh_configured_model_pool(cli_config: Any) -> None:
     """Refresh configured model rows without waiting for the next task lease.
 
     Config changes should become visible to queued leases and dashboards
@@ -1767,7 +1744,7 @@ async def refresh_configured_model_pool(cli_config: Any, *, global_concurrency: 
     """
     global _global_updated_at
     async with _condition:
-        options = model_options(cli_config, global_concurrency=max(1, global_concurrency))
+        options = model_options(cli_config)
         configured_ids = {option.id for option in options}
         # Bind new ids/identities before deleting removed ids so health follows
         # an unchanged execution target across a config-row rename.

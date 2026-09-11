@@ -114,7 +114,6 @@ async def hunt_variants(
 
     capacity = total_model_capacity(
         config.opencode,
-        global_concurrency=config.opencode_concurrency,
         required_capability="high",
     )
     concurrency = max(1, min(capacity, len(patterns)))

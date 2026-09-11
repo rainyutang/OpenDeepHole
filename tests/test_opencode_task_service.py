@@ -1179,7 +1179,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert acquire_kwargs["task_context"]["prompt"] == captured["prompt"]
         assert acquire_kwargs["task_context"]["prompt_length"] == len(captured["prompt"])
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
-        assert callable(acquire_kwargs["global_concurrency"])
+        assert "global_concurrency" not in acquire_kwargs
         assert acquire_kwargs["wait_when_unavailable"] is False
         assert any(line.startswith("[vulnerability_mining][pending][task] QUEUED") for line in output)
         assert any(line.startswith("[vulnerability_mining][pending][task] START") for line in output)

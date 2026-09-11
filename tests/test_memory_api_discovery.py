@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from deephole_client import memory_api_discovery as discovery
 
 
@@ -21,6 +23,59 @@ class FakeDb:
                 "start_line": 10,
             },
         ]
+
+
+@pytest.mark.parametrize("capacity,batches", [(1, 12), (9, 12), (9, 3)])
+def test_memory_api_workers_use_model_capacity_and_stop_on_cancel(
+    tmp_path: Path, monkeypatch, capacity: int, batches: int,
+) -> None:
+    from deephole_client.config import AgentConfig, OpenCodeConfig, OpenCodeModelConfig
+
+    cfg = AgentConfig(opencode=OpenCodeConfig(models=[
+        OpenCodeModelConfig(id="model", model="provider/model", max_concurrency=capacity),
+    ]))
+    monkeypatch.setattr(discovery, "get_config", lambda: cfg)
+    candidates = [discovery.MemoryApiCandidate(
+        candidate_id=str(index), name=f"alloc_{index}", kind="function", file="alloc.c",
+        line=index + 1, role_hint="alloc", evidence="malloc",
+    ) for index in range(batches)]
+    monkeypatch.setattr(discovery, "collect_memory_api_candidates", lambda *_args, **_kwargs: candidates)
+
+    async def run():
+        reached = asyncio.Event()
+        release = asyncio.Event()
+        cancel = asyncio.Event()
+        started = 0
+
+        async def batch(**_kwargs):
+            nonlocal started
+            started += 1
+            if started == min(capacity, batches):
+                reached.set()
+            await release.wait()
+
+        monkeypatch.setattr(discovery, "_run_memory_api_batch", batch)
+        task = asyncio.create_task(discovery.ensure_memory_api_artifact(
+            project_root=tmp_path, workspace=tmp_path, scan_dir=tmp_path / "scan",
+            cancel_event=cancel,
+            options=discovery.MemoryApiDiscoveryOptions(batch_size=1, max_candidates=0),
+        ))
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=1)
+            assert started == min(capacity, batches)
+            cancel.set()
+            release.set()
+            report = await asyncio.wait_for(task, timeout=1)
+            assert report.skipped
+            assert started == min(capacity, batches)
+            assert not report.artifact_path.exists()
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
 
 
 def test_collect_candidates_includes_function_bodies_and_macros(tmp_path: Path) -> None:

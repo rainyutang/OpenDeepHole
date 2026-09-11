@@ -69,8 +69,13 @@ class StandaloneOpenCodeConfig:
     environment: dict[str, str]
     opencode_config: dict[str, Any]
     opencode: StandaloneCLIConfig
-    opencode_concurrency: int
     fp_review_cli: None = None
+
+    @property
+    def opencode_concurrency(self) -> int:
+        from .model_pool import configured_model_capacity
+
+        return configured_model_capacity(self.opencode)
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -286,6 +291,7 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         "serve",
     )
     model_pool = _section(raw, "model_pool")
+    # Accept retired global limits in existing YAML files without using them.
     _reject_unknown(model_pool, {"global_concurrency", "models"}, "model_pool")
 
     base_dir = source_path.parent
@@ -393,13 +399,6 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         ),
         models=models,
     )
-    concurrency = _integer(
-        model_pool.get("global_concurrency"),
-        name="model_pool.global_concurrency",
-        default=1,
-        minimum=1,
-        maximum=64,
-    )
 
     work_dir.mkdir(parents=True, exist_ok=True)
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -412,7 +411,6 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         environment=environment,
         opencode_config=opencode_config,
         opencode=cli_config,
-        opencode_concurrency=concurrency,
     )
 
 

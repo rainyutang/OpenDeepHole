@@ -200,7 +200,6 @@ class FpReviewConfig(BaseModel):
 
 class AppConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
-    opencode_concurrency: int = 1
     server: ServerConfig = ServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
@@ -219,6 +218,13 @@ class AppConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     auth: AuthConfig = AuthConfig()
+
+    @property
+    def opencode_concurrency(self) -> int:
+        """Read-only worker capacity; legacy configuration values are ignored."""
+        from task_agent.model_pool import configured_model_capacity
+
+        return configured_model_capacity(self.opencode)
 
 
 def load_config(config_path: str | None = None) -> AppConfig:

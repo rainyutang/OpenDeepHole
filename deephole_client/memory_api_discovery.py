@@ -27,7 +27,7 @@ from backend.preprocess.memory_api_artifact import (
     memory_deallocator_names,
 )
 from task_agent import run_opencode_task
-from task_agent.model_pool import configured_global_concurrency
+from task_agent.model_pool import configured_model_capacity
 from task_agent.output_format import with_local_timestamp
 from task_agent.task_service import bind_opencode_execution_context
 
@@ -216,7 +216,7 @@ async def ensure_memory_api_artifact(
     queue: asyncio.Queue[tuple[int, list[MemoryApiCandidate], Path]] = asyncio.Queue()
     for item in batch_items:
         queue.put_nowait(item)
-    concurrency = max(1, min(8, len(batch_items) or 1))
+    concurrency = max(1, min(configured_model_capacity(get_config().opencode), len(batch_items)))
 
     async def _run_worker() -> None:
         while not queue.empty():

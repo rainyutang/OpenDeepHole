@@ -42,7 +42,6 @@ AGENT_CONFIG: dict[str, Any] = {
             "enabled": True,
         }],
     },
-    "opencode_concurrency": 1,
     "fp_review_cli": None,
 }
 

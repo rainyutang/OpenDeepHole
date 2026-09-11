@@ -318,7 +318,6 @@ class AgentConfig:
     checkers: list = field(default_factory=list)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     fp_review_cli: OpenCodeConfig | None = None
-    opencode_concurrency: int = 4
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
     threat_analysis: ThreatAnalysisConfig = field(default_factory=ThreatAnalysisConfig)
@@ -348,6 +347,13 @@ class AgentConfig:
         repr=False,
         compare=False,
     )
+
+    @property
+    def opencode_concurrency(self) -> int:
+        """Read-only worker capacity derived from the configured model rows."""
+        from task_agent.model_pool import configured_model_capacity
+
+        return configured_model_capacity(self.opencode)
 
 
 def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
@@ -667,9 +673,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
                 for item in model_pool["models"]
                 if isinstance(item, dict)
             ]
-        config.opencode_concurrency = _bounded_int(
-            model_pool.get("global_concurrency"), config.opencode_concurrency, 1, 64
-        )
         normalize_cli_config(config.opencode)
         config.fp_review_cli = None
 
@@ -695,11 +698,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         if f.name in section and section[f.name] is not None:
             setattr(config.opencode, f.name, section[f.name])
     normalize_cli_config(config.opencode)
-    if "opencode_concurrency" in remote and remote["opencode_concurrency"] is not None:
-        try:
-            config.opencode_concurrency = max(1, min(8, int(remote["opencode_concurrency"])))
-        except (TypeError, ValueError):
-            config.opencode_concurrency = 4
     if "fp_review_cli" in remote:
         section = remote.get("fp_review_cli")
         if section is None:
@@ -818,7 +816,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
             "opencode_serve_port": config.opencode.serve_port,
         },
         "model_pool": {
-            "global_concurrency": config.opencode_concurrency,
             "models": models,
         },
         "threat_analysis": {
@@ -948,7 +945,6 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         checkers=raw.get("checkers", []),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
-        opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 4), 4, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         git_history=GitHistoryConfig(**git_history_raw),
         threat_analysis=ThreatAnalysisConfig(**threat_analysis_raw),

@@ -168,8 +168,7 @@ serve:
         timeout: 30000
 
 model_pool:
-  # 所有模型合计正在执行的任务数硬上限。
-  global_concurrency: 2
+  # 总并发容量自动汇总已启用模型的 max_concurrency。
   models:
     - id: deepseek-pro
       # OpenCode 使用的 provider/model；use_default_model=false 时必须非空。
@@ -255,7 +254,6 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 
 | 参数 | 必填/默认值 | 含义 |
 | --- | --- | --- |
-| `model_pool.global_concurrency` | 默认 `1`，范围 `1..64` | 所有模型合计正在执行的任务数硬上限。 |
 | `models[].id` | 默认取 `model`，默认模型行为 `default` | 模型池内部稳定标识，用于 Lease、日志和统计；不同模型行应使用不同 ID。 |
 | `models[].model` | 条件必填 | OpenCode 的 `provider/model`。要让该行进入可调度模型池，当 `use_default_model` 为 `false` 时必须非空。 |
 | `models[].use_default_model` | 默认 `false` | 为 `true` 时忽略 `model`，让 Serve 使用自己的默认模型。 |
@@ -267,16 +265,16 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 | `models[].max_retries` | 默认继承 `serve.max_retries`，最小 `0` | 该模型在超时或其它可重试失败后采用的新 Session 重试次数。 |
 | `models[].time_windows` | 默认 `[]` | 模型允许获得新 Lease 的本地时间窗口；空列表表示全天可用。 |
 
-实际并发数同时受全局和模型行限制。对于当前满足能力、已启用且处于可用时间窗内的模型，可近似理解为：
+只配置每个模型的 `max_concurrency`，没有独立全局并发闸门。配置总容量汇总已启用且配置有效的模型，时间窗和任务能力决定当前可使用哪些额度：
 
 ```text
-实际并发容量 = min(
-    model_pool.global_concurrency,
-    所有合格模型的 max_concurrency 之和,
-)
+配置总容量 = 所有已启用且配置有效的模型的 max_concurrency 之和
+当前任务可用容量 = 满足能力要求且处于可用时间窗内的模型的 max_concurrency 之和
 ```
 
-例如全局并发为 `2`，但唯一高能力模型的 `max_concurrency` 为 `1` 时，两个 `high` 任务会同时进入队列，却仍然只能串行执行。要让它们同时运行，需要把该模型的 `max_concurrency` 提高到 `2`，或者再配置一个当前可用的高能力模型。
+例如两个当前可用的高能力模型分别配置 `4` 和 `5`，充足的 `high` 任务可以同时运行 `9` 个，第 `10` 个等待空位。不同扫描和任务类型共享这些模型额度；总容量也不再受 `8` 或 `64` 截断。单模型并发缺省值仍为 `1`。
+
+旧的 `model_pool.global_concurrency` 和平台顶层 `opencode_concurrency` 已退役，兼容读取但忽略数值；平台保存、导出和下发时不再包含这些字段，独立 Task Agent 也无需修改旧 YAML 才能启动。配置版本保持不变，无需数据库迁移。平台各扫描阶段及内存 API 分析按模型容量创建工作协程，已有阶段不动态扩充工作协程；运行中修改模型额度仍会更新模型租约调度，降低额度不会中断已有请求。
 
 模型池在当前 Agent/Task Agent 进程内为每个实际模型身份维护 `0..4` 级健康惩罚，调度使用的有效权重为：
 
@@ -392,7 +390,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 若文本和已写文件都没有符合 Schema 的 JSON，且 `invalid_json_retry_count > 0`，服务按以下顺序恢复：
 
 1. 释放原业务模型 Lease，新建一个独立格式匹配 Session。输入优先使用本轮最后写入的非空文件原文，没有可读文件时使用业务 Session 最终文本；新 Session 不连接扫描 MCP、权限覆盖为空、所有已发现工具与内置工具均禁用。
-2. 格式匹配以 `required_capability="low"` 严格调度，并优先使用满足要求的最低能力候选，因此配置为低能力的模型可以承担该任务；候选始终只来自已启用且当前时间窗有效的模型，不会使用禁用模型。若没有任何已启用模型，格式匹配失败并回到原 Session。为避免全局并发为 `1` 时死锁，该阶段不会占用原业务 Lease。
+2. 格式匹配以 `required_capability="low"` 严格调度，并优先使用满足要求的最低能力候选，因此配置为低能力的模型可以承担该任务；候选始终只来自已启用且当前时间窗有效的模型，不会使用禁用模型。若没有任何已启用模型，格式匹配失败并回到原 Session。为避免仅有一个模型槽位时死锁，该阶段不会占用原业务 Lease。
 3. 格式匹配提示只允许修复 JSON 语法、围栏、引号、转义、逗号及无歧义且不改变语义的组织/字段映射，禁止新增、删除、推断、补全、概括、翻译或改写业务事实。原文缺少 Schema 必需语义、映射有歧义或与 JSON/Schema 完全无关时，模型必须只返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不得强制套用 Schema。
 4. 格式匹配输出通过 Schema 后，只把该 JSON 作为 `structured`；公开结果仍返回原业务 `session_id`、原 `text`、原 `model` 和原输出来源。格式匹配失败、返回固定非法值或请求异常时，服务重新取得符合原业务能力要求的已启用模型 Lease，并在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息。
 5. 原 Session 纠正仍失败后，才按 `serve.max_retries` 重新排队并创建 fresh 业务 Session。格式不合规与固定非法值属于健康中性失败；格式匹配或纠正请求本身发生 Provider/Auth/API 失败或超时时，仍按真实请求结果更新对应模型健康状态。
@@ -515,7 +513,7 @@ validator 不创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不�
 
 - `task_agent/api.py`：唯一公共调用与精简结果契约。
 - `task_agent/task_service.py`：内部队列、模型调度、权限、Session、JSON 纠正和重试。
-- `task_agent/model_pool.py`：模型 Lease、全局并发、能力匹配、时间窗和统计。
+- `task_agent/model_pool.py`：模型 Lease、单模型并发、容量汇总、能力匹配、时间窗和统计。
 - `task_agent/serve_client.py`：Serve 生命周期、Session API、事件与消息流。
 - `task_agent/host.py`：自包含组件与宿主之间的最小配置回调边界。
 - `task_agent/standalone.py`：独立 YAML 的校验、发现、宿主适配和一次性自举。

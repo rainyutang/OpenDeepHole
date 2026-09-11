@@ -1102,7 +1102,6 @@ class AgentBaseConfig(BaseModel):
 
 
 class AgentModelPoolConfig(BaseModel):
-    global_concurrency: int = 4
     models: list[AgentOpenCodeModelConfig] = []
 
 
@@ -1584,7 +1583,6 @@ class AgentRemoteConfig(BaseModel):
                 "opencode_serve_port": None,
             },
             "model_pool": {
-                "global_concurrency": legacy.get("opencode_concurrency", 4),
                 "models": models,
             },
             "threat_analysis": {
@@ -1621,7 +1619,9 @@ class AgentRemoteConfig(BaseModel):
 
     @property
     def opencode_concurrency(self) -> int:
-        return self.model_pool.global_concurrency
+        from task_agent.model_pool import configured_model_capacity
+
+        return configured_model_capacity(self.opencode)
 
     @property
     def opencode(self) -> AgentOpenCodeConfig:

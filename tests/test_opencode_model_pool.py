@@ -12,6 +12,7 @@ from task_agent.model_pool import (
     acquire_model_lease,
     clear_planned_task,
     clear_planned_tasks,
+    configured_model_capacity,
     model_options,
     model_pool_snapshot,
     register_planned_task,
@@ -64,7 +65,6 @@ def test_token_usage_accumulates_by_actual_model_for_scope_and_agent() -> None:
         }])
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id="scan-1",
         )
         assert lease is not None
@@ -94,7 +94,7 @@ def test_token_usage_accumulates_by_actual_model_for_scope_and_agent() -> None:
 def test_model_options_empty_pool_does_not_fall_back_to_legacy_model() -> None:
     cfg = SimpleNamespace(tool="opencode", executable="opencode", model="default-model", models=[])
 
-    options = model_options(cfg, global_concurrency=3)
+    options = model_options(cfg)
 
     assert options == []
 
@@ -113,7 +113,18 @@ def test_model_options_excludes_disabled_and_invalid_empty_models(models: list[d
         models=models,
     )
 
-    assert model_options(cfg, global_concurrency=3) == []
+    assert model_options(cfg) == []
+
+
+def test_configured_capacity_excludes_disabled_and_invalid_rows_and_defaults_to_one() -> None:
+    assert configured_model_capacity(SimpleNamespace(models=[])) == 0
+    cfg = SimpleNamespace(models=[
+        {"id": "default-limit", "model": "provider/default-limit"},
+        {"id": "invalid-limit", "model": "provider/invalid-limit", "max_concurrency": 0},
+        {"id": "disabled", "model": "provider/disabled", "max_concurrency": 100, "enabled": False},
+        {"id": "missing-model", "model": "", "max_concurrency": 100},
+    ])
+    assert configured_model_capacity(cfg) == 2
 
 
 def test_model_options_keeps_explicit_default_model() -> None:
@@ -129,7 +140,7 @@ def test_model_options_keeps_explicit_default_model() -> None:
         ],
     )
 
-    options = model_options(cfg, global_concurrency=3)
+    options = model_options(cfg)
 
     assert len(options) == 1
     assert options[0].id == "default"
@@ -154,7 +165,7 @@ def test_model_options_normalizes_enabled_models() -> None:
         ],
     )
 
-    options = model_options(cfg, global_concurrency=4)
+    options = model_options(cfg)
 
     assert [option.id for option in options] == ["fast"]
     assert options[0].model == ""
@@ -174,7 +185,7 @@ def _scheduled_option(time_windows: list[dict]) -> model_pool_module.ModelOption
         "model": "scheduled-model",
         "time_windows": time_windows,
     }])
-    return model_options(cfg, global_concurrency=1)[0]
+    return model_options(cfg)[0]
 
 
 def test_time_window_honors_selected_weekday_and_boundaries() -> None:
@@ -223,7 +234,7 @@ def test_model_pool_snapshot_includes_time_window_weekdays() -> None:
             "time_windows": [{"weekdays": [1, 3, 5], "start": "09:00", "end": "18:00"}],
         }])
 
-        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        await refresh_configured_model_pool(cfg)
         assert model_pool_snapshot()["models"][0]["time_windows"] == [{
             "weekdays": [1, 3, 5],
             "start": "09:00",
@@ -268,7 +279,7 @@ def test_acquire_model_lease_filters_by_capability_and_releases() -> None:
             ],
         )
 
-        lease = await acquire_model_lease(cfg, global_concurrency=2, required_capability="high")
+        lease = await acquire_model_lease(cfg, required_capability="high")
         try:
             assert lease is not None
             assert lease.option.id == "deep"
@@ -290,7 +301,6 @@ def test_immediate_lease_does_not_count_as_queued() -> None:
         )
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id="scope-immediate",
             on_queued=lambda: queued_events.append("queued"),
@@ -318,14 +328,12 @@ def test_waiting_lease_reports_queued_before_it_can_run() -> None:
         }])
         first = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id="scope-queued",
         )
         queued = asyncio.Event()
         second_task = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id="scope-queued",
             on_queued=queued.set,
@@ -363,7 +371,6 @@ def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
             await asyncio.wait_for(
                 acquire_model_lease(
                     cfg,
-                    global_concurrency=1,
                     stats_scope_id=scope,
                     task_context={
                         "planned_task_id": planned_id,
@@ -420,7 +427,6 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
         scope = "scope-dynamically-cleared"
         first = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id=scope,
         )
         planned_id = await register_planned_task(
@@ -431,7 +437,6 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
         queued_task = asyncio.create_task(
             acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 stats_scope_id=scope,
                 task_context={
                     "planned_task_id": planned_id,
@@ -447,7 +452,7 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
             assert queued_snapshot["planned_tasks"] == []
 
             cfg.models.clear()
-            await refresh_configured_model_pool(cfg, global_concurrency=1)
+            await refresh_configured_model_pool(cfg)
 
             with pytest.raises(NoAvailableModelError):
                 await asyncio.wait_for(queued_task, timeout=0.2)
@@ -505,7 +510,6 @@ def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
 
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id=scope,
             task_context={"planned_task_id": planned_id, "task_type": "vulnerability_mining", "file": "src/a.c", "line": 42},
@@ -551,8 +555,8 @@ def test_acquire_model_lease_prefers_weighted_fast_model_for_any_capability() ->
             ],
         )
 
-        first = await acquire_model_lease(cfg, global_concurrency=3, required_capability="any")
-        second = await acquire_model_lease(cfg, global_concurrency=3, required_capability="any")
+        first = await acquire_model_lease(cfg, required_capability="any")
+        second = await acquire_model_lease(cfg, required_capability="any")
         try:
             assert first is not None
             assert second is not None
@@ -579,7 +583,6 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
         # eligible and the second one must queue behind the first.
         first = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id=scope,
         )
@@ -587,7 +590,6 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
         second_task = asyncio.create_task(
             acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 required_capability="high",
                 stats_scope_id=scope,
                 task_context={
@@ -617,7 +619,6 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
 
             third = await acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 required_capability="any",
                 stats_scope_id=scope,
             )
@@ -659,7 +660,6 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
             session_id = f"ses_{outcome}"
             lease = await acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 required_capability="high",
                 stats_scope_id=scope,
                 task_context={
@@ -701,7 +701,6 @@ def test_model_pool_snapshot_persists_terminal_session_trace() -> None:
         scope = "scan-session-trace"
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id=scope,
             task_id="logical-task",
             task_context={"task_type": "vulnerability_mining"},
@@ -756,7 +755,6 @@ def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
         task_id = "logical-task"
         first = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id=scope,
             task_id=task_id,
             task_context={"task_type": "vulnerability_mining", "session_attempt": 1},
@@ -771,7 +769,6 @@ def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
 
         second = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id=scope,
             task_id=task_id,
             task_context={"task_type": "vulnerability_mining", "session_attempt": 2},
@@ -800,7 +797,6 @@ def test_non_terminal_scheduling_failure_does_not_append_completed_task() -> Non
         with pytest.raises(NoAvailableModelError):
             await acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 stats_scope_id=scope,
                 task_id="logical-task",
                 task_context={
@@ -837,14 +833,12 @@ def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
 
         first = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id=scope,
         )
         second_task = asyncio.create_task(
             acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 required_capability="high",
                 stats_scope_id=scope,
                 cancel_event=cancel_event,
@@ -878,47 +872,61 @@ def test_waiting_lease_does_not_refresh_snapshot_timestamp() -> None:
     asyncio.run(run())
 
 
-def test_global_concurrency_is_hard_gate_across_models() -> None:
-    """The top-level concurrency is a hard cap over all model-pool leases."""
+@pytest.mark.parametrize("limits", [(4, 5), (32, 33)])
+@pytest.mark.parametrize("legacy_global_limit", [1, 8, 1000])
+def test_model_limits_are_shared_across_scans_without_global_gate(
+    limits: tuple[int, int], legacy_global_limit: int,
+) -> None:
+    """All model slots are usable across scans; each model remains bounded."""
+    from deephole_client.config import AgentConfig, apply_remote_config
 
     async def run():
-        cfg = SimpleNamespace(
-            models=[
-                {"id": "deep", "model": "deep-model", "capability": "high", "weight": 1, "max_concurrency": 1},
-                {"id": "fast", "model": "fast-model", "capability": "medium", "weight": 1, "max_concurrency": 1},
+        config = AgentConfig()
+        apply_remote_config(config, {"model_pool": {
+            "global_concurrency": legacy_global_limit,
+            "models": [
+                {"id": name, "model": f"provider/{name}", "max_concurrency": limit}
+                for name, limit in zip(("first", "second"), limits)
             ],
-        )
-
-        # Simulates an FP review holding the high model in one scan scope...
-        fp_lease = await acquire_model_lease(
-            cfg,
-            global_concurrency=1,
-            required_capability="high",
-            prefer_high=True,
-            stats_scope_id="scope-fp",
-        )
+        }})
+        capacity = sum(limits)
+        assert config.opencode_concurrency == capacity
+        assert total_model_capacity(config.opencode) == capacity
+        leases = []
+        waiter = None
         try:
-            assert fp_lease is not None
-            assert fp_lease.option.id == "deep"
-            # ...while a normal scan in another scope must queue behind the
-            # global limit even though the medium model itself is idle.
-            scan_task = asyncio.create_task(
-                acquire_model_lease(
-                    cfg,
-                    global_concurrency=1,
-                    required_capability="any",
-                    stats_scope_id="scope-scan",
-                )
-            )
-            await asyncio.sleep(0.05)
-            assert not scan_task.done()
-            await release_model_lease(fp_lease, outcome="success", duration_seconds=0.1)
-            fp_lease = None
-            scan_lease = await asyncio.wait_for(scan_task, timeout=1)
-            assert scan_lease is not None
-            await release_model_lease(scan_lease, outcome="success", duration_seconds=0.1)
+            for index in range(capacity):
+                leases.append(await asyncio.wait_for(acquire_model_lease(
+                    config.opencode,
+                    required_capability="high",
+                    stats_scope_id=f"scan-{index % 2}",
+                ), timeout=1))
+            snapshot = model_pool_snapshot()
+            assert snapshot["global_running"] == capacity
+            assert {row["id"]: row["running"] for row in snapshot["models"]} == {
+                "first": limits[0], "second": limits[1],
+            }
+            queued = asyncio.Event()
+            waiter = asyncio.create_task(acquire_model_lease(
+                config.opencode, stats_scope_id="third-scan", on_queued=queued.set,
+            ))
+            await asyncio.wait_for(queued.wait(), timeout=1)
+            assert not waiter.done()
+            assert model_pool_snapshot()["global_queued"] == 1
+            released = leases.pop()
+            await release_model_lease(released)
+            replacement = await asyncio.wait_for(waiter, timeout=1)
+            leases.append(replacement)
+            assert replacement.option.id == released.option.id
+            assert model_pool_snapshot()["global_running"] == capacity
+            assert model_pool_snapshot()["global_queued"] == 0
         finally:
-            await release_model_lease(fp_lease, outcome="success", duration_seconds=0.1)
+            if waiter is not None and not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+            for lease in leases:
+                await release_model_lease(lease)
+        assert model_pool_snapshot()["global_running"] == 0
 
     asyncio.run(run())
 
@@ -936,10 +944,10 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
         scope = "test-scope-queue-fallback"
 
         lease_a = await acquire_model_lease(
-            cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
+            cfg, required_capability="any", stats_scope_id=scope
         )
         lease_b = await acquire_model_lease(
-            cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
+            cfg, required_capability="any", stats_scope_id=scope
         )
         assert lease_a is not None and lease_b is not None
         held = {lease_a.option.id: lease_a, lease_b.option.id: lease_b}
@@ -947,7 +955,7 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
 
         third_task = asyncio.create_task(
             acquire_model_lease(
-                cfg, global_concurrency=2, required_capability="any", stats_scope_id=scope
+                cfg, required_capability="any", stats_scope_id=scope
             )
         )
         try:
@@ -985,12 +993,11 @@ def test_global_queue_skips_blocked_capability_head() -> None:
         scope = "test-scope-capability-skip"
 
         deep = await acquire_model_lease(
-            cfg, global_concurrency=2, required_capability="high", stats_scope_id=scope
+            cfg, required_capability="high", stats_scope_id=scope
         )
         high_waiter = asyncio.create_task(
             acquire_model_lease(
                 cfg,
-                global_concurrency=2,
                 required_capability="high",
                 stats_scope_id=scope,
                 task_context={"task_type": "threat_analysis"},
@@ -1005,7 +1012,6 @@ def test_global_queue_skips_blocked_capability_head() -> None:
             any_task = asyncio.create_task(
                 acquire_model_lease(
                     cfg,
-                    global_concurrency=2,
                     required_capability="any",
                     stats_scope_id=scope,
                     task_context={"task_type": "vulnerability_mining", "checker": "npd"},
@@ -1071,7 +1077,6 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
         second_task = asyncio.create_task(
             acquire_model_lease(
                 cfg,
-                global_concurrency=2,
                 required_capability="any",
                 stats_scope_id=scope,
                 cancel_event=second_cancel,
@@ -1091,7 +1096,6 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
 
             first = await acquire_model_lease(
                 cfg,
-                global_concurrency=2,
                 required_capability="any",
                 stats_scope_id=scope,
                 task_context={
@@ -1135,7 +1139,6 @@ def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() ->
         group = f"{scope}:audit"
         deep = await acquire_model_lease(
             cfg,
-            global_concurrency=2,
             required_capability="high",
             stats_scope_id=scope,
         )
@@ -1165,7 +1168,6 @@ def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() ->
             low = await asyncio.wait_for(
                 acquire_model_lease(
                     cfg,
-                    global_concurrency=2,
                     required_capability="any",
                     stats_scope_id=scope,
                     task_context={
@@ -1200,10 +1202,11 @@ def test_total_model_capacity_honors_active_time_windows(monkeypatch: pytest.Mon
         lambda option, now=None: option.id == "day",
     )
 
-    assert total_model_capacity(cfg, global_concurrency=2, required_capability="any") == 2
+    assert total_model_capacity(cfg, required_capability="any") == 3
+    assert configured_model_capacity(cfg) == 6
     # No active model satisfies the high requirement; capacity still returns a
     # single worker so the task can queue until a matching time window opens.
-    assert total_model_capacity(cfg, global_concurrency=2, required_capability="high") == 1
+    assert total_model_capacity(cfg, required_capability="high") == 1
 
 
 def test_acquire_queues_when_matching_model_is_outside_time_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1220,7 +1223,7 @@ def test_acquire_queues_when_matching_model_is_outside_time_window(monkeypatch: 
             return option.id in active
 
         monkeypatch.setattr(model_pool_module, "_option_available_now", available)
-        task = asyncio.create_task(acquire_model_lease(cfg, global_concurrency=1, required_capability="high"))
+        task = asyncio.create_task(acquire_model_lease(cfg, required_capability="high"))
         await asyncio.sleep(0.05)
         assert not task.done()
         active.add("night")
@@ -1248,7 +1251,7 @@ def test_refresh_configured_model_pool_updates_snapshot_and_wakes_waiters() -> N
             ],
         )
 
-        await refresh_configured_model_pool(initial, global_concurrency=1)
+        await refresh_configured_model_pool(initial)
         before = {item["id"]: item for item in model_pool_snapshot()["models"]}
         assert before["day"]["model"] == "day-model"
         scoped_before_first_lease = {
@@ -1258,7 +1261,7 @@ def test_refresh_configured_model_pool_updates_snapshot_and_wakes_waiters() -> N
         assert scoped_before_first_lease["day"]["running"] == 0
         assert scoped_before_first_lease["day"]["queued"] == 0
 
-        await refresh_configured_model_pool(updated, global_concurrency=3)
+        await refresh_configured_model_pool(updated)
         after = {item["id"]: item for item in model_pool_snapshot()["models"]}
         assert after["day"]["model"] == "day-model-v2"
         assert after["day"]["capability"] == "medium"
@@ -1277,7 +1280,6 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
         )
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             stats_scope_id="scan-active",
             task_context={
@@ -1318,10 +1320,9 @@ def test_priority_queue_runs_higher_priority_before_earlier_lower_priority() -> 
                 {"id": "only", "model": "only-model", "capability": "high", "max_concurrency": 1},
             ],
         )
-        occupied = await acquire_model_lease(cfg, global_concurrency=1)
+        occupied = await acquire_model_lease(cfg)
         low_task = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=1,
             task_id="task-low",
             priority=10,
             strict_capability=True,
@@ -1330,7 +1331,6 @@ def test_priority_queue_runs_higher_priority_before_earlier_lower_priority() -> 
         await asyncio.sleep(0.02)
         high_task = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=1,
             task_id="task-high",
             priority=90,
             strict_capability=True,
@@ -1366,7 +1366,6 @@ def test_strict_capability_uses_lowest_sufficient_model_without_downgrade() -> N
         for required, expected in (("low", "low"), ("medium", "medium"), ("high", "high")):
             lease = await acquire_model_lease(
                 cfg,
-                global_concurrency=3,
                 required_capability=required,
                 strict_capability=True,
                 prefer_lowest_capability=True,
@@ -1392,7 +1391,6 @@ def test_waiting_strict_task_is_redispatched_after_model_config_change() -> None
         }
         task = asyncio.create_task(acquire_model_lease(
             lambda: current["config"],
-            global_concurrency=1,
             required_capability="high",
             task_id="strict-high",
             strict_capability=True,
@@ -1410,7 +1408,7 @@ def test_waiting_strict_task_is_redispatched_after_model_config_change() -> None
                 {"id": "high", "model": "high-model", "capability": "high", "max_concurrency": 1},
             ],
         )
-        await refresh_configured_model_pool(current["config"], global_concurrency=1)
+        await refresh_configured_model_pool(current["config"])
         lease = await asyncio.wait_for(task, timeout=1)
         assert lease is not None and lease.option.id == "high"
         await release_model_lease(lease, outcome="success", duration_seconds=0.1)
@@ -1427,7 +1425,7 @@ def test_health_outcome_is_independent_from_task_outcome_and_clamped() -> None:
             "max_concurrency": 1,
         }])
 
-        json_failure = await acquire_model_lease(cfg, global_concurrency=1)
+        json_failure = await acquire_model_lease(cfg)
         await release_model_lease(
             json_failure,
             outcome="failure",
@@ -1440,7 +1438,7 @@ def test_health_outcome_is_independent_from_task_outcome_and_clamped() -> None:
         assert unchanged["effective_weight"] == 8
 
         for _ in range(5):
-            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            lease = await acquire_model_lease(cfg)
             await release_model_lease(
                 lease,
                 outcome="failure",
@@ -1455,7 +1453,7 @@ def test_health_outcome_is_independent_from_task_outcome_and_clamped() -> None:
         assert penalized["last_health_failure_at"]
         assert penalized["last_health_failure_kind"] == "failure"
 
-        success = await acquire_model_lease(cfg, global_concurrency=1)
+        success = await acquire_model_lease(cfg)
         await release_model_lease(
             success,
             outcome="success",
@@ -1486,7 +1484,7 @@ def test_quota_circuit_switches_to_alternative_model_immediately() -> None:
                 "max_concurrency": 1,
             },
         ])
-        failed = await acquire_model_lease(cfg, global_concurrency=2)
+        failed = await acquire_model_lease(cfg)
         assert failed is not None and failed.option.id == "primary"
         failed_identity = failed.health_identity
         await release_model_lease(
@@ -1498,7 +1496,6 @@ def test_quota_circuit_switches_to_alternative_model_immediately() -> None:
 
         retry = await acquire_model_lease(
             cfg,
-            global_concurrency=2,
             avoid_model_identities={failed_identity},
             quota_wait_deadline=model_pool_module.time.monotonic() + 1,
         )
@@ -1526,7 +1523,7 @@ def test_quota_circuit_allows_only_one_half_open_probe_per_identity() -> None:
                 "max_concurrency": 1,
             },
         ])
-        failed = await acquire_model_lease(cfg, global_concurrency=2)
+        failed = await acquire_model_lease(cfg)
         assert failed is not None
         await release_model_lease(
             failed,
@@ -1539,13 +1536,11 @@ def test_quota_circuit_allows_only_one_half_open_probe_per_identity() -> None:
 
         probe = await acquire_model_lease(
             cfg,
-            global_concurrency=2,
             quota_wait_deadline=model_pool_module.time.monotonic() + 1,
         )
         assert probe is not None and probe.quota_half_open_probe is True
         follower = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=2,
             wait_when_unavailable=True,
             quota_wait_deadline=model_pool_module.time.monotonic() + 1,
         ))
@@ -1573,7 +1568,7 @@ def test_quota_circuit_wait_is_bounded_and_cancelable() -> None:
             "model": "provider/primary",
             "max_concurrency": 1,
         }])
-        failed = await acquire_model_lease(cfg, global_concurrency=1)
+        failed = await acquire_model_lease(cfg)
         assert failed is not None
         await release_model_lease(
             failed,
@@ -1587,7 +1582,6 @@ def test_quota_circuit_wait_is_bounded_and_cancelable() -> None:
         with pytest.raises(ModelQuotaCircuitOpenError):
             await acquire_model_lease(
                 cfg,
-                global_concurrency=1,
                 wait_when_unavailable=True,
                 quota_wait_budget=budget,
             )
@@ -1596,7 +1590,6 @@ def test_quota_circuit_wait_is_bounded_and_cancelable() -> None:
         cancel_event = asyncio.Event()
         waiting = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=1,
             wait_when_unavailable=True,
             cancel_event=cancel_event,
             quota_wait_budget=ModelQuotaWaitBudget(total_seconds=1),
@@ -1622,7 +1615,7 @@ def test_health_penalty_recovers_one_level_per_ten_failure_free_minutes(
             "max_concurrency": 1,
         }])
         for _ in range(3):
-            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            lease = await acquire_model_lease(cfg)
             await release_model_lease(
                 lease,
                 outcome="timeout",
@@ -1660,7 +1653,7 @@ def test_effective_weight_changes_weighted_model_selection() -> None:
             "max_concurrency": 1,
         }])
         for _ in range(4):
-            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            lease = await acquire_model_lease(cfg)
             await release_model_lease(
                 lease,
                 outcome="failure",
@@ -1674,8 +1667,8 @@ def test_effective_weight_changes_weighted_model_selection() -> None:
             "weight": 2,
             "max_concurrency": 1,
         })
-        await refresh_configured_model_pool(cfg, global_concurrency=1)
-        lease = await acquire_model_lease(cfg, global_concurrency=1)
+        await refresh_configured_model_pool(cfg)
+        lease = await acquire_model_lease(cfg)
         try:
             assert lease.option.id == "secondary"
             by_id = {item["id"]: item for item in model_pool_snapshot()["models"]}
@@ -1697,7 +1690,7 @@ def test_effective_weight_can_override_lowest_capability_preference() -> None:
             "max_concurrency": 1,
         }])
         for _ in range(4):
-            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            lease = await acquire_model_lease(cfg)
             await release_model_lease(
                 lease,
                 outcome="failure",
@@ -1712,10 +1705,9 @@ def test_effective_weight_can_override_lowest_capability_preference() -> None:
             "weight": 2,
             "max_concurrency": 1,
         })
-        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        await refresh_configured_model_pool(cfg)
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="low",
             strict_capability=True,
             prefer_lowest_capability=True,
@@ -1750,7 +1742,7 @@ def test_retry_avoidance_uses_execution_identity_instead_of_config_id() -> None:
                 "max_concurrency": 1,
             },
         ])
-        failed = await acquire_model_lease(cfg, global_concurrency=1)
+        failed = await acquire_model_lease(cfg)
         assert failed.option.id == "duplicate-a"
         failed_identity = failed.health_identity
         await release_model_lease(
@@ -1768,7 +1760,6 @@ def test_retry_avoidance_uses_execution_identity_instead_of_config_id() -> None:
 
         retry = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             avoid_model_identities={failed_identity},
         )
         try:
@@ -1782,10 +1773,9 @@ def test_retry_avoidance_uses_execution_identity_instead_of_config_id() -> None:
             "weight": 2,
             "max_concurrency": 1,
         }]
-        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        await refresh_configured_model_pool(cfg)
         reconfigured = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             avoid_model_identities={failed_identity},
         )
         try:
@@ -1815,8 +1805,8 @@ def test_retry_waits_for_busy_untried_model_instead_of_reusing_avoided_model() -
                 "max_concurrency": 1,
             },
         ])
-        failed = await acquire_model_lease(cfg, global_concurrency=2)
-        occupied_alternative = await acquire_model_lease(cfg, global_concurrency=2)
+        failed = await acquire_model_lease(cfg)
+        occupied_alternative = await acquire_model_lease(cfg)
         assert failed.option.id == "primary"
         assert occupied_alternative.option.id == "secondary"
         await release_model_lease(
@@ -1828,7 +1818,6 @@ def test_retry_waits_for_busy_untried_model_instead_of_reusing_avoided_model() -
 
         retry_task = asyncio.create_task(acquire_model_lease(
             cfg,
-            global_concurrency=2,
             avoid_model_ids={"primary"},
         ))
         await asyncio.sleep(0.03)
@@ -1866,7 +1855,6 @@ def test_retry_falls_back_when_all_eligible_models_were_avoided() -> None:
         ])
         capability_fallback = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="high",
             avoid_model_ids={"primary"},
         )
@@ -1877,7 +1865,6 @@ def test_retry_falls_back_when_all_eligible_models_were_avoided() -> None:
 
         all_tried_fallback = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             required_capability="any",
             avoid_model_ids={"primary", "secondary"},
         )
@@ -1903,7 +1890,7 @@ def test_health_survives_non_identity_config_changes_and_resets_on_identity_chan
                 "max_concurrency": 1,
             }],
         )
-        lease = await acquire_model_lease(cfg, global_concurrency=1)
+        lease = await acquire_model_lease(cfg)
         assert lease.option.tool == "opencode"
         assert lease.option.executable == "/opt/opencode"
         await release_model_lease(
@@ -1918,14 +1905,14 @@ def test_health_survives_non_identity_config_changes_and_resets_on_identity_chan
             "max_concurrency": 3,
             "time_windows": [{"start": "00:00", "end": "23:59"}],
         })
-        await refresh_configured_model_pool(cfg, global_concurrency=3)
+        await refresh_configured_model_pool(cfg)
         preserved = model_pool_snapshot()["models"][0]
         assert preserved["health_penalty_level"] == 1
         assert preserved["weight"] == 10
         assert preserved["effective_weight"] == 5
 
         cfg.executable = "/opt/opencode-v2"
-        await refresh_configured_model_pool(cfg, global_concurrency=3)
+        await refresh_configured_model_pool(cfg)
         reset = model_pool_snapshot()["models"][0]
         assert reset["health_penalty_level"] == 0
         assert reset["effective_weight"] == 10
@@ -1944,8 +1931,8 @@ def test_recreated_model_ignores_late_health_result_from_old_lease() -> None:
             "max_concurrency": 2,
         }
         cfg = SimpleNamespace(models=[dict(model)])
-        old_lease = await acquire_model_lease(cfg, global_concurrency=2)
-        penalty_lease = await acquire_model_lease(cfg, global_concurrency=2)
+        old_lease = await acquire_model_lease(cfg)
+        penalty_lease = await acquire_model_lease(cfg)
         await release_model_lease(
             penalty_lease,
             outcome="failure",
@@ -1955,9 +1942,9 @@ def test_recreated_model_ignores_late_health_result_from_old_lease() -> None:
         assert model_pool_snapshot()["models"][0]["health_penalty_level"] == 1
 
         cfg.models.clear()
-        await refresh_configured_model_pool(cfg, global_concurrency=2)
+        await refresh_configured_model_pool(cfg)
         cfg.models.append(dict(model))
-        await refresh_configured_model_pool(cfg, global_concurrency=2)
+        await refresh_configured_model_pool(cfg)
         recreated = model_pool_snapshot()["models"][0]
         assert recreated["health_penalty_level"] == 0
 
@@ -1983,7 +1970,6 @@ def test_intermediate_attempt_records_stats_without_terminal_completion() -> Non
         }])
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id="retry-scope",
             task_id="logical-task",
         )
@@ -2016,7 +2002,6 @@ def test_completed_task_sink_receives_history_once_and_snapshot_stays_bounded() 
         }])
         lease = await acquire_model_lease(
             cfg,
-            global_concurrency=1,
             stats_scope_id="scan-incremental",
             task_id="logical-task",
             task_context={"task_type": "candidate_audit"},

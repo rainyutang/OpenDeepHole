@@ -787,7 +787,6 @@ export interface AgentBaseConfig {
 }
 
 export interface AgentModelPoolConfig {
-  global_concurrency: number;
   models: AgentOpenCodeModelConfig[];
 }
 

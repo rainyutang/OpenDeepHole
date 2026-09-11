@@ -599,8 +599,6 @@ def _validate_managed_config(
         raise HTTPException(status_code=422, detail="基础配置中的工具只能是 opencode")
     if not config.base.executable.strip():
         raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
-    if not 1 <= config.model_pool.global_concurrency <= 64:
-        raise HTTPException(status_code=422, detail="模型池总并发数必须在 1 到 64 之间")
     seen: set[str] = set()
     for index, model in enumerate(config.model_pool.models, start=1):
         model_id = model.id.strip()

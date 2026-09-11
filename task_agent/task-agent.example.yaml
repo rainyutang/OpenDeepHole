@@ -53,7 +53,7 @@ serve:
         timeout: 30000
 
 model_pool:
-  global_concurrency: 1
+  # Total capacity is the sum of max_concurrency across enabled model rows.
   models:
     - id: deepseek/deepseek-v4-pro
       model: deepseek/deepseek-v4-pro

@@ -18,7 +18,7 @@ base:
   opencode_serve_port: null
 
 model_pool:
-  global_concurrency: 4
+  # Total capacity is the sum of max_concurrency across enabled model rows.
   # A scan cannot start until at least one enabled row has an explicit model.
   models: []
 

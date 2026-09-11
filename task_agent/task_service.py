@@ -38,7 +38,6 @@ from .model_pool import (
     ModelQuotaWaitBudget,
     NoAvailableModelError,
     acquire_model_lease,
-    configured_global_concurrency,
     normalize_priority,
     normalize_requirement,
     record_model_token_usage,
@@ -822,9 +821,6 @@ class OpenCodeTaskService:
         validation_debug = self._validation_debug_enabled(record)
         combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
-        global_concurrency = lambda: configured_global_concurrency(
-            get_config()
-        )
         task_policy = _task_model_policy(record.execution_context)
         configured_retry_count = int(
             _cfg_value(_task_cli_config(record.execution_context), "max_retries", 2) or 0
@@ -883,7 +879,6 @@ class OpenCodeTaskService:
                 )
                 lease = await acquire_model_lease(
                     cli_config_source,
-                    global_concurrency=global_concurrency,
                     required_capability=_effective_required_capability(record.execution_context, spec),
                     prefer_high=False,
                     cancel_event=combined_cancel,
@@ -1794,7 +1789,6 @@ class OpenCodeTaskService:
         spec = record.spec
         context = record.execution_context
         cli_config_source = lambda: _task_cli_config(record.execution_context)
-        global_concurrency = lambda: configured_global_concurrency(get_config())
         log_stage = task_output_stage(context.task_metadata.get("task_type"))
         has_fresh_retry = session_attempt < total_session_attempts
         work_dir = _required_work_dir(context)
@@ -1885,7 +1879,6 @@ class OpenCodeTaskService:
         try:
             formatter_lease = await acquire_model_lease(
                 cli_config_source,
-                global_concurrency=global_concurrency,
                 required_capability="low",
                 prefer_high=False,
                 cancel_event=combined_cancel,
@@ -2182,7 +2175,6 @@ class OpenCodeTaskService:
         try:
             correction_lease = await acquire_model_lease(
                 cli_config_source,
-                global_concurrency=global_concurrency,
                 required_capability=_effective_required_capability(context, spec),
                 prefer_high=False,
                 cancel_event=combined_cancel,

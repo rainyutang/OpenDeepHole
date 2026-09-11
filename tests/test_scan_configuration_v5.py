@@ -299,12 +299,14 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
         replace_skill_reports=AsyncMock(),
         report_processed_key=AsyncMock(),
     )
-    config = SimpleNamespace(
-        static_dedup=True,
-        opencode_concurrency=1,
-        pattern_filter=SimpleNamespace(enabled=False, scope="directory"),
-        vulnerability_mining=SimpleNamespace(required_capability="high"),
-    )
+    from deephole_client.config import AgentConfig, apply_remote_config
+
+    config = AgentConfig()
+    apply_remote_config(config, {"model_pool": {"global_concurrency": 8, "models": [
+        {"id": "first", "model": "provider/first", "max_concurrency": 4},
+        {"id": "second", "model": "provider/second", "max_concurrency": 5},
+    ]}})
+    config.pattern_filter.enabled = False
     audit_result = {
         "status": "success",
         "vulnerabilities": [{
@@ -328,7 +330,7 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
         static_candidate_engine,
         "run_candidate_audit",
         new=AsyncMock(return_value=audit_result),
-    ):
+    ) as audit:
         result = asyncio.run(static_candidate_engine.run(
             project_path=tmp_path,
             code_scan_path=tmp_path,
@@ -372,6 +374,7 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
             ]),
         ))
 
+    assert audit.await_args.kwargs["concurrency"] == 9
     reporter.report_candidates.assert_not_awaited()
     reporter.report_candidate_audit.assert_awaited_once_with(
         "scan-targeted-resume",

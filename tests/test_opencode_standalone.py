@@ -120,11 +120,27 @@ def test_standalone_config_loads_context_runtime_and_relative_paths(tmp_path: Pa
     assert config.port == 4317
     assert config.environment["OPENCODE_SERVE_PORT"] == "4317"
     assert config.environment["HTTPS_PROXY"] == "http://proxy.example:8080"
-    assert config.opencode_concurrency == 2
+    assert config.opencode_concurrency == 1
     assert config.opencode.tool == "opencode"
     assert config.opencode.executable == "opencode"
     assert config.opencode.models[0].model == "provider/model"
     assert config.opencode_config == {"provider": {}}
+
+
+@pytest.mark.parametrize("legacy_limit", [None, 1, 8, 1000, "ignored"])
+def test_standalone_capacity_comes_only_from_model_rows(tmp_path: Path, legacy_limit) -> None:
+    config_path = _write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["model_pool"] = {"models": [
+        {"id": "first", "model": "provider/first", "max_concurrency": 4},
+        {"id": "second", "model": "provider/second", "max_concurrency": 5},
+        {"id": "disabled", "model": "provider/disabled", "max_concurrency": 12, "enabled": False},
+    ]}
+    if legacy_limit is not None:
+        raw["model_pool"]["global_concurrency"] = legacy_limit
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    config = load_standalone_config(config_path)
+    assert config.opencode_concurrency == 9
 
 
 def test_standalone_config_merges_global_provider_then_inline_override(

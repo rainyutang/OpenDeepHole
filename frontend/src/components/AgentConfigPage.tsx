@@ -49,7 +49,7 @@ const policy = (
 const defaultConfig = (): AgentRemoteConfig => ({
   schema_version: 8,
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
-  model_pool: { global_concurrency: 4, models: [] },
+  model_pool: { models: [] },
   threat_analysis: {
     enabled: true,
     model_policy: { ...policy("high", 2), timeout_seconds: 7200 },
@@ -517,9 +517,14 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
     time_windows: (models[modelIndex].time_windows || []).filter((_, current) => current !== windowIndex),
   });
   const ready = models.some((item) => item.enabled && item.model.trim());
+  const capacity = models.reduce((total, model) => (
+    model.enabled && model.model.trim() && Number.isInteger(model.max_concurrency) && model.max_concurrency > 0
+      ? total + model.max_concurrency
+      : total
+  ), 0);
   return <div className="space-y-5">
     <div className="flex flex-wrap items-end gap-3">
-      <Field label="模型池总并发"><input className={`${input} w-32`} type="number" min={1} value={config.model_pool.global_concurrency} onChange={(e) => setCfg({ ...config, model_pool: { ...config.model_pool, global_concurrency: Number(e.target.value) } })} /></Field>
+      <Field label="总并发容量（自动计算）" hint="已启用模型的并发之和"><output className="block py-2 text-lg font-semibold tabular-nums text-slate-100">{capacity}</output></Field>
       <button onClick={onImport} disabled={!online} className="rounded bg-slate-700 px-3 py-2 text-sm disabled:opacity-40">从 serve 读取</button>
       <button onClick={add} className="rounded bg-blue-600 px-3 py-2 text-sm">添加模型</button>
       {pool && <span className="pb-2 text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
@@ -531,18 +536,18 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
       const effectiveWeight = runtime?.effective_weight ?? runtime?.weight ?? model.weight;
       const penaltyLevel = runtime?.health_penalty_level ?? 0;
       return <div key={index} className="rounded-xl border border-slate-700 p-4">
-      <div className="grid gap-3 md:grid-cols-6">
+      <div className="grid items-end gap-3 md:grid-cols-6">
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={model.enabled} onChange={(e) => update(index, { enabled: e.target.checked })} />启用</label>
-        <input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} />
-        <input className={`${input} md:col-span-2`} value={model.model} placeholder="provider/model" onChange={(e) => update(index, { model: e.target.value })} />
-        <select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select>
-        <button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 text-sm text-red-300">删除</button>
+        <Field label="模型 ID"><input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} /></Field>
+        <div className="md:col-span-2"><Field label="模型名称"><input className={input} value={model.model} placeholder="provider/model" onChange={(e) => update(index, { model: e.target.value })} /></Field></div>
+        <Field label="模型能力"><select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select></Field>
+        <button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 py-2 text-sm text-red-300">删除</button>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-4">
-        <input className={input} type="number" min={0.1} step={0.1} value={model.weight} title="权重" onChange={(e) => update(index, { weight: Number(e.target.value) })} />
-        <input className={input} type="number" min={1} value={model.max_concurrency} title="单模型并发" onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} />
-        <input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="超时覆盖" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} />
-        <input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="重试覆盖" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} />
+        <Field label="权重"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} onChange={(e) => update(index, { weight: Number(e.target.value) })} /></Field>
+        <Field label="模型可用并发"><input className={input} type="number" min={1} value={model.max_concurrency} onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} /></Field>
+        <Field label="超时覆盖（秒）"><input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
+        <Field label="重试次数覆盖"><input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} /></Field>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs">
         <span className="text-slate-300">
@@ -587,10 +592,10 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
                 >{day.label}</button>;
               })}</div>
               {selectedWeekdays.length === 0 && <p className="text-xs text-red-300">请至少选择一天，或删除该时间段。</p>}
-              <div className="flex flex-wrap items-center gap-2">
-                <input type="time" className={`${input} w-auto min-w-36`} value={window.start} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, start: e.target.value })} />
-                <span className="text-xs text-slate-500">至</span>
-                <input type="time" className={`${input} w-auto min-w-36`} value={window.end} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, end: e.target.value })} />
+              <div className="flex flex-wrap items-end gap-2">
+                <Field label="开始时间"><input type="time" className={`${input} w-auto min-w-36`} value={window.start} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, start: e.target.value })} /></Field>
+                <span className="py-2 text-xs text-slate-500">至</span>
+                <Field label="结束时间"><input type="time" className={`${input} w-auto min-w-36`} value={window.end} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, end: e.target.value })} /></Field>
                 <button type="button" onClick={() => removeWindow(index, windowIndex)} className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-200 hover:bg-red-500/20">删除</button>
               </div>
             </div>;

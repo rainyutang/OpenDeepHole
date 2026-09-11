@@ -21,7 +21,6 @@ def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict
     opencode["mock"] = False
     raw = {
         "opencode": opencode,
-        "opencode_concurrency": config.opencode_concurrency,
         "memory_api_discovery": dataclasses.asdict(config.memory_api_discovery),
         "git_history": dataclasses.asdict(config.git_history),
         "threat_analysis": dataclasses.asdict(config.threat_analysis),
@@ -69,7 +68,6 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
         return
     raw = _runtime_sections(config)
     current.opencode = backend_config.OpenCodeConfig(**raw["opencode"])
-    current.opencode_concurrency = int(raw["opencode_concurrency"])
     current.memory_api_discovery = backend_config.MemoryApiDiscoveryConfig(
         **raw["memory_api_discovery"],
     )

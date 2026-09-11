@@ -469,10 +469,7 @@ async def _apply_live_config_update(config) -> None:
         build_managed_mcp_runtime_specs(config)
     )
     mark_serve_config_dirty()
-    await refresh_configured_model_pool(
-        config.opencode,
-        global_concurrency=config.opencode_concurrency,
-    )
+    await refresh_configured_model_pool(config.opencode)
     await notify_model_pool_config_changed()
     # Increasing an environment limit should start already queued validations
     # immediately; lowering it only affects subsequent dispatches.

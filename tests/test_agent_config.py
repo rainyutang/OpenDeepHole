@@ -46,6 +46,52 @@ def _server_knowledge_config(headers: dict[str, str] | None = None):
 
 
 class AgentConfigTests(unittest.TestCase):
+    def test_model_capacity_survives_legacy_inputs_and_save_reload(self) -> None:
+        from backend.api.agent import _validate_managed_config
+        from backend.config import AppConfig
+        from deephole_client.platform_runtime import _runtime_sections
+
+        models = [
+            {"id": "first", "model": "provider/first", "max_concurrency": 4},
+            {"id": "second", "model": "provider/second", "max_concurrency": 5},
+            {"id": "disabled", "model": "provider/disabled", "max_concurrency": 10, "enabled": False},
+        ]
+        for legacy_limit in (1, 8, 1000, "ignored"):
+            for managed in (False, True):
+                with self.subTest(legacy_limit=legacy_limit, managed=managed):
+                    payload = (
+                        {"model_pool": {"global_concurrency": legacy_limit, "models": models}}
+                        if managed else
+                        {"opencode_concurrency": legacy_limit, "opencode": {"models": models}}
+                    )
+                    remote = AgentRemoteConfig.model_validate(payload)
+                    _validate_managed_config(remote)
+                    self.assertEqual(remote.opencode_concurrency, 9)
+                    self.assertNotIn("global_concurrency", remote.model_dump()["model_pool"])
+                    self.assertNotIn("opencode_concurrency", remote.model_dump())
+                    with tempfile.TemporaryDirectory() as tmp:
+                        path = Path(tmp) / "agent.yaml"
+                        path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                        cfg = load_config(path)
+                        self.assertEqual(cfg.opencode_concurrency, 9)
+                        apply_remote_config(cfg, payload)
+                        self.assertEqual(cfg.opencode_concurrency, 9)
+                        save_config(cfg)
+                        saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+                        self.assertNotIn("opencode_concurrency", saved)
+                        self.assertNotIn("global_concurrency", saved["model_pool"])
+                        self.assertEqual(load_config(path).opencode_concurrency, 9)
+                        runtime = _runtime_sections(cfg)
+                        self.assertNotIn("opencode_concurrency", runtime)
+                        self.assertEqual(AppConfig(**runtime).opencode_concurrency, 9)
+                        cfg.opencode.models[1].max_concurrency = 6
+                        self.assertEqual(cfg.opencode_concurrency, 10)
+                        with self.assertRaises(AttributeError):
+                            cfg.opencode_concurrency = 1
+                    backend = AppConfig(opencode={"models": models}, opencode_concurrency=legacy_limit)
+                    self.assertEqual(backend.opencode_concurrency, 9)
+                    self.assertNotIn("opencode_concurrency", backend.model_dump())
+
     def test_defaults_match_agent_template_values(self) -> None:
         cfg = AgentConfig()
 
@@ -74,7 +120,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.pattern_filter.scope, "directory")
         self.assertTrue(cfg.vulnerability_validation.enabled)
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
-        self.assertEqual(cfg.opencode_concurrency, 4)
+        self.assertEqual(cfg.opencode_concurrency, 0)
 
     def test_backend_and_remote_v8_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
@@ -89,7 +135,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(AgentRemoteConfig().opencode.tool, "opencode")
         self.assertEqual(AgentRemoteConfig().opencode.executable, "opencode")
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
-        self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
+        self.assertEqual(AgentRemoteConfig().opencode_concurrency, 0)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
         self.assertEqual(
             AgentRemoteConfig().threat_analysis.model_policy.timeout_seconds,
@@ -496,7 +542,7 @@ class AgentConfigTests(unittest.TestCase):
             "no_proxy": "10.0.0.0/8",
             "opencode_serve_port": None,
         })
-        self.assertEqual(remote["model_pool"], {"global_concurrency": 4, "models": []})
+        self.assertEqual(remote["model_pool"], {"models": []})
         self.assertEqual(
             remote["threat_analysis"],
             {
@@ -617,7 +663,8 @@ class AgentConfigTests(unittest.TestCase):
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
             self.assertEqual(raw["base"]["no_proxy"], "10.0.0.0/8")
-            self.assertEqual(raw["model_pool"]["global_concurrency"], 3)
+            self.assertNotIn("global_concurrency", raw["model_pool"])
+            self.assertEqual(load_config(path).opencode_concurrency, 2)
             self.assertEqual(raw["model_pool"]["models"][0]["model"], "provider/model")
             self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
             self.assertEqual(raw["threat_analysis"], {
@@ -838,7 +885,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(cfg.opencode_concurrency, 4)
+        self.assertEqual(cfg.opencode_concurrency, 3)
         self.assertEqual(cfg.opencode.models[0].id, "fast")
         self.assertEqual(cfg.opencode.models[0].model, "")
         self.assertTrue(cfg.opencode.models[0].use_default_model)
@@ -853,7 +900,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.fp_review_cli.models[0].id, "judge")
 
         remote = remote_config_dict(cfg)
-        self.assertEqual(remote["model_pool"]["global_concurrency"], 4)
+        self.assertNotIn("global_concurrency", remote["model_pool"])
         self.assertFalse(remote["model_pool"]["models"][0]["enabled"])
         self.assertNotIn("use_default_model", remote["model_pool"]["models"][0])
         self.assertEqual(remote["model_pool"]["models"][0]["time_windows"][0]["weekdays"], [1, 3, 5])
@@ -982,7 +1029,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config.schema_version, 8)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertNotIn("opencode_config", config.model_dump())
-        self.assertEqual(config.model_pool.global_concurrency, 2)
+        self.assertEqual(config.opencode_concurrency, 1)
+        self.assertNotIn("global_concurrency", config.model_dump()["model_pool"])
         self.assertFalse(config.model_pool.models[0].enabled)
         self.assertEqual(config.model_pool.models[0].model, "")
         self.assertTrue(config.model_pool.models[1].enabled)
@@ -1012,7 +1060,7 @@ class AgentConfigTests(unittest.TestCase):
 
             cfg = load_config(path)
 
-            self.assertEqual(cfg.opencode_concurrency, 4)
+            self.assertEqual(cfg.opencode_concurrency, 1)
             self.assertEqual(cfg.opencode.models[0].id, "m1")
             self.assertEqual(cfg.opencode.models[0].capability, "high")
             self.assertEqual(cfg.opencode.models[0].weight, 1)

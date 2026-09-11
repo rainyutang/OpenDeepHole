@@ -1762,6 +1762,73 @@ def test_static_analysis_spawn_reports_abrupt_worker_exit() -> None:
         asyncio.run(scenario(Path(temp)))
 
 
+def test_candidate_audit_runs_nine_model_slots_and_finishes_backlog() -> None:
+    from deephole_client.config import AgentConfig, apply_remote_config
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        index_path.touch()
+        audit_root = root / "audit-rules"
+        _write_candidate_audit_rule(audit_root)
+        config = AgentConfig()
+        apply_remote_config(config, {"model_pool": {"global_concurrency": 8, "models": [
+            {"id": "first", "model": "provider/first", "max_concurrency": 4},
+            {"id": "second", "model": "provider/second", "max_concurrency": 5},
+        ]}})
+        reached = asyncio.Event()
+        release = asyncio.Event()
+        running = 0
+        peak = 0
+        completed: list[dict] = []
+
+        async def run_task(**_kwargs):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            if running == 9:
+                reached.set()
+            try:
+                await release.wait()
+                return _task_result([])
+            finally:
+                running -= 1
+
+        with patch(
+            "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.run_opencode_task",
+            side_effect=run_task,
+        ):
+            task = asyncio.create_task(run_candidate_audit(
+                project_path=project, work_dir=root / "audit", scan_id="nine-slots",
+                index_db_path=index_path, checker_dirs=[audit_root],
+                concurrency=config.opencode_concurrency,
+                candidates=[{
+                    "file": f"candidate-{index}.c", "line": index + 1,
+                    "function": f"candidate_{index}", "description": "candidate", "vuln_type": "demo",
+                } for index in range(12)],
+                on_candidate_result=completed.append,
+            ))
+            try:
+                await asyncio.wait_for(reached.wait(), timeout=1)
+                assert running == 9
+                assert not completed
+                release.set()
+                result = await asyncio.wait_for(task, timeout=2)
+                assert result["status"] == "success"
+                assert len(completed) == 12
+                assert result["completed_candidates"] == 12
+                assert peak == 9
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
 def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
     async def scenario(root: Path) -> None:
         project = root / "project"

@@ -646,7 +646,6 @@ base:
   # null 时由 Agent 进程自动选择并复用一个空闲端口
   opencode_serve_port: null
 model_pool:
-  global_concurrency: 4
   models: []
 checker_selection:
   quick:
@@ -728,7 +727,8 @@ OpenCode 模型池统计：
 
 - 漏洞挖掘、威胁分析、去误报和漏洞验证全部通过唯一公共接口，内部统一创建/续写 Session 并累计模型池统计。漏洞挖掘中的候选点审计、项目级审计和威胁审计共享 `task_type="vulnerability_mining"`，看板通过 `task_name` 区分具体子任务。
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
-- `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
+- 只配置各模型的 `max_concurrency`；总并发容量自动汇总已启用且配置有效的模型，不另设全局上限。各扫描共享单模型额度，实际执行仍受能力要求及 `time_windows` 限制。配置页显示只读总容量，并在模型 ID、模型名称、模型能力、权重、模型可用并发、超时覆盖、重试次数覆盖和时间输入框上方显示标签。
+- 旧配置中的 `model_pool.global_concurrency` 和顶层 `opencode_concurrency` 读取时忽略，保存、导出和下发时移除；升级无需数据库迁移，需同步更新后端、前端和 Agent 并重启 Agent。新扫描及新启动阶段按派生容量创建工作协程，已有阶段不动态扩充工作协程。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
 - 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`；公开模型任务按类型自动使用固定优先级：漏洞验证 `90`、去误报复核 `60`、威胁分析与漏洞挖掘 `50`，同优先级按 FIFO 调度。v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
 - OpenCode 轻量级威胁分析的模型调用默认超时为 `7200` 秒，其它模型任务仍默认为 `3600` 秒；超时只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史仍只记录一个逻辑任务，但会保留业务、格式修复和 JSON 纠正的完整 Session 事件轨迹及稳定失败分类；扫描详情首页在同一任务行的展开区展示全部关联 Session，最终成功也保留此前异常尝试。
