@@ -611,6 +611,7 @@ async def run_scan(
     cancel_event: threading.Event,
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
+    refresh_skill_packages: bool | None = None,
     is_resume: bool = False,
     retry_candidates: list[dict] | None = None,
     retry_total_candidates: int | None = None,
@@ -1466,6 +1467,9 @@ async def run_scan(
             "reporter": reporter,
             "checker_names": list(checker_names),
             "checker_packages": list(checker_packages),
+            "refresh_skill_packages": (
+                not is_resume if refresh_skill_packages is None else refresh_skill_packages
+            ),
             "product": product,
             "validation_environment": validation_environment,
             "vulnerability_validation": copy.deepcopy(

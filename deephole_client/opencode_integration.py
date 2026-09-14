@@ -35,14 +35,9 @@ _AGENT_WRITABLE_EXTERNAL_ROOTS = (
     "~/.opendeephole/vulnerability_validation",
     "~/.opendeephole/skill_create",
 )
-_LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS = (
-    "value-asset-map",
-    "high-risk-module-map",
-    "high-risk-module-merge",
-    "attack-tree-by-asset",
-)
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
+_initialized_skill_workspaces: set[Path] = set()
 @dataclass(frozen=True)
 class _ResolvedServePort:
     port: int
@@ -265,6 +260,7 @@ def configure_opencode_component() -> None:
         disabled_source_mcp_tools=_disabled_source_mcp_tools,
         writable_roots=_agent_writable_roots,
         readable_roots=_agent_readable_roots,
+        fixed_skill_root=_fixed_skill_root,
     ))
 
 
@@ -305,20 +301,40 @@ def managed_opencode_config_path(workspace: Path) -> Path:
     return workspace / _MANAGED_CONFIG_FILENAME
 
 
-def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
+def _fixed_skill_root() -> Path:
+    return (get_global_opencode_workspace() / ".opencode" / "skills").resolve()
 
 
-def _remove_legacy_managed_threat_analysis_skills(workspace: Path) -> Path:
-    """Remove globally injected Skills now supplied by each selected method."""
-    skills_dir = workspace / ".opencode" / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    for name in _LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS:
-        _remove_path(skills_dir / name)
-    return skills_dir
+async def sync_agent_skills(sources, *, replace_existing=True, cancel_event=None) -> None:
+    """Publish received resources only while the shared Serve is idle."""
+    from task_agent.serve_client import get_serve_manager
+    from .skill_catalog import install_skills, needs_install
+
+    workspace = get_global_opencode_workspace()
+
+    def needed():
+        with get_workspace_lock(workspace):
+            return needs_install(workspace, sources, replace_existing=replace_existing)
+
+    def publish():
+        with get_workspace_lock(workspace):
+            install_skills(workspace, sources, replace_existing=replace_existing)
+
+    await get_serve_manager().update_skill_catalog(needed, publish, cancel_event=cancel_event)
+
+
+async def sync_rule_skill_roots(roots, *, replace_existing=True, cancel_event=None) -> None:
+    """Hosted scans install packages once; standalone keeps its explicit roots."""
+    from task_agent.host import _get_opencode_configuration_state, get_host_bindings
+    from .skill_catalog import rule_skill_sources
+
+    if _get_opencode_configuration_state()[0] != "host":
+        return
+    if get_host_bindings().fixed_skill_root is None:
+        return
+    await sync_agent_skills(
+        rule_skill_sources(roots), replace_existing=replace_existing, cancel_event=cancel_event,
+    )
 
 
 def get_global_opencode_workspace() -> Path:
@@ -332,7 +348,16 @@ def get_global_opencode_workspace() -> Path:
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
-        _remove_legacy_managed_threat_analysis_skills(workspace)
+        if workspace.resolve() not in _initialized_skill_workspaces:
+            from .skill_catalog import builtin_skill_sources, install_skills
+
+            sources = builtin_skill_sources()
+            install_skills(workspace, sources, bundled=True)
+            _initialized_skill_workspaces.add(workspace.resolve())
+            logger.info(
+                "OpenCode Skills ready: builtin_count=%s root=%s",
+                len(sources), workspace / ".opencode/skills",
+            )
         config_path = managed_opencode_config_path(workspace)
         config_missing = not config_path.is_file()
         permissions_stale = (
@@ -343,7 +368,13 @@ def get_global_opencode_workspace() -> Path:
             not config_missing
             and _has_obsolete_builtin_mcp(config_path)
         )
-        if config_missing or permissions_stale or builtin_mcp_stale:
+        skills_stale = (
+            not config_missing
+            and _read_runtime_config(config_path).get("skills") != {
+                "paths": [str((workspace / ".opencode/skills").resolve())],
+            }
+        )
+        if config_missing or permissions_stale or builtin_mcp_stale or skills_stale:
             _write_opencode_config(workspace)
     return workspace
 

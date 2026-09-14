@@ -811,8 +811,7 @@ OpenDeepHole/
 │   ├── models.py                  # 后端请求、响应和持久化模型
 │   ├── config.py                  # 服务端配置加载
 │   ├── main.py                    # FastAPI 入口与应用生命周期
-│   ├── static/                    # Vite 构建后的前端静态文件
-│   └── system_skills/             # 在线创建 SKILL 使用的系统 Skill
+│   └── static/                    # Vite 构建后的前端静态文件
 ├── frontend/                      # React + TypeScript + Vite + Tailwind CSS
 │   └── src/
 │       ├── api/                    # 后端 API 客户端
@@ -823,6 +822,7 @@ OpenDeepHole/
 │       ├── types.ts                # 前端领域类型
 │       └── App.tsx                 # 页面路由与应用入口
 ├── deephole_client/               # 本地 Agent、扫描协调器和独立业务过程
+│   ├── builtin_skills/             # 随 Agent 安装的系统 Skill
 │   ├── code_graph_build/           # code_index.db 构建与缓存复用
 │   ├── vulnerability_mining/
 │   │   ├── engines/

@@ -52,7 +52,7 @@ def _should_skip(path: Path) -> bool:
 
 def runtime_hash_scope() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "dirs": list(RUNTIME_DIRS),
         "tool_dirs": list(RUNTIME_TOOL_DIRS),
         "root_files": list(RUNTIME_ROOT_FILES),

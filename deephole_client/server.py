@@ -159,6 +159,7 @@ async def _run(task, is_resume: bool) -> None:
             cancel_event=task.cancel_event,
             feedback_entries=task.feedback_entries,
             checker_packages=task.checker_packages,
+            refresh_skill_packages=getattr(task, "refresh_skill_packages", not is_resume),
             is_resume=is_resume,
             retry_candidates=task.retry_candidates,
             retry_total_candidates=task.retry_total_candidates,
@@ -448,6 +449,7 @@ async def handle_resume(
         codex_model_ids=resolved_codex_model_ids,
         multi_versions=resolved_multi_versions,
     )
+    task.refresh_skill_packages = checker_packages is not None
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
     print(f"Resumed task {scan_id}")
 
@@ -1642,20 +1644,19 @@ async def _run_skill_creator(
 
     from deephole_client.platform_runtime import configure_platform_runtime
     from task_agent import opencode_task_context, run_opencode_task
-    from deephole_client.opencode_integration import get_global_opencode_workspace, get_workspace_lock
+    from deephole_client.opencode_integration import sync_agent_skills
+    from deephole_client.skill_catalog import skill_source
 
     request_dir = Path.home() / ".opendeephole" / "skill_create" / request_id
     if request_dir.exists():
         shutil.rmtree(request_dir, ignore_errors=True)
     request_dir.mkdir(parents=True, exist_ok=True)
-    workspace = get_global_opencode_workspace()
-    with get_workspace_lock(workspace):
-        _write_skill_creator_package(
-            skill_creator_package or {},
-            workspace / ".opencode" / "skills",
-        )
-
     configure_platform_runtime(_config, request_dir)
+    package_root = request_dir / "creator-package"
+    _write_skill_creator_package(skill_creator_package or {}, package_root)
+    await sync_agent_skills([
+        skill_source(package_root / _SKILL_CREATOR_NAME, f"system:{_SKILL_CREATOR_NAME}"),
+    ])
     prompt = _skill_creator_prompt(name, description, user_input)
 
     def on_output(line: str) -> None:

@@ -459,7 +459,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertTrue(codegraph_runtime.is_codegraph_ready(nested))
             self.assertIn(root.resolve(), codegraph_runtime._ready_projects)
 
-    def test_global_workspace_does_not_inject_threat_analysis_method_skills(
+    def test_global_workspace_installs_all_business_skills(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -499,7 +499,11 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 "attack-tree-by-asset",
             ):
                 installed = skills_dir / name
-                self.assertFalse(installed.exists())
+                self.assertTrue((installed / "SKILL.md").is_file())
+            self.assertEqual(len(list(skills_dir.glob("*/SKILL.md"))), 28)
+            self.assertTrue((skills_dir / "fp-check/references/gate-reviews.md").is_file())
+            self.assertTrue((skills_dir / "attack-tree-by-asset/references/attack_mode.json").is_file())
+            self.assertTrue((skills_dir / "deephole-skill-creator/SKILL.md").is_file())
 
     def test_global_workspace_removes_legacy_managed_skill_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -533,7 +537,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertFalse((managed / "stale.txt").exists())
             self.assertFalse((managed / "stale-empty-directory").exists())
-            self.assertFalse(managed.exists())
+            self.assertTrue((managed / "SKILL.md").is_file())
             self.assertEqual(
                 (unrelated / "SKILL.md").read_text(encoding="utf-8"),
                 "user-owned",

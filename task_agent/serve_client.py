@@ -7760,6 +7760,47 @@ class OpenCodeServeManager:
         self._restart_required = False
         self._invalidate_model_cache()
 
+    async def update_skill_catalog(
+        self,
+        needs_update: Callable[[], bool],
+        publish: Callable[[], None],
+        *,
+        cancel_event: Any = None,
+    ) -> bool:
+        """Drain sessions before publishing Skills; block new acquisitions meanwhile."""
+        if not needs_update():
+            return False
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
+            try:
+                await asyncio.wait_for(self._lock.acquire(), timeout=0.2)
+                break
+            except asyncio.TimeoutError:
+                pass
+        try:
+            if not needs_update():
+                return False
+            logger.info("OpenCode Skill update waiting for %s active session(s)", self._active_sessions)
+            while self._active_sessions or self._active_model_listings:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError
+                try:
+                    await asyncio.wait_for(self._wait_until_idle_locked(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
+            await self._stop_locked(reason="skill catalog updated")
+            # No await between publication and invalidation: cancellation must
+            # never leave a live Serve serving a partially updated catalog.
+            publish()
+            self.mark_dirty()
+            logger.info("OpenCode Skill update published; next acquisition loads the new catalog")
+            return True
+        finally:
+            self._lock.release()
+
     async def _acquire_session(
         self,
         key: OpenCodeServeKey,

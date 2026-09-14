@@ -246,7 +246,13 @@ Skill 有两种常用放置方式：
 1. 项目专用 Skill 放在 `<project_dir>/.opencode/skills/<skill-name>/SKILL.md`，由以 `project_dir` 为 Session 目录的 OpenCode 按项目发现。
 2. 多个任务共享的 standalone Skill 推荐放在 `<workspace_dir>/.opencode/skills/<skill-name>/SKILL.md`，并将 `<workspace_dir>/.opencode/skills` 的绝对路径写入 `serve.opencode_config.skills.paths`。
 
-standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 DeepHole 2.0 Agent 时，威胁分析适配器会把当前所选方法相邻 `skills/` 中的 Skill 根作为任务级 `skill_paths` 绑定；它们不会复制到全局 workspace，其它威胁分析方法的 Skill 也不会注册到当前任务。升级时只会清理旧版曾全局注入的四个受管 Skill，不删除其它 workspace Skill。
+standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导读取权限，使 Skill 内的引用资源一并可读。
+
+完整 DeepHole 2.0 Agent 在首次启动 Serve 前（包括模型列表触发的启动）自动安装全部业务 Skill，固定位置为 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。当前随包提供 28 个：18 个候选审计、4 个去误报、4 个威胁分析、1 个多版本审计和 1 个 Skill 创建功能；数量随业务目录新增自动变化，不读取开发机的历史安装清单。安装按 `SKILL.md` frontmatter 名称组织，并完整保留 `references/`、`agents/`、`assets/`、`scripts/` 等资源。启动日志中的 `OpenCode Skills ready` 会显示内置数量与绝对目录。
+
+宿主通过 `OpenCodeHostBindings.fixed_skill_root` 绑定固定目录，此时任务上下文中的 `skill_paths` 只检查所需名称已经安装，不向运行配置追加路径。任务之间切换 Skill 不改变 `skills.paths`，不会因此重启 Serve。服务端新下发的规则包在模型任务进入前安装；内容变化时暂停新的 Serve 会话进入，等待已有会话完成，再发布完整目录并让下一次调用重新启动 Serve、发现更新后的 Skill。相同内容不会重复刷新。本地续扫仅补齐缺失 Skill，使用统一目录的当前版本，不将旧扫描快照覆盖回来。
+
+安装清单 `.opendeephole-skills.json` 位于 workspace 根目录，记录来源和内容哈希；暂存与备份不进入 Skill 搜索目录。不同来源的同名 Skill 会明确报错，安装失败会恢复原目录。升级会迁移可识别的旧 checker 目录别名，保留非受管用户文件。需要同步更新后端发布代码和 Agent 并重启 Agent；`deephole-skill-creator` 源文件移到 `deephole_client/builtin_skills/`，随下载包和运行时更新包一起校验、安装，也兼容仍会跳过旧 `system_skills` 目录的 Agent 更新器，无需数据库迁移。
 
 ### 模型池参数
 
@@ -365,8 +371,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
 - `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令、无需模型执行校验命令。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
 - `scan_id`、`execution_kind` / `execution_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。执行身份只用于精确取消一个扫描、去误报或验证作业；共享同一 Serve 的其它任务不会被终止。
-- `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，任务级 `skill_paths` 再追加到最终列表。
-- `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
+- `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，并保留任务路径合并兼容性。
+- `skill_paths`：完整 Agent 只用它检查固定目录中是否已安装所需 Skill；独立 Task Agent 未绑定 `fixed_skill_root` 时仍提供任务级路径注册。
 
 后端模式没有绑定 `project_dir` 或 `work_dir` 时，调用会立即失败，不会回退到进程当前目录。独立模式始终使用 YAML 中固定的两个目录，因此 Session continuation 不会改变权限边界。
 
@@ -375,7 +381,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - 全局允许 `read`、`list`、`glob`、`grep` 与 `external_directory`，使 OpenCode 可读取运行账户有权访问的全部本地路径；这包括项目工作目录、其它版本的真实项目路径、全局 workspace、Skill 资源、隐藏文件和配置文件。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
 - 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令。只有后者会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
-- 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
+- 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
 原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
 

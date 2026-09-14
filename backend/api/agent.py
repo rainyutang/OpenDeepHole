@@ -5706,7 +5706,7 @@ _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 def _agent_runtime_hash_scope() -> dict:
     return {
-        "version": 3,
+        "version": 4,
         "dirs": list(_AGENT_RUNTIME_DIRS),
         "tool_dirs": list(_AGENT_TOOL_DIRS),
         "root_files": list(_AGENT_RUNTIME_ROOT_FILES),

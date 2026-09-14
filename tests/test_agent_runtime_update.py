@@ -266,7 +266,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("run_agent.sh", names)
         self.assertNotIn("run_agent.bat", names)
         self.assertFalse(any(name.startswith("backend/static/") for name in names))
-        self.assertFalse(any(name.startswith("backend/system_skills/") for name in names))
+        self.assertIn("deephole_client/builtin_skills/deephole-skill-creator/SKILL.md", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.py", names)
         self.assertIn("task_agent/standalone.py", names)
@@ -283,6 +283,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("run_agent.sh", names)
         self.assertIn("run_agent.bat", names)
         self.assertIn("requirements-agent.txt", names)
+        self.assertIn("deephole_client/builtin_skills/deephole-skill-creator/SKILL.md", names)
         self.assertIn(
             "deephole_client/vulnerability_mining/"
             "engines/static_candidate/engine.yaml",
@@ -450,7 +451,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "mcp_server",
             "backend",
         ]
-        self.assertEqual(updater.runtime_hash_scope()["version"], 3)
+        self.assertEqual(updater.runtime_hash_scope()["version"], 4)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
         self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
 
@@ -490,12 +491,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
             self.assertNotEqual(before, compute_runtime_hash(root))
 
-    def test_runtime_hash_ignores_system_skill_changes(self) -> None:
+    def test_runtime_hash_includes_system_skill_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "deephole_client").mkdir()
             (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
-            skill_dir = root / "backend" / "system_skills" / "deephole-skill-creator"
+            skill_dir = root / "deephole_client" / "builtin_skills" / "deephole-skill-creator"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
                 "name: deephole-skill-creator\n",
@@ -508,7 +509,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(before, compute_runtime_hash(root))
+            self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_hash_includes_validation_process_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -574,6 +575,30 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 (root / "deephole_client" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",
             )
+
+    def test_legacy_updater_installs_all_business_skills_in_one_update(self) -> None:
+        from deephole_client.skill_catalog import builtin_skill_sources
+
+        files = agent_api._read_agent_runtime_files()
+        archive = agent_api._build_agent_runtime_zip_from_files(files)
+        manifest = _runtime_manifest(files)
+        legacy_scope = {**updater.runtime_hash_scope(), "version": 3}
+        # Old updaters skip system_skills even when it is in a verified archive.
+        self.assertIn("system_skills", legacy_scope["skip_dirs"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("deephole_client.updater.runtime_root", return_value=root),
+                patch("deephole_client.updater.runtime_hash_scope", return_value=legacy_scope),
+            ):
+                updater._install_update_archive(archive, manifest["runtime_hash"], manifest)
+            installed = builtin_skill_sources(root)
+            self.assertEqual(len(installed), 28)
+            self.assertEqual(
+                {s.name: s.files for s in installed},
+                {s.name: s.files for s in builtin_skill_sources()},
+            )
+            self.assertEqual(compute_runtime_hash(root), manifest["runtime_hash"])
 
     def test_runtime_install_replaces_the_complete_client_process_tree(self) -> None:
         files = [

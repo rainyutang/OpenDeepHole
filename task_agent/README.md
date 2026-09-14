@@ -86,8 +86,9 @@ result = await run_opencode_task(
 平台公开入口仍统一为 `async`，原实现及其同步任务提交器可以保持不变。
 
 过程门面还可以通过 `opencode_task_context(..., config_path=..., skill_paths=[...])` 绑定独立
-配置和临时 SKILL 根。绑定值会被内部 `run_opencode_task()` 继承，SKILL 路径仅合并到该
-任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；最终 `opencode.json` 全局允许
+配置和 SKILL 根。独立 Task Agent 会把路径合并到该任务的 Serve 配置。完整 DeepHole Agent
+通过 `OpenCodeHostBindings.fixed_skill_root` 绑定统一安装目录，此时任务中的 `skill_paths`
+只检查所需 Skill 是否已经安装，不改变 Serve 配置；最终 `opencode.json` 全局允许
 `read`、`list`、`glob`、`grep` 和 `external_directory`，因此 `skills.paths`、临时
 `skill_paths` 及其它运行账户可访问路径中的 `references/`、`assets/`、`scripts/` 都可读。
 standalone 默认仍只允许写 `work_dir`；嵌入宿主可通过

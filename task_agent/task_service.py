@@ -1739,10 +1739,7 @@ class OpenCodeTaskService:
             lease.option,
             spec.directory,
         )
-        runtime = _runtime_with_skill_paths(
-            runtime,
-            record.execution_context.skill_paths,
-        )
+        runtime = _runtime_with_task_skills(runtime, record.execution_context.skill_paths)
         runtime = _runtime_with_permissions(
             runtime,
             record.execution_context,
@@ -2618,6 +2615,18 @@ class OpenCodeTaskService:
         self._session_runtimes.pop(session_id, None)
         self._session_locks.pop(session_id, None)
         return result
+
+
+def _runtime_with_task_skills(
+    runtime: _SessionRuntime, skill_paths: tuple[Path, ...],
+) -> _SessionRuntime:
+    fixed_root = get_host_bindings().fixed_skill_root
+    if fixed_root is None:
+        return _runtime_with_skill_paths(runtime, skill_paths)
+    from .skills import validate_fixed_skills
+
+    validate_fixed_skills(fixed_root(), skill_paths)
+    return runtime
 
 
 def _runtime_with_skill_paths(

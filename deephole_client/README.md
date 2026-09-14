@@ -63,9 +63,11 @@ Session 历史。每个逻辑任务完成时只单独上报一次其最终状态
 接入已有实现时，实现可以直接占用对应过程目录，平台适配器放在目录外，只负责参数校验、
 上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用
 `task_agent.run_sync_component()`；同步实现内部仍可正常使用
-`task_agent.run_opencode_task()`。通用过程仍可通过门面的 `skill_paths` 上下文临时合并自己的
-Skill。威胁分析同样只把本次所选方法相邻 `skills/` 中的 Skill 根加入任务上下文，不再把
-内置方法的 Skill 全局复制到 Agent workspace。内置
+`task_agent.run_opencode_task()`。独立过程可通过门面的 `skill_paths` 上下文注册自己的
+Skill。完整 Agent 会在首次启动 Serve 前将所有业务 Skill 及引用资源统一安装到
+`~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`，此时上下文中的 Skill 根
+只用于缺失检查，不再改变配置路径。服务端下发的规则包在模型任务开始前同步；内容有变化时
+等待已有会话完成并刷新 Serve，本地续扫复用统一目录的当前版本。内置
 `threat_analysis/methods/deephole_threat_analysis/` 可由
 `ThreatAnalysis/src/threat_analysis_harness` 的内容直接覆盖；相邻的
 `threat_analysis_runner.py` 将所选方法按原包名加载，不修改原生绝对导入。

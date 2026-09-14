@@ -225,6 +225,11 @@ with opencode_task_context(
     )
 ```
 
+完整 Agent 会在首次启动 Serve 前发现并完整安装内置引擎、去误报方法、威胁分析方法及
+系统 Skill，统一使用 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。
+上述 `skill_paths` 在完整 Agent 内只做已安装名称检查；独立 Task Agent 保留任务路径合并。
+新增引擎的 Skill 应随引擎放入 `skills/` 并通过 Agent 更新发布，避免运行中临时变更发现路径。
+
 完整 Agent 已在外层绑定扫描级项目目录、模型池、超时与重试策略、扫描级 MCP、输出回调和
 取消信号。扩展引擎应像上例一样嵌套 `opencode_task_context()`，把框架分配的引擎
 `work_dir` 和相邻 Skill 根绑定到自己的模型任务；省略的上下文字段继续继承外层配置。

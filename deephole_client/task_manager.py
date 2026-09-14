@@ -34,6 +34,7 @@ class ScanTask:
     knowledge_base_mcp: dict | None = None
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
+    refresh_skill_packages: bool = True
     mining_engines: list[dict] | None = None
     codex_model_ids: list[str] | None = None
     retry_candidates: list[dict] | None = None
