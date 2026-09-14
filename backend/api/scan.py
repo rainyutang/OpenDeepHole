@@ -99,6 +99,7 @@ from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
 from backend.store.base import DuplicateScanNameError
 from backend.store.summaries import metrics_from_totals
+from backend.sse import publish as publish_scan_event
 from backend.vulnerability_identity import vulnerability_report_identity
 from backend.pagination import decode_cursor, encode_cursor
 from backend.task_order import MISSING_TASK_TIME, task_sort_time
@@ -3369,6 +3370,14 @@ class _ReportVulnerabilityGroup:
     validation: VulnerabilityValidation | None
 
 
+def _vulnerability_at_index(vulnerabilities: list[Vulnerability], index: int) -> Vulnerability | None:
+    """Resolve a persisted problem index, including gaps in paginated results."""
+    if index < 0:
+        return None
+    return next((vulnerability for position, vulnerability in enumerate(vulnerabilities)
+                 if (vulnerability.vuln_index if vulnerability.vuln_index is not None else position) == index), None)
+
+
 def _report_vulnerability_groups(
     vulnerabilities: list[Vulnerability],
     fp_map: dict[int, FpReviewResult],
@@ -3379,6 +3388,7 @@ def _report_vulnerability_groups(
         list[tuple[int, Vulnerability]],
     ] = {}
     for index, vulnerability in enumerate(vulnerabilities):
+        index = vulnerability.vuln_index if vulnerability.vuln_index is not None else index
         grouped.setdefault(
             vulnerability_report_identity(vulnerability),
             [],
@@ -3700,9 +3710,9 @@ async def download_vulnerability_report(
     """Download a single vulnerability's report (AI analysis + FP review) as Markdown."""
     await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
-    if idx < 0 or idx >= len(scan.vulnerabilities):
+    vuln = _vulnerability_at_index(scan.vulnerabilities, idx)
+    if vuln is None:
         raise HTTPException(status_code=404, detail="Vulnerability index out of range")
-    vuln = scan.vulnerabilities[idx]
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
     group = next(
@@ -4076,10 +4086,10 @@ async def _mark_single(
     """Mark a vulnerability. Final verdicts create feedback; pending analysis does not."""
     if verdict not in _MARK_VERDICTS:
         raise HTTPException(status_code=400, detail="Invalid verdict")
-    if index < 0 or index >= len(scan.vulnerabilities):
+    vuln = _vulnerability_at_index(scan.vulnerabilities, index)
+    if vuln is None:
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
-    vuln = scan.vulnerabilities[index]
     if vuln.provisional:
         raise HTTPException(
             status_code=409,
@@ -4098,11 +4108,12 @@ async def _mark_single(
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
-        if index < len(live.vulnerabilities):
-            live.vulnerabilities[index].user_verdict = verdict
-            live.vulnerabilities[index].user_verdict_reason = reason
-            live.vulnerabilities[index].ticket_submitted = ticket_submitted
-            live.vulnerabilities[index].ticket_id = normalized_ticket_id
+        live_vuln = _vulnerability_at_index(live.vulnerabilities, index)
+        if live_vuln is not None:
+            live_vuln.user_verdict = verdict
+            live_vuln.user_verdict_reason = reason
+            live_vuln.ticket_submitted = ticket_submitted
+            live_vuln.ticket_id = normalized_ticket_id
 
     vuln.user_verdict = verdict
     vuln.user_verdict_reason = reason
@@ -4127,6 +4138,7 @@ async def _mark_single(
             index,
             removed_feedback_ids,
         )
+        publish_scan_event(scan_id, "resource_changed", {"resource": "vulnerabilities", "index": index})
         return None, removed_feedback_ids
 
     now = datetime.now(timezone.utc).isoformat()
@@ -4166,6 +4178,7 @@ async def _mark_single(
     except Exception:
         pass
 
+    publish_scan_event(scan_id, "resource_changed", {"resource": "vulnerabilities", "index": index})
     return entry.id, removed_feedback_ids
 
 
@@ -4204,10 +4217,11 @@ async def _unmark_single(
     index: int,
 ) -> list[str]:
     """Clear a vulnerability's manual verdict and delete its same-source feedback."""
-    if index < 0 or index >= len(scan.vulnerabilities):
+    vuln = _vulnerability_at_index(scan.vulnerabilities, index)
+    if vuln is None:
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
-    if scan.vulnerabilities[index].provisional:
+    if vuln.provisional:
         raise HTTPException(
             status_code=409,
             detail="漏洞仍在等待引擎最终结果对账，暂不能取消标记",
@@ -4215,13 +4229,13 @@ async def _unmark_single(
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
-        if index < len(live.vulnerabilities):
-            live.vulnerabilities[index].user_verdict = None
-            live.vulnerabilities[index].user_verdict_reason = None
-            live.vulnerabilities[index].ticket_submitted = False
-            live.vulnerabilities[index].ticket_id = ""
+        live_vuln = _vulnerability_at_index(live.vulnerabilities, index)
+        if live_vuln is not None:
+            live_vuln.user_verdict = None
+            live_vuln.user_verdict_reason = None
+            live_vuln.ticket_submitted = False
+            live_vuln.ticket_id = ""
 
-    vuln = scan.vulnerabilities[index]
     vuln.user_verdict = None
     vuln.user_verdict_reason = None
     vuln.ticket_submitted = False
@@ -4239,6 +4253,7 @@ async def _unmark_single(
         index,
         removed_feedback_ids,
     )
+    publish_scan_event(scan_id, "resource_changed", {"resource": "vulnerabilities", "index": index})
     return removed_feedback_ids
 
 

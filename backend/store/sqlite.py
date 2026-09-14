@@ -76,6 +76,7 @@ from .deletion import DELETION_SCHEMA, ScanDeletionMixin, deletion_triggers
 from .dashboard import DashboardStoreMixin
 from .validation_history import VALIDATION_SCHEMA, VALIDATION_COLUMNS, ValidationHistoryMixin
 from .rollback import StorageRollbackMixin
+from .shares import SHARE_SCHEMA, ScanSharesMixin
 from .migration import ScanStorageMigrationMixin
 from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixin
 
@@ -979,6 +980,7 @@ _SCHEMA += BODY_SCHEMA
 _SCHEMA += MAINTENANCE_SCHEMA
 _SCHEMA += DELETION_SCHEMA
 _SCHEMA += VALIDATION_SCHEMA
+_SCHEMA += SHARE_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1000,7 +1002,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -1997,6 +1999,7 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
             pool = terminal_opencode_pool_status(pool)
         return ScanStatus(
             scan_id=row["scan_id"],
+            execution_revision=int(row["execution_revision"] or 0),
             project_id=row["project_id"],
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=(

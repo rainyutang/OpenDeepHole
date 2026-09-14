@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { getStoredUser, isAuthenticated, logout, setPublicScanAccess } from "./api/client";
 import ScanStatusView from "./components/ScanStatus";
+import SharedScanView from "./components/SharedScanView";
+import type { PublicScanAccess } from "./api/client";
 import ScanHistory from "./components/ScanHistory";
 import AgentDownload from "./components/AgentDownload";
 import AgentConfigPage from "./components/AgentConfigPage";
@@ -16,20 +18,20 @@ import type { User } from "./types";
 type Page = "history" | "newScan" | "scanning" | "agent" | "agentConfig" | "users" | "checkerDashboard" | "checkerCatalog";
 type AuthPage = "login" | "register";
 
-function parsePublicScanAccess(): { scanId: string; token: string } | null {
-  const hash = window.location.hash || "";
-  const match = hash.match(/^#\/public-scan\/([^?]+)(?:\?(.*))?$/);
+export function parsePublicScanAccess(hash = window.location.hash || ""): PublicScanAccess | null {
+  const match = hash.match(/^#\/(public|shared)-scan\/([^?]*)(?:\?(.*))?$/);
   if (!match) return null;
+  const kind = match[1] === "shared" ? "shared" : "integration";
   let scanId = "";
   try {
-    scanId = decodeURIComponent(match[1] || "");
+    scanId = decodeURIComponent(match[2] || "");
   } catch {
-    return null;
+    return kind === "shared" ? { scanId: "", token: "", kind } : null;
   }
-  const params = new URLSearchParams(match[2] || "");
+  const params = new URLSearchParams(match[3] || "");
   const token = params.get("token") || "";
-  if (!scanId || !token) return null;
-  return { scanId, token };
+  if ((!scanId || !token) && kind !== "shared") return null;
+  return { scanId, token, kind };
 }
 
 export default function App() {
@@ -38,7 +40,7 @@ export default function App() {
   const [authPage, setAuthPage] = useState<AuthPage>("login");
   const [scanId, setScanId] = useState<string>("");
   const [preferredAgentKey, setPreferredAgentKey] = useState("");
-  const [publicAccess, setPublicAccess] = useState<{ scanId: string; token: string } | null>(
+  const [publicAccess, setPublicAccess] = useState<PublicScanAccess | null>(
     parsePublicScanAccess,
   );
 
@@ -70,19 +72,20 @@ export default function App() {
   };
 
   if (publicAccess) {
+    const back = () => { window.location.hash = ""; setPublicAccess(null); };
     return (
       <RuntimeErrorBoundary
         name="public-scan-detail"
-        resetKey={publicAccess.scanId}
+        resetKey={`${publicAccess.kind}:${publicAccess.scanId}:${publicAccess.token}`}
         fullscreen
       >
-        <ScanStatusView
+        {publicAccess.kind === "shared" ? <SharedScanView
+          key={`${publicAccess.scanId}:${publicAccess.token}`} access={publicAccess} onBack={back}
+        /> : <ScanStatusView
+          key={`${publicAccess.scanId}:${publicAccess.token}`}
           scanId={publicAccess.scanId}
-          onBack={() => {
-            window.location.hash = "";
-            setPublicAccess(null);
-          }}
-        />
+          onBack={back}
+        />}
       </RuntimeErrorBoundary>
     );
   }

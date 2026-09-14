@@ -3,6 +3,7 @@ import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
+import ScanShareButton from "./ScanShareButton";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -727,6 +728,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                           >
                             查看
                           </button>
+                          <ScanShareButton scanId={scan.scan_id} compact />
                           {running && (
                             <button
                               onClick={() => handleStop(scan.scan_id)}

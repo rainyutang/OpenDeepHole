@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 import uuid
 
-from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, scan, skills
+from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, scan, sharing, skills
 from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
@@ -143,6 +143,7 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(scan.router)
 app.include_router(integration.router)
+app.include_router(sharing.router)
 app.include_router(checkers.router)
 app.include_router(skills.router)
 app.include_router(feedback.router)

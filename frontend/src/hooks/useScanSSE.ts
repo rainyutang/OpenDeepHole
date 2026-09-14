@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus } from "../api/client";
+import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
 import {
   isRecord,
   isOlderScanExecution,
@@ -397,6 +397,11 @@ export function useScanSSE(
   useEffect(() => {
     const url = scanSSEUrl(scanId);
     const es = new EventSource(url);
+    es.addEventListener("share_unavailable", () => {
+      es.close();
+      setConnected(false);
+      notifyShareUnavailable(scanId, new URL(url).searchParams.get("token") ?? "");
+    });
     let disposed = false;
     let eventFlushTimer: number | null = null;
     let queuedEvents: ScanEvent[] = [];

@@ -45,6 +45,18 @@ class DuplicateScanNameError(ValueError):
 class ScanStoreBase(ABC):
     """Scan data storage abstract interface."""
 
+    def get_scan_share(self, scan_id: str) -> dict | None:
+        """Return the active share and its scan owner; exclude deleted scans."""
+        raise NotImplementedError
+
+    def get_or_create_scan_share(self, scan_id: str) -> dict | None:
+        """Atomically return a stable share, or None for an unavailable scan."""
+        raise NotImplementedError
+
+    def revoke_scan_share(self, scan_id: str) -> None:
+        """Revoke the current share without changing scan execution."""
+        raise NotImplementedError
+
     # -- Scan lifecycle --
 
     @abstractmethod

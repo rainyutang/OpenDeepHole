@@ -37,6 +37,8 @@ import {
 } from "../miningEngines";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
+import ScanShareButton from "./ScanShareButton";
+import { isSharedScan } from "../api/client";
 import { ThemeToggle } from "./ThemeToggle";
 import {
   findIndexedVulnerability,
@@ -694,9 +696,10 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
 interface Props {
   scanId: string;
   onBack: () => void;
+  sharedView?: boolean;
 }
 
-export default function ScanStatus({ scanId, onBack }: Props) {
+export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(scanId) }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeEngineId, setActiveEngineId] = useState("");
@@ -1739,6 +1742,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // Handle feedback selection change — update backend and refresh skills
   const handleFeedbackChange = async (ids: Set<string>) => {
+    if (sharedView) return;
     setSelectedFeedbackIds(ids);
     setScan((prev) => prev ? { ...prev, feedback_ids: [...ids] } : prev);
     try {
@@ -1967,9 +1971,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       validatingIndices={launchingValidations}
       stoppingValidationIndices={stoppingValidations}
       agentOnline={!!scan.agent_online}
-      onTriggerValidation={scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
-      onStopValidation={handleStopValidation}
-      onFeedbackCreated={addSelectedFeedbackIds}
+      onTriggerValidation={!sharedView && scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
+      onStopValidation={sharedView ? undefined : handleStopValidation}
+      onFeedbackCreated={sharedView ? undefined : addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
       onVulnMarked={() => {
         setThreatResultRevision((value) => value + 1);
@@ -2017,7 +2021,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         onIssues={() => { auditNavigation.cancel(); setActiveTab("issues"); }}
         onNodeClick={handleFlowNodeClick}
         onOpenScanInfo={() => setScanInfoOpen(true)}
-        onOpenFeedback={() => setFeedbackOpen(true)}
+        onOpenFeedback={sharedView ? undefined : () => setFeedbackOpen(true)}
         onOpenSkill={() => {
           setSkillOpen(true);
           if (!skillType && scan.scan_items.length > 0) {
@@ -2080,7 +2084,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
           <div className="flex flex-wrap items-center gap-2 xl:max-w-[72%] xl:justify-end">
             <ThemeToggle />
-            {isDone && (
+            {sharedView && <span className="text-xs text-cyan-300">分享访问</span>}
+            {!sharedView && !isPublicScan(scanId) && <ScanShareButton scanId={scanId} />}
+            {!sharedView && isDone && (
               <>
                 {scan.can_continue && (
                   <button
@@ -2145,7 +2151,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 </div>
               )}
             </div>
-            {isRunning && (
+            {!sharedView && isRunning && (
               <button
                 onClick={handleStop}
                 disabled={stopping}
@@ -2343,9 +2349,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               stoppingValidationIndices={stoppingValidations}
               agentOnline={!!scan.agent_online}
               fixedEngineId={activeEngine.engine_id}
-              onTriggerValidation={scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
-              onStopValidation={handleStopValidation}
-              onFeedbackCreated={addSelectedFeedbackIds}
+              onTriggerValidation={!sharedView && scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
+              onStopValidation={sharedView ? undefined : handleStopValidation}
+              onFeedbackCreated={sharedView ? undefined : addSelectedFeedbackIds}
               onFeedbackRemoved={removeSelectedFeedbackIds}
             />
           </GenericEnginePanel>
@@ -2361,11 +2367,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             validations={scan.validations ?? []}
             stoppingValidationIndices={stoppingValidations}
             events={validationEvents}
-            onStopValidation={handleStopValidation}
+            onStopValidation={sharedView ? undefined : handleStopValidation}
           />
         )}
         {activeTab === "fp_review" && (
           <FpReviewPanel
+            canControl={!sharedView}
             vulnerabilities={scan.vulnerabilities}
             scanId={scanId}
             reviewDataLoaded={fpReviewHydrated && !fpReviewPageLoading && !fpReviewPageFailed
@@ -2445,7 +2452,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       )}
 
       {/* Feedback Manager Panel */}
-      {feedbackOpen && scan.project_id && (
+      {feedbackOpen && !sharedView && scan.project_id && (
         <FeedbackManager
           checkers={checkers.filter((c) => scan.scan_items.includes(c.name))}
           initialTypes={scan.scan_items}
@@ -3239,7 +3246,7 @@ interface ScanDetailSidebarProps {
   onIssues: () => void;
   onNodeClick: (node: FlowNodeId) => void;
   onOpenScanInfo: () => void;
-  onOpenFeedback: () => void;
+  onOpenFeedback?: () => void;
   onOpenSkill: () => void;
   onOpenModels: () => void;
   onOpenReports: () => void;
@@ -3438,13 +3445,13 @@ function ScanSidebarContent({
             badge={modelRunningCount}
             onClick={() => select(onOpenModels)}
           />
-          <SidebarNavigationButton
+          {onOpenFeedback && <SidebarNavigationButton
             label="误报屏蔽规则"
             detail="管理本次扫描使用的反馈规则"
             expanded={openTool === "feedback"}
             badge={feedbackCount}
             onClick={() => select(onOpenFeedback)}
-          />
+          />}
           {hasReportModeSkill && (
             <SidebarNavigationButton
               label="SKILL 报告"
@@ -6084,6 +6091,7 @@ function AuditTaskPanel({
 }
 
 export function FpReviewPanel({
+  canControl = true,
   vulnerabilities,
   scanId,
   reviewDataLoaded,
@@ -6100,6 +6108,7 @@ export function FpReviewPanel({
   onTrigger,
   onStop,
 }: {
+  canControl?: boolean;
   vulnerabilities: IndexedVulnerability[];
   scanId: string;
   reviewDataLoaded: boolean;
@@ -6260,7 +6269,7 @@ export function FpReviewPanel({
         <MiniMetric label="判定误报" value={fpCount} tone="green" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        {eligibleItems.length > 0 && (
+        {canControl && eligibleItems.length > 0 && (
           <button
             type="button"
             onClick={onTrigger}
@@ -6283,7 +6292,7 @@ export function FpReviewPanel({
                     : "启动复核"}
           </button>
         )}
-        {isFpReviewing && (
+        {canControl && isFpReviewing && (
           <button
             type="button"
             onClick={onStop}

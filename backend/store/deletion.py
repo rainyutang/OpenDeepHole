@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS scan_deletions (
 # Dependency order matters: current pointers precede immutable bodies, and FP
 # children precede FP jobs. Independent feedback is deliberately absent.
 SCAN_CHILDREN = (
+    "scan_shares",
     "validation_output_chunks", "validation_update_receipts", "scan_task_current", "opencode_task_reports", "scan_task_versions",
     "scan_candidates", "vulnerabilities", "vulnerability_validations",
     "events", "processed_keys", "agent_resume_manifests", "skill_reports",

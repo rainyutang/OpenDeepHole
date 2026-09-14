@@ -15,14 +15,30 @@ import {
 
 export const api = axios.create({ baseURL: "/" });
 
-let publicScanAccess: { scanId: string; token: string } | null = null;
+export interface PublicScanAccess {
+  scanId: string;
+  token: string;
+  kind?: "integration" | "shared";
+}
 
-export function setPublicScanAccess(access: { scanId: string; token: string } | null): void {
+let publicScanAccess: PublicScanAccess | null = null;
+
+export function setPublicScanAccess(access: PublicScanAccess | null): void {
   publicScanAccess = access;
 }
 
 export function isPublicScan(scanId: string): boolean {
-  return !!publicScanAccess && publicScanAccess.scanId === scanId && !!publicScanAccess.token;
+  return !!publicScanAccess && publicScanAccess.scanId === scanId
+    && (publicScanAccess.kind === "shared" || !!publicScanAccess.token);
+}
+
+export function isSharedScan(scanId: string): boolean {
+  return isPublicScan(scanId) && publicScanAccess?.kind === "shared";
+}
+
+export function notifyShareUnavailable(scanId: string, token?: string): void {
+  if (!isSharedScan(scanId) || (token != null && token !== publicScanAccess?.token)) return;
+  window.dispatchEvent(new CustomEvent("scan_share_unavailable", { detail: { ...publicScanAccess } }));
 }
 
 export function publicParams(): { token: string } | undefined {
@@ -31,7 +47,8 @@ export function publicParams(): { token: string } | undefined {
 
 export function publicScanPath(path: string): string {
   if (!publicScanAccess) return path;
-  return `/api/public/scans/${publicScanAccess.scanId}${path}`;
+  const kind = publicScanAccess.kind === "shared" ? "shared" : "public";
+  return `/api/${kind}/scans/${encodeURIComponent(publicScanAccess.scanId)}${path}`;
 }
 
 function scanV2Path(scanId: string, path: string): string {
@@ -59,6 +76,19 @@ export async function getScanTaskDetail(scanId: string, task: Record<string, unk
 
 // Attach JWT token to all requests
 api.interceptors.request.use((config) => {
+  if (publicScanAccess?.kind === "shared") {
+    const allowedMark = config.method === "post" && ["/mark", "/unmark", "/batch-mark", "/batch-unmark"]
+      .some((suffix) => config.url === publicScanPath(suffix));
+    if (config.method !== "get" && !allowedMark) {
+      throw new Error("分享链接仅支持查看、标记问题和下载报告");
+    }
+    config.headers.delete("Authorization");
+    return config;
+  }
+  if (config.url?.startsWith("/api/shared/scans/")) {
+    config.headers.delete("Authorization");
+    return config;
+  }
   const token = localStorage.getItem("auth_token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -70,7 +100,15 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const sharedRequest = error.config?.url?.startsWith("/api/shared/scans/");
+    if (sharedRequest && (error.response?.status === 403
+      || (error.response?.status === 404 && error.config.url.endsWith("/overview")))) {
+      const params = error.config.params;
+      const token = params instanceof URLSearchParams ? params.get("token") : params?.token;
+      const scanId = decodeURIComponent(error.config.url.split("/")[4] || "");
+      notifyShareUnavailable(scanId, token ?? "");
+    }
+    if (error.response?.status === 401 && !sharedRequest && publicScanAccess?.kind !== "shared") {
       localStorage.removeItem("auth_token");
       localStorage.removeItem("auth_user");
       window.dispatchEvent(new Event("auth_expired"));
@@ -876,6 +914,18 @@ export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
 }
 
+export async function createScanShare(scanId: string): Promise<string> {
+  const { data } = await api.post<{ scan_id: string; token: string }>(`/api/scan/${scanId}/share`);
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = `/shared-scan/${encodeURIComponent(data.scan_id)}?token=${encodeURIComponent(data.token)}`;
+  return url.toString();
+}
+
+export async function revokeScanShare(scanId: string): Promise<void> {
+  await api.delete(`/api/scan/${scanId}/share`);
+}
+
 export async function getCheckerDashboard(product?: string): Promise<CheckerDashboardResponse> {
   const params = product ? { product } : undefined;
   const { data } = await api.get<CheckerDashboardResponse>("/api/v2/checker-dashboard", { params });
@@ -986,7 +1036,7 @@ export async function getFpReviewMethodCatalog(): Promise<FpReviewMethodCatalog>
 export function scanSSEUrl(scanId: string): string {
   const base = window.location.origin;
   if (isPublicScan(scanId) && publicScanAccess) {
-    return `${base}/api/public/scans/${scanId}/events?token=${encodeURIComponent(publicScanAccess.token)}`;
+    return `${base}${publicScanPath("/events")}?token=${encodeURIComponent(publicScanAccess.token)}`;
   }
   const token = localStorage.getItem("auth_token") || "";
   return `${base}/api/scan/${scanId}/events?token=${encodeURIComponent(token)}`;
