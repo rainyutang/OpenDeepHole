@@ -355,6 +355,28 @@ class ReportOutbox:
             ).fetchall()
         return [str(row["dedupe_key"] or "") for row in rows]
 
+    def pending_scan_executions(self, target_url: str) -> list[dict]:
+        """Identify terminal scan reports without mistaking older attempts for live work."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT dedupe_key, payload_json FROM pending_reports
+                   WHERE target_url = ? AND blocked = 0
+                     AND (path LIKE '%/finish' OR path LIKE '%/execution-failed')
+                   ORDER BY id""", (target_url.rstrip("/"),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            parts = str(row["dedupe_key"]).split(":")
+            if len(parts) < 3 or parts[0] != "scan" or parts[2] not in {"finish", "start-failure"}:
+                continue
+            payload = json.loads(row["payload_json"])
+            result.append({
+                "scan_id": parts[1],
+                "execution_revision": int(payload.get("execution_revision") or 0),
+                "agent_session_id": str(payload.get("agent_session_id") or ""),
+            })
+        return result
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

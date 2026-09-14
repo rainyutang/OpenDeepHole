@@ -399,8 +399,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
     try {
       await resumeScan(scanId);
       onViewScan(scanId);
-    } catch {
-      // silently fail
+    } catch (err: unknown) {
+      const message = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : undefined;
+      alert(`续扫失败：${message || "未知错误，请稍后重试"}`);
     } finally {
       setActionLoading(null);
     }

@@ -76,6 +76,7 @@ from backend.models import (
     AgentScanCandidates,
     AgentScanEventBatch,
     AgentScanFinish,
+    AgentScanExecutionFailure,
     AgentScanFinishV2,
     AgentVulnerabilityReconcile,
     AgentVulnerabilityValidationUpdate,
@@ -1269,12 +1270,18 @@ async def _reattach_active_agent_scans_async(
             and scan.error_message == "用户手动停止"
         ):
             if pending_stops is not None:
-                pending_stops.append({"type": "stop", "scan_id": scan_id})
+                command = {"type": "stop", "scan_id": scan_id}
+                if meta.execution_revision > 0:
+                    command["execution_revision"] = meta.execution_revision
+                pending_stops.append(command)
             logger.warning(
                 "Agent %s still reports manually stopped scan %s; resending stop",
                 agent_id,
                 scan_id,
             )
+            continue
+        if not _reported_execution_matches(item, meta.execution_revision):
+            logger.info("Ignoring obsolete/stopping scan %s from agent %s", scan_id, agent_id)
             continue
         if not _is_infrastructure_interruption(scan.status, scan.error_message):
             logger.info(
@@ -1504,6 +1511,60 @@ def _reported_work_ids(items: object, *keys: str) -> set[tuple[str, ...]]:
     return values
 
 
+def _reported_execution_matches(item: dict, revision: int) -> bool:
+    if item.get("cancel_requested"):
+        return False
+    try:
+        reported_revision = int(item.get("execution_revision") or 0)
+    except (TypeError, ValueError):
+        return False
+    return reported_revision == revision
+
+
+def _matching_active_execution(items: object, row: dict, *keys: str) -> bool:
+    return isinstance(items, list) and any(
+        isinstance(item, dict)
+        and all(str(item.get(key, "")) == str(row.get(key, "")) for key in keys)
+        and _reported_execution_matches(item, int(row.get("execution_revision") or 0))
+        for item in items
+    )
+
+
+async def _adopt_reported_agent_work(agent_id: str, agent: AgentInfo, hello: dict) -> list[dict]:
+    """Finish execution ownership transfer before welcome releases publishers."""
+    kinds = (
+        ("scan", "scans", "active_scans", ("scan_id",)),
+        ("fp_review", "fp_reviews", "active_fp_reviews", ("scan_id", "review_id")),
+        ("validation", "validations", "active_validations", ("scan_id", "vuln_index")),
+    )
+    if not any(hello.get(active) for _, _, active, _ in kinds):
+        return []
+    store = get_scan_store()
+    inflight = await run_store_call(store, "list_agent_inflight_executions", agent.agent_key, agent_id)
+    accepted_scans: list[dict] = []
+    for kind, collection, active, keys in kinds:
+        for row in inflight.get(collection, []):
+            if not _matching_active_execution(hello.get(active), row, *keys):
+                continue
+            previous = str(row.get("execution_agent_session_id") or "")
+            adopted = previous == agent.agent_session_id
+            if not adopted:
+                adopted = await run_store_call(
+                    store, "adopt_active_execution", kind,
+                    str(row["review_id"] if kind == "fp_review" else row["scan_id"]),
+                    int(row["vuln_index"]) if kind == "validation" else None,
+                    previous_session_id=previous,
+                    agent_session_id=agent.agent_session_id,
+                    execution_revision=int(row.get("execution_revision") or 0),
+                )
+            if adopted and kind == "scan":
+                accepted_scans.append({
+                    "scan_id": row["scan_id"],
+                    "execution_revision": int(row.get("execution_revision") or 0),
+                })
+    return accepted_scans
+
+
 async def _recover_missing_agent_work(
     agent_id: str,
     agent: AgentInfo,
@@ -1519,7 +1580,10 @@ async def _recover_missing_agent_work(
         agent.agent_key,
         agent_id,
     )
-    active_scans = _reported_work_ids(hello.get("active_scans"), "scan_id")
+    active_scans = {
+        (str(row["scan_id"]),) for row in inflight.get("scans", [])
+        if _matching_active_execution(hello.get("active_scans"), row, "scan_id")
+    }
     active_fp = _reported_work_ids(
         hello.get("active_fp_reviews"),
         "scan_id",
@@ -1540,6 +1604,11 @@ async def _recover_missing_agent_work(
         for scan_id in pending.get("scans", [])
         if str(scan_id or "")
     }
+    if "scan_executions" in pending:
+        pending_scans = {
+            (str(row["scan_id"]),) for row in inflight.get("scans", [])
+            if _matching_active_execution(pending["scan_executions"], row, "scan_id")
+        }
     pending_fp = _reported_work_ids(
         pending.get("fp_reviews"),
         "scan_id",
@@ -1563,6 +1632,7 @@ async def _recover_missing_agent_work(
             sub_id,
             previous_session_id=previous_session,
             agent_session_id=agent.agent_session_id,
+            execution_revision=int(row.get("execution_revision") or 0),
         )
 
     for row in inflight.get("scans", []):
@@ -2116,6 +2186,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
     """Agent connects here and receives task/stop/resume commands."""
     await websocket.accept()
     agent_id = None
+    recovery_task: asyncio.Task | None = None
     try:
         msg = await websocket.receive_json()
         if msg.get("type") != "hello":
@@ -2295,12 +2366,14 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 )
             )
 
+        accepted_scan_executions = await _adopt_reported_agent_work(agent_id, agent_info, msg)
         await _send_agent_json(agent_id, {
             "type": "welcome",
             "agent_id": agent_id,
             "agent_key": stable_key,
             "config": cfg.model_dump(),
             "protocol_version": protocol_version,
+            "scan_executions": accepted_scan_executions,
             "capabilities": {
                 "candidate_batches": protocol_version >= 2,
                 "event_batches": protocol_version >= 2,
@@ -2316,19 +2389,23 @@ async def agent_websocket(websocket: WebSocket) -> None:
             await send_agent_command(agent_id, command)
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
-        await _recover_missing_agent_work(
-            agent_id,
-            agent_info,
-            msg,
-            server_url=_websocket_server_url(websocket),
-        )
-        if final_vulnerability_callbacks:
-            await _resume_final_callback_downstream(
-                agent_info,
-                recovery_scan_ids,
-                promoted_by_scan,
-                server_url=_websocket_server_url(websocket),
-            )
+        async def recover_after_welcome() -> None:
+            try:
+                await _recover_missing_agent_work(
+                    agent_id, agent_info, msg,
+                    server_url=_websocket_server_url(websocket),
+                )
+                if final_vulnerability_callbacks:
+                    await _resume_final_callback_downstream(
+                        agent_info, recovery_scan_ids, promoted_by_scan,
+                        server_url=_websocket_server_url(websocket),
+                    )
+            except Exception:
+                logger.exception("Agent reconnect recovery failed for %s", agent_id)
+
+        # Recovery can issue stop RPCs; their replies and heartbeats must be
+        # received while recovery awaits them.
+        recovery_task = asyncio.create_task(recover_after_welcome())
 
         logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
 
@@ -2362,6 +2439,9 @@ async def agent_websocket(websocket: WebSocket) -> None:
     except Exception as e:
         logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
     finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         if agent_id:
             store = get_scan_store()
             if getattr(store, "distributed", False):
@@ -2415,17 +2495,22 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
         return False
 
 
-async def request_agent_scan_stop(agent_id: str, scan_id: str) -> dict | None:
+async def request_agent_scan_stop(
+    agent_id: str, scan_id: str, *, execution_revision: int | None = None,
+) -> dict | None:
     """Request a scan stop and wait briefly for the Agent to confirm quiescence."""
     request_id = uuid.uuid4().hex
     waiter = asyncio.get_running_loop().create_future()
     _scan_stop_waiters[request_id] = waiter
     try:
-        sent = await send_agent_command(agent_id, {
+        command = {
             "type": "stop",
             "request_id": request_id,
             "scan_id": scan_id,
-        })
+        }
+        if execution_revision is not None:
+            command["execution_revision"] = execution_revision
+        sent = await send_agent_command(agent_id, command)
         if not sent:
             logger.warning(
                 "Unable to deliver scan stop request %s to agent %s for scan %s",
@@ -2448,6 +2533,12 @@ async def request_agent_scan_stop(agent_id: str, scan_id: str) -> dict | None:
                 request_id,
                 scan_id,
             )
+            return None
+        if (
+            execution_revision is not None
+            and "execution_revision" in incoming
+            and incoming["execution_revision"] != execution_revision
+        ):
             return None
         return incoming
     except asyncio.TimeoutError:
@@ -5031,6 +5122,29 @@ async def _merge_finish_stage_runs(
         })
 
 
+@router.post("/scan/{scan_id}/execution-failed")
+async def agent_scan_execution_failed(scan_id: str, body: AgentScanExecutionFailure) -> dict:
+    from backend.sse import publish
+
+    store = get_scan_store()
+    changed = await run_store_call(
+        store, "fail_scan_execution", scan_id,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+        error_message=body.error_message,
+    )
+    if changed:
+        live = _running_scans.get(scan_id)
+        if live is None or live.opencode_pool is None or live.opencode_pool.execution_revision <= body.execution_revision:
+            _running_scans.pop(scan_id, None)
+            _scan_owners.pop(scan_id, None)
+        publish(scan_id, "scan_status", {
+            "status": "error", "error_message": body.error_message,
+            "opencode_pool": {"execution_revision": body.execution_revision, "agent_session_id": body.agent_session_id},
+        })
+    return {"ok": True, "changed": changed}
+
+
 @router.post("/scan/{scan_id}/finish")
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Request) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
@@ -5262,6 +5376,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     publish(scan_id, "scan_finish", {
         "status": final_status.value,
         "error_message": final_error_message,
+        "execution_revision": body.execution_revision,
     })
 
     confirmed = sum(1 for vuln in final_vulnerabilities if vuln.confirmed)
@@ -5332,6 +5447,15 @@ async def agent_get_resume_manifest_v2(token: str) -> Response:
     )
     if record is None:
         raise HTTPException(status_code=404, detail="Resume manifest not found or expired")
+    payload = json.loads(record["payload_json"])
+    loaded = await run_store_call(get_scan_store(), "get_scan_identity", record["scan_id"])
+    if (
+        loaded is None
+        or str(payload.get("scan_id") or "") != record["scan_id"]
+        or int(payload.get("execution_revision") or 0) != loaded["execution_revision"]
+        or loaded["status"] not in _RUNNING_SCAN_STATUSES
+    ):
+        raise HTTPException(status_code=409, detail="stale scan execution")
     return Response(
         content=str(record["payload_json"]),
         media_type="application/json",

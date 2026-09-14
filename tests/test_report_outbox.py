@@ -329,6 +329,7 @@ def test_pending_terminal_inventory_reuses_existing_outbox_rows(tmp_path: Path) 
 
     assert reporter.pending_terminal_work() == {
         "scans": ["scan-1"],
+        "scan_executions": [],
         "fp_reviews": [{"scan_id": "scan-1", "review_id": "review-1"}],
         "validations": [{"scan_id": "scan-1", "vuln_index": 7}],
     }
@@ -345,6 +346,27 @@ def test_pending_terminal_inventory_reuses_existing_outbox_rows(tmp_path: Path) 
         assert tables <= {"pending_reports", "sqlite_sequence", "report_sequences"}
     finally:
         connection.close()
+
+
+def test_pending_scan_execution_inventory_keeps_revision_and_start_failures(tmp_path: Path) -> None:
+    outbox = ReportOutbox(tmp_path / "outbox.sqlite3")
+    try:
+        for key, path, revision in (
+            ("scan:s:finish", "/api/agent/v2/scan/s/finish", 8),
+            ("scan:s:start-failure:9", "/api/agent/scan/s/execution-failed", 9),
+            ("scan:s:fp:review:finish", "/api/agent/scan/s/fp_review/finish", 3),
+        ):
+            outbox.enqueue(
+                target_url="http://server", stream_key="scan:s", dedupe_key=key, path=path,
+                payload={"agent_session_id": "session", "execution_revision": revision},
+            )
+        assert outbox.pending_scan_executions("http://server") == [
+            {"scan_id": "s", "agent_session_id": "session", "execution_revision": revision}
+            for revision in (8, 9)
+        ]
+        assert outbox.pending_count() == 3
+    finally:
+        outbox.close()
 
 
 def test_pool_snapshot_retries_http_413_with_compact_details(tmp_path: Path) -> None:

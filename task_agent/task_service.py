@@ -763,6 +763,7 @@ class OpenCodeTaskService:
         execution_id: str,
         *,
         timeout_seconds: float = 5.0,
+        execution_revision: int | None = None,
     ) -> dict[str, Any]:
         """Cancel only tasks owned by one business execution and wait briefly.
 
@@ -780,6 +781,11 @@ class OpenCodeTaskService:
             for record in self._records.values()
             if record.execution_context.execution_kind == kind
             and record.execution_context.execution_id == identity
+            and (
+                execution_revision is None
+                or int(record.execution_context.task_metadata.get("execution_revision") or 0)
+                <= execution_revision
+            )
             and record.status not in TERMINAL_TASK_STATUSES
         ]
         for record in matched:

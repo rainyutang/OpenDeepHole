@@ -7,6 +7,8 @@ import hashlib
 import json
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -43,6 +45,17 @@ logger = logging.getLogger(__name__)
 
 _OutboxDeliveryCallback = Callable[[httpx.Response], Awaitable[None]]
 _PoolIdentity = tuple[str, str, int]
+_scan_execution: ContextVar[tuple[str, int] | None] = ContextVar("scan_execution", default=None)
+
+
+@contextmanager
+def scan_execution_context(scan_id: str, revision: int):
+    """Freeze report identity for a scan and its child tasks, including cleanup."""
+    token = _scan_execution.set((scan_id, revision))
+    try:
+        yield
+    finally:
+        _scan_execution.reset(token)
 
 
 @dataclass
@@ -224,7 +237,7 @@ class Reporter:
         return (
             f"scan:{scope_id}" if scope_id else f"agent:{self.agent_id}",
             self.agent_session_id,
-            self._scan_execution_revisions.get(scope_id, 0) if scope_id else 0,
+            self.scan_execution_revision(scope_id) if scope_id else 0,
         )
 
     def _wake_opencode_pool_publishers(self, scope_id: str | None = None) -> None:
@@ -296,12 +309,54 @@ class Reporter:
                 previous[0],
             )
 
-    def set_scan_execution(self, scan_id: str, revision: int) -> None:
+    def scan_execution_revision(self, scan_id: str) -> int:
+        bound = _scan_execution.get()
+        if bound is not None and bound[0] == scan_id:
+            return bound[1]
+        return self._scan_execution_revisions.get(scan_id, 0)
+
+    def set_scan_execution(self, scan_id: str, revision: int) -> int:
         scope_id = str(scan_id)
         previous = self._pool_identity(scope_id)
-        self._scan_execution_revisions[scope_id] = max(0, int(revision or 0))
+        self._scan_execution_revisions[scope_id] = max(
+            self._scan_execution_revisions.get(scope_id, 0), int(revision or 0),
+        )
         if self._pool_identity(scope_id) != previous:
             self._wake_opencode_pool_publishers(scope_id)
+        return self._scan_execution_revisions[scope_id]
+
+    async def report_scan_start_failure(self, scan_id: str, revision: int, error: str) -> None:
+        if self.dry_run:
+            return
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}",
+            dedupe_key=f"scan:{scan_id}:start-failure:{revision}",
+            path=f"/api/agent/scan/{scan_id}/execution-failed",
+            payload={
+                "agent_session_id": self.agent_session_id,
+                "execution_revision": revision,
+                "error_message": error,
+            },
+            timeout=5.0,
+        )
+
+    def confirm_scan_executions(self, executions: object) -> None:
+        """Re-enable only identities explicitly accepted by the server handshake."""
+        if not isinstance(executions, list):
+            return
+        for item in executions:
+            if not isinstance(item, dict) or not item.get("scan_id"):
+                continue
+            scan_id = str(item["scan_id"])
+            try:
+                revision = int(item.get("execution_revision") or 0)
+            except (TypeError, ValueError):
+                continue
+            if revision < self._scan_execution_revisions.get(scan_id, 0):
+                continue
+            self.set_scan_execution(scan_id, revision)
+            self._opencode_pool_stale_identities.discard(self._pool_identity(scan_id))
+            self._wake_opencode_pool_publishers(scan_id)
 
     def set_fp_review_execution(self, review_id: str, revision: int) -> int:
         normalized_review_id = str(review_id)
@@ -327,6 +382,7 @@ class Reporter:
         }
         if self._outbox is None:
             return result
+        result["scan_executions"] = self._outbox.pending_scan_executions(self.server_url)
         for key in self._outbox.pending_dedupe_keys(self.server_url):
             parts = key.split(":")
             if len(parts) == 3 and parts[0] == "scan" and parts[2] == "finish":
@@ -992,7 +1048,7 @@ class Reporter:
             "completed_candidates": completed_candidates,
             "total_candidates": total_candidates,
             "agent_session_id": self.agent_session_id,
-            "execution_revision": self._scan_execution_revisions.get(scan_id, 0),
+            "execution_revision": self.scan_execution_revision(scan_id),
         }
         if self._outbox is not None and state in {"success", "failed"}:
             response = await self._queue_post(
@@ -1581,14 +1637,14 @@ class Reporter:
             "error_message": error_message,
             "replace_report_batch_ids": list(replace_report_batch_ids or []),
             "agent_session_id": self.agent_session_id,
-            "execution_revision": self._scan_execution_revisions.get(scan_id, 0),
+            "execution_revision": self.scan_execution_revision(scan_id),
         }
         if self._model_pool_sink_bound:
             from task_agent.model_pool import model_pool_snapshot
 
             final_pool = dict(model_pool_snapshot(scan_id))
             final_pool["agent_session_id"] = self.agent_session_id
-            final_pool["execution_revision"] = self._scan_execution_revisions.get(scan_id, 0)
+            final_pool["execution_revision"] = self.scan_execution_revision(scan_id)
             final_pool["completed_tasks"] = []
             payload["opencode_pool"] = final_pool
         threat_analysis_run = self._threat_analysis_run_snapshots.get(scan_id)

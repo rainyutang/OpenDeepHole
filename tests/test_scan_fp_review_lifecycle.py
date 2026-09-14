@@ -203,7 +203,7 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 [payload["type"] for payload in payloads],
                 ["fp_review_stop", "fp_review_stop"],
             )
-            request_stop.assert_awaited_once_with("agent-live", "scan-1")
+            request_stop.assert_awaited_once_with("agent-live", "scan-1", execution_revision=0)
 
     def test_stop_reports_pending_when_agent_does_not_acknowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,7 +232,7 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
 
             self.assertEqual(response["agent_stop_state"], "pending")
             self.assertEqual(store.load_scan("scan-1")[0].status, ScanItemStatus.CANCELLED)
-            request_stop.assert_awaited_once_with("agent-live", "scan-1")
+            request_stop.assert_awaited_once_with("agent-live", "scan-1", execution_revision=0)
 
     def test_resume_complete_scan_dispatches_only_unresolved_stopped_fp_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

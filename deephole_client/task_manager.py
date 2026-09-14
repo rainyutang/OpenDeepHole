@@ -53,6 +53,12 @@ class ScanTask:
 class TaskManager:
     def __init__(self):
         self._tasks: dict[str, ScanTask] = {}
+        self._execution_revisions: dict[str, int] = {}
+
+    def has_seen_execution(self, scan_id: str, revision: int) -> bool:
+        """Keep duplicate/stale commands fenced after a task leaves memory."""
+        latest = self._execution_revisions.get(scan_id, 0)
+        return latest > 0 and revision <= latest
 
     def create(
         self,
@@ -141,6 +147,9 @@ class TaskManager:
             execution_revision=max(0, int(execution_revision or 0)),
         )
         self._tasks[scan_id] = task
+        self._execution_revisions[scan_id] = max(
+            self._execution_revisions.get(scan_id, 0), task.execution_revision,
+        )
         return task
 
     def get(self, scan_id: str) -> Optional[ScanTask]:

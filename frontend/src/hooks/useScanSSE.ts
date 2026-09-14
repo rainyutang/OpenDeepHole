@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus } from "../api/client";
 import {
   isRecord,
+  isOlderScanExecution,
   mergeScanSnapshot,
   normalizeScanCandidate,
   normalizeScanEvent,
@@ -43,6 +44,7 @@ interface ScanStatusEvent {
   static_total_files?: number | null;
   static_scanned_files?: number | null;
   static_analysis_done?: boolean | null;
+  error_message?: string | null;
   opencode_pool?: ScanStatus["opencode_pool"];
 }
 
@@ -83,6 +85,7 @@ interface ScanEventPayload {
 }
 
 interface ScanFinishEvent {
+  execution_revision?: number;
   status: string;
   error_message: string | null;
 }
@@ -438,6 +441,7 @@ export function useScanSSE(
     };
 
     const queueScanStatus = (status: ScanStatusEvent) => {
+      if (isOlderScanExecution(pendingStatus?.opencode_pool, status.opencode_pool)) return;
       pendingStatus = {
         status: status.status ?? pendingStatus?.status ?? null,
         progress: status.progress ?? pendingStatus?.progress ?? null,
@@ -446,6 +450,7 @@ export function useScanSSE(
         static_total_files: status.static_total_files ?? pendingStatus?.static_total_files ?? null,
         static_scanned_files: status.static_scanned_files ?? pendingStatus?.static_scanned_files ?? null,
         static_analysis_done: status.static_analysis_done ?? pendingStatus?.static_analysis_done ?? null,
+        error_message: status.error_message !== undefined ? status.error_message : pendingStatus?.error_message,
         opencode_pool: status.opencode_pool !== undefined
           ? status.opencode_pool
           : pendingStatus?.opencode_pool,

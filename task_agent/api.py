@@ -502,6 +502,7 @@ async def cancel_opencode_execution(
     execution_id: str,
     *,
     timeout_seconds: float = 5.0,
+    execution_revision: int | None = None,
 ) -> dict[str, Any]:
     """Cancel Task Agent work belonging to one business execution."""
     from .task_service import _get_opencode_task_service
@@ -510,6 +511,7 @@ async def cancel_opencode_execution(
         execution_kind,
         execution_id,
         timeout_seconds=timeout_seconds,
+        execution_revision=execution_revision,
     )
 
 

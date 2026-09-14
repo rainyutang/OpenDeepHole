@@ -170,27 +170,34 @@ def test_resume_claim_is_atomic_across_store_connections(tmp_path: Path) -> None
         first.save_scan(*_scan("scan-1", ScanItemStatus.CANCELLED))
         barrier = threading.Barrier(2)
 
-        def claim(store: SqliteScanStore) -> bool:
+        def claim(store: SqliteScanStore) -> int | None:
             barrier.wait()
             return store.claim_scan_for_resume(
                 "scan-1",
                 processed_candidates=2,
                 progress=0.5,
+                expected_revision=0,
+                agent_id="agent-new",
+                agent_session_id="session-new",
             )
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(claim, (first, second)))
 
-        assert sorted(results) == [False, True]
+        assert results.count(None) == 1
+        assert results.count(1) == 1
         stored, _meta = first.load_scan("scan-1")
         assert stored.status == ScanItemStatus.PENDING
         assert stored.error_message == ""
+        assert _meta.execution_revision == 1
+        assert _meta.execution_agent_session_id == "session-new"
+        assert stored.opencode_pool.execution_revision == 1
         _assert_terminal_pool(stored.opencode_pool)
         assert first.claim_scan_for_resume(
             "scan-1",
             processed_candidates=2,
             progress=0.5,
-        ) is False
+        ) is None
     finally:
         second.close()
         first.close()

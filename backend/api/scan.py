@@ -2603,7 +2603,9 @@ async def stop_scan(
         if agent_id:
             from backend.api.agent import request_agent_scan_stop
 
-            acknowledgement = await request_agent_scan_stop(agent_id, scan_id)
+            acknowledgement = await request_agent_scan_stop(
+                agent_id, scan_id, execution_revision=meta.execution_revision,
+            )
             if (
                 isinstance(acknowledgement, dict)
                 and acknowledgement.get("still_active") is False
@@ -2851,6 +2853,24 @@ async def _continue_scan(
             detail="扫描关联的客户端尚未配置启用的显式模型，请先完成客户端模型配置",
         )
 
+    # Confirm local quiescence before changing progress/checkpoints or reserving
+    # a new identity. The revision bound protects a competing newer resume from
+    # a delayed stop RPC issued by this request.
+    from backend.api.agent import request_agent_scan_stop
+
+    acknowledgement = await request_agent_scan_stop(
+        agent_id, scan_id, execution_revision=meta.execution_revision,
+    )
+    if (
+        not isinstance(acknowledgement, dict)
+        or acknowledgement.get("still_active") is not False
+        or str(acknowledgement.get("error") or "").strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="旧扫描尚未确认退出或清理超时，未启动续扫；请稍后再次续扫",
+        )
+
     # Update scan meta with new agent_id if it changed
     if agent_id != meta.agent_id:
         meta.agent_id = agent_id
@@ -3011,92 +3031,103 @@ async def _continue_scan(
         scan_id,
         processed_candidates=processed_offset,
         progress=progress,
+        expected_revision=meta.execution_revision,
+        agent_id=agent_id,
+        agent_session_id=agent.agent_session_id,
+        claimed_revision=claimed_execution_revision,
     )
     if not claimed:
         raise HTTPException(status_code=400, detail="Scan is already running")
 
-    execution_revision = claimed_execution_revision
-    if execution_revision is None:
-        execution_revision = await run_store_call(
-            store,
-            "begin_scan_execution",
-            scan_id,
-            agent_id=agent_id,
-            agent_session_id=agent.agent_session_id,
-        )
-    resume_payload["execution_revision"] = execution_revision
-    if agent.protocol_version >= 2:
-        manifest_token = secrets.token_urlsafe(32)
-        payload_json = await run_store_call(
-            store,
-            json.dumps,
-            resume_payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+    execution_revision = claimed
+    try:
+        resume_payload["execution_revision"] = execution_revision
+        if agent.protocol_version >= 2:
+            manifest_token = secrets.token_urlsafe(32)
+            payload_json = await run_store_call(
+                store,
+                json.dumps,
+                resume_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            await run_store_call(
+                store,
+                "create_resume_manifest",
+                token=manifest_token,
+                scan_id=scan_id,
+                agent_key=meta.agent_key or agent.agent_key,
+                payload_json=payload_json,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            )
+            command = {
+                "type": "resume",
+                "scan_id": scan_id,
+                "execution_revision": execution_revision,
+                "resume_manifest_url": (
+                    f"{server_url}"
+                    f"/api/agent/v2/resume-manifests/{manifest_token}"
+                ),
+                "agent_runtime_update": runtime_update,
+            }
+        else:
+            command = resume_payload
+
+        scan.opencode_pool = terminal_opencode_pool_status(scan.opencode_pool)
+        if scan.opencode_pool is not None:
+            scan.opencode_pool = scan.opencode_pool.model_copy(update={
+                "execution_revision": execution_revision,
+                "agent_session_id": agent.agent_session_id,
+            })
+        if resume_threat_analysis or retry_mining_engine_ids:
+            replaced = await run_store_call(
+                store,
+                "replace_scan_stage_runs",
+                scan_id,
+                pending_threat_analysis_run,
+                pending_mining_engine_runs,
+            )
+            if not replaced:
+                raise HTTPException(status_code=404, detail="Scan not found")
+            scan.threat_analysis_run = pending_threat_analysis_run
+            scan.mining_engine_runs = pending_mining_engine_runs
+
+        scan.status = ScanItemStatus.PENDING
+        scan.error_message = None
+        scan.current_candidate = None
+        scan.agent_name = agent.name
+        scan.agent_online = True
+        scan.processed_candidates = processed_offset
+        scan.progress = progress
         await run_store_call(
             store,
-            "create_resume_manifest",
-            token=manifest_token,
-            scan_id=scan_id,
-            agent_key=meta.agent_key or agent.agent_key,
-            payload_json=payload_json,
-            expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-        )
-        command = {
-            "type": "resume",
-            "scan_id": scan_id,
-            "execution_revision": execution_revision,
-            "resume_manifest_url": (
-                f"{server_url}"
-                f"/api/agent/v2/resume-manifests/{manifest_token}"
-            ),
-            "agent_runtime_update": runtime_update,
-        }
-    else:
-        command = resume_payload
-
-    scan.opencode_pool = terminal_opencode_pool_status(scan.opencode_pool)
-    if resume_threat_analysis or retry_mining_engine_ids:
-        replaced = await run_store_call(
-            store,
-            "replace_scan_stage_runs",
+            "reset_scan_candidate_audits",
             scan_id,
-            pending_threat_analysis_run,
-            pending_mining_engine_runs,
+            retry_candidate_indexes,
         )
-        if not replaced:
-            raise HTTPException(status_code=404, detail="Scan not found")
-        scan.threat_analysis_run = pending_threat_analysis_run
-        scan.mining_engine_runs = pending_mining_engine_runs
-
-    scan.status = ScanItemStatus.PENDING
-    scan.error_message = None
-    scan.current_candidate = None
-    scan.agent_name = agent.name
-    scan.agent_online = True
-    scan.processed_candidates = processed_offset
-    scan.progress = progress
-    await run_store_call(
-        store,
-        "reset_scan_candidate_audits",
-        scan_id,
-        retry_candidate_indexes,
-    )
-    retry_index_set = set(retry_candidate_indexes)
-    scan.candidates = [
-        candidate.model_copy(update={
-            "audit_state": "pending",
-            "audit_result": None,
-            "vulnerability_idx": None,
-            "dedup_decision": {},
-            "audit_updated_at": "",
-        })
-        if candidate.idx in retry_index_set
-        else candidate
-        for candidate in scan.candidates
-    ]
-    await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
+        retry_index_set = set(retry_candidate_indexes)
+        scan.candidates = [
+            candidate.model_copy(update={
+                "audit_state": "pending",
+                "audit_result": None,
+                "vulnerability_idx": None,
+                "dedup_decision": {},
+                "audit_updated_at": "",
+            })
+            if candidate.idx in retry_index_set
+            else candidate
+            for candidate in scan.candidates
+        ]
+        await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
+    except Exception as exc:
+        logger.exception("Failed to prepare scan resume for %s", scan_id)
+        await run_store_call(
+            store, "fail_scan_execution", scan_id,
+            agent_session_id=agent.agent_session_id,
+            execution_revision=execution_revision,
+            error_message="续扫准备失败，请稍后再次续扫",
+        )
+        raise HTTPException(status_code=502, detail="续扫准备失败，请稍后再次续扫") from exc
 
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id

@@ -45,6 +45,39 @@ function pool(updatedAt, overrides = {}) {
   });
 }
 
+test("late scan GET cannot restore the previous execution or its start time", () => {
+  const current = {
+    scan_id: "scan-1", status: "auditing", progress: 0.6,
+    opencode_pool: pool("2026-09-14T02:00:00Z", {
+      execution_revision: 9,
+      models: [{ active_tasks: [{ task_id: "new", started_at: "2026-09-14T02:00:00Z" }] }],
+    }),
+  };
+  const stale = {
+    scan_id: "scan-1", status: "cancelled", progress: 0.2,
+    opencode_pool: pool("2026-09-14T03:00:00Z", { execution_revision: 8 }),
+  };
+  assert.equal(runtime.mergeScanSnapshot(current, stale), current);
+  assert.equal(runtime.isOlderScanExecution(current.opencode_pool, stale.opencode_pool), true);
+  assert.equal(runtime.isOlderScanExecution(current.opencode_pool, { status: "cancelled", execution_revision: 8 }), true);
+  assert.equal(runtime.isOlderScanExecution(current.opencode_pool, undefined), false);
+});
+
+test("resume accepts the new task start time and retains completed history", () => {
+  const oldTask = { task_id: "old", started_at: "2026-09-01T02:00:00Z", outcome: "cancelled" };
+  const previous = { scan_id: "scan-1", status: "cancelled", opencode_pool: pool("2026-09-01T02:00:00Z", {
+    execution_revision: 8, completed_tasks: [oldTask],
+  }) };
+  const incoming = { scan_id: "scan-1", status: "auditing", opencode_pool: pool("2026-09-14T02:00:00Z", {
+    execution_revision: 9, completed_tasks: [oldTask],
+    models: [{ model: "model", active_tasks: [{ task_id: "new", started_at: "2026-09-14T02:00:00Z" }] }],
+  }) };
+  const merged = runtime.mergeScanSnapshot(previous, incoming);
+  assert.equal(merged.status, "auditing");
+  assert.equal(merged.opencode_pool.models[0].active_tasks[0].started_at, "2026-09-14T02:00:00Z");
+  assert.equal(merged.opencode_pool.completed_tasks[0].started_at, oldTask.started_at);
+});
+
 test("normalizes legacy arrays without materializing invalid entries", () => {
   const normalized = runtime.normalizeIndexedVulnerabilities([
     null,

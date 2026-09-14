@@ -98,6 +98,8 @@ python scripts/migrate_scan_storage.py --config config.yaml validate-constraints
 
 新版 Agent 收到明确的过期响应后，只停止对应身份的模型池上报，包括后续状态变化、心跳和退出补发，并记录一次 `OPENCODE_POOL_DISCARDED_STALE`（目标、原请求会话、执行版本及响应原因）。新执行或新会话会恢复上报，其他扫描和正常任务继续运行。网络错误、5xx 及非过期 409 按普通失败处理，从本次尝试完成后至少等待 2 秒再重试，避免心跳期限过后密集发送。
 
+如果该日志伴随停止后续扫卡住及 `RUNTIME_UPDATE_DEFERRED reason=local_work_active`，还需部署停止/续扫执行交接修复：先确认旧执行退出，再领取新轮次；重连先接管准确的活动 session/revision，再发送 welcome。新 welcome 明确确认同一执行仍有效时，Agent 也会恢复该身份的上报。不要删除执行轮次或关闭 stale 校验来消除日志。升级后验证新任务开始时间更新、候选进度继续增加、完成状态落库；清理超时应明确提示稍后再次续扫。
+
 后端部署后，还需通过现有 Agent runtime 更新流程部署并重启持续发送请求的 Agent，使停报逻辑生效；已经运行的旧 Agent 进程不会因后端升级自动改变重试行为。验收时确认概览正常返回、过期身份只记录一次停报日志、新执行能重新上报，并观察后端不再收到该旧身份的持续请求。
 
 ## 清理与回滚

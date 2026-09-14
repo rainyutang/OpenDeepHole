@@ -117,94 +117,32 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | None:
-    """Dispatch a command message from the server to the appropriate handler."""
+async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> None:
     import deephole_client.server as agent_server
 
-    cmd_type = msg.get("type")
-
-    if cmd_type == "task":
-        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
-        if msg.get("runtime_update_only"):
-            post_update_command = msg.get("post_update_command")
-            if isinstance(post_update_command, dict):
-                return await _handle_command(post_update_command, config, task_manager, reporter)
-            return None
-        execution_revision = int(msg.get("execution_revision") or 0)
-        await _set_reporter_execution(
-            reporter, "set_scan_execution", msg["scan_id"], execution_revision
-        )
-        await agent_server.handle_task(
-            scan_id=msg["scan_id"],
-            project_path=msg["project_path"],
-            code_scan_path=msg.get("code_scan_path"),
-            multi_versions=(
-                msg.get("multi_versions")
-                if isinstance(msg.get("multi_versions"), list)
-                else None
-            ),
-            checkers=msg.get("checkers", []),
-            scan_name=msg.get("scan_name", ""),
-            scan_mode=msg.get("scan_mode", "custom"),
-            threat_analysis_enabled=bool(
-                msg.get("threat_analysis_enabled")
-            ),
-            threat_analysis_method=str(
-                msg.get("threat_analysis_method")
-                or "deephole_threat_analysis"
-            ),
-            product=msg.get("product", ""),
-            validation_environment=msg.get("validation_environment", ""),
-            vulnerability_validation=(
-                msg.get("vulnerability_validation")
-                if isinstance(msg.get("vulnerability_validation"), dict)
-                else None
-            ),
-            code_graph_mcp=(
-                msg.get("code_graph_mcp")
-                if isinstance(msg.get("code_graph_mcp"), dict)
-                else None
-            ),
-            knowledge_base_mcp=(
-                msg.get("knowledge_base_mcp")
-                if isinstance(msg.get("knowledge_base_mcp"), dict)
-                else None
-            ),
-            feedback_entries=msg.get("feedback_entries", []),
-            checker_packages=msg.get("checker_packages", []),
-            mining_engines=(
-                msg.get("mining_engines")
-                if isinstance(msg.get("mining_engines"), list)
-                else None
-            ),
-            codex_model_ids=(
-                msg.get("codex_model_ids")
-                if isinstance(msg.get("codex_model_ids"), list)
-                else None
-            ),
-            execution_revision=execution_revision,
-        )
-    elif cmd_type == "stop":
-        result = await agent_server.handle_stop(msg["scan_id"])
-        request_id = str(msg.get("request_id") or "")
-        if request_id:
-            return {
-                "type": "scan_stop_result",
-                "request_id": request_id,
-                "scan_id": msg["scan_id"],
-                **result,
-            }
-    elif cmd_type == "resume":
+    scan_id = msg["scan_id"]
+    revision = int(msg.get("execution_revision") or 0)
+    if agent_server.scan_command_is_obsolete(scan_id, revision):
+        return
+    try:
+        await agent_server.prepare_scan_resume(scan_id, revision)
         await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         manifest_url = str(msg.get("resume_manifest_url") or "").strip()
         if manifest_url:
             manifest = await reporter.fetch_resume_manifest(manifest_url)
+            if (
+                str(manifest.get("scan_id") or msg["scan_id"]) != msg["scan_id"]
+                or (revision > 0 and int(manifest.get("execution_revision") or 0) != revision)
+            ):
+                raise RuntimeError("续扫 manifest 与命令执行轮次不一致，请再次续扫")
             msg = {
                 **manifest,
                 "type": "resume",
                 "scan_id": msg["scan_id"],
             }
         execution_revision = int(msg.get("execution_revision") or 0)
+        if agent_server.scan_command_is_obsolete(msg["scan_id"], execution_revision):
+            return
         await _set_reporter_execution(
             reporter, "set_scan_execution", msg["scan_id"], execution_revision
         )
@@ -271,6 +209,102 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             ),
             execution_revision=execution_revision,
         )
+    except Exception as exc:
+        if reporter is not None:
+            try:
+                await reporter.report_scan_start_failure(scan_id, revision, f"续扫启动失败：{exc}")
+            except Exception as report_error:
+                print(f"Failed to report scan startup error for {scan_id}: {report_error}")
+        raise
+
+
+async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | None:
+    """Dispatch a command message from the server to the appropriate handler."""
+    import deephole_client.server as agent_server
+
+    cmd_type = msg.get("type")
+
+    if cmd_type == "task":
+        if not msg.get("runtime_update_only") and agent_server.scan_command_is_obsolete(
+            msg["scan_id"], int(msg.get("execution_revision") or 0),
+        ):
+            return None
+        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
+        if msg.get("runtime_update_only"):
+            post_update_command = msg.get("post_update_command")
+            if isinstance(post_update_command, dict):
+                return await _handle_command(post_update_command, config, task_manager, reporter)
+            return None
+        execution_revision = int(msg.get("execution_revision") or 0)
+        await _set_reporter_execution(
+            reporter, "set_scan_execution", msg["scan_id"], execution_revision
+        )
+        await agent_server.handle_task(
+            scan_id=msg["scan_id"],
+            project_path=msg["project_path"],
+            code_scan_path=msg.get("code_scan_path"),
+            multi_versions=(
+                msg.get("multi_versions")
+                if isinstance(msg.get("multi_versions"), list)
+                else None
+            ),
+            checkers=msg.get("checkers", []),
+            scan_name=msg.get("scan_name", ""),
+            scan_mode=msg.get("scan_mode", "custom"),
+            threat_analysis_enabled=bool(
+                msg.get("threat_analysis_enabled")
+            ),
+            threat_analysis_method=str(
+                msg.get("threat_analysis_method")
+                or "deephole_threat_analysis"
+            ),
+            product=msg.get("product", ""),
+            validation_environment=msg.get("validation_environment", ""),
+            vulnerability_validation=(
+                msg.get("vulnerability_validation")
+                if isinstance(msg.get("vulnerability_validation"), dict)
+                else None
+            ),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
+            knowledge_base_mcp=(
+                msg.get("knowledge_base_mcp")
+                if isinstance(msg.get("knowledge_base_mcp"), dict)
+                else None
+            ),
+            feedback_entries=msg.get("feedback_entries", []),
+            checker_packages=msg.get("checker_packages", []),
+            mining_engines=(
+                msg.get("mining_engines")
+                if isinstance(msg.get("mining_engines"), list)
+                else None
+            ),
+            codex_model_ids=(
+                msg.get("codex_model_ids")
+                if isinstance(msg.get("codex_model_ids"), list)
+                else None
+            ),
+            execution_revision=execution_revision,
+        )
+    elif cmd_type == "stop":
+        revision_options = (
+            {"execution_revision": int(msg["execution_revision"])}
+            if "execution_revision" in msg else {}
+        )
+        result = await agent_server.handle_stop(msg["scan_id"], **revision_options)
+        request_id = str(msg.get("request_id") or "")
+        if request_id:
+            return {
+                "type": "scan_stop_result",
+                "request_id": request_id,
+                "scan_id": msg["scan_id"],
+                **result,
+            }
+    elif cmd_type == "resume":
+        await _handle_resume_command(msg, config, task_manager, reporter)
     elif cmd_type == "fp_review":
         await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         execution_revision = int(msg.get("execution_revision") or 0)
@@ -560,6 +594,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 reporter.set_agent_id(agent_id)
                 reporter.set_protocol_version(int(welcome.get("protocol_version") or 1))
                 reporter.set_capabilities(welcome.get("capabilities"))
+                reporter.confirm_scan_executions(welcome.get("scan_executions"))
 
                 if welcome.get("config"):
                     from deephole_client.config import save_config

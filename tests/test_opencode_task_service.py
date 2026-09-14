@@ -3482,6 +3482,46 @@ def test_cancel_execution_only_stops_matching_business_owner(tmp_path: Path) -> 
     asyncio.run(run())
 
 
+def test_old_scan_stop_does_not_cancel_newer_revision(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        queued = {8: asyncio.Event(), 9: asyncio.Event()}
+
+        async def acquire(*_args, **kwargs):
+            record = service._records[kwargs["task_id"]]
+            queued[record.execution_context.task_metadata["execution_revision"]].set()
+            while not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.005)
+            return None
+
+        with (
+            patch("task_agent.task_service.get_config", return_value=_config()),
+            patch("task_agent.task_service.acquire_model_lease", side_effect=acquire),
+            patch("task_agent.task_service.release_model_lease", new=AsyncMock()),
+        ):
+            tasks = {}
+            for revision in queued:
+                with _task_context(
+                    tmp_path, execution_kind="scan", execution_id="same-scan",
+                    task_metadata={"execution_revision": revision},
+                ):
+                    tasks[revision] = service.submit_task(OpenCodeTaskSpec(
+                        task_name=f"revision {revision}", prompt="wait", directory=tmp_path,
+                    ))
+            await asyncio.gather(*(event.wait() for event in queued.values()))
+            try:
+                result = await service.cancel_execution(
+                    "scan", "same-scan", execution_revision=8, timeout_seconds=1,
+                )
+                assert result["matched_tasks"] == 1 and result["active_tasks"] == 0
+                assert tasks[8].status == "cancelled"
+                assert tasks[9].status == "queued"
+            finally:
+                await service.cancel_execution("scan", "same-scan", timeout_seconds=1)
+
+    asyncio.run(run())
+
+
 def test_run_sync_component_cancellation_unwinds_owner_loop_task() -> None:
     async def run() -> None:
         owner_started = asyncio.Event()

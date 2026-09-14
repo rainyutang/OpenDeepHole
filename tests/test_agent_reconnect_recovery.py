@@ -1139,6 +1139,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 start_fp_review.assert_not_awaited()
 
     def test_callback_capability_recovers_only_after_welcome(self) -> None:
+        recovered = asyncio.Event()
+
         class FakeClient:
             host = "127.0.0.1"
 
@@ -1164,6 +1166,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             async def receive_json(self):
                 if self.messages:
                     return self.messages.pop(0)
+                await recovered.wait()
                 raise agent_api.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
@@ -1178,6 +1181,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         async def resume(*_args, **kwargs) -> None:
             self.assertEqual(websocket.sent[0]["type"], "welcome")
             self.assertEqual(kwargs["server_url"], "http://server")
+            recovered.set()
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2330,6 +2334,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         self.assertEqual(task["failure_kind"], "timeout")
         self.assertEqual(task["failure_reason"], "slow")
 
+    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2417,6 +2422,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(manifest["agent_runtime_update"], {"hash": "runtime-current"})
             self.assertEqual(manifest["code_graph_mcp"], graph.model_dump(mode="json"))
 
+    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_retry_incomplete_scan_dispatches_retryable_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2560,6 +2566,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 [1, 2, 3],
             )
 
+    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_dispatches_unprocessed_failed_and_threat_audit_work_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2793,6 +2800,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "2026-01-01T00:01:00+00:00",
             )
 
+    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_preserves_analysis_only_empty_engine_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2866,6 +2874,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["mining_engines"], [])
             self.assertEqual(sent["retry_mining_engine_ids"], [])
 
+    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_failed_threat_analysis_retries_pattern_engine_without_rerunning_successful_engine(
         self,
     ) -> None:

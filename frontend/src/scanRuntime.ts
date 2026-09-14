@@ -355,10 +355,22 @@ export function normalizeOpenCodePool(value: unknown): OpenCodePoolStatus | null
 /** Overview-based snapshots omit artifacts; their null is not a deletion. */
 export function mergeScanSnapshot(previous: ScanStatus | null, incoming: ScanStatus): ScanStatus {
   if (previous?.scan_id !== incoming.scan_id) return incoming;
+  if (isOlderScanExecution(previous.opencode_pool, incoming.opencode_pool)) return previous;
   return {
     ...incoming,
+    opencode_pool: selectOpenCodePoolSnapshot(previous.opencode_pool, incoming.opencode_pool, {
+      allowClear: incoming.opencode_pool === null,
+    }),
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
   };
+}
+
+export function isOlderScanExecution(
+  current: { execution_revision?: number } | null | undefined,
+  incoming: { execution_revision?: number } | null | undefined,
+): boolean {
+  return typeof incoming?.execution_revision === "number"
+    && incoming.execution_revision < (current?.execution_revision ?? 0);
 }
 
 export function normalizeScanStatus(value: unknown): ScanStatus | null {

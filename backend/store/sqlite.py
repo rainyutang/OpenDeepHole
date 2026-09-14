@@ -3069,8 +3069,16 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
         *,
         processed_candidates: int,
         progress: float,
-    ) -> bool:
+        expected_revision: int | None = None,
+        agent_id: str | None = None,
+        agent_session_id: str | None = None,
+        claimed_revision: int | None = None,
+    ) -> int | None:
         """Claim one terminal scan for resume across processes and workers."""
+        if claimed_revision is not None and (
+            claimed_revision <= 0 or claimed_revision != expected_revision
+        ):
+            raise ValueError("Recovery must retain its expected execution revision")
         with self._lock:
             row = self._conn.execute(
                 """\
@@ -3079,29 +3087,40 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
                     processed_candidates = ?,
                     progress = ?,
                     error_message = '',
-                    current_candidate = NULL
+                    current_candidate = NULL,
+                    agent_id = COALESCE(?, agent_id),
+                    execution_agent_session_id = COALESCE(?, execution_agent_session_id),
+                    execution_revision = COALESCE(?, execution_revision + 1)
                 WHERE scan_id = ?
                   AND status IN ('complete', 'error', 'cancelled')
-                RETURNING opencode_pool
+                  AND execution_revision = COALESCE(?, execution_revision)
+                RETURNING opencode_pool, execution_revision, execution_agent_session_id
                 """,
                 (
                     max(0, int(processed_candidates)),
                     max(0.0, min(1.0, float(progress))),
+                    agent_id,
+                    agent_session_id,
+                    claimed_revision,
                     scan_id,
+                    expected_revision,
                 ),
             ).fetchone()
             if row is None:
                 self._conn.commit()
-                return False
+                return None
+            pool = json.loads(_terminal_opencode_pool_json(row["opencode_pool"]))
+            pool["execution_revision"] = int(row["execution_revision"])
+            pool["agent_session_id"] = row["execution_agent_session_id"] or ""
             self._conn.execute(
                 "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
                 (
-                    _terminal_opencode_pool_json(row["opencode_pool"]),
+                    json.dumps(pool, ensure_ascii=False),
                     scan_id,
                 ),
             )
             self._conn.commit()
-            return True
+            return int(row["execution_revision"])
 
     def update_scan_agent(
         self,
@@ -5318,6 +5337,7 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
         *,
         previous_session_id: str,
         agent_session_id: str,
+        execution_revision: int | None = None,
     ) -> bool:
         if kind == "scan":
             sql = """\
@@ -5349,10 +5369,34 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
             )
         else:
             return False
+        if execution_revision is not None:
+            sql += " AND execution_revision = ?"
+            params = (*params, execution_revision)
         with self._lock:
             cursor = self._conn.execute(sql, params)
             self._conn.commit()
             return bool(cursor.rowcount)
+
+    def fail_scan_execution(
+        self, scan_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                """UPDATE scans SET status = 'error', error_message = ?,
+                       current_candidate = NULL
+                   WHERE scan_id = ? AND status = 'pending'
+                     AND execution_agent_session_id = ? AND execution_revision = ?
+                   RETURNING opencode_pool""",
+                (error_message, scan_id, agent_session_id, execution_revision),
+            ).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                    (_terminal_opencode_pool_json(row["opencode_pool"]), scan_id),
+                )
+            self._conn.commit()
+            return row is not None
 
     def claim_fp_review_for_agent_recovery(
         self,

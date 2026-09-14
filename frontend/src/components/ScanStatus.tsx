@@ -40,6 +40,7 @@ import FeedbackManager from "./FeedbackManager";
 import { ThemeToggle } from "./ThemeToggle";
 import {
   findIndexedVulnerability,
+  isOlderScanExecution,
   mergeIndexedVulnerabilities,
   mergeScanSnapshot,
   normalizeOpenCodePool,
@@ -1061,6 +1062,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     onStateRefresh: () => setThreatResultRevision((value) => value + 1),
     onScanStatus: (data) => {
       setScan((prev) => {
+        if (prev && isOlderScanExecution(prev.opencode_pool, data.opencode_pool)) return prev;
         if (!prev) {
           if (data.opencode_pool !== undefined) {
             const incomingPool = data.opencode_pool === null
@@ -1077,6 +1079,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           return prev;
         }
         const patch: Partial<ScanStatusType> = {};
+        if (data.error_message !== undefined) patch.error_message = data.error_message;
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
         if (data.progress != null && data.progress !== prev.progress) patch.progress = data.progress;
         const nextTotal = data.total_candidates ?? prev.total_candidates;
@@ -1376,7 +1379,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     },
     onScanFinish: (data) => {
       setScan((prev) =>
-        prev ? { ...prev, status: data.status as ScanItemStatus, error_message: data.error_message } : prev,
+        prev && !isOlderScanExecution(prev.opencode_pool, data)
+          ? { ...prev, status: data.status as ScanItemStatus, error_message: data.error_message }
+          : prev,
       );
       scheduleOverviewSummaryRefresh(0);
     },

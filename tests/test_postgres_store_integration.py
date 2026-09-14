@@ -336,12 +336,12 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             stale_scan.scan_id,
             processed_candidates=0,
             progress=0.0,
-        ) is True
+        ) == 1
         assert peer.claim_scan_for_resume(
             stale_scan.scan_id,
             processed_candidates=0,
             progress=0.0,
-        ) is False
+        ) is None
     finally:
         recovery_store.close()
         peer.close()

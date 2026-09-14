@@ -196,11 +196,15 @@ class ScanStoreBase(ABC):
         *,
         processed_candidates: int,
         progress: float,
-    ) -> bool:
-        """Atomically move a terminal scan to pending for one resume attempt.
+        expected_revision: int | None = None,
+        agent_id: str | None = None,
+        agent_session_id: str | None = None,
+        claimed_revision: int | None = None,
+    ) -> int | None:
+        """Atomically claim a terminal scan and bind its execution identity.
 
-        Returns ``False`` when the scan is missing, is not terminal, or another
-        request has already moved it into a running state.
+        Return the new revision, or None if the state/revision changed. Recovery
+        can retain its already reserved revision using ``claimed_revision``.
         """
 
     # -- Static-analysis candidates --
@@ -568,8 +572,16 @@ class ScanStoreBase(ABC):
         *,
         previous_session_id: str,
         agent_session_id: str,
+        execution_revision: int | None = None,
     ) -> bool:
         """Rebind an Agent-reported active execution without changing revision."""
+        raise NotImplementedError
+
+    def fail_scan_execution(
+        self, scan_id: str, *, agent_session_id: str,
+        execution_revision: int, error_message: str,
+    ) -> bool:
+        """Fail only the matching pending execution without replacing results."""
         raise NotImplementedError
 
     def claim_scan_for_agent_recovery(

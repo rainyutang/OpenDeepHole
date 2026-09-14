@@ -129,6 +129,17 @@ def has_active_local_work() -> bool:
 
 
 async def _run(task, is_resume: bool) -> None:
+    from deephole_client.reporter import scan_execution_context
+    from task_agent.task_service import bind_opencode_execution_context
+
+    with (
+        scan_execution_context(task.scan_id, task.execution_revision),
+        bind_opencode_execution_context(task_metadata={"execution_revision": task.execution_revision}),
+    ):
+        await _run_scan(task, is_resume)
+
+
+async def _run_scan(task, is_resume: bool) -> None:
     """Run a scan task, refreshing config from server first."""
     if _reporter is not None and _agent_id is not None:
         try:
@@ -233,11 +244,22 @@ async def handle_task(
     print(f"Started task {scan_id}")
 
 
-async def handle_stop(scan_id: str) -> dict[str, Any]:
+async def handle_stop(
+    scan_id: str, *, execution_revision: int | None = None,
+) -> dict[str, Any]:
     """Stop one scan's Task Agent work and report whether it has quiesced."""
     from task_agent import cancel_opencode_execution
 
     task = _task_manager.get(scan_id) if _task_manager is not None else None
+    if (
+        task is not None and execution_revision is not None
+        and task.execution_revision > execution_revision
+    ):
+        return {
+            "found": False, "cancelled_opencode_tasks": 0,
+            "still_active": True, "error": "扫描已切换到更新的执行轮次",
+            "execution_revision": execution_revision,
+        }
     stopped = bool(_task_manager is not None and _task_manager.stop(scan_id))
     if stopped:
         print(f"Stopping task {scan_id}")
@@ -251,10 +273,15 @@ async def handle_stop(scan_id: str) -> dict[str, Any]:
     }
     cancellation_error = ""
     try:
+        revision_options = (
+            {"execution_revision": execution_revision}
+            if execution_revision is not None else {}
+        )
         cancellation = await cancel_opencode_execution(
             "scan",
             scan_id,
             timeout_seconds=5.0,
+            **revision_options,
         )
     except Exception as exc:
         cancellation_error = f"{type(exc).__name__}: {exc}"
@@ -282,12 +309,40 @@ async def handle_stop(scan_id: str) -> dict[str, Any]:
         and not task.asyncio_task.done()
     )
     still_active = scan_active or int(cancellation.get("active_tasks") or 0) > 0
-    return {
+    result = {
         "found": stopped or int(cancellation.get("matched_tasks") or 0) > 0,
         "cancelled_opencode_tasks": int(cancellation.get("cancelled_tasks") or 0),
         "still_active": still_active,
         "error": cancellation_error,
     }
+    if execution_revision is not None:
+        result["execution_revision"] = execution_revision
+    return result
+
+
+def scan_command_is_obsolete(scan_id: str, revision: int) -> bool:
+    return bool(
+        _task_manager is not None
+        and _task_manager.has_seen_execution(scan_id, revision)
+    )
+
+
+async def prepare_scan_resume(scan_id: str, revision: int) -> None:
+    """Bound old-task cleanup without binding the new Reporter identity."""
+    previous = _task_manager.get(scan_id) if _task_manager is not None else None
+    if previous is None or previous.asyncio_task is None or previous.asyncio_task.done():
+        return
+    previous.cancel_event.suppress_terminal_report = True
+    try:
+        # handle_stop already bounds Task Agent and scanner waits to 5 + 2 s.
+        result = await asyncio.wait_for(
+            handle_stop(scan_id, execution_revision=revision), timeout=8.0,
+        )
+        if result["still_active"] or result["error"]:
+            raise RuntimeError("旧扫描清理超时或失败，请稍后再次续扫")
+    except BaseException:
+        previous.cancel_event.suppress_terminal_report = False
+        raise
 
 
 async def handle_resume(
@@ -319,6 +374,9 @@ async def handle_resume(
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
+        return
+
+    if scan_command_is_obsolete(scan_id, execution_revision):
         return
 
     previous = _task_manager.get(scan_id)
@@ -402,23 +460,9 @@ async def handle_resume(
         else copy.deepcopy(previous_value("multi_versions", []))
     )
 
-    if (
-        previous is not None
-        and previous.asyncio_task
-        and not previous.asyncio_task.done()
-    ):
-        # Stop cooperatively and wait for synchronous component workers to
-        # observe the old event before creating a task that reuses scan paths.
-        previous.cancel_event.suppress_terminal_report = True
-        previous.cancel_event.set()
-        try:
-            await asyncio.shield(previous.asyncio_task)
-        except asyncio.CancelledError:
-            if not previous.asyncio_task.done():
-                previous.cancel_event.suppress_terminal_report = False
-                raise
-        except Exception:
-            pass
+    await prepare_scan_resume(scan_id, execution_revision)
+    if scan_command_is_obsolete(scan_id, execution_revision):
+        return
     if previous is not None:
         _task_manager.remove(scan_id, previous)
 

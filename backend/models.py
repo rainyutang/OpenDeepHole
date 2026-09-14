@@ -919,6 +919,12 @@ class AgentScanRegister(BaseModel):
     agent_version: str = ""
 
 
+class AgentScanExecutionFailure(BaseModel):
+    agent_session_id: str
+    execution_revision: int = Field(ge=0)
+    error_message: str
+
+
 class AgentScanFinish(BaseModel):
     """Sent by the agent when the scan completes (success or error)."""
     vulnerabilities: list[Vulnerability]

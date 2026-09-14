@@ -31,6 +31,8 @@ SQLite 仍用于单机兼容和开发环境，但只允许一个后端 Worker。
 - 候选审计和威胁审计的“排队中”只来自真实模型租约等待队列，“运行中”只在取得租约后产生；OpenCode 轻量级威胁分析会先登记一个扫描级“计划中”逻辑任务，首次 Lease 消费同一身份，因此页面连续显示计划、排队、运行和终态而不会重复计数。扫描级快照在首次租约前也包含已配置模型的零值容量行。模型池 POST 会检查非 2xx，失败时每 2 秒以内重试最新快照；首次失败及持续失败的限频采样会写 Agent 日志，恢复后记录恢复日志；若服务端以 413 拒绝，Agent 去除 Prompt 和非身份明细、标记 `details_truncated` 后重发。
 - 用户停止扫描时，服务端先持久化取消意图，再通过带 request ID 的命令等待 Agent 有界确认；Agent 按扫描执行身份取消精确归属的 Task Agent 记录和 OpenCode Session，不终止共享 Serve。未收到确认时 API 返回 `agent_stop_state="pending"`，页面明确提示并依赖上述重连对账继续补发；迟到的同 revision 完成报告不能覆盖已持久化的“用户手动停止”。
 - 恢复状态通过短期 HTTP manifest 获取，不再把大列表塞进 WebSocket 控制帧。
+- 停止后续扫先用旧 `execution_revision` 请求 Agent 确认清理，最长等待 10 秒；未确认、仍在清理或清理报错时返回可重试的 409，不领取新轮次。确认后将 `pending` 状态与新 revision 原子写入，Agent 有界等待旧任务退出后才同步运行时、校验 manifest 并绑定新上报身份；启动失败按 session/revision 写入可重试错误。迟到的旧停止命令只能取消不高于其轮次的任务，已接受过的重复/旧续扫命令被忽略。扫描 `created_at` 和已完成历史保持原值，新任务的开始时间使用本轮实际启动时间。
+- 重连活动扫描及待发终态按扫描 ID 和执行轮次匹配，已请求取消的本地任务不算活动执行。服务端在发送 welcome 前完成活动执行的 session 接管，并在 welcome 中返回接受的轮次；Agent 只对这些明确确认的身份解除模型池过期停报。恢复调度在独立异步任务内运行，WebSocket 同时接收停止确认和心跳，避免等待自己尚未读取的停止回复。
 - 心跳先立即 ACK，持久化最多每 10 秒合并一次，数据库抖动不会直接阻塞心跳响应。
 - 服务端先升级后，可继续接受 v1 Agent 一个发布周期。Agent 应逐台更新；手动更新以服务端持久化的扫描、去误报和验证生命周期为准，不中断仍在执行或刚提交的任务。Agent 上报的模型池快照只用于观测，不参与更新阻塞，因此用户停止全部任务后，即使快照短暂残留 `running` / `queued`，下一次调度也会下发更新。新建扫描和续扫仍会在任务命令中携带自动运行时更新，并在任务执行前完成客户端更新。
 - WebSocket 断开和后端重启不会直接 `exec` Agent。内部进程替换只由运行时包更新触发，且本地存在扫描、去误报或验证时会延后；日志中的 `RESTART_REQUESTED`/`PROCESS_RESTARTED reason=runtime_update` 可确认该路径。只有 `PROCESS_STARTED reason=initial_or_external_supervisor` 时，需转查 systemd、容器 restart policy、批处理脚本或其它外部守护进程。
