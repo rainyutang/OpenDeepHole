@@ -80,8 +80,11 @@ def _store() -> tuple[tempfile.TemporaryDirectory, SqliteScanStore]:
 
 
 @pytest.fixture
-def candidate_store():
+def candidate_store(monkeypatch):
     temporary, store = _store()
+    # HTTP reports also pass through the deletion guard before the endpoint.
+    monkeypatch.setattr("backend.report_routes.get_scan_store", lambda: store)
+    monkeypatch.setattr("backend.report_routes.run_store_call", _direct_store_call)
     try:
         store.replace_scan_candidates("scan-1", [ScanCandidate(
             idx=7,

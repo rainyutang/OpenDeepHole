@@ -1983,21 +1983,34 @@ async def _resume_final_callback_downstream(
 async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     """Load a recoverable scan into memory when events arrive after restart."""
     scan = _running_scans.get(scan_id)
-    if scan is not None:
-        return scan
-
     store = get_scan_store()
     distributed = bool(getattr(store, "distributed", False))
+    if scan is not None and not distributed:
+        return scan
+
+    # Other PostgreSQL workers may have resumed or finished this scan. Runtime
+    # rows are small; never reuse a worker's old lifecycle/counters as truth.
     loaded = await run_store_call(
         store,
         "load_scan_runtime" if distributed else "load_scan",
         scan_id,
     )
     if loaded is None:
+        _running_scans.pop(scan_id, None)
         return None
 
+    cached = scan
     scan, meta = loaded[:2]
+    if cached is not None and cached.execution_revision == scan.execution_revision:
+        # Runtime reads omit separately loaded results. Keep those collections
+        # within the same execution while refreshing lifecycle and counters.
+        for field in (
+            "candidates", "vulnerabilities", "skill_reports", "threat_analysis",
+            "threat_audit_tasks", "validations", "events",
+        ):
+            setattr(scan, field, getattr(cached, field))
     if not _is_infrastructure_interruption(scan.status, scan.error_message):
+        _running_scans.pop(scan_id, None)
         return None
 
     if scan.status not in _RUNNING_SCAN_STATUSES:
@@ -2159,6 +2172,7 @@ async def _mark_agent_scans_cancelled_async(agent_id: str) -> None:
         for scan_id, loaded in zip(sorted(cancelled_scan_ids), refreshed):
             persisted = loaded[0] if loaded is not None else None
             publish(scan_id, "scan_status", {
+                "execution_revision": persisted.execution_revision if persisted else 0,
                 "status": ScanItemStatus.CANCELLED,
                 "error_message": AGENT_DISCONNECT_ERROR,
                 "opencode_pool": (
@@ -3708,18 +3722,16 @@ def _apply_agent_event_to_scan(scan, event: ScanEvent) -> dict:
     return progress_kwargs
 
 
-def _publish_agent_event_state(scan_id: str, scan, events: list[ScanEvent]) -> None:
+def _publish_agent_event_state(
+    scan_id: str, scan, events: list[ScanEvent], changes: dict,
+) -> None:
     from backend.sse import publish
 
-    publish(scan_id, "scan_status", {
-        "status": scan.status if scan else None,
-        "progress": scan.progress if scan else None,
-        "total_candidates": scan.total_candidates if scan else None,
-        "processed_candidates": scan.processed_candidates if scan else None,
-        "static_total_files": scan.static_total_files if scan else None,
-        "static_scanned_files": scan.static_scanned_files if scan else None,
-        "static_analysis_done": scan.static_analysis_done if scan else None,
-    })
+    if changes:
+        publish(scan_id, "scan_status", {
+            **changes,
+            "execution_revision": scan.execution_revision,
+        })
     for event in events:
         publish(scan_id, "scan_event", {"event": event.model_dump()})
 
@@ -3745,7 +3757,7 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     if progress_kwargs:
         await run_store_call(store, "update_scan_progress", scan_id, **progress_kwargs)
 
-    _publish_agent_event_state(scan_id, scan, [event])
+    _publish_agent_event_state(scan_id, scan, [event], progress_kwargs)
 
     return {"ok": True}
 
@@ -3781,7 +3793,7 @@ async def agent_scan_events_v2(
         progress_kwargs.update(_apply_agent_event_to_scan(scan, event))
     if progress_kwargs:
         await run_store_call(store, "update_scan_progress", scan_id, **progress_kwargs)
-    _publish_agent_event_state(scan_id, scan, events)
+    _publish_agent_event_state(scan_id, scan, events, progress_kwargs)
     return {"ok": True, "count": stored_count}
 
 
@@ -3905,7 +3917,7 @@ async def _reconcile_candidate_progress(
     reported_total: int | None = None,
     publish_update: bool = True,
 ) -> tuple[int, int]:
-    """Persist monotonic, bounded candidate progress and refresh live state."""
+    """Persist candidate-row progress and refresh the matching live execution."""
     store = get_scan_store()
     loaded = await run_store_call(store, "load_scan_overview", scan_id)
     if loaded is None:
@@ -3913,9 +3925,9 @@ async def _reconcile_candidate_progress(
             0,
             int(reported_total or 0),
         )
-    stored_scan, _meta, counts = loaded
+    stored_scan, meta, counts = loaded
     live = _running_scans.get(scan_id)
-    scan = live or stored_scan
+    scan = stored_scan
     terminal_audit_count, processed_key_count = await asyncio.gather(
         run_store_call(store, "count_terminal_candidate_audits", scan_id),
         # Legacy Agents still checkpoint location tuples. New Agents use the
@@ -3928,7 +3940,6 @@ async def _reconcile_candidate_progress(
         raw_processed = max(
             processed_key_count,
             int(stored_scan.processed_candidates or 0),
-            int(scan.processed_candidates or 0),
             max(0, int(reported_processed or 0)),
         )
     total, processed = _normalize_candidate_progress(
@@ -3949,17 +3960,19 @@ async def _reconcile_candidate_progress(
     scan.total_candidates = total
     scan.processed_candidates = processed
     scan.progress = progress
+    if live is not None and live.execution_revision == meta.execution_revision:
+        live.total_candidates = total
+        live.processed_candidates = processed
+        live.progress = progress
     if publish_update:
         from backend.sse import publish
 
         publish(scan_id, "scan_status", {
+            "execution_revision": meta.execution_revision,
             "status": scan.status,
             "progress": scan.progress,
             "total_candidates": total,
             "processed_candidates": processed,
-            "static_total_files": scan.static_total_files,
-            "static_scanned_files": scan.static_scanned_files,
-            "static_analysis_done": scan.static_analysis_done,
         })
     return processed, total
 
@@ -4072,7 +4085,6 @@ async def agent_report_mining_engine_run(
     if body.engine_id == _STATIC_CANDIDATE_ENGINE_ID:
         await _reconcile_candidate_progress(
             scan_id,
-            publish_update=False,
         )
     from backend.sse import publish
 
@@ -4080,25 +4092,6 @@ async def agent_report_mining_engine_run(
         "run": body.model_dump(mode="json"),
         "runs": [item.model_dump(mode="json") for item in runs],
     })
-    if body.engine_id == _STATIC_CANDIDATE_ENGINE_ID:
-        current = _running_scans.get(scan_id)
-        if current is None:
-            refreshed = await run_store_call(
-                store,
-                "load_scan_runtime",
-                scan_id,
-            )
-            current = refreshed[0] if refreshed is not None else None
-        if current is not None:
-            publish(scan_id, "scan_status", {
-                "status": current.status,
-                "progress": current.progress,
-                "total_candidates": current.total_candidates,
-                "processed_candidates": current.processed_candidates,
-                "static_total_files": current.static_total_files,
-                "static_scanned_files": current.static_scanned_files,
-                "static_analysis_done": current.static_analysis_done,
-            })
     return {"ok": True, "run": body.model_dump(mode="json")}
 
 
@@ -4544,21 +4537,11 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
     processed, total = await _reconcile_candidate_progress(
         scan_id,
         reported_total=total,
-        publish_update=False,
     )
 
     from backend.sse import publish
     publish(scan_id, "scan_candidates", {
         "candidates": [candidate.model_dump() for candidate in candidates],
-    })
-    publish(scan_id, "scan_status", {
-        "status": scan.status if scan else None,
-        "progress": scan.progress if scan else None,
-        "total_candidates": total,
-        "processed_candidates": processed,
-        "static_total_files": scan.static_total_files if scan else None,
-        "static_scanned_files": scan.static_scanned_files if scan else None,
-        "static_analysis_done": scan.static_analysis_done if scan else None,
     })
     logger.info("Stored %d static candidate(s) for scan %s", total, scan_id)
     return {"ok": True, "count": total}
@@ -5139,6 +5122,7 @@ async def agent_scan_execution_failed(scan_id: str, body: AgentScanExecutionFail
             _running_scans.pop(scan_id, None)
             _scan_owners.pop(scan_id, None)
         publish(scan_id, "scan_status", {
+            "execution_revision": body.execution_revision,
             "status": "error", "error_message": body.error_message,
             "opencode_pool": {"execution_revision": body.execution_revision, "agent_session_id": body.agent_session_id},
         })
@@ -5367,6 +5351,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
             "count": len(final_vulnerabilities),
         })
     publish(scan_id, "scan_status", {
+        "execution_revision": existing.execution_revision,
         "status": final_status,
         "progress": 1.0 if final_status == ScanItemStatus.COMPLETE else (existing_scan.progress if existing_scan else None),
         "total_candidates": final_total,
@@ -5376,7 +5361,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     publish(scan_id, "scan_finish", {
         "status": final_status.value,
         "error_message": final_error_message,
-        "execution_revision": body.execution_revision,
+        "execution_revision": existing.execution_revision,
     })
 
     confirmed = sum(1 for vuln in final_vulnerabilities if vuln.confirmed)
@@ -5621,13 +5606,9 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
     publish(scan_id, "index_status", payload)
     if scan is not None and file_counts is not None:
         publish(scan_id, "scan_status", {
-            "status": scan.status,
-            "progress": scan.progress,
-            "total_candidates": scan.total_candidates,
-            "processed_candidates": scan.processed_candidates,
+            "execution_revision": scan.execution_revision,
             "static_total_files": scan.static_total_files,
             "static_scanned_files": scan.static_scanned_files,
-            "static_analysis_done": scan.static_analysis_done,
         })
 
     return {"ok": True}
@@ -5689,10 +5670,8 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
     if scan is not None:
         from backend.sse import publish
         publish(scan_id, "scan_status", {
-            "status": scan.status,
-            "progress": scan.progress,
-            "total_candidates": scan.total_candidates,
-            "processed_candidates": scan.processed_candidates,
+            "execution_revision": scan.execution_revision,
+            **({"status": status} if status is not None else {}),
             "static_total_files": scan.static_total_files,
             "static_scanned_files": scan.static_scanned_files,
             "static_analysis_done": scan.static_analysis_done,
@@ -5741,20 +5720,14 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     )
 
     scan = None if terminal else _running_scans.get(scan_id)
-    if scan is not None:
+    if scan is not None and scan.execution_revision == body.execution_revision:
         scan.opencode_pool = status
 
     from backend.sse import publish
     live_pool = status.model_dump()
     live_pool.pop("completed_tasks", None)
     publish(scan_id, "scan_status", {
-        "status": scan.status if scan else None,
-        "progress": scan.progress if scan else None,
-        "total_candidates": scan.total_candidates if scan else None,
-        "processed_candidates": scan.processed_candidates if scan else None,
-        "static_total_files": scan.static_total_files if scan else None,
-        "static_scanned_files": scan.static_scanned_files if scan else None,
-        "static_analysis_done": scan.static_analysis_done if scan else None,
+        "execution_revision": status.execution_revision,
         "opencode_pool": live_pool,
     })
     return {"ok": True}

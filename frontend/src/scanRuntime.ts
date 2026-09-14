@@ -352,25 +352,80 @@ export function normalizeOpenCodePool(value: unknown): OpenCodePoolStatus | null
   } as OpenCodePoolStatus;
 }
 
-/** Overview-based snapshots omit artifacts; their null is not a deletion. */
-export function mergeScanSnapshot(previous: ScanStatus | null, incoming: ScanStatus): ScanStatus {
+type ScanExecutionState = {
+  execution_revision?: number | null;
+  opencode_pool?: { execution_revision?: number } | null;
+};
+
+export function scanExecutionRevision(value: ScanExecutionState | null | undefined): number | undefined {
+  return value?.execution_revision ?? value?.opencode_pool?.execution_revision;
+}
+
+const progressFields = [
+  "status", "error_message", "progress", "total_candidates", "processed_candidates",
+  "static_total_files", "static_scanned_files", "static_analysis_done",
+] as const;
+
+/** Merge a GET without letting a response started before a live update undo it. */
+export function mergeScanSnapshot(
+  previous: ScanStatus | null,
+  incoming: ScanStatus,
+  requestedFrom?: ScanStatus | null,
+): ScanStatus {
   if (previous?.scan_id !== incoming.scan_id) return incoming;
-  if (isOlderScanExecution(previous.opencode_pool, incoming.opencode_pool)) return previous;
+  if (isOlderScanExecution(previous, incoming)) return previous;
+  const newerExecution = (scanExecutionRevision(incoming) ?? 0) > (scanExecutionRevision(previous) ?? 0);
+  const updatedDuringRequest = requestedFrom !== undefined && !newerExecution && (
+    requestedFrom?.scan_id !== previous.scan_id
+    || scanExecutionRevision(requestedFrom) !== scanExecutionRevision(previous)
+    || progressFields.some((key) => previous[key] !== requestedFrom?.[key])
+  );
+  const runtime = updatedDuringRequest ? previous : incoming;
   return {
     ...incoming,
+    ...Object.fromEntries(progressFields.map((key) => [key, runtime[key]])),
+    execution_revision: scanExecutionRevision(runtime) ?? scanExecutionRevision(previous),
+    progress: runtime.total_candidates > 0
+      ? Math.min(1, Math.max(0, runtime.processed_candidates / runtime.total_candidates))
+      : runtime.progress,
+    ...(updatedDuringRequest ? {
+      detail_counts: previous.detail_counts,
+      retryable_candidates_count: previous.retryable_candidates_count,
+      continuable_task_count: previous.continuable_task_count,
+      can_continue: previous.can_continue,
+    } : {}),
     opencode_pool: selectOpenCodePoolSnapshot(previous.opencode_pool, incoming.opencode_pool, {
-      allowClear: incoming.opencode_pool === null,
+      allowClear: incoming.opencode_pool === null && !updatedDuringRequest
+        && ["complete", "error", "cancelled"].includes(incoming.status),
     }),
+    // Overview snapshots omit artifacts; null does not delete a loaded result.
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
   };
 }
 
+export function mergeScanOverview(
+  previous: ScanStatus | null, incoming: ScanStatus, requestedFrom?: ScanStatus | null,
+): ScanStatus {
+  const merged = mergeScanSnapshot(previous, incoming, requestedFrom);
+  if (!previous || previous.scan_id !== incoming.scan_id || merged === previous) return merged;
+  return {
+    ...merged,
+    candidates: previous.candidates,
+    vulnerabilities: previous.vulnerabilities,
+    skill_reports: previous.skill_reports,
+    threat_audit_tasks: previous.threat_audit_tasks,
+    validations: previous.validations,
+    events: previous.events,
+    detail_pages: previous.detail_pages,
+  };
+}
+
 export function isOlderScanExecution(
-  current: { execution_revision?: number } | null | undefined,
-  incoming: { execution_revision?: number } | null | undefined,
+  current: ScanExecutionState | null | undefined,
+  incoming: ScanExecutionState | null | undefined,
 ): boolean {
-  return typeof incoming?.execution_revision === "number"
-    && incoming.execution_revision < (current?.execution_revision ?? 0);
+  const revision = scanExecutionRevision(incoming);
+  return revision !== undefined && revision < (scanExecutionRevision(current) ?? 0);
 }
 
 export function normalizeScanStatus(value: unknown): ScanStatus | null {
@@ -389,6 +444,7 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
   return {
     ...value,
     scan_id: value.scan_id,
+    execution_revision: nullableFiniteNumber(value.execution_revision) ?? undefined,
     project_id: text(value.project_id),
     project_path: text(value.project_path),
     code_scan_path: text(value.code_scan_path),

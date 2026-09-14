@@ -43,6 +43,8 @@ import { ThemeToggle } from "./ThemeToggle";
 import {
   findIndexedVulnerability,
   isOlderScanExecution,
+  scanExecutionRevision,
+  mergeScanOverview,
   mergeIndexedVulnerabilities,
   mergeScanSnapshot,
   normalizeOpenCodePool,
@@ -269,15 +271,6 @@ function mergeRecentScanEvents(existing: ScanEvent[], incoming: ScanEvent[]): Sc
   }
   if (next.length === existing.length) return existing;
   return next.slice(-MAX_LOG_LINES);
-}
-
-function sameShallowValues(left: object | null | undefined, right: object | null | undefined): boolean {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  const leftRecord = left as Record<string, unknown>;
-  const rightRecord = right as Record<string, unknown>;
-  const keys = new Set([...Object.keys(leftRecord), ...Object.keys(rightRecord)]);
-  return [...keys].every((key) => leftRecord[key] === rightRecord[key]);
 }
 
 function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[] {
@@ -867,27 +860,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       const overview = await getScanOverview(scanId);
       setScan((previous) => {
         if (!previous || previous.scan_id !== overview.scan_id) return previous;
-        const totalCandidates = overview.total_candidates;
-        const detailCounts = overview.detail_counts ?? previous.detail_counts;
-        if (
-          totalCandidates === previous.total_candidates
-          && overview.processed_candidates === previous.processed_candidates
-          && overview.retryable_candidates_count === previous.retryable_candidates_count
-          && overview.continuable_task_count === previous.continuable_task_count
-          && overview.can_continue === previous.can_continue
-          && sameShallowValues(detailCounts, previous.detail_counts)
-        ) {
-          return previous;
-        }
-        return {
-          ...previous,
-          total_candidates: totalCandidates,
-          processed_candidates: overview.processed_candidates,
-          retryable_candidates_count: overview.retryable_candidates_count,
-          continuable_task_count: overview.continuable_task_count,
-          can_continue: overview.can_continue,
-          detail_counts: detailCounts,
-        };
+        return mergeScanOverview(previous, overview, current);
       });
     } catch {
       // SSE and the running-scan fallback poll will try again.
@@ -1011,6 +984,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setFpReviewHydrated(false);
     setIndexStatus(null);
     setGitHistory([]);
+    const requestedFrom = scanRef.current;
     getScanStatus(scanId)
       .then((data) => {
         if (cancelled || data.scan_id !== scanId) return;
@@ -1030,7 +1004,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             { allowClear: pendingPool === null },
           );
           return {
-            ...mergeScanSnapshot(previous, data),
+            ...mergeScanSnapshot(previous, data, requestedFrom),
             opencode_pool: opencodePool,
           };
         });
@@ -1065,7 +1039,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     onStateRefresh: () => setThreatResultRevision((value) => value + 1),
     onScanStatus: (data) => {
       setScan((prev) => {
-        if (prev && isOlderScanExecution(prev.opencode_pool, data.opencode_pool)) return prev;
+        if (prev && isOlderScanExecution(prev, data)) return prev;
         if (!prev) {
           if (data.opencode_pool !== undefined) {
             const incomingPool = data.opencode_pool === null
@@ -1082,9 +1056,10 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
           return prev;
         }
         const patch: Partial<ScanStatusType> = {};
+        const revision = scanExecutionRevision(data);
+        if (revision !== undefined && revision !== prev.execution_revision) patch.execution_revision = revision;
         if (data.error_message !== undefined) patch.error_message = data.error_message;
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
-        if (data.progress != null && data.progress !== prev.progress) patch.progress = data.progress;
         const nextTotal = data.total_candidates ?? prev.total_candidates;
         const reportedProcessed = data.processed_candidates ?? prev.processed_candidates;
         const nextProcessed = nextTotal > 0
@@ -1092,6 +1067,10 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
           : 0;
         if (nextTotal !== prev.total_candidates) patch.total_candidates = nextTotal;
         if (nextProcessed !== prev.processed_candidates) patch.processed_candidates = nextProcessed;
+        const nextProgress = nextTotal > 0 && (data.total_candidates != null || data.processed_candidates != null)
+          ? nextProcessed / nextTotal
+          : data.progress;
+        if (nextProgress != null && nextProgress !== prev.progress) patch.progress = nextProgress;
         if (data.static_total_files != null && data.static_total_files !== prev.static_total_files) patch.static_total_files = data.static_total_files;
         if (data.static_scanned_files != null && data.static_scanned_files !== prev.static_scanned_files) patch.static_scanned_files = data.static_scanned_files;
         if (data.static_analysis_done != null && data.static_analysis_done !== prev.static_analysis_done) patch.static_analysis_done = data.static_analysis_done;
@@ -1382,8 +1361,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     },
     onScanFinish: (data) => {
       setScan((prev) =>
-        prev && !isOlderScanExecution(prev.opencode_pool, data)
-          ? { ...prev, status: data.status as ScanItemStatus, error_message: data.error_message }
+        prev && !isOlderScanExecution(prev, data)
+          ? { ...prev, execution_revision: data.execution_revision ?? prev.execution_revision,
+              status: data.status as ScanItemStatus, error_message: data.error_message }
           : prev,
       );
       scheduleOverviewSummaryRefresh(0);
@@ -1516,6 +1496,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   }), [scanId, scheduleOverviewSummaryRefresh, refreshThreatAnalysis, acceptThreatAnalysis]);
 
   const sseStateSetters = useMemo<SSEStateSetters>(() => ({
+    getScan: () => scanRef.current,
     setScan,
     setFpReview,
     setIndexStatus,
@@ -1692,8 +1673,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       if (result.agent_stop_state === "pending") {
         alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
       }
+      const requestedFrom = scanRef.current;
       const next = await getScanStatus(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next) : previous);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next, requestedFrom) : previous);
     } catch {
       // The next poll can still reconcile an Agent-side stop.
     } finally {
@@ -1705,8 +1687,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setContinuing(true);
     try {
       await resumeScan(scanId);
+      const requestedFrom = scanRef.current;
       const next = await getScanStatus(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next) : previous);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next, requestedFrom) : previous);
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail

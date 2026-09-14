@@ -78,6 +78,39 @@ test("resume accepts the new task start time and retains completed history", () 
   assert.equal(merged.opencode_pool.completed_tasks[0].started_at, oldTask.started_at);
 });
 
+test("scan revisions protect progress even without a model-pool snapshot", () => {
+  const old = { scan_id: "s", execution_revision: 1, status: "complete", progress: 1,
+    processed_candidates: 100, total_candidates: 100, opencode_pool: null };
+  const resumed = { ...old, execution_revision: 2, status: "auditing", progress: 0.8, processed_candidates: 80 };
+  assert.equal(runtime.mergeScanSnapshot(resumed, old), resumed);
+  assert.equal(runtime.mergeScanSnapshot(old, resumed).processed_candidates, 80);
+  assert.equal(runtime.isOlderScanExecution(resumed, { execution_revision: 1 }), true);
+  assert.equal(runtime.isOlderScanExecution(resumed, {}), false);
+});
+
+test("late overview cannot undo progress received while it was in flight", () => {
+  const requested = { scan_id: "s", execution_revision: 2, status: "auditing", progress: 0.8,
+    processed_candidates: 80, total_candidates: 100, opencode_pool: null,
+    candidates: [{ idx: 0 }], vulnerabilities: [], detail_counts: { candidates: 100 } };
+  const current = { ...requested, processed_candidates: 81, progress: 0.81 };
+  const merged = runtime.mergeScanOverview(current, { ...requested, candidates: [] }, requested);
+  assert.equal(merged.processed_candidates, 81);
+  assert.equal(merged.progress, 0.81);
+  assert.equal(merged.candidates, current.candidates);
+  const next = runtime.mergeScanOverview(merged, { ...requested, processed_candidates: 82 }, merged);
+  assert.equal(next.processed_candidates, 82);
+  assert.equal(next.progress, 0.82);
+});
+
+test("new execution counters may drop after a pool-only update announces the revision", () => {
+  const current = { scan_id: "s", execution_revision: 2, status: "complete", progress: 1,
+    processed_candidates: 100, total_candidates: 100, opencode_pool: null };
+  const incoming = { ...current, status: "auditing", processed_candidates: 80 };
+  const merged = runtime.mergeScanSnapshot(current, incoming, current);
+  assert.equal(merged.processed_candidates, 80);
+  assert.equal(merged.progress, 0.8);
+});
+
 test("normalizes legacy arrays without materializing invalid entries", () => {
   const normalized = runtime.normalizeIndexedVulnerabilities([
     null,

@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
     "test:scan-sharing": "node tests/scanSharing.test.mjs",
+    "test:scan-resume-progress": "node tests/scanResumeProgress.test.mjs",
     "test:agent-config": "node tests/agentConfig.test.mjs",
     "test:task-queue": "node tests/taskQueue.test.mjs",
     "test:static-audit": "node tests/staticAudit.test.mjs",

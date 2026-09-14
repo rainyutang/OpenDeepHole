@@ -528,6 +528,7 @@ export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
 
 export interface ScanStatus {
   scan_id: string;
+  execution_revision?: number;
   project_id: string;
   project_path: string;
   code_scan_path: string;

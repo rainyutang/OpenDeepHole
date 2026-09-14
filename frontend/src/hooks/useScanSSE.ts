@@ -3,10 +3,11 @@ import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpRev
 import {
   isRecord,
   isOlderScanExecution,
+  scanExecutionRevision,
+  mergeScanOverview,
   mergeScanSnapshot,
   normalizeScanCandidate,
   normalizeScanEvent,
-  selectOpenCodePoolSnapshot,
   normalizeThreatTask,
   normalizeValidation,
   normalizeVulnerability,
@@ -37,6 +38,7 @@ const FP_REVIEW_STATUSES = new Set(["pending", "running", "complete", "error", "
 /* ------------------------------------------------------------------ */
 
 interface ScanStatusEvent {
+  execution_revision?: number;
   status: string | null;
   progress: number | null;
   total_candidates: number | null;
@@ -191,6 +193,7 @@ export interface ScanSSEHandlers {
 /* ------------------------------------------------------------------ */
 
 export interface SSEStateSetters {
+  getScan: () => ScanStatus | null;
   setScan: React.Dispatch<React.SetStateAction<ScanStatus | null>>;
   setFpReview: React.Dispatch<React.SetStateAction<FpReviewJob | null>>;
   setIndexStatus: React.Dispatch<React.SetStateAction<IndexStatus | null>>;
@@ -198,30 +201,17 @@ export interface SSEStateSetters {
 
 async function refreshFullState(
   scanId: string,
-  { setScan, setFpReview, setIndexStatus }: SSEStateSetters,
+  { getScan, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
   isCurrent: () => boolean,
 ) {
+  const requestedFrom = getScan();
   try {
     const data = await getScanOverview(scanId);
     if (!isCurrent() || data.scan_id !== scanId) return;
     setScan((previous) => {
       if (!isCurrent()) return previous;
       if (!previous || previous.scan_id !== scanId) return data;
-      return {
-        ...mergeScanSnapshot(previous, data),
-        candidates: previous.candidates,
-        vulnerabilities: previous.vulnerabilities,
-        skill_reports: previous.skill_reports,
-        threat_audit_tasks: previous.threat_audit_tasks,
-        validations: previous.validations,
-        events: previous.events,
-        detail_pages: previous.detail_pages,
-        opencode_pool: selectOpenCodePoolSnapshot(
-          previous.opencode_pool,
-          data.opencode_pool,
-          { allowClear: ["complete", "error", "cancelled"].includes(data.status) },
-        ),
-      };
+      return mergeScanOverview(previous, data, requestedFrom);
     });
   } catch {
     // transient — SSE will keep pushing
@@ -279,6 +269,7 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
   switch (eventType) {
     case "scan_status":
       return (value.status == null || (isString(value.status) && SCAN_STATUSES.has(value.status)))
+        && (value.execution_revision == null || isFiniteNumber(value.execution_revision))
         && (value.progress == null || isFiniteNumber(value.progress))
         && (value.total_candidates == null || isFiniteNumber(value.total_candidates))
         && (value.processed_candidates == null || isFiniteNumber(value.processed_candidates))
@@ -446,8 +437,13 @@ export function useScanSSE(
     };
 
     const queueScanStatus = (status: ScanStatusEvent) => {
-      if (isOlderScanExecution(pendingStatus?.opencode_pool, status.opencode_pool)) return;
+      if (isOlderScanExecution(pendingStatus, status)
+        || isOlderScanExecution(stateSettersRef.current.getScan(), status)) return;
+      if ((scanExecutionRevision(status) ?? 0) > (scanExecutionRevision(pendingStatus) ?? 0)) {
+        pendingStatus = null;
+      }
       pendingStatus = {
+        execution_revision: scanExecutionRevision(status) ?? scanExecutionRevision(pendingStatus),
         status: status.status ?? pendingStatus?.status ?? null,
         progress: status.progress ?? pendingStatus?.progress ?? null,
         total_candidates: status.total_candidates ?? pendingStatus?.total_candidates ?? null,
@@ -510,8 +506,9 @@ export function useScanSSE(
       }
       try {
         if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && notice.resource !== "threat-analysis")) {
+          const requestedFrom = stateSettersRef.current.getScan();
           const data = await getScanStatus(scanId);
-          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, data) : previous);
+          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, data, requestedFrom) : previous);
           const job = await getFpReview(scanId).catch(() => null);
           if (!disposed && job) stateSettersRef.current.setFpReview(job);
         } else {
@@ -571,6 +568,8 @@ export function useScanSSE(
       if (event) queueScanEvent(event);
     });
     handle<ScanFinishEvent>("scan_finish", (d) => {
+      if (isOlderScanExecution(pendingStatus, d)
+        || isOlderScanExecution(stateSettersRef.current.getScan(), d)) return;
       flushPendingStatus();
       handlersRef.current.onScanFinish?.(d);
       handlersRef.current.onThreatAnalysisRefresh?.();

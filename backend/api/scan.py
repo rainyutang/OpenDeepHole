@@ -1797,6 +1797,7 @@ async def create_agent_scan(
         agent_id=agent_id,
         agent_session_id=agent.agent_session_id,
     )
+    scan.execution_revision = execution_revision
     ok = await send_agent_command(agent_id, {
         "type": "task",
         "scan_id": scan_id,
@@ -2588,6 +2589,7 @@ async def stop_scan(
         persisted = refreshed[0] if refreshed is not None else stored_scan
         terminal_pool = terminal_opencode_pool_status(persisted.opencode_pool)
         publish(scan_id, "scan_status", {
+            "execution_revision": persisted.execution_revision,
             "status": persisted.status,
             "error_message": persisted.error_message,
             "opencode_pool": (
@@ -3094,6 +3096,7 @@ async def _continue_scan(
             scan.mining_engine_runs = pending_mining_engine_runs
 
         scan.status = ScanItemStatus.PENDING
+        scan.execution_revision = execution_revision
         scan.error_message = None
         scan.current_candidate = None
         scan.agent_name = agent.name
@@ -3202,6 +3205,7 @@ async def _continue_scan(
     from backend.sse import publish
 
     publish(scan_id, "scan_status", {
+        "execution_revision": execution_revision,
         "status": ScanItemStatus.PENDING,
         "progress": progress,
         "total_candidates": total_candidates,

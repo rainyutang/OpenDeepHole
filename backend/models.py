@@ -790,6 +790,7 @@ class MultiVersionTarget(BaseModel):
 
 class ScanStatus(BaseModel):
     scan_id: str
+    execution_revision: int = 0
     project_id: str = ""
     project_path: str = ""
     code_scan_path: str = ""
