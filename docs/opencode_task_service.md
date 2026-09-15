@@ -248,7 +248,7 @@ Skill 有两种常用放置方式：
 
 standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导读取权限，使 Skill 内的引用资源一并可读。
 
-完整 DeepHole 2.0 Agent 在首次启动 Serve 前（包括模型列表触发的启动）自动安装全部业务 Skill，固定位置为 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。当前随包提供 28 个：18 个候选审计、4 个去误报、4 个威胁分析、1 个多版本审计和 1 个 Skill 创建功能；数量随业务目录新增自动变化，不读取开发机的历史安装清单。安装按 `SKILL.md` frontmatter 名称组织，并完整保留 `references/`、`agents/`、`assets/`、`scripts/` 等资源。启动日志中的 `OpenCode Skills ready` 会显示内置数量与绝对目录。
+完整 DeepHole 2.0 Agent 在首次启动 Serve 前（包括模型列表触发的启动）自动安装全部业务 Skill，固定位置为 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。当前随包提供 28 个：18 个候选审计、4 个去误报、4 个威胁分析、1 个多版本审计和 1 个 Skill 创建功能；数量随业务目录新增自动变化，不读取开发机的历史安装清单。安装按 `SKILL.md` frontmatter 名称组织，保留 `references/`、`agents/`、`assets/`、`scripts/` 等运行资源，并排除各层目录中的 `SCENARIOS.md` 介绍文件；源目录和下发包仍保留该文件用于介绍页。启动或规则同步时会一并清理本次安装 Skill 的旧 `SCENARIOS.md`，保留同步版本和本地续扫的版本选择规则。启动日志中的 `OpenCode Skills ready` 会显示内置数量与绝对目录。
 
 宿主通过 `OpenCodeHostBindings.fixed_skill_root` 绑定固定目录，此时任务上下文中的 `skill_paths` 只检查所需名称已经安装，不向运行配置追加路径。任务之间切换 Skill 不改变 `skills.paths`，不会因此重启 Serve。服务端新下发的规则包在模型任务进入前安装；内容变化时暂停新的 Serve 会话进入，等待已有会话完成，再发布完整目录并让下一次调用重新启动 Serve、发现更新后的 Skill。相同内容不会重复刷新。本地续扫仅补齐缺失 Skill，使用统一目录的当前版本，不将旧扫描快照覆盖回来。
 

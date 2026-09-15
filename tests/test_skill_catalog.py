@@ -39,12 +39,74 @@ def test_complete_builtin_catalog_and_idempotent_initialization(tmp_path):
     workspace = tmp_path / "Agent With Spaces"
     assert install_skills(workspace, sources, bundled=True)
     paths = list((workspace / ".opencode/skills").rglob("*"))
+    assert not any(p.name == "SCENARIOS.md" for p in paths)
     before = {p: p.stat().st_mtime_ns for p in paths}
     assert not install_skills(workspace, sources, bundled=True)
     assert before == {p: p.stat().st_mtime_ns for p in paths}
     for s in sources:
         copied = skill_source(workspace / ".opencode/skills" / s.name, s.owner)
-        assert copied.files == s.files
+        expected = dict(s.files)
+        expected.pop("SCENARIOS.md", None)
+        assert copied.files == expected
+
+
+def test_install_excludes_scenarios_and_preserves_runtime_resources(tmp_path):
+    original = source(tmp_path / "source")
+    source_root = tmp_path / "source/demo"
+    (source_root / "SCENARIOS.md").write_text("Catalog introduction", encoding="utf-8")
+    (source_root / "references/SCENARIOS.md").write_text("Nested introduction", encoding="utf-8")
+    for name in ("agents/openai.yaml", "assets/example.json", "scripts/check.py"):
+        path = source_root / name
+        path.parent.mkdir()
+        path.write_text(name, encoding="utf-8")
+    packaged = skill_source(source_root, original.owner)
+    workspace = tmp_path / "workspace"
+    assert install_skills(workspace, [packaged])
+    installed = workspace / ".opencode/skills/demo"
+    assert not list(installed.rglob("SCENARIOS.md"))
+    assert (source_root / "SCENARIOS.md").read_text() == "Catalog introduction"
+    assert (source_root / "references/SCENARIOS.md").read_text() == "Nested introduction"
+    for name, content in original.files.items():
+        assert (installed / name).read_bytes() == content
+    for name in ("agents/openai.yaml", "assets/example.json", "scripts/check.py"):
+        assert (installed / name).read_text() == name
+    (source_root / "SCENARIOS.md").write_text("Updated introduction", encoding="utf-8")
+    updated = skill_source(source_root, original.owner)
+    assert not needs_install(workspace, [updated])
+    assert not install_skills(workspace, [updated])
+
+
+@pytest.mark.parametrize("mode", ["bootstrap", "resume", "dispatch"])
+def test_legacy_scenarios_removed_without_reverting_synced_skill(tmp_path, mode):
+    workspace = tmp_path / "workspace"
+    bundled = source(tmp_path / "bundle")
+    (tmp_path / "bundle/demo/SCENARIOS.md").write_text("Bundled introduction", encoding="utf-8")
+    bundled = skill_source(tmp_path / "bundle/demo", bundled.owner)
+    root = workspace / ".opencode/skills"
+    current = source(root, body="v2")
+    installed = root / "demo"
+    (installed / "SCENARIOS.md").write_text("Legacy introduction", encoding="utf-8")
+    (installed / "references/SCENARIOS.md").write_text("Nested introduction", encoding="utf-8")
+    legacy = skill_source(installed, current.owner)
+    # Reproduce the pre-filter manifest, including the original bundle hash.
+    manifest_path = workspace / ".opendeephole-skills.json"
+    manifest_path.write_text(json.dumps({"version": 1, "skills": {
+        current.name: {"owner": current.owner, "hash": legacy.digest, "bundled_hash": bundled.digest},
+    }}), encoding="utf-8")
+    source(root, name="user-owned", owner="user")
+    user_document = root / "user-owned/SCENARIOS.md"
+    user_document.write_text("User introduction", encoding="utf-8")
+    incoming = legacy if mode == "dispatch" else bundled
+    options = {"bundled": mode == "bootstrap", "replace_existing": mode != "resume"}
+
+    assert needs_install(workspace, [incoming], **options)
+    assert install_skills(workspace, [incoming], **options)
+    assert not list(installed.rglob("SCENARIOS.md"))
+    assert skill_source(installed, current.owner).files == current.files
+    assert user_document.read_text() == "User introduction"
+    assert json.loads(manifest_path.read_text())["skills"][current.name]["hash"] == current.digest
+    assert not needs_install(workspace, [incoming], **options)
+    assert not install_skills(workspace, [incoming], **options)
 
 
 def test_updates_survive_bootstrap_and_local_resume(tmp_path):
@@ -225,6 +287,7 @@ def test_transported_rule_package_installs_references_in_fixed_host(tmp_path):
         workspace = tmp_path / "workspace"
         checker = tmp_path / "rules/custom-rule"
         custom = source(checker / "skills", name="custom-audit", owner="checker:custom-rule")
+        (checker / "skills/custom-audit/SCENARIOS.md").write_text("Catalog introduction", encoding="utf-8")
         (checker / "checker.yaml").write_text("name: custom-rule\nmode: opencode\n")
         package = build_checker_package(CheckerEntry(
             name="custom-rule", label="Custom", description="", enabled=True,
@@ -232,6 +295,7 @@ def test_transported_rule_package_installs_references_in_fixed_host(tmp_path):
         ))
         unpacked = tmp_path / "scan/rules"
         unpack_rule_packages([package], unpacked)
+        assert (unpacked / "custom-rule/skills/custom-audit/SCENARIOS.md").is_file()
         root = workspace / ".opencode/skills"
         bindings = OpenCodeHostBindings(
             get_config=lambda: None, get_workspace=lambda: workspace,
@@ -247,6 +311,7 @@ def test_transported_rule_package_installs_references_in_fixed_host(tmp_path):
         ):
             await sync_rule_skill_roots([unpacked])
             assert skill_source(root / custom.name, custom.owner).files == custom.files
+            assert not (root / custom.name / "SCENARIOS.md").exists()
             manager._stop_locked.assert_awaited_once()
             await sync_rule_skill_roots([unpacked])
             manager._stop_locked.assert_awaited_once()

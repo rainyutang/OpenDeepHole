@@ -44,6 +44,14 @@ def skill_source(directory: Path, owner: str) -> SkillSource:
     return SkillSource(name, owner, files)
 
 
+def _runtime_source(source: SkillSource) -> SkillSource:
+    """Keep runtime resources, excluding catalog-only scenario documentation."""
+    return SkillSource(source.name, source.owner, {
+        name: content for name, content in source.files.items()
+        if Path(name).name != "SCENARIOS.md"
+    })
+
+
 def rule_skill_sources(roots: list[Path]) -> list[SkillSource]:
     return [
         skill_source(path.parent, f"checker:{checker.name}")
@@ -94,6 +102,10 @@ def _changes(
     aliases: set[str] = set()
     owners: dict[str, str] = {}
     for source in sources:
+        # Keep the original bundled fingerprint so excluding documentation does
+        # not look like a package upgrade and overwrite a newer synced Skill.
+        bundled_hash = source.digest
+        source = _runtime_source(source)
         if source.name in owners:
             raise ValueError(f"Duplicate Skill {source.name!r}: {owners[source.name]}, {source.owner}")
         owners[source.name] = source.owner
@@ -104,19 +116,20 @@ def _changes(
         current = None
         if (destination / "SKILL.md").is_file():
             current = skill_source(destination, source.owner)
-        if not previous and not bundled and current and current.digest != source.digest:
+        runtime_current = _runtime_source(current) if current is not None else None
+        if not previous and not bundled and runtime_current and runtime_current.digest != source.digest:
             raise ValueError(f"Skill conflicts with an unmanaged installation: {source.name}")
         # A local resume must never reinstall its old snapshot over a newer
         # shared version. Unchanged bundled resources also retain synced updates.
         keep = current is not None and (
             not replace_existing
-            or (bundled and previous.get("bundled_hash") == source.digest)
+            or (bundled and previous.get("bundled_hash") == bundled_hash)
         )
-        effective = current if keep else source
+        effective = runtime_current if keep else source
         assert effective is not None
         entry = {**previous, "owner": source.owner, "hash": effective.digest}
         if bundled:
-            entry["bundled_hash"] = source.digest
+            entry["bundled_hash"] = bundled_hash
         manifest[source.name] = entry
         if current is None or current.digest != effective.digest:
             changed.append(effective)

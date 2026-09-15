@@ -501,6 +501,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 installed = skills_dir / name
                 self.assertTrue((installed / "SKILL.md").is_file())
             self.assertEqual(len(list(skills_dir.glob("*/SKILL.md"))), 28)
+            self.assertEqual(list(skills_dir.rglob("SCENARIOS.md")), [])
             self.assertTrue((skills_dir / "fp-check/references/gate-reviews.md").is_file())
             self.assertTrue((skills_dir / "attack-tree-by-asset/references/attack_mode.json").is_file())
             self.assertTrue((skills_dir / "deephole-skill-creator/SKILL.md").is_file())
