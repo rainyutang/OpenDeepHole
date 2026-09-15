@@ -79,6 +79,7 @@ from .rollback import StorageRollbackMixin
 from .shares import SHARE_SCHEMA, ScanSharesMixin
 from .migration import ScanStorageMigrationMixin
 from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixin
+from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 
@@ -981,6 +982,7 @@ _SCHEMA += MAINTENANCE_SCHEMA
 _SCHEMA += DELETION_SCHEMA
 _SCHEMA += VALIDATION_SCHEMA
 _SCHEMA += SHARE_SCHEMA
+_SCHEMA += TOKEN_CATEGORY_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1002,7 +1004,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -2630,18 +2632,18 @@ class SqliteScanStore(ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, Sca
             for row in _token_usage_rows(status.token_usage)
         ]
         with self._lock:
+            if not self._accept_token_snapshot_locked(scan_id, session_id, status):
+                self._conn.commit()
+                return
             self._diff_snapshot_locked(
                 "scan_opencode_token_usage", ['scan_id', 'agent_session_id', 'model', 'input_tokens', 'output_tokens', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'complete', 'updated_at'], ['scan_id', 'agent_session_id', 'model'],
                 "scan_id = ? AND agent_session_id = ?", (scan_id, session_id), rows,
             )
+            self._persist_reported_token_categories_locked(scan_id, session_id, status)
             self._conn.commit()
 
     def get_scan_opencode_token_usage(self, scan_id: str) -> OpenCodeTokenUsage | None:
-        cur = self._conn.execute(
-            "SELECT * FROM scan_opencode_token_usage WHERE scan_id = ?",
-            (scan_id,),
-        )
-        return _token_usage_from_rows(cur.fetchall())
+        return self._scan_token_usage_with_categories(scan_id)
 
     def upsert_opencode_task_report(self, **kwargs) -> bool:
         return self.persist_opencode_task_report(**kwargs)

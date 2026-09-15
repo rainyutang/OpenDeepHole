@@ -722,9 +722,16 @@ class OpenCodeModelTokenUsage(OpenCodeTokenCounters):
     model: str = "unknown"
 
 
+class OpenCodeCategoryTokenUsage(OpenCodeTokenCounters):
+    category: str = "uncategorized"
+    label: str = ""
+    complete: bool = True
+
+
 class OpenCodeTokenUsage(OpenCodeTokenCounters):
     complete: bool = True
     by_model: list[OpenCodeModelTokenUsage] = []
+    by_category: list[OpenCodeCategoryTokenUsage] = Field(default_factory=list)
 
 
 class OpenCodePoolStatus(BaseModel):

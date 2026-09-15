@@ -23,7 +23,7 @@ from task_agent.model_pool import (
     update_model_lease_context,
     wait_for_model_pool_update,
 )
-from task_agent.token_usage import TokenCounters, token_usage_from_models
+from task_agent.token_usage import TokenCounters, attribute_token_usage, token_usage_from_models
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +87,41 @@ def test_token_usage_accumulates_by_actual_model_for_scope_and_agent() -> None:
         assert scoped["total_tokens"] == 18
         assert scoped["by_model"][0]["model"] == "provider/actual"
         await release_model_lease(lease, outcome="success")
+
+    asyncio.run(run())
+
+
+def test_token_categories_remain_scoped_after_concurrent_failed_and_cancelled_tasks() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "shared", "model": "provider/shared", "capability": "high", "max_concurrency": 2,
+        }])
+        leases = await asyncio.gather(
+            acquire_model_lease(cfg, stats_scope_id="scan-a"),
+            acquire_model_lease(cfg, stats_scope_id="scan-b"),
+        )
+        await asyncio.gather(*(
+            record_model_token_usage(lease, attribute_token_usage(
+                token_usage_from_models({"provider/shared": TokenCounters(input_tokens=inputs, output_tokens=2)}),
+                category,
+            ))
+            for lease, category, inputs in zip(leases, ("threat_analysis", "fp_review"), (10, 20))
+        ))
+        await asyncio.gather(
+            release_model_lease(leases[0], outcome="failure"),
+            release_model_lease(leases[1], outcome="cancelled"),
+        )
+
+        for scope, category, total in (("scan-a", "threat_analysis", 12), ("scan-b", "fp_review", 22)):
+            scoped = model_pool_snapshot(scope)["token_usage"]
+            assert scoped["total_tokens"] == total
+            assert [(item["category"], item["total_tokens"]) for item in scoped["by_category"]] == [(category, total)]
+        combined = model_pool_snapshot()["token_usage"]
+        assert combined["total_tokens"] == 34
+        assert sum(item["total_tokens"] for item in combined["by_model"]) == 34
+        assert {item["category"]: item["total_tokens"] for item in combined["by_category"]} == {
+            "threat_analysis": 12, "fp_review": 22,
+        }
 
     asyncio.run(run())
 

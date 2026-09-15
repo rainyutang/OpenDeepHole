@@ -62,7 +62,8 @@ def inventory(store) -> dict:
     tables = ("scans", "vulnerabilities", "scan_candidates", "fp_review_jobs", "fp_review_results",
               "fp_review_stage_outputs", "vulnerability_validations", "opencode_task_reports",
               "feedback_entries", "agent_resume_manifests", "scan_task_versions", "scan_task_current", "scan_audit_versions",
-              "fp_stage_versions", "fp_result_versions", "validation_output_chunks", "scan_legacy_payloads", "scan_deletions")
+              "fp_stage_versions", "fp_result_versions", "validation_output_chunks", "scan_legacy_payloads", "scan_deletions",
+              "scan_opencode_category_token_usage", "scan_token_category_recovery")
     present = {row[0] for row in store._conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()" if getattr(store, "distributed", False) else "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
     rows = {table: int(store._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if table in present else None for table in tables}
     size = "OCTET_LENGTH(opencode_pool)" if getattr(store, "distributed", False) else "LENGTH(CAST(opencode_pool AS BLOB))"
@@ -86,13 +87,14 @@ def main(argv=None) -> int:
     target.add_argument("--sqlite", help="Existing SQLite database path")
     target.add_argument("--database-url-env", help="Name of the environment variable holding the PostgreSQL URL")
     parser.add_argument("command", choices=("check", "expand", "status", "backfill", "verify", "cleanup-receipts", "cleanup-archives", "restore-legacy", "indexes", "validate-constraints"))
-    parser.add_argument("--phase", choices=("all", "tasks", "bodies", "summaries"), default="all")
+    parser.add_argument("--phase", choices=("all", "tasks", "bodies", "summaries", "token-categories"), default="all")
+    parser.add_argument("--restart", action="store_true", help="Restart token-category recovery from its first source batch")
     parser.add_argument("--batch-rows", type=int, default=500)
     parser.add_argument("--batch-bytes", type=int, default=MAX_BATCH_BYTES)
     parser.add_argument("--batches", type=int, default=1)
     parser.add_argument("--until-complete", action="store_true")
     parser.add_argument("--pause-ms", type=int, default=200)
-    parser.add_argument("--scan-id", help="Verify one scan; omit to verify all scans using a keyset cursor")
+    parser.add_argument("--scan-id", help="Verify, restore, or recover token categories for one scan; omit to process all scans")
     parser.add_argument("--offline", action="store_true", help="Confirm all backend and Agent writers have been stopped before legacy-field reconstruction")
     args = parser.parse_args(argv)
     if not 1 <= args.batch_rows <= 500 or not 1 <= args.batch_bytes <= MAX_BATCH_BYTES:
@@ -101,9 +103,11 @@ def main(argv=None) -> int:
         parser.error("--batches must be positive and --pause-ms must not be negative")
     if args.command == "restore-legacy" and not args.offline:
         parser.error("restore-legacy requires --offline after stopping every backend and Agent writer")
+    if args.restart and (args.command != "backfill" or args.phase != "token-categories"):
+        parser.error("--restart requires backfill --phase token-categories")
     store = None
     try:
-        store = open_store(args, readonly=args.command in {"check", "status"})
+        store = open_store(args, readonly=args.command in {"check", "status"} or (args.command == "verify" and args.phase == "token-categories"))
         if args.command == "check":
             emit(inventory(store))
         elif args.command == "status":
@@ -134,10 +138,20 @@ def main(argv=None) -> int:
                 operations.append(("bodies", lambda: store.backfill_bodies_batch(batch_rows=args.batch_rows, batch_bytes=args.batch_bytes)))
             if args.phase in {"all", "summaries"}:
                 operations.append(("summaries", lambda: store.backfill_summaries_batch(batch_rows=args.batch_rows)))
+            if args.phase in {"all", "token-categories"}:
+                restart_tokens = args.restart
+
+                def token_batch():
+                    return store.backfill_token_categories_batch(batch_rows=args.batch_rows, batch_bytes=args.batch_bytes,
+                                                                 scan_id=args.scan_id, restart=restart_tokens)
+
+                operations.append(("token-categories", token_batch))
             remaining = args.batches
             for phase, operation in operations:
                 while args.until_complete or remaining > 0:
                     result = operation()
+                    if phase == "token-categories":
+                        restart_tokens = False
                     emit({"phase": phase, **result})
                     remaining -= 1
                     if result["complete"]:
@@ -156,7 +170,8 @@ def main(argv=None) -> int:
                 if not rows:
                     break
                 for row in rows:
-                    result = store.verify_scan_history(row["scan_id"])
+                    result = (store.verify_token_categories(row["scan_id"]) if args.phase == "token-categories"
+                              else store.verify_scan_history(row["scan_id"]))
                     emit(result)
                     checked += 1
                     failed += int(not result["ok"])

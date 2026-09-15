@@ -1,3 +1,4 @@
+import { ScanTokenUsagePanel } from "./ScanTokenUsagePanel";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefCallback } from "react";
 import { isInvalidTaskCursorError } from "../api/client";
@@ -4657,45 +4658,6 @@ function ScanOverview({
       </div>
     </div>
   );
-}
-
-function ScanTokenUsagePanel({ usage }: { usage: OpenCodeTokenUsage | null }) {
-  if (!usage) {
-    return <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-      <h3 className="text-sm font-semibold text-slate-200">Token 统计</h3>
-      <p className="mt-2 text-xs text-slate-500">暂无统计。升级前创建的扫描不会回填 Token 用量。</p>
-    </section>;
-  }
-  const items = [
-    ["输入", usage.input_tokens],
-    ["输出", usage.output_tokens],
-    ["推理", usage.reasoning_tokens],
-    ["缓存读取", usage.cache_read_tokens],
-    ["缓存写入", usage.cache_write_tokens],
-    ["总计", usage.total_tokens],
-  ] as const;
-  return <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div>
-        <h3 className="text-sm font-semibold text-slate-200">Token 统计</h3>
-        <p className="mt-1 text-xs text-slate-500">包含主会话、子会话、重试与 JSON 修正调用。</p>
-      </div>
-      {!usage.complete && <StatusPill label="统计可能不完整" tone="amber" />}
-    </div>
-    <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
-      {items.map(([label, value]) => <div key={label} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
-        <div className="text-[11px] text-slate-500">{label}</div>
-        <div className="mt-1 font-mono text-sm text-slate-200">{formatTokenCount(value)}</div>
-      </div>)}
-    </div>
-    {(usage.by_model ?? []).length > 1 && <div className="mt-3 flex flex-wrap gap-2">
-      {[...(usage.by_model ?? [])].sort((left, right) => right.total_tokens - left.total_tokens).map((item) => (
-        <span key={item.model} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-[11px] text-slate-400">
-          {item.model}: {formatTokenCount(item.total_tokens)}
-        </span>
-      ))}
-    </div>}
-  </section>;
 }
 
 export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null }) {

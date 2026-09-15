@@ -54,7 +54,8 @@ from .serve_client import (
     OpenCodeTaskQualityError,
     get_serve_manager,
 )
-from .token_usage import OpenCodeTokenUsage, merge_token_usages
+from .token_usage import OpenCodeTokenUsage, attribute_token_usage, merge_token_usages
+from .token_categories import token_category
 
 logger = logging.getLogger(__name__)
 
@@ -659,6 +660,13 @@ class OpenCodeTaskService:
                 )
         loop = asyncio.get_running_loop()
         task_id = uuid4().hex
+        context = _snapshot_execution_context()
+        category, category_label = token_category(context.task_metadata)
+        context = dataclasses.replace(context, task_metadata={
+            **context.task_metadata,
+            "token_category": category,
+            "token_category_label": category_label,
+        })
         record = _TaskRecord(
             task_id=task_id,
             spec=normalized,
@@ -667,7 +675,7 @@ class OpenCodeTaskService:
             result_future=loop.create_future(),
             session_future=loop.create_future(),
             cancel_event=asyncio.Event(),
-            execution_context=_snapshot_execution_context(),
+            execution_context=context,
         )
         if normalized.session_id:
             record.session_future.set_result(normalized.session_id)
@@ -988,6 +996,7 @@ class OpenCodeTaskService:
 
                 async def record_token_usage(value: OpenCodeTokenUsage) -> None:
                     nonlocal task_token_usage
+                    value = attribute_token_usage(value, *token_category(context.task_metadata))
                     task_token_usage = merge_token_usages((task_token_usage, value))
                     await record_model_token_usage(lease, value)
                     if task_token_usage is not None:
@@ -1808,6 +1817,7 @@ class OpenCodeTaskService:
             value: OpenCodeTokenUsage,
         ) -> None:
             nonlocal accumulated_usage
+            value = attribute_token_usage(value, *token_category(context.task_metadata))
             accumulated_usage = merge_token_usages((accumulated_usage, value))
             await record_model_token_usage(lease, value)
             if accumulated_usage is not None:

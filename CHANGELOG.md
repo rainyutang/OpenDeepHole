@@ -2,6 +2,7 @@
 
 ## 2026-09-15
 
+- **新增** 扫描详情的 Token 统计按威胁分析、基于威胁的审计、基于候选点的审计、去误报及其它业务类别展示总量、占比和输入/输出/推理/缓存读写明细；重试、子会话和 JSON 修正归入所属业务，续扫及跨 Agent 会话累计持久保存，登录、公开与分享页面同步展示。SQLite/PostgreSQL 增量创建分类表；历史扫描可通过 `migrate_scan_storage.py --phase token-categories` 分批恢复可确认的类别，重复快照不会叠加，无法恢复的余额显示“未分类”并保留原总量。需更新后端、前端及 Agent 并重启 Agent，历史回填和只读校验见 `docs/scan-token-categories.md`
 - **修复** Skill 安装到统一 OpenCode workspace 时排除各层目录中的 `SCENARIOS.md`，启动及规则同步同时清理对应 Skill 的旧文件；保留运行引用资源、源包介绍文件及已同步的较新 Skill 版本。需更新并重启 Agent，无需数据库迁移
 
 ## 2026-09-14

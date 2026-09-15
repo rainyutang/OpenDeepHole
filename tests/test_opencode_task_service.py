@@ -1882,6 +1882,8 @@ def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
 
 
 def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
+    from task_agent.token_usage import TokenCounters, token_usage_from_models
+
     async def run() -> None:
         service = OpenCodeTaskService()
         calls: list[dict] = []
@@ -1900,6 +1902,9 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
             callback = kwargs["on_session_id"](created_sessions[index])
             if hasattr(callback, "__await__"):
                 await callback
+            await kwargs["on_token_usage"](token_usage_from_models({
+                "provider/formatter" if index == 1 else "provider/model-low": TokenCounters(10, 2),
+            }))
             text = responses[index]
             return OpenCodePromptResult(
                 session_id=created_sessions[index],
@@ -1912,10 +1917,11 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         manager = SimpleNamespace(run_prompt=run_prompt)
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
-        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5]:
+        with (patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5],
+              patch("task_agent.task_service.record_model_token_usage", new=AsyncMock()) as record_usage):
             with _task_context(
                 tmp_path,
-                task_metadata={"standalone_console": True},
+                task_metadata={"standalone_console": True, "task_type": "fp_review"},
                 on_output=output.append,
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
@@ -1930,6 +1936,14 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.structured == {"answer": 9}
         assert result.session_id == "ses_same"
+        assert result.token_usage["total_tokens"] == 48
+        assert result.token_usage["by_category"] == [{
+            "category": "fp_review", "label": "去误报", "complete": True,
+            "input_tokens": 40, "output_tokens": 8, "reasoning_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0, "total_tokens": 48,
+        }]
+        assert [call.args[1].by_category[0].category for call in record_usage.await_args_list] == ["fp_review"] * 4
+        assert sum(call.args[1].counters.total_tokens for call in record_usage.await_args_list) == 48
         assert acquire_mock.await_count == 3
         assert release_mock.await_count == 3
         assert [call["session_id"] for call in calls] == [
@@ -1978,29 +1992,29 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
             for call in calls
         )
         assert (
-            "[opencode][ses_same][session] "
+            "[fp_review][ses_same][session] "
             "JSON_FORMAT_RETRY reason=invalid_json next_session=new "
             "required_capability=low"
             in output
         )
         assert any(
-            line.startswith("[opencode][ses_same][session] JSON_FORMAT_FAILED")
+            line.startswith("[fp_review][ses_same][session] JSON_FORMAT_FAILED")
             and "reason=source_unrelated" in line
             and "fallback=original_session" in line
             for line in output
         )
         assert (
-            "[opencode][ses_same][session] "
+            "[fp_review][ses_same][session] "
             "JSON_RETRY 1/2 reason=invalid_json next_session=same"
             in output
         )
         assert (
-            "[opencode][ses_same][session] "
+            "[fp_review][ses_same][session] "
             "JSON_RETRY 2/2 reason=invalid_json next_session=same"
             in output
         )
         assert any(
-            line.startswith("[opencode][ses_same][task] FINISHED")
+            line.startswith("[fp_review][ses_same][task] FINISHED")
             and "status=success" in line
             for line in output
         )

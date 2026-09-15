@@ -74,6 +74,36 @@ def test_cli_check_is_read_only_and_requires_explicit_target(tmp_path, capsys):
         main(["check"])
 
 
+def test_token_category_cli_resumes_and_verification_is_read_only(tmp_path, capsys):
+    from backend.models import OpenCodePoolStatus
+
+    store = make_store(tmp_path)
+    value = {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35}
+    pool = OpenCodePoolStatus(scope_id="s", agent_session_id="old", token_usage=value)
+    store.upsert_scan_opencode_token_usage(scan_id="s", agent_session_id="old", status=pool)
+    store.persist_opencode_pool("s", pool)
+    # The source envelope, rather than the current Agent identity, owns history.
+    record = {**task(), "task_type": "threat_analysis", "token_usage": value}
+    store.upsert_opencode_task_report(agent_key="a", scan_id="s", agent_session_id="old", task_id=record["task_id"], revision=1, task=record)
+    store.close()
+    path = tmp_path / "history.db"
+    target = ["--sqlite", str(path)]
+    options = ["--phase", "token-categories", "--scan-id", "s", "--batch-rows", "1", "--pause-ms", "0"]
+    assert main([*target, "backfill", *options]) == 0
+    capsys.readouterr()
+    assert main([*target, "backfill", *options, "--until-complete"]) == 0
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert output[-1]["complete"]
+    assert main([*target, "backfill", *options, "--restart", "--until-complete"]) == 0
+    capsys.readouterr()
+    before = path.read_bytes()
+    assert main([*target, "verify", "--phase", "token-categories", "--scan-id", "s"]) == 0
+    output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert output[0]["total_tokens"] == 35
+    assert output[0]["uncategorized_tokens"] == 0
+    assert path.read_bytes() == before
+
+
 def test_corrupted_destination_fails_verification_and_retains_archive(tmp_path):
     store = make_store(tmp_path)
     raw = json.dumps({"completed_tasks": [task()], "completed_task_count": 1})

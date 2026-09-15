@@ -281,6 +281,12 @@ function normalizeTokenUsage(value: unknown): OpenCodeTokenUsage | null {
     ...normalizeTokenCounters(value),
     complete: value.complete === true,
     by_model: byModel,
+    by_category: recordArray(value.by_category).map((item) => ({
+      ...normalizeTokenCounters(item),
+      category: text(item.category) || "uncategorized",
+      label: text(item.label),
+      complete: item.complete === true,
+    })),
   };
 }
 

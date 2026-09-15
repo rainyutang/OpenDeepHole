@@ -15,7 +15,7 @@ import pytest
 
 from backend import auth, sse
 from backend.api import agent, integration, scan, sharing
-from backend.models import FpReviewResult, FpReviewStatus, ScanItemStatus, ScanMeta, ScanStatus, Vulnerability
+from backend.models import FpReviewResult, FpReviewStatus, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -198,6 +198,36 @@ def test_share_reads_and_downloads_real_report_content(environment):
             for response in (csv_response, single, zipped):
                 assert response.headers["cache-control"] == "no-store"
             assert (await client.get(base + "/skill/unselected", params=params)).status_code == 404
+    asyncio.run(run())
+
+
+def test_owner_public_and_shared_overviews_preserve_category_usage(environment):
+    env = environment
+    pool = OpenCodePoolStatus(scope_id=env.scan_id, agent_session_id="usage-session", token_usage={
+        "input_tokens": 100, "output_tokens": 20, "total_tokens": 120,
+        "by_category": [
+            {"category": "threat_analysis", "label": "威胁分析", "input_tokens": 60, "output_tokens": 10, "total_tokens": 70},
+            {"category": "fp_review", "label": "去误报", "input_tokens": 40, "output_tokens": 10, "total_tokens": 50},
+        ],
+    })
+    env.store.upsert_scan_opencode_token_usage(scan_id=env.scan_id, agent_session_id="usage-session", status=pool)
+    pool.token_usage = env.store.get_scan_opencode_token_usage(env.scan_id)
+    env.store.persist_opencode_pool(env.scan_id, pool)
+
+    async def run():
+        async with client_for(env) as client:
+            token = await create_share(client, env)
+            for path, params, headers in (
+                (f"/api/v2/scans/{env.scan_id}/overview", {}, env.tokens["owner"]),
+                (f"/api/public/scans/{env.scan_id}/overview", {"token": env.meta.public_access_token}, {}),
+                (f"/api/shared/scans/{env.scan_id}/overview", {"token": token}, {}),
+            ):
+                response = await client.get(path, params=params, headers=headers)
+                assert response.status_code == 200, response.text
+                tokens = response.json()["opencode_pool"]["token_usage"]
+                assert tokens["total_tokens"] == 120
+                assert {item["category"]: item["total_tokens"] for item in tokens["by_category"]} == {"threat_analysis": 70, "fp_review": 50}
+
     asyncio.run(run())
 
 

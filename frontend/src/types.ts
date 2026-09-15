@@ -474,9 +474,16 @@ export interface OpenCodeModelTokenUsage extends OpenCodeTokenCounters {
   model: string;
 }
 
+export interface OpenCodeCategoryTokenUsage extends OpenCodeTokenCounters {
+  category: string;
+  label: string;
+  complete: boolean;
+}
+
 export interface OpenCodeTokenUsage extends OpenCodeTokenCounters {
   complete: boolean;
   by_model: OpenCodeModelTokenUsage[];
+  by_category?: OpenCodeCategoryTokenUsage[];
 }
 
 export interface OpenCodeSessionEvent {

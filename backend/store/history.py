@@ -80,6 +80,7 @@ TASK_METADATA_FIELDS = frozenset({
     "model", "model_id", "capability", "started_at", "finished_at", "outcome",
     "status", "duration_seconds", "serve_session_id", "failure_kind",
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
+    "token_category", "token_category_label", "mining_engine_id", "mining_engine_label",
 })
 
 
@@ -236,7 +237,12 @@ class ScanHistoryMixin:
             and status.execution_revision < int(row["execution_revision"] or 0)
         )
         compact = OpenCodePoolStatus.model_validate(previous) if stale else status.model_copy(deep=True)
-        if compact.token_usage is None and previous.get("token_usage"):
+        # Refresh under the scan lock: a delayed HTTP update may hold usage read
+        # before another writer or a historical-category recovery committed.
+        persisted_usage = self.get_scan_opencode_token_usage(scan_id)
+        if persisted_usage is not None:
+            compact.token_usage = persisted_usage
+        elif compact.token_usage is None and previous.get("token_usage"):
             compact.token_usage = OpenCodePoolStatus.model_validate(previous).token_usage
         compact.completed_tasks = []
         compact.completed_task_count = max(
