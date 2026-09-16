@@ -31,6 +31,7 @@ from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
 )
+from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline, retire_task
 from .output_format import format_task_output, task_output_stage
 from .token_usage import (
     OpenCodeTokenUsage,
@@ -50,6 +51,8 @@ _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_VERSION_PROBE_TIMEOUT_SECONDS = 3.0
 _COMMAND_PROBE_STOP_TIMEOUT_SECONDS = 2.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
+_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS = 2.0
+_SERVE_REQUEST_REAP_TIMEOUT_SECONDS = 1.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS = 10.0
@@ -3377,17 +3380,18 @@ async def _session_tree_token_entries(
     complete = True
     pending = [root_session_id]
     visited: set[str] = set()
+    deadline = OperationDeadline(_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS)
     while pending:
         current = pending.pop()
         if not current or current in visited:
             continue
         visited.add(current)
         try:
-            response = await client.get(
+            response = await deadline.wait(client.get(
                 f"/session/{current}/message",
                 params=params,
                 headers=headers,
-            )
+            ), phase="token_messages")
             response.raise_for_status()
             messages = response.json()
             if isinstance(messages, list):
@@ -3397,15 +3401,17 @@ async def _session_tree_token_entries(
                     )
             else:
                 complete = False
+        except asyncio.TimeoutError:
+            return entries, False
         except Exception as exc:
             complete = False
             logger.debug("Failed to collect OpenCode messages for %s: %s", current, exc)
         try:
-            response = await client.get(
+            response = await deadline.wait(client.get(
                 f"/session/{current}/children",
                 params=params,
                 headers=headers,
-            )
+            ), phase="token_children")
             response.raise_for_status()
             children = response.json()
             if isinstance(children, list):
@@ -3417,6 +3423,8 @@ async def _session_tree_token_entries(
                         pending.append(child_id)
             else:
                 complete = False
+        except asyncio.TimeoutError:
+            return entries, False
         except Exception as exc:
             complete = False
             logger.debug("Failed to collect OpenCode child sessions for %s: %s", current, exc)
@@ -5178,7 +5186,9 @@ class OpenCodeServeManager:
             for target in self._managed_mcp_specs
         ]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # A caller timing out must not cancel MCP synchronization shared
+            # by other sessions in this directory.
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
     def _spawn_managed_mcp_sync(
         self,
@@ -6275,17 +6285,41 @@ class OpenCodeServeManager:
         required_bash_success_markers: tuple[tuple[str, str], ...] = (),
         required_bash_path_prepend: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
+        deadline = OperationDeadline(timeout, cancel_event=cancel_event)
+        callbacks_open = True
+        usage_open = True
+        output_callback = on_line
+
+        def guarded(callback):
+            if callback is None:
+                return None
+
+            def invoke(*args, **kwargs):
+                if callbacks_open:
+                    return callback(*args, **kwargs)
+                return None
+
+            return invoke
+
+        on_session_id = guarded(on_session_id)
+        on_response_model = guarded(on_response_model)
+        on_file_write = guarded(on_file_write)
+        on_line = guarded(on_line)
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
         session_mode = "continued" if active_session_id else "created"
 
-        def emit(category: str, message: object, *, current_session_id: str | None = None) -> None:
-            if on_line is None:
+        def emit(
+            category: str, message: object, *,
+            current_session_id: str | None = None, final: bool = False,
+        ) -> None:
+            callback = output_callback if final else on_line
+            if callback is None:
                 return
             resolved_session_id = (
                 active_session_id if current_session_id is None else current_session_id
             )
-            on_line(
+            callback(
                 format_task_output(
                     normalized_log_stage,
                     resolved_session_id,
@@ -6330,19 +6364,12 @@ class OpenCodeServeManager:
                 f"port={port_label} "
                 f"port_mode={'auto' if serve_port_auto else 'fixed'}"
             )
-        try:
-            serve_mode = await self._acquire_session(
-                key,
-                startup_cwd=config_workspace,
-            )
-        except Exception as exc:
-            if show_serve_status and on_line:
-                emit(
-                    "task",
-                    "SERVE STARTUP_FAILED "
-                    f"error={_one_line_preview(exc, _SERVE_STARTUP_LOG_TAIL_LIMIT + 500)}",
-                )
-            raise
+        serve_acquired = False
+        client = None
+        request = None
+        message_finished = False
+        response_data = None
+        capture_token_usage = None
         event_state: _ServeEventState | None = None
         event_registered = False
         event_flush_task: asyncio.Task | None = None
@@ -6353,6 +6380,7 @@ class OpenCodeServeManager:
         response_message_id_for_log = ""
         scan_mcp_lease: _ScanMcpLease | None = None
         knowledge_mcp_lease: _ScanMcpLease | None = None
+        owned_mcp_leases: list[_ScanMcpLease] = []
         knowledge_binding_path: Path | None = None
         command_binding_path: Path | None = None
         command_audit_path: Path | None = None
@@ -6368,7 +6396,35 @@ class OpenCodeServeManager:
         ).strip()
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
+
+        async def acquire_serve() -> str:
+            nonlocal serve_acquired
+            mode = await self._acquire_session(key, startup_cwd=config_workspace)
+            if callbacks_open:
+                serve_acquired = True
+            else:
+                await self._release_active_session()
+            return mode
+
+        async def acquire_mcp(*args, **kwargs) -> _ScanMcpLease:
+            lease = await self._acquire_scan_mcp(*args, **kwargs)
+            if callbacks_open:
+                owned_mcp_leases.append(lease)
+            else:
+                late_cleanup = OperationDeadline(CLEANUP_TIMEOUT_SECONDS)
+                await late_cleanup.wait(
+                    self._release_scan_mcp(directory, lease), phase="late_mcp_release",
+                )
+            return lease
+
         try:
+            try:
+                serve_mode = await deadline.wait(acquire_serve(), phase="serve_preparation")
+            except Exception as exc:
+                if show_serve_status and on_line:
+                    emit("task", "SERVE STARTUP_FAILED "
+                         f"error={_one_line_preview(exc, _SERVE_STARTUP_LOG_TAIL_LIMIT + 500)}")
+                raise
             if show_serve_status and on_line:
                 pid = int(getattr(self._proc, "pid", 0) or 0)
                 emit(
@@ -6376,624 +6432,612 @@ class OpenCodeServeManager:
                     f"SERVE READY mode={serve_mode} "
                     f"url={self.base_url} pid={pid}"
                 )
-            await self.ensure_managed_mcp(directory)
-            async with httpx.AsyncClient(
+            await deadline.wait(self.ensure_managed_mcp(directory), phase="managed_mcp")
+            client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
-            ) as client:
-                token_baseline: dict[
-                    tuple[str, str, str], tuple[str, TokenCounters]
-                ] = {}
-                token_baseline_complete = True
-                captured_token_usage: OpenCodeTokenUsage | None = None
-                token_usage_captured = False
+            )
+            await deadline.wait(client.__aenter__(), phase="http_client")
+            token_baseline: dict[
+                tuple[str, str, str], tuple[str, TokenCounters]
+            ] = {}
+            token_baseline_complete = True
+            captured_token_usage: OpenCodeTokenUsage | None = None
+            token_usage_captured = False
 
-                async def capture_token_usage(
-                    response_message: object = None,
-                ) -> OpenCodeTokenUsage:
-                    nonlocal captured_token_usage, token_usage_captured
-                    if token_usage_captured and captured_token_usage is not None:
-                        return captured_token_usage
-                    after, after_complete = await _session_tree_token_entries(
+            async def capture_token_usage(
+                response_message: object = None,
+            ) -> OpenCodeTokenUsage:
+                nonlocal captured_token_usage, token_usage_captured
+                if token_usage_captured and captured_token_usage is not None:
+                    return captured_token_usage
+                after, after_complete = await _session_tree_token_entries(
+                    client,
+                    active_session_id,
+                    params,
+                    headers,
+                    model,
+                )
+                if not token_baseline_complete:
+                    # An incomplete continuation baseline cannot distinguish
+                    # old child messages from this invocation's usage. Keep
+                    # only the authoritative current response in that case.
+                    after = {}
+                if response_message is not None:
+                    after.update(
+                        _message_token_entries(
+                            active_session_id,
+                            response_message,
+                            model,
+                        )
+                    )
+                captured_token_usage = _token_usage_delta(
+                    token_baseline,
+                    after,
+                    complete=token_baseline_complete and after_complete,
+                )
+                token_usage_captured = True
+                if usage_open and on_token_usage is not None:
+                    try:
+                        result = on_token_usage(captured_token_usage)
+                        if hasattr(result, "__await__"):
+                            await result
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to publish OpenCode token usage for session %s: %s",
+                            active_session_id,
+                            exc,
+                        )
+                return captured_token_usage
+
+            if str(scan_id or "").strip():
+                scan_mcp_lease = await deadline.wait(acquire_mcp(
+                    client,
+                    directory,
+                    str(scan_id),
+                    code_graph_mcp if isinstance(code_graph_mcp, dict) else None,
+                ), phase="scan_mcp")
+                selected_source_mcp = (
+                    scan_mcp_lease.name if scan_mcp_lease.connected else ""
+                )
+                if scan_mcp_lease.connected:
+                    emit(
+                        "session",
+                        f"CODE_GRAPH_MCP connected name={scan_mcp_lease.name}",
+                    )
+                elif scan_mcp_lease.error:
+                    emit(
+                        "session",
+                        "CODE_GRAPH_MCP unavailable fallback=file_tools "
+                        f"error={_one_line_preview(scan_mcp_lease.error)}",
+                    )
+                else:
+                    emit(
+                        "session",
+                        "CODE_GRAPH_MCP disabled mode=file_tools",
+                    )
+                if knowledge_runtime is not None:
+                    knowledge_mcp_lease = await deadline.wait(acquire_mcp(
+                        client,
+                        directory,
+                        str(scan_id),
+                        knowledge_runtime,
+                        role="knowledge_base",
+                        source_graph=False,
+                    ), phase="scan_mcp")
+                    if knowledge_mcp_lease.connected:
+                        emit(
+                            "session",
+                            f"KNOWLEDGE_BASE_MCP connected name={knowledge_mcp_lease.name}",
+                        )
+                    elif knowledge_mcp_lease.error:
+                        emit(
+                            "session",
+                            "KNOWLEDGE_BASE_MCP unavailable "
+                            f"error={_one_line_preview(knowledge_mcp_lease.error)}",
+                        )
+            if not active_session_id:
+                create_payload: dict[str, Any] = {
+                    "title": str(session_title or "").strip() or "DeepHole 2.0 task",
+                }
+                if permissions is not None:
+                    create_payload["permission"] = permissions
+                created = await deadline.wait(client.post(
+                    "/session",
+                    params=params,
+                    headers=headers,
+                    json=create_payload,
+                ), phase="session_create")
+                self._raise_for_session_control_status(
+                    created,
+                    "POST /session",
+                )
+                active_session_id = _session_id(created.json())
+            elif permissions is not None:
+                updated = await deadline.wait(client.patch(
+                    f"/session/{active_session_id}",
+                    params=params,
+                    headers=headers,
+                    json={"permission": permissions},
+                ), phase="session_permissions")
+                self._raise_for_session_control_status(
+                    updated,
+                    "PATCH /session/{session_id}",
+                )
+            binding_workspace = self._startup_cwd or config_workspace
+            if binding_workspace is not None:
+                try:
+                    _remove_file(_knowledge_binding_path(
+                        binding_workspace,
+                        active_session_id,
+                    ))
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to remove stale knowledge binding for session %s: %s",
+                        active_session_id,
+                        _one_line_preview(exc),
+                    )
+            bound_bash_commands = tuple(dict.fromkeys((
+                *allowed_bash_commands,
+                *required_bash_commands,
+            )))
+            if bound_bash_commands:
+                if binding_workspace is None:
+                    raise RuntimeError(
+                        "Managed plugin workspace is unavailable for bound shell commands"
+                    )
+                command_binding_path, command_audit_path = (
+                    _write_command_binding(
+                        binding_workspace,
+                        session_id=active_session_id,
+                        required_commands=bound_bash_commands,
+                        success_markers=required_bash_success_markers,
+                        path_prepend=required_bash_path_prepend,
+                    )
+                )
+            elif binding_workspace is not None:
+                with contextlib.suppress(Exception):
+                    _remove_file(_command_binding_path(
+                        binding_workspace,
+                        active_session_id,
+                    ))
+                with contextlib.suppress(Exception):
+                    _remove_file(_command_audit_path(
+                        binding_workspace,
+                        active_session_id,
+                    ))
+            if session_mode == "continued":
+                token_baseline, token_baseline_complete = (
+                    await deadline.wait(_session_tree_token_entries(
                         client,
                         active_session_id,
                         params,
                         headers,
                         model,
-                    )
-                    if response_message is not None:
-                        after.update(
-                            _message_token_entries(
-                                active_session_id,
-                                response_message,
-                                model,
-                            )
-                        )
-                    captured_token_usage = _token_usage_delta(
-                        token_baseline,
-                        after,
-                        complete=token_baseline_complete and after_complete,
-                    )
-                    token_usage_captured = True
-                    if on_token_usage is not None:
-                        try:
-                            result = on_token_usage(captured_token_usage)
-                            if hasattr(result, "__await__"):
-                                await result
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to publish OpenCode token usage for session %s: %s",
-                                active_session_id,
-                                exc,
-                            )
-                    return captured_token_usage
-
-                if str(scan_id or "").strip():
-                    scan_mcp_lease = await self._acquire_scan_mcp(
-                        client,
-                        directory,
-                        str(scan_id),
-                        code_graph_mcp if isinstance(code_graph_mcp, dict) else None,
-                    )
-                    selected_source_mcp = (
-                        scan_mcp_lease.name if scan_mcp_lease.connected else ""
-                    )
-                    if scan_mcp_lease.connected:
-                        emit(
-                            "session",
-                            f"CODE_GRAPH_MCP connected name={scan_mcp_lease.name}",
-                        )
-                    elif scan_mcp_lease.error:
-                        emit(
-                            "session",
-                            "CODE_GRAPH_MCP unavailable fallback=file_tools "
-                            f"error={_one_line_preview(scan_mcp_lease.error)}",
-                        )
-                    else:
-                        emit(
-                            "session",
-                            "CODE_GRAPH_MCP disabled mode=file_tools",
-                        )
-                    if knowledge_runtime is not None:
-                        knowledge_mcp_lease = await self._acquire_scan_mcp(
-                            client,
-                            directory,
-                            str(scan_id),
-                            knowledge_runtime,
-                            role="knowledge_base",
-                            source_graph=False,
-                        )
-                        if knowledge_mcp_lease.connected:
-                            emit(
-                                "session",
-                                f"KNOWLEDGE_BASE_MCP connected name={knowledge_mcp_lease.name}",
-                            )
-                        elif knowledge_mcp_lease.error:
-                            emit(
-                                "session",
-                                "KNOWLEDGE_BASE_MCP unavailable "
-                                f"error={_one_line_preview(knowledge_mcp_lease.error)}",
-                            )
-                if not active_session_id:
-                    create_payload: dict[str, Any] = {
-                        "title": str(session_title or "").strip() or "DeepHole 2.0 task",
-                    }
-                    if permissions is not None:
-                        create_payload["permission"] = permissions
-                    created = await client.post(
-                        "/session",
-                        params=params,
+                    ), phase="token_baseline")
+                )
+            if on_session_id:
+                result = on_session_id(active_session_id)
+                if hasattr(result, "__await__"):
+                    await deadline.wait(result, phase="response_callback")
+            if on_line:
+                config_note = f" config={config_workspace}" if config_workspace else ""
+                correlation_note = (
+                    f" task={task_id} attempt={task_attempt}"
+                    if task_id
+                    else ""
+                )
+                emit(
+                    "session",
+                    f"START mode={session_mode} directory={directory}"
+                    f"{correlation_note}{config_note}",
+                )
+                session_started = True
+            ignored_file_message_ids: tuple[str, ...] = ()
+            response_baseline_known = session_mode != "continued"
+            response_baseline_message_id = ""
+            if session_mode == "continued":
+                baseline_params = dict(params)
+                baseline_params["limit"] = "2"
+                try:
+                    baseline_response = await deadline.wait(client.get(
+                        f"/session/{active_session_id}/message",
+                        params=baseline_params,
                         headers=headers,
-                        json=create_payload,
-                    )
-                    self._raise_for_session_control_status(
-                        created,
-                        "POST /session",
-                    )
-                    active_session_id = _session_id(created.json())
-                elif permissions is not None:
-                    updated = await client.patch(
-                        f"/session/{active_session_id}",
-                        params=params,
-                        headers=headers,
-                        json={"permission": permissions},
-                    )
-                    self._raise_for_session_control_status(
-                        updated,
-                        "PATCH /session/{session_id}",
-                    )
-                binding_workspace = self._startup_cwd or config_workspace
-                if binding_workspace is not None:
-                    try:
-                        _remove_file(_knowledge_binding_path(
-                            binding_workspace,
-                            active_session_id,
-                        ))
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to remove stale knowledge binding for session %s: %s",
-                            active_session_id,
-                            _one_line_preview(exc),
-                        )
-                bound_bash_commands = tuple(dict.fromkeys((
-                    *allowed_bash_commands,
-                    *required_bash_commands,
-                )))
-                if bound_bash_commands:
-                    if binding_workspace is None:
+                    ), phase="response_cleanup")
+                    baseline_response.raise_for_status()
+                    baseline_messages = baseline_response.json()
+                    if not isinstance(baseline_messages, list):
                         raise RuntimeError(
-                            "Managed plugin workspace is unavailable for bound shell commands"
+                            "OpenCode session history did not return a message list"
                         )
-                    command_binding_path, command_audit_path = (
-                        _write_command_binding(
+                    baseline_message = _latest_assistant_message(
+                        baseline_messages,
+                        active_session_id,
+                    )
+                    response_baseline_message_id = _response_message_id(
+                        baseline_message
+                    )
+                    response_baseline_known = True
+                except Exception:
+                    if on_file_write is not None:
+                        raise
+                    logger.debug(
+                        "Failed to capture OpenCode response baseline for session %s",
+                        active_session_id,
+                        exc_info=True,
+                    )
+                if response_baseline_message_id:
+                    ignored_file_message_ids = (
+                        response_baseline_message_id,
+                    )
+            if on_line is not None or on_file_write is not None:
+                event_state = _ServeEventState(
+                    tool,
+                    active_session_id,
+                    on_line,
+                    on_file_write=on_file_write,
+                    ignored_file_message_ids=ignored_file_message_ids,
+                    log_stage=normalized_log_stage,
+                    source_mcp_name=selected_source_mcp or "",
+                )
+                if on_line is not None:
+                    event_flush_task = asyncio.create_task(
+                        _flush_event_state_periodically(event_state)
+                    )
+                event_registered = True
+                await deadline.wait(self._register_event_state(active_session_id, directory, event_state), phase="event_registration")
+            payload: dict[str, Any] = {
+                "agent": agent,
+                "parts": [{"type": "text", "text": prompt}],
+            }
+            tool_ids = await deadline.wait(self._list_tool_ids(
+                client,
+                params,
+                headers,
+                on_line=(lambda message: emit("session", message)) if on_line else None,
+                tool=tool,
+            ), phase="tool_discovery")
+            if disable_all_tools:
+                mcp_overrides = {
+                    tool_id: False
+                    for tool_id in sorted(
+                        set(tool_ids) | set(_FORMATTER_DISABLED_TOOL_IDS)
+                    )
+                }
+                source_available = False
+            else:
+                mcp_overrides = _mcp_tool_overrides(
+                    tool_ids,
+                    mcp_tools,
+                    disabled_mcp_tools,
+                )
+                mcp_overrides, source_available = _apply_source_graph_overrides(
+                    tool_ids,
+                    mcp_overrides,
+                    selected_source_mcp,
+                    source_mcp_names=self._source_graph_mcp_names(directory),
+                    protected_mcp_names=(
+                        self._enabled_managed_mcp_names()
+                        | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
+                    ),
+                    allow_undiscovered=bool(
+                        scan_mcp_lease is not None and scan_mcp_lease.connected
+                    ),
+                )
+            # OpenCode 1.18.4's experimental tool-ID route only exposes
+            # registry tools; MCP tools are merged later when a Session
+            # resolves its tools. Build the deterministic MCP IDs instead.
+            knowledge_tool_patterns = [
+                f"{prefix}*"
+                for prefix in _opencode_mcp_tool_prefixes(knowledge_mcp_name)
+            ]
+            if (
+                disable_all_tools
+                and knowledge_mcp_lease is not None
+                and knowledge_mcp_lease.connected
+            ):
+                for pattern in knowledge_tool_patterns:
+                    mcp_overrides[pattern] = False
+            if (
+                not disable_all_tools
+                and knowledge_mcp_lease is not None
+                and knowledge_mcp_lease.connected
+            ):
+                projects_tool = str(
+                    (knowledge_runtime or {}).get("projects_tool") or ""
+                ).strip()
+                set_project_tool = str(
+                    (knowledge_runtime or {}).get("set_project_tool") or ""
+                ).strip()
+                projects_tool_ids = list(_opencode_mcp_tool_ids(
+                    knowledge_mcp_name,
+                    projects_tool,
+                ))
+                set_project_tool_ids = list(_opencode_mcp_tool_ids(
+                    knowledge_mcp_name,
+                    set_project_tool,
+                ))
+                blocked_knowledge_tools = list(dict.fromkeys([
+                    *projects_tool_ids,
+                    *set_project_tool_ids,
+                ]))
+                binding_error = ""
+                if not projects_tool or not set_project_tool:
+                    binding_error = "knowledge control-tool configuration is incomplete"
+                else:
+                    try:
+                        if binding_workspace is None:
+                            raise RuntimeError("managed plugin workspace is unavailable")
+                        knowledge_binding_path = _write_knowledge_binding(
                             binding_workspace,
                             session_id=active_session_id,
-                            required_commands=bound_bash_commands,
-                            success_markers=required_bash_success_markers,
-                            path_prepend=required_bash_path_prepend,
+                            project_id=str(
+                                (knowledge_runtime or {}).get("project_id") or ""
+                            ),
+                            mcp_name=knowledge_mcp_name,
+                            blocked_tool_ids=blocked_knowledge_tools,
                         )
-                    )
-                elif binding_workspace is not None:
-                    with contextlib.suppress(Exception):
-                        _remove_file(_command_binding_path(
-                            binding_workspace,
-                            active_session_id,
-                        ))
-                    with contextlib.suppress(Exception):
-                        _remove_file(_command_audit_path(
-                            binding_workspace,
-                            active_session_id,
-                        ))
-                if session_mode == "continued":
-                    token_baseline, token_baseline_complete = (
-                        await _session_tree_token_entries(
-                            client,
-                            active_session_id,
-                            params,
-                            headers,
-                            model,
-                        )
-                    )
-                if on_session_id:
-                    result = on_session_id(active_session_id)
-                    if hasattr(result, "__await__"):
-                        await result
-                if on_line:
-                    config_note = f" config={config_workspace}" if config_workspace else ""
-                    correlation_note = (
-                        f" task={task_id} attempt={task_attempt}"
-                        if task_id
-                        else ""
-                    )
-                    emit(
-                        "session",
-                        f"START mode={session_mode} directory={directory}"
-                        f"{correlation_note}{config_note}",
-                    )
-                    session_started = True
-                ignored_file_message_ids: tuple[str, ...] = ()
-                response_baseline_known = session_mode != "continued"
-                response_baseline_message_id = ""
-                if session_mode == "continued":
-                    baseline_params = dict(params)
-                    baseline_params["limit"] = "2"
-                    try:
-                        baseline_response = await client.get(
-                            f"/session/{active_session_id}/message",
-                            params=baseline_params,
-                            headers=headers,
-                        )
-                        baseline_response.raise_for_status()
-                        baseline_messages = baseline_response.json()
-                        if not isinstance(baseline_messages, list):
-                            raise RuntimeError(
-                                "OpenCode session history did not return a message list"
-                            )
-                        baseline_message = _latest_assistant_message(
-                            baseline_messages,
-                            active_session_id,
-                        )
-                        response_baseline_message_id = _response_message_id(
-                            baseline_message
-                        )
-                        response_baseline_known = True
-                    except Exception:
-                        if on_file_write is not None:
-                            raise
-                        logger.debug(
-                            "Failed to capture OpenCode response baseline for session %s",
-                            active_session_id,
-                            exc_info=True,
-                        )
-                    if response_baseline_message_id:
-                        ignored_file_message_ids = (
-                            response_baseline_message_id,
-                        )
-                if on_line is not None or on_file_write is not None:
-                    event_state = _ServeEventState(
-                        tool,
-                        active_session_id,
-                        on_line,
-                        on_file_write=on_file_write,
-                        ignored_file_message_ids=ignored_file_message_ids,
-                        log_stage=normalized_log_stage,
-                        source_mcp_name=selected_source_mcp or "",
-                    )
-                    if on_line is not None:
-                        event_flush_task = asyncio.create_task(
-                            _flush_event_state_periodically(event_state)
-                        )
-                    await self._register_event_state(active_session_id, directory, event_state)
-                    event_registered = True
-                payload: dict[str, Any] = {
-                    "agent": agent,
-                    "parts": [{"type": "text", "text": prompt}],
-                }
-                tool_ids = await self._list_tool_ids(
-                    client,
-                    params,
-                    headers,
-                    on_line=(lambda message: emit("session", message)) if on_line else None,
-                    tool=tool,
-                )
-                if disable_all_tools:
-                    mcp_overrides = {
-                        tool_id: False
-                        for tool_id in sorted(
-                            set(tool_ids) | set(_FORMATTER_DISABLED_TOOL_IDS)
-                        )
-                    }
-                    source_available = False
-                else:
-                    mcp_overrides = _mcp_tool_overrides(
-                        tool_ids,
-                        mcp_tools,
-                        disabled_mcp_tools,
-                    )
-                    mcp_overrides, source_available = _apply_source_graph_overrides(
-                        tool_ids,
-                        mcp_overrides,
-                        selected_source_mcp,
-                        source_mcp_names=self._source_graph_mcp_names(directory),
-                        protected_mcp_names=(
-                            self._enabled_managed_mcp_names()
-                            | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
-                        ),
-                        allow_undiscovered=bool(
-                            scan_mcp_lease is not None and scan_mcp_lease.connected
-                        ),
-                    )
-                # OpenCode 1.18.4's experimental tool-ID route only exposes
-                # registry tools; MCP tools are merged later when a Session
-                # resolves its tools. Build the deterministic MCP IDs instead.
-                knowledge_tool_patterns = [
-                    f"{prefix}*"
-                    for prefix in _opencode_mcp_tool_prefixes(knowledge_mcp_name)
-                ]
-                if (
-                    disable_all_tools
-                    and knowledge_mcp_lease is not None
-                    and knowledge_mcp_lease.connected
-                ):
+                    except Exception as exc:
+                        binding_error = _one_line_preview(exc)
+                        if binding_workspace is not None:
+                            with contextlib.suppress(Exception):
+                                _remove_file(_knowledge_binding_path(
+                                    binding_workspace,
+                                    active_session_id,
+                                ))
+                if binding_error:
                     for pattern in knowledge_tool_patterns:
                         mcp_overrides[pattern] = False
-                if (
-                    not disable_all_tools
-                    and knowledge_mcp_lease is not None
-                    and knowledge_mcp_lease.connected
-                ):
-                    projects_tool = str(
-                        (knowledge_runtime or {}).get("projects_tool") or ""
-                    ).strip()
-                    set_project_tool = str(
-                        (knowledge_runtime or {}).get("set_project_tool") or ""
-                    ).strip()
-                    projects_tool_ids = list(_opencode_mcp_tool_ids(
-                        knowledge_mcp_name,
-                        projects_tool,
-                    ))
-                    set_project_tool_ids = list(_opencode_mcp_tool_ids(
-                        knowledge_mcp_name,
-                        set_project_tool,
-                    ))
-                    blocked_knowledge_tools = list(dict.fromkeys([
-                        *projects_tool_ids,
-                        *set_project_tool_ids,
-                    ]))
-                    binding_error = ""
-                    if not projects_tool or not set_project_tool:
-                        binding_error = "knowledge control-tool configuration is incomplete"
-                    else:
-                        try:
-                            if binding_workspace is None:
-                                raise RuntimeError("managed plugin workspace is unavailable")
-                            knowledge_binding_path = _write_knowledge_binding(
-                                binding_workspace,
-                                session_id=active_session_id,
-                                project_id=str(
-                                    (knowledge_runtime or {}).get("project_id") or ""
-                                ),
-                                mcp_name=knowledge_mcp_name,
-                                blocked_tool_ids=blocked_knowledge_tools,
-                            )
-                        except Exception as exc:
-                            binding_error = _one_line_preview(exc)
-                            if binding_workspace is not None:
-                                with contextlib.suppress(Exception):
-                                    _remove_file(_knowledge_binding_path(
-                                        binding_workspace,
-                                        active_session_id,
-                                    ))
-                    if binding_error:
-                        for pattern in knowledge_tool_patterns:
-                            mcp_overrides[pattern] = False
-                        await self._disable_scan_mcp_lease(
-                            client,
-                            directory,
-                            knowledge_mcp_lease,
-                            binding_error,
-                        )
-                        emit(
-                            "session",
-                            "KNOWLEDGE_BASE_MCP disabled fallback=continue_task "
-                            f"error={binding_error}",
-                        )
-                    else:
-                        for pattern in knowledge_tool_patterns:
-                            mcp_overrides[pattern] = True
-                        for tool_id in blocked_knowledge_tools:
-                            mcp_overrides.pop(tool_id, None)
-                            mcp_overrides[tool_id] = False
-                        emit(
-                            "session",
-                            "KNOWLEDGE_BASE_MCP project_bound "
-                            f"name={knowledge_mcp_name} "
-                            "query_tools=dynamic",
-                        )
-                if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
+                    await deadline.wait(self._disable_scan_mcp_lease(
+                        client,
+                        directory,
+                        knowledge_mcp_lease,
+                        binding_error,
+                    ), phase="mcp_cleanup")
                     emit(
                         "session",
-                        "CODE_GRAPH_MCP no_tools fallback=file_tools",
+                        "KNOWLEDGE_BASE_MCP disabled fallback=continue_task "
+                        f"error={binding_error}",
                     )
-                if mcp_overrides:
-                    payload["tools"] = mcp_overrides
-                if model:
-                    provider_id, model_id = split_model_id(model)
-                    payload["model"] = {"providerID": provider_id, "modelID": model_id}
-                if system_prompt:
-                    payload["system"] = system_prompt
-
-                request = asyncio.create_task(
-                    client.post(
-                        f"/session/{active_session_id}/message",
-                        params=params,
-                        headers=headers,
-                        json=payload,
-                        timeout=timeout + 30,
+                else:
+                    for pattern in knowledge_tool_patterns:
+                        mcp_overrides[pattern] = True
+                    for tool_id in blocked_knowledge_tools:
+                        mcp_overrides.pop(tool_id, None)
+                        mcp_overrides[tool_id] = False
+                    emit(
+                        "session",
+                        "KNOWLEDGE_BASE_MCP project_bound "
+                        f"name={knowledge_mcp_name} "
+                        "query_tools=dynamic",
                     )
+            if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
+                emit(
+                    "session",
+                    "CODE_GRAPH_MCP no_tools fallback=file_tools",
                 )
-                if event_state is not None:
-                    snapshot_poll_task = asyncio.create_task(
-                        self._poll_session_snapshots(
-                            client=client,
-                            session_id=active_session_id,
-                            directory=directory,
-                            params=params,
-                            headers=headers,
-                            state=event_state,
-                        )
-                    )
-                try:
-                    response = await self._wait_for_response(
-                        request=request,
-                        timeout=timeout,
-                        cancel_event=cancel_event,
-                    )
-                except asyncio.TimeoutError:
-                    await emit_model_request_failure("timeout")
-                    await self._abort_session(
-                        client,
-                        active_session_id,
-                        params,
-                        headers,
-                    )
-                    await self._cancel_request_task(request)
-                    await capture_token_usage()
-                    raise
-                except asyncio.CancelledError:
-                    await self._abort_session(
-                        client,
-                        active_session_id,
-                        params,
-                        headers,
-                    )
-                    await self._cancel_request_task(request)
-                    await capture_token_usage()
-                    raise
-                except BaseException:
-                    await emit_model_request_failure("failure")
-                    await self._cancel_request_task(request)
-                    await capture_token_usage()
-                    raise
-                try:
-                    response.raise_for_status()
-                except BaseException:
-                    await emit_model_request_failure("failure")
-                    await capture_token_usage()
-                    raise
-                if event_state:
-                    deadline = (
-                        asyncio.get_running_loop().time()
-                        + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
-                    )
-                    while (
-                        not event_state.session_terminal
-                        and asyncio.get_running_loop().time() < deadline
-                    ):
-                        await asyncio.sleep(0.01)
-                    if snapshot_poll_task is not None:
-                        snapshot_poll_task.cancel()
-                        with contextlib.suppress(BaseException):
-                            await snapshot_poll_task
-                        snapshot_poll_task = None
-                    if event_registered:
-                        await self._unregister_event_state(active_session_id)
-                        event_registered = False
-                    event_state.flush()
-                try:
-                    response_data = response.json()
-                except ValueError:
-                    (
-                        response_failure_reason,
-                        response_status_code,
-                        response_body_bytes,
-                        response_content_type,
-                    ) = _prompt_response_diagnostic(response)
-                    recovered_response: dict[str, Any] | None = None
-                    recovery_failure = "baseline_unknown"
-                    if response_baseline_known:
-                        recovered_response, recovery_failure = (
-                            await _recover_prompt_response(
-                                client,
-                                session_id=active_session_id,
-                                params=params,
-                                headers=headers,
-                                baseline_message_id=response_baseline_message_id,
-                                cancel_event=cancel_event,
-                            )
-                        )
-                    if recovered_response is None:
-                        await emit_model_request_failure("neutral")
-                        await capture_token_usage()
-                        response_description = (
-                            "an empty response body"
-                            if response_failure_reason == "empty_body"
-                            else "a non-JSON response"
-                        )
-                        content_type_note = (
-                            response_content_type or "<missing>"
-                        )
-                        raise RuntimeError(
-                            "OpenCode message endpoint returned "
-                            f"{response_description} "
-                            f"(status={response_status_code}, "
-                            f"content_type={content_type_note}, "
-                            f"bytes={response_body_bytes}); "
-                            "Session recovery failed: "
-                            f"{recovery_failure}"
-                        ) from None
-                    response_data = recovered_response
-                    emit(
-                        "session",
-                        "RESPONSE_RECOVERED "
-                        f"reason={response_failure_reason} "
-                        "source=session_messages "
-                        f"status={response_status_code} "
-                        f"bytes={response_body_bytes}",
-                    )
-                await capture_token_usage(response_data)
-                response_message_id_for_log = _response_message_id(response_data)
-                response_model = _response_model(response_data)
-                if response_model and on_response_model:
-                    result = on_response_model(response_model)
-                    if hasattr(result, "__await__"):
-                        await result
-                if event_state is not None and on_file_write is not None:
-                    await _replay_current_prompt_file_writes(
-                        client,
+            if mcp_overrides:
+                payload["tools"] = mcp_overrides
+            if model:
+                provider_id, model_id = split_model_id(model)
+                payload["model"] = {"providerID": provider_id, "modelID": model_id}
+            if system_prompt:
+                payload["system"] = system_prompt
+
+            request = asyncio.create_task(
+                client.post(
+                    f"/session/{active_session_id}/message",
+                    params=params,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout + 30,
+                )
+            )
+            if event_state is not None:
+                snapshot_poll_task = asyncio.create_task(
+                    self._poll_session_snapshots(
+                        client=client,
                         session_id=active_session_id,
+                        directory=directory,
                         params=params,
                         headers=headers,
-                        baseline_message_id=response_baseline_message_id,
-                        response_message_id=_response_message_id(response_data),
                         state=event_state,
                     )
-                assistant_error = _assistant_message_error(response_data)
-                if assistant_error is not None:
-                    error_name = (
-                        str(assistant_error.get("name") or "")
-                        if isinstance(assistant_error, dict)
-                        else ""
+                )
+            try:
+                response = await deadline.wait(self._wait_for_response(
+                    request=request,
+                    timeout=deadline.remaining(),
+                    cancel_event=cancel_event,
+                ), phase="message")
+                message_finished = True
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                raise
+            except BaseException:
+                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
+                raise
+            try:
+                response.raise_for_status()
+            except BaseException:
+                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
+                raise
+            if event_state:
+                event_drain_deadline = (
+                    asyncio.get_running_loop().time()
+                    + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
+                )
+                while (
+                    not event_state.session_terminal
+                    and asyncio.get_running_loop().time() < event_drain_deadline
+                ):
+                    await deadline.wait(asyncio.sleep(0.01), phase="event_drain")
+                if snapshot_poll_task is not None:
+                    snapshot_poll_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await deadline.wait(snapshot_poll_task, phase="response_cleanup")
+                    snapshot_poll_task = None
+                if event_registered:
+                    await deadline.wait(self._unregister_event_state(active_session_id), phase="event_cleanup")
+                    event_registered = False
+                event_state.flush()
+            try:
+                response_data = response.json()
+            except ValueError:
+                (
+                    response_failure_reason,
+                    response_status_code,
+                    response_body_bytes,
+                    response_content_type,
+                ) = _prompt_response_diagnostic(response)
+                recovered_response: dict[str, Any] | None = None
+                recovery_failure = "baseline_unknown"
+                if response_baseline_known:
+                    recovered_response, recovery_failure = (
+                        await deadline.wait(_recover_prompt_response(
+                            client,
+                            session_id=active_session_id,
+                            params=params,
+                            headers=headers,
+                            baseline_message_id=response_baseline_message_id,
+                            cancel_event=cancel_event,
+                        ), phase="response_recovery")
                     )
-                    if (
-                        error_name == "MessageAbortedError"
-                        and cancel_event is not None
-                        and cancel_event.is_set()
-                    ):
-                        raise asyncio.CancelledError()
-                    quota_error = _provider_quota_error(assistant_error)
-                    if quota_error is not None:
-                        await emit_model_request_failure("quota")
-                        raise quota_error
-                    await emit_model_request_failure(
-                        "failure"
-                        if _assistant_error_affects_model_health(assistant_error)
-                        else "neutral"
+                if recovered_response is None:
+                    await deadline.wait(emit_model_request_failure("neutral"), phase="response_cleanup")
+                    response_description = (
+                        "an empty response body"
+                        if response_failure_reason == "empty_body"
+                        else "a non-JSON response"
+                    )
+                    content_type_note = (
+                        response_content_type or "<missing>"
                     )
                     raise RuntimeError(
-                        _error_summary(assistant_error)
-                        or "OpenCode model request failed"
-                    )
-                lines = _extract_text(response_data)
-                response_text = _extract_response_text(response_data)
-                if event_state:
-                    if isinstance(response_data, dict):
-                        event_state.record_message(response_data.get("info"))
-                        response_message_id = _response_message_id(response_data)
-                        response_parts = response_data.get("parts")
-                        if isinstance(response_parts, list):
-                            for part in response_parts:
-                                if (
-                                    isinstance(part, dict)
-                                    and response_message_id
-                                    and not part.get("messageID")
-                                ):
-                                    part = {
-                                        **part,
-                                        "messageID": response_message_id,
-                                    }
-                                if not isinstance(part, dict) or part.get("type") not in {
-                                    "text",
-                                    "reasoning",
-                                }:
-                                    state = part.get("state") if isinstance(part, dict) else None
-                                    if (
-                                        isinstance(state, dict)
-                                        and state.get("status") == "completed"
-                                    ):
-                                        for value in _completed_file_writes(part, state):
-                                            event_state.record_file_write(value, replay=True)
-                                    event_state.handle_part(part)
-                    event_state.reconcile_text("text", "".join(response_text))
-                    event_state.flush()
-                details = OpenCodePromptResult(
-                    session_id=active_session_id,
-                    message_id=_response_message_id(response_data),
-                    lines=lines,
-                    text="\n".join(response_text),
-                    model=response_model,
-                    token_usage=captured_token_usage,
-                    raw=response_data,
+                        "OpenCode message endpoint returned "
+                        f"{response_description} "
+                        f"(status={response_status_code}, "
+                        f"content_type={content_type_note}, "
+                        f"bytes={response_body_bytes}); "
+                        "Session recovery failed: "
+                        f"{recovery_failure}"
+                    ) from None
+                response_data = recovered_response
+                emit(
+                    "session",
+                    "RESPONSE_RECOVERED "
+                    f"reason={response_failure_reason} "
+                    "source=session_messages "
+                    f"status={response_status_code} "
+                    f"bytes={response_body_bytes}",
                 )
-                if required_bash_commands:
-                    if command_audit_path is None:
-                        raise OpenCodeTaskQualityError(
-                            "OpenCode required command audit was not initialized"
-                        )
-                    try:
-                        _validate_required_command_audit(
-                            command_audit_path,
-                            required_bash_commands,
-                        )
-                    except OpenCodeTaskQualityError as exc:
-                        exc.prompt_result = details
-                        raise
-                session_outcome = "success"
-                return details if return_details else lines
+            response_message_id_for_log = _response_message_id(response_data)
+            response_model = _response_model(response_data)
+            if response_model and on_response_model:
+                result = on_response_model(response_model)
+                if hasattr(result, "__await__"):
+                    await deadline.wait(result, phase="response_callback")
+            if event_state is not None and on_file_write is not None:
+                await deadline.wait(_replay_current_prompt_file_writes(
+                    client,
+                    session_id=active_session_id,
+                    params=params,
+                    headers=headers,
+                    baseline_message_id=response_baseline_message_id,
+                    response_message_id=_response_message_id(response_data),
+                    state=event_state,
+                ), phase="file_write_replay")
+            assistant_error = _assistant_message_error(response_data)
+            if assistant_error is not None:
+                error_name = (
+                    str(assistant_error.get("name") or "")
+                    if isinstance(assistant_error, dict)
+                    else ""
+                )
+                if (
+                    error_name == "MessageAbortedError"
+                    and cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    raise asyncio.CancelledError()
+                quota_error = _provider_quota_error(assistant_error)
+                if quota_error is not None:
+                    await deadline.wait(emit_model_request_failure("quota"), phase="response_cleanup")
+                    raise quota_error
+                await deadline.wait(emit_model_request_failure(
+                    "failure"
+                    if _assistant_error_affects_model_health(assistant_error)
+                    else "neutral"
+                ), phase="response_cleanup")
+                raise RuntimeError(
+                    _error_summary(assistant_error)
+                    or "OpenCode model request failed"
+                )
+            await deadline.wait(capture_token_usage(response_data), phase="token_collection")
+            lines = _extract_text(response_data)
+            response_text = _extract_response_text(response_data)
+            if event_state:
+                if isinstance(response_data, dict):
+                    event_state.record_message(response_data.get("info"))
+                    response_message_id = _response_message_id(response_data)
+                    response_parts = response_data.get("parts")
+                    if isinstance(response_parts, list):
+                        for part in response_parts:
+                            if (
+                                isinstance(part, dict)
+                                and response_message_id
+                                and not part.get("messageID")
+                            ):
+                                part = {
+                                    **part,
+                                    "messageID": response_message_id,
+                                }
+                            if not isinstance(part, dict) or part.get("type") not in {
+                                "text",
+                                "reasoning",
+                            }:
+                                state = part.get("state") if isinstance(part, dict) else None
+                                if (
+                                    isinstance(state, dict)
+                                    and state.get("status") == "completed"
+                                ):
+                                    for value in _completed_file_writes(part, state):
+                                        event_state.record_file_write(value, replay=True)
+                                event_state.handle_part(part)
+                event_state.reconcile_text("text", "".join(response_text))
+                event_state.flush()
+            details = OpenCodePromptResult(
+                session_id=active_session_id,
+                message_id=_response_message_id(response_data),
+                lines=lines,
+                text="\n".join(response_text),
+                model=response_model,
+                token_usage=captured_token_usage,
+                raw=response_data,
+            )
+            if required_bash_commands:
+                if command_audit_path is None:
+                    raise OpenCodeTaskQualityError(
+                        "OpenCode required command audit was not initialized"
+                    )
+                try:
+                    _validate_required_command_audit(
+                        command_audit_path,
+                        required_bash_commands,
+                    )
+                except OpenCodeTaskQualityError as exc:
+                    exc.prompt_result = details
+                    raise
+            session_outcome = "success"
+            return details if return_details else lines
         except asyncio.TimeoutError as exc:
             session_outcome = "timeout"
-            session_error = str(exc) or "OpenCode task timed out"
+            session_error = str(exc) or f"OpenCode call timed out during {deadline.phase}"
+            emit("task", f"TIMEOUT phase={deadline.phase} task={task_id} "
+                 f"attempt={task_attempt} elapsed={time.monotonic() - deadline.started_at:.3f}s")
+            if deadline.phase in {"session_create", "session_permissions", "scan_mcp"}:
+                self._mark_serve_restart_required("Session preparation timed out")
             raise
         except asyncio.CancelledError:
             session_outcome = "cancelled"
@@ -7003,61 +7047,101 @@ class OpenCodeServeManager:
             session_error = str(exc) or type(exc).__name__
             raise
         finally:
+            cleanup_expires = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
+            cleanup_cancelled = False
+            callbacks_open = False
+
+            async def cleanup(operation, phase, limit=None):
+                nonlocal cleanup_cancelled
+                expires = cleanup_expires
+                if limit is not None:
+                    expires = min(expires, time.monotonic() + limit)
+                budget = OperationDeadline(0, expires_at=expires)
+                try:
+                    # Even after the budget expires, enter cleanup so its
+                    # local bookkeeping/finally blocks get a chance to run.
+                    task = asyncio.ensure_future(operation)
+                    retire_task(task)
+                    await asyncio.sleep(0)
+                    if task.done():
+                        return True, task.result()
+                    return True, await budget.wait(task, phase=phase)
+                except asyncio.CancelledError:
+                    if not task.done():
+                        task.cancel()
+                    cleanup_cancelled = True
+                    return False, None
+                except Exception as exc:
+                    logger.warning("OpenCode cleanup incomplete session=%s phase=%s error=%s",
+                                   active_session_id, phase, type(exc).__name__)
+                    return False, None
+
             try:
-                if snapshot_poll_task is not None:
-                    snapshot_poll_task.cancel()
-                    with contextlib.suppress(BaseException):
-                        await snapshot_poll_task
-                if event_registered:
-                    await self._unregister_event_state(active_session_id)
-                if event_flush_task is not None:
-                    event_flush_task.cancel()
-                    with contextlib.suppress(BaseException):
-                        await event_flush_task
+                if request is not None and not request.done():
+                    request.cancel()
+                    retire_task(request)
                 if event_state:
                     event_state.flush()
+                    event_state.on_line = None
+                    event_state.on_file_write = None
+                if event_registered:
+                    await cleanup(self._unregister_event_state(active_session_id), "event_cleanup", 1.0)
+                for task in (snapshot_poll_task, event_flush_task):
+                    if task is not None:
+                        task.cancel()
+                        await cleanup(self._cancel_request_task(task), "event_reap", 1.0)
+                if session_outcome == "timeout" and deadline.phase == "message":
+                    await cleanup(emit_model_request_failure("timeout"), "timeout_notification", 1.0)
+                if active_session_id and client is not None and not message_finished:
+                    ok, aborted = await cleanup(
+                        self._abort_session(client, active_session_id, params, headers),
+                        "session_abort", 5.0,
+                    )
+                    if not ok or not aborted:
+                        self._mark_serve_restart_required("Session abort did not complete")
+                if request is not None:
+                    ok, reaped = await cleanup(
+                        self._cancel_request_task(request), "request_reap",
+                        _SERVE_REQUEST_REAP_TIMEOUT_SECONDS,
+                    )
+                    if not ok or not reaped:
+                        self._mark_serve_restart_required("Message request did not stop")
+                if active_session_id and capture_token_usage is not None:
+                    await cleanup(capture_token_usage(response_data), "token_collection",
+                                  _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS + 0.1)
+                usage_open = False
+                for binding in (knowledge_binding_path, command_binding_path, command_audit_path):
+                    if binding is not None:
+                        with contextlib.suppress(Exception):
+                            _remove_file(binding)
+                if client is not None:
+                    ok, _ = await cleanup(client.__aexit__(None, None, None), "http_close")
+                    if not ok:
+                        self._mark_serve_restart_required("HTTP client cleanup did not complete")
+                for lease in reversed(owned_mcp_leases):
+                    ok, _ = await cleanup(self._release_scan_mcp(directory, lease), "mcp_release")
+                    if not ok:
+                        self._mark_serve_restart_required("MCP release did not complete")
+                if not await deadline.drain(expires_at=cleanup_expires):
+                    self._mark_serve_restart_required("Timed out operation did not stop")
             finally:
-                try:
-                    if session_started:
-                        error_note = (
-                            f" error={_one_line_preview(session_error)}"
-                            if session_error
-                            else ""
-                        )
-                        correlation_note = (
-                            f" task={task_id} attempt={task_attempt}"
-                            if task_id
-                            else ""
-                        )
-                        message_note = (
-                            f" message={response_message_id_for_log}"
-                            if task_id and response_message_id_for_log
-                            else ""
-                        )
-                        emit(
-                            "session",
-                            f"STOP status={session_outcome} retained=true"
-                            f"{correlation_note}{message_note}{error_note}",
-                        )
-                finally:
-                    try:
-                        if knowledge_binding_path is not None:
-                            _remove_file(knowledge_binding_path)
-                    finally:
-                        try:
-                            if command_binding_path is not None:
-                                _remove_file(command_binding_path)
-                            if command_audit_path is not None:
-                                _remove_file(command_audit_path)
-                        finally:
-                            try:
-                                if knowledge_mcp_lease is not None:
-                                    await self._release_scan_mcp(directory, knowledge_mcp_lease)
-                            finally:
-                                try:
-                                    await self._release_scan_mcp(directory, scan_mcp_lease)
-                                finally:
-                                    await self._release_active_session()
+                usage_open = False
+                if serve_acquired:
+                    # This condition protects only local counters; its holders
+                    # never await network I/O. Release exactly once, even when
+                    # remote cleanup exhausted its budget.
+                    await self._release_active_session()
+                if session_started:
+                    error_note = f" error={_one_line_preview(session_error)}" if session_error else ""
+                    correlation_note = f" task={task_id} attempt={task_attempt}" if task_id else ""
+                    message_note = (
+                        f" message={response_message_id_for_log}"
+                        if task_id and response_message_id_for_log else ""
+                    )
+                    emit("session", f"STOP status={session_outcome} retained=true"
+                         f"{correlation_note}{message_note}{error_note}", final=True)
+            if cleanup_cancelled or (cancel_event is not None and cancel_event.is_set()):
+                raise asyncio.CancelledError()
 
     async def _session_api_request(
         self,
@@ -7914,12 +7998,18 @@ class OpenCodeServeManager:
             await asyncio.sleep(0.2)
 
     @staticmethod
-    async def _cancel_request_task(request: asyncio.Task[httpx.Response]) -> None:
-        """Cancel and reap an in-flight message request before releasing its Session."""
+    async def _cancel_request_task(request: asyncio.Future) -> bool:
+        """Reap cooperative requests without letting transport cleanup stall retry."""
         if not request.done():
             request.cancel()
+            retire_task(request)
+            await asyncio.wait({request}, timeout=_SERVE_REQUEST_REAP_TIMEOUT_SECONDS)
+        if not request.done():
+            retire_task(request)
+            return False
         with contextlib.suppress(BaseException):
-            await request
+            request.result()
+        return True
 
     @staticmethod
     async def _serve_health_ready(port: int) -> bool:
@@ -8808,16 +8898,19 @@ class OpenCodeServeManager:
         session_id: str,
         params: dict[str, str],
         headers: dict[str, str],
-    ) -> None:
+    ) -> bool:
         try:
-            await client.post(
+            response = await client.post(
                 f"/session/{session_id}/abort",
                 params=params,
                 headers=headers,
                 timeout=5.0,
             )
+            response.raise_for_status()
+            return True
         except Exception as exc:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
+            return False
 
     async def _stop_event_hub(self) -> None:
         async with self._event_lock:

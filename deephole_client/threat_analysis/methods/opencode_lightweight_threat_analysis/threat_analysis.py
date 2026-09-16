@@ -15,6 +15,7 @@ build_lightweight_prompt = _lightweight_contract.build_lightweight_prompt
 reference_paths = _lightweight_contract.reference_paths
 reference_root = _lightweight_contract.reference_root
 validate_artifacts_locally = _lightweight_contract.validate_artifacts_locally
+validate_artifacts_locally_async = _lightweight_contract.validate_artifacts_locally_async
 validation_command = _lightweight_contract.validation_command
 
 
@@ -167,13 +168,13 @@ async def _run_task(
     )
 
 
-def _artifact_validation_feedback(
+async def _artifact_validation_feedback(
     *,
     guidance_path: Path,
     paths: Mapping[str, Path],
 ) -> str | None:
     try:
-        validate_artifacts_locally(guidance_path=guidance_path, paths=paths)
+        await validate_artifacts_locally_async(guidance_path=guidance_path, paths=paths)
     except Exception as exc:
         detail = " ".join(str(exc).split())
         return detail or type(exc).__name__

@@ -4,9 +4,13 @@ import asyncio
 import importlib
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from deephole_client.codex_scan_config import codex_runtime_reference_root
 from deephole_client.threat_analysis import lightweight_contract
@@ -20,6 +24,54 @@ from deephole_client.threat_analysis.runtime import (
 
 
 METHOD_ID = "opencode_lightweight_threat_analysis"
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+def test_async_validator_remains_responsive_and_reaps_process(monkeypatch, stop):
+    async def run():
+        processes = []
+        create_process = asyncio.create_subprocess_exec
+
+        async def create(*args, **kwargs):
+            process = await create_process(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        monkeypatch.setattr(lightweight_contract, "ARTIFACT_VALIDATION_TIMEOUT_SECONDS", 0.15)
+        monkeypatch.setattr(lightweight_contract, "validation_argv", lambda **_: (
+            sys.executable, "-c", "import time; time.sleep(30)",
+        ))
+        task = asyncio.create_task(lightweight_contract.validate_artifacts_locally_async(
+            guidance_path=Path("unused"), paths={},
+        ))
+        ticks = 0
+        started = time.monotonic()
+        while not task.done():
+            await asyncio.sleep(0.01)
+            ticks += 1
+            if stop == "cancel" and ticks == 5:
+                task.cancel()
+            assert time.monotonic() - started < 2
+        error = asyncio.CancelledError if stop == "cancel" else ValueError
+        with pytest.raises(error) as exc:
+            await task
+        if stop == "timeout":
+            assert "validation timed out" in str(exc.value)
+        assert ticks >= 5
+        assert len(processes) == 1
+        assert processes[0].returncode is not None
+
+    asyncio.run(run())
+
+
+def test_resume_validator_has_a_process_timeout(monkeypatch):
+    monkeypatch.setattr(lightweight_contract, "ARTIFACT_VALIDATION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(lightweight_contract, "validation_argv", lambda **_: (
+        sys.executable, "-c", "import time; time.sleep(30)",
+    ))
+    with pytest.raises(ValueError, match="validation timed out"):
+        lightweight_contract.validate_artifacts_locally(guidance_path=Path("unused"), paths={})
 
 
 def _implementation(method_id: str = METHOD_ID) -> ModuleType:
@@ -171,7 +223,7 @@ def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
 
     with (
         patch("task_agent.run_opencode_task", new=runner),
-        patch.object(implementation, "validate_artifacts_locally") as validate,
+        patch.object(implementation, "validate_artifacts_locally_async", new_callable=AsyncMock) as validate,
     ):
         asyncio.run(implementation._run_task(
             prompt="strict shared prompt",
@@ -182,7 +234,7 @@ def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
             session_id="ses-existing",
         ))
         validator = runner.await_args.kwargs["post_session_validator"]
-        assert validator() is None
+        assert asyncio.run(validator()) is None
 
     runner.assert_awaited_once()
     kwargs = dict(runner.await_args.kwargs)
@@ -198,7 +250,7 @@ def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
         "post_session_validation_retry_count": 1,
         "session_id": "ses-existing",
     }
-    validate.assert_called_once_with(guidance_path=guidance_path, paths=paths)
+    validate.assert_awaited_once_with(guidance_path=guidance_path, paths=paths)
 
 
 def test_windows_validation_command_uses_cmd_safe_double_quotes(
@@ -253,6 +305,7 @@ def test_local_validation_executes_an_argv_without_a_shell(
             "check": False,
             "capture_output": True,
             "text": True,
+            "timeout": lightweight_contract.ARTIFACT_VALIDATION_TIMEOUT_SECONDS,
         }
         return subprocess.CompletedProcess(argv, 0, "valid\n", "")
 
@@ -278,13 +331,14 @@ def test_post_session_validation_feedback_returns_diagnostics(
 
     with patch.object(
         implementation,
-        "validate_artifacts_locally",
+        "validate_artifacts_locally_async",
+        new_callable=AsyncMock,
         side_effect=ValueError("invalid\nattack tree"),
     ):
-        assert implementation._artifact_validation_feedback(
+        assert asyncio.run(implementation._artifact_validation_feedback(
             guidance_path=guidance_path,
             paths=paths,
-        ) == "invalid attack tree"
+        )) == "invalid attack tree"
 
 
 def test_resume_reuses_valid_completed_outputs_without_new_task(

@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from .api import OpenCodeResult
 from .config_json import dump_opencode_config, parse_opencode_jsonc
+from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline
 from .host import (
     OpenCodeInvocationMetadata as OutputSource,
     OpenCodeSessionRuntime as _SessionRuntime,
@@ -1054,6 +1055,9 @@ class OpenCodeTaskService:
                             message_prompt: str,
                         ) -> OpenCodePromptResult:
                             nonlocal parsed_written_json
+                            call_deadline = OperationDeadline(
+                                timeout_seconds, cancel_event=combined_cancel,
+                            )
                             message_writes.clear()
                             parsed_written_json = None
                             try:
@@ -1100,9 +1104,12 @@ class OpenCodeTaskService:
                                 raise
                             assert isinstance(result, OpenCodePromptResult)
                             try:
-                                feedback = await _post_session_validation_feedback(
-                                    spec.post_session_validator
-                                )
+                                feedback = ""
+                                if spec.post_session_validator is not None:
+                                    feedback = await call_deadline.wait(
+                                        _post_session_validation_feedback(spec.post_session_validator),
+                                        phase="post_session_validation",
+                                    )
                                 if feedback:
                                     error = OpenCodeTaskQualityError(
                                         "OpenCode post-session validation failed: "
@@ -1112,7 +1119,18 @@ class OpenCodeTaskService:
                                     )
                                     error.prompt_result = result
                                     raise error
-                            except BaseException:
+                            except BaseException as exc:
+                                if isinstance(exc, asyncio.TimeoutError):
+                                    self._emit_task_progress(
+                                        record,
+                                        "TIMEOUT phase=post_session_validation "
+                                        f"task={record.task_id} attempt={session_attempt} "
+                                        f"elapsed={time.monotonic() - call_deadline.started_at:.3f}s",
+                                        session_id=session_id,
+                                    )
+                                await call_deadline.drain(
+                                    expires_at=time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+                                )
                                 cleanup_message_writes()
                                 message_writes.clear()
                                 raise

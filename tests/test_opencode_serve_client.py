@@ -1965,6 +1965,8 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
         manager = OpenCodeServeManager()
         manager._port = 4096
         manager.ensure_managed_mcp = AsyncMock()
+        # This case targets the message deadline, after event preparation.
+        manager._register_event_state = AsyncMock()
 
         async def acquire(*args, **kwargs):
             manager._active_sessions += 1
@@ -2088,6 +2090,270 @@ def test_wait_for_response_prioritizes_cancel_over_completed_response() -> None:
                 timeout=1,
                 cancel_event=cancel_event,
             )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", [
+    "serve_preparation", "managed_mcp", "session_create", "session_abort",
+    "request_reap", "token_collection", "http_close", "all_cleanup",
+])
+def test_prompt_deadline_and_cleanup_bound_all_blocking_phases(monkeypatch, tmp_path, phase):
+    async def run():
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        failures = []
+        output = []
+        usages = []
+        posted = []
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._register_event_state = AsyncMock()
+
+        async def block(*_args):
+            entered.set()
+            await gate.wait()
+
+        async def acquire(*args, **kwargs):
+            if phase == "serve_preparation":
+                await block()
+            manager._active_sessions += 1
+            return "reused"
+
+        class Client(_HangingMessageAsyncClient):
+            async def post(self, path, **kwargs):
+                posted.append(path)
+                if phase == "session_create" and path == "/session":
+                    await block()
+                if phase in {"session_abort", "all_cleanup"} and path.endswith("/abort"):
+                    await block()
+                if phase in {"request_reap", "all_cleanup"} and path.endswith("/message"):
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        entered.set()
+                        while not gate.is_set():
+                            try:
+                                await gate.wait()
+                            except asyncio.CancelledError:
+                                continue
+                        return _FakeResponse({"parts": [{"type": "text", "text": "late"}]})
+                return await super().post(path, **kwargs)
+
+            async def get(self, path, **kwargs):
+                if phase in {"token_collection", "all_cleanup"} and path.endswith("/children"):
+                    await block()
+                return await super().get(path, **kwargs)
+
+            async def __aexit__(self, *args):
+                if phase in {"http_close", "all_cleanup"}:
+                    await block()
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client.CLEANUP_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.03)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_REQUEST_REAP_TIMEOUT_SECONDS", 0.03)
+        Client.hang_messages = True
+        manager._acquire_session = acquire
+        manager.ensure_managed_mcp = block if phase == "managed_mcp" else AsyncMock()
+        try:
+            with pytest.raises(asyncio.TimeoutError, match="OpenCode call timed out"):
+                await asyncio.wait_for(manager.run_prompt(
+                    tool="opencode", executable="opencode", directory=tmp_path,
+                    prompt="hang", model="provider/model", timeout=0.05,
+                    on_line=output.append, on_model_request_failure=failures.append,
+                    on_token_usage=usages.append,
+                ), timeout=1)
+            assert entered.is_set()
+            assert manager._active_sessions == 0
+            assert manager._event_states == {}
+            assert any("TIMEOUT phase=" in line for line in output)
+            if phase in {"serve_preparation", "managed_mcp", "session_create"}:
+                assert failures == []  # Preparation faults do not penalize a model.
+                assert not any(path.endswith("/message") for path in posted)
+            else:
+                assert failures == ["timeout"]
+            if phase in {"session_create", "session_abort", "request_reap", "http_close", "all_cleanup"}:
+                assert manager._restart_required is True
+            before = (list(output), list(usages), list(failures))
+            gate.set()
+            await asyncio.sleep(0.02)
+            assert (output, usages, failures) == before
+        finally:
+            gate.set()
+            await asyncio.sleep(0.02)
+
+    asyncio.run(run())
+
+
+def test_token_tree_timeout_preserves_partial_counts_and_success(monkeypatch, tmp_path):
+    async def run():
+        class Client(_FakeAsyncClient):
+            async def get(self, path, **kwargs):
+                if path == "/session/session-1/message":
+                    return _FakeResponse([{
+                        "info": {"id": "msg-1", "role": "assistant", "tokens": {"input": 7, "output": 3}},
+                    }])
+                if path == "/session/session-1/children":
+                    return _FakeResponse([{"id": "child"}])
+                if path == "/session/child/message":
+                    await asyncio.Future()
+                return await super().get(path, **kwargs)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.02)
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        failures = []
+        result = await manager.run_prompt(
+            tool="opencode", executable="opencode", directory=tmp_path,
+            prompt="success", model="provider/model", timeout=1,
+            return_details=True, on_model_request_failure=failures.append,
+        )
+        assert result.text == "done"
+        assert failures == []
+        assert result.token_usage.complete is False
+        assert result.token_usage.counters.total_tokens == 10
+
+    asyncio.run(run())
+
+
+def test_incomplete_continuation_baseline_does_not_recount_old_tokens(monkeypatch, tmp_path):
+    async def run():
+        old = {"info": {"id": "old", "role": "assistant", "tokens": {"input": 100, "output": 100}}}
+
+        class Client(_FakeAsyncClient):
+            message_info = {"id": "current", "role": "assistant", "tokens": {"input": 3, "output": 2}}
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client._session_tree_token_entries", AsyncMock(side_effect=[
+            ({}, False), (_message_token_entries("session-1", old, "provider/model"), True),
+        ]))
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        result = await manager.run_prompt(
+            tool="opencode", executable="opencode", directory=tmp_path,
+            prompt="continue", model="provider/model", timeout=1,
+            session_id="session-1", return_details=True,
+        )
+        assert result.token_usage.complete is False
+        assert result.token_usage.counters.total_tokens == 5
+
+    asyncio.run(run())
+
+
+def test_token_cleanup_does_not_replace_original_request_error(monkeypatch, tmp_path):
+    async def run():
+        class Client(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path.endswith("/message"):
+                    return _FakeResponse({}, error=RuntimeError("original request failure"))
+                return await super().post(path, **kwargs)
+
+            async def get(self, path, **kwargs):
+                if path.endswith("/children"):
+                    await asyncio.Future()
+                return await super().get(path, **kwargs)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.1)
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        failures = []
+        with pytest.raises(RuntimeError, match="original request failure"):
+            await asyncio.wait_for(manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path,
+                prompt="fail", model="provider/model", timeout=0.03,
+                on_model_request_failure=failures.append,
+            ), timeout=1)
+        assert failures == ["failure"]
+
+    asyncio.run(run())
+
+
+def test_cancelled_prompt_does_not_cancel_shared_mcp_sync(monkeypatch, tmp_path):
+    async def run():
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._managed_mcp_specs = {"product_info": {}}
+        manager._acquire_session = AsyncMock(return_value="reused")
+        ready = asyncio.Event()
+        shared = asyncio.create_task(ready.wait())
+        manager._spawn_managed_mcp_sync = lambda *args: shared
+        cancel = asyncio.Event()
+        first = asyncio.create_task(manager.run_prompt(
+            tool="opencode", executable="opencode", directory=tmp_path,
+            prompt="cancel", model="provider/model", timeout=1,
+            cancel_event=cancel,
+        ))
+        await asyncio.sleep(0.02)
+        cancel.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=0.5)
+        assert not shared.done()
+        ready.set()
+        await shared
+        assert not shared.cancelled()
+
+    asyncio.run(run())
+
+
+def test_timed_out_session_leaves_other_active_session_running(monkeypatch, tmp_path):
+    async def run():
+        neighbor_started = asyncio.Event()
+        neighbor_finish = asyncio.Event()
+        aborted = []
+        sessions = []
+
+        class Client(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    session = f"session-{len(sessions) + 1}"
+                    sessions.append(session)
+                    return _FakeResponse({"id": session})
+                if path.endswith("/message"):
+                    prompt = kwargs["json"]["parts"][0]["text"]
+                    if prompt == "neighbor":
+                        neighbor_started.set()
+                        await neighbor_finish.wait()
+                        return _FakeResponse({"parts": [{"type": "text", "text": "done"}]})
+                    await asyncio.Future()
+                if path.endswith("/abort"):
+                    aborted.append(path)
+                    return _FakeResponse(True)
+                return await super().post(path, **kwargs)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._stop_locked = AsyncMock()
+
+        async def acquire(*args, **kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        manager._acquire_session = acquire
+        common = dict(tool="opencode", executable="opencode", directory=tmp_path, model="provider/model")
+        neighbor = asyncio.create_task(manager.run_prompt(**common, prompt="neighbor", timeout=2))
+        await asyncio.wait_for(neighbor_started.wait(), timeout=1)
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await manager.run_prompt(**common, prompt="victim", timeout=0.03)
+            assert not neighbor.done()
+            assert manager._active_sessions == 1
+            assert aborted == ["/session/session-2/abort"]
+            manager._stop_locked.assert_not_awaited()
+        finally:
+            neighbor_finish.set()
+            assert await neighbor == ["done"]
+        assert manager._active_sessions == 0
 
     asyncio.run(run())
 

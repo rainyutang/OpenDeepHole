@@ -413,6 +413,12 @@ JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invali
 
 创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
 
+`timeout_seconds` 保持单次调用口径：取得模型 Lease 后，每次调用从 Serve 准备开始使用单调时钟截止时间，覆盖共享 Serve 等待、MCP 准备、Session 创建、消息等待、响应恢复和宿主校验。模型排队不计入，同 Session 的下一次纠正调用及新 Session 重试分别重新计时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
+
+超时会输出 `TIMEOUT phase=... task=... attempt=... elapsed=...`。后续 Session 中止、请求/事件回收、MCP 释放及 HTTP 关闭共用最多 10 秒清理预算；取消不合作的操作不会无限阻塞模型 Lease 释放。Session 中止未确认或请求未退出时，标记共享 Serve 在空闲边界恢复，不强制终止其它扫描的活动 Session。关闭旧调用的结果和文件事件回调，迟到回复不能更新新尝试。Session 树 Token 补采最多等待 2 秒，保留已取得的统计并使用现有 `complete=false` 标记不完整；补采失败不替换原始失败原因。
+
+OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验器，最长运行 60 秒，且受本次调用剩余时间约束；主动取消或超时会终止并回收校验进程，Agent 心跳与状态上报继续运行。校验器自身超时作为明确的校验诊断，沿用一次同 Session 纠正及后续新 Session 重试；调用总时限耗尽则直接进入超时重试。恢复扫描时校验已完成产物的同步路径同样限制为 60 秒。校验规则、任务策略默认值、重试次数及轻量分析失败后的一次 DeepHole 回退均保持不变。部署需更新并重启 Agent，然后续扫受影响任务，无需数据库迁移。
+
 OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Task Agent 会查询同一 Session 的消息历史，只接受相对于发送前基线新增且已经完成的 assistant 消息，并将其送回正常的错误、模型、Token、文本和文件写入处理链；恢复成功时控制台输出 `RESPONSE_RECOVERED reason=empty_body|invalid_json source=session_messages`。续写 Session 无法取得发送前基线时不会用历史消息兜底，避免把上一轮结果误认为本轮成功。若没有可确认的新消息，则错误只包含状态码、Content-Type、响应字节数和恢复失败类别，不包含响应正文或模型文本，并作为健康中性失败进入 fresh Session 换模重试，不降低模型权重。
 
 fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Literal, Mapping
+
+from task_agent.deadline import OperationDeadline, retire_task
 
 from ..codex_scan_config import codex_runtime_reference_root
 
 
 MAX_LIGHTWEIGHT_PROMPT_CHARS = 4000
+ARTIFACT_VALIDATION_TIMEOUT_SECONDS = 60.0
+_VALIDATION_STOP_TIMEOUT_SECONDS = 2.0
 ATTACK_MODE_FILE = "attack_mode.json"
 VALIDATION_SUCCESS_MARKER = (
     "VALID: threat-analysis artifacts passed schema and relationship checks"
@@ -151,19 +159,75 @@ def validate_artifacts_locally(
 ) -> None:
     """Validate lightweight artifacts outside the model Session."""
 
-    completed = subprocess.run(
-        validation_argv(guidance_path=guidance_path, paths=paths),
-        check=False,
-        capture_output=True,
-        text=True,
+    try:
+        completed = subprocess.run(
+            validation_argv(guidance_path=guidance_path, paths=paths),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=ARTIFACT_VALIDATION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(_validation_timeout_message()) from exc
+    _check_validation_result(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _validation_timeout_message() -> str:
+    return (
+        "Lightweight threat-analysis artifact validation timed out after "
+        f"{ARTIFACT_VALIDATION_TIMEOUT_SECONDS:g}s"
     )
-    if completed.returncode == 0:
+
+
+def _check_validation_result(returncode: int, stdout: str, stderr: str) -> None:
+    if returncode == 0:
         return
-    detail = " ".join((completed.stderr or completed.stdout or "").split())
+    detail = " ".join((stderr or stdout or "").split())
     raise ValueError(
         "Lightweight threat-analysis artifact validation failed"
-        + (f": {detail}" if detail else f" (exit={completed.returncode})")
+        + (f": {detail}" if detail else f" (exit={returncode})")
     )
+
+
+async def validate_artifacts_locally_async(
+    *,
+    guidance_path: Path,
+    paths: Mapping[str, Path],
+) -> None:
+    """Run the same validator while keeping Agent heartbeats and cancellation alive."""
+    # The validator is a single Python process. File-backed output avoids pipe
+    # EOF waits during timeout/cancellation and bounds diagnostic memory usage.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = await asyncio.create_subprocess_exec(
+            *validation_argv(guidance_path=guidance_path, paths=paths),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        deadline = OperationDeadline(ARTIFACT_VALIDATION_TIMEOUT_SECONDS)
+        try:
+            returncode = await deadline.wait(process.wait(), phase="artifact_validation")
+        except BaseException as exc:
+            stop_expires = time.monotonic() + _VALIDATION_STOP_TIMEOUT_SECONDS
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.terminate()
+                waiter = asyncio.create_task(process.wait())
+                await asyncio.wait({waiter}, timeout=min(0.5, _VALIDATION_STOP_TIMEOUT_SECONDS / 2))
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                await asyncio.wait({waiter}, timeout=max(0.0, stop_expires - time.monotonic()))
+                retire_task(waiter)
+            if isinstance(exc, asyncio.TimeoutError):
+                raise ValueError(_validation_timeout_message()) from exc
+            raise
+
+        def tail(stream) -> str:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 16 * 1024))
+            return stream.read().decode("utf-8", errors="replace")
+
+        _check_validation_result(returncode, tail(stdout), tail(stderr))
 
 
 __all__ = [
@@ -174,6 +238,7 @@ __all__ = [
     "reference_paths",
     "reference_root",
     "validate_artifacts_locally",
+    "validate_artifacts_locally_async",
     "validation_argv",
     "validation_command",
 ]

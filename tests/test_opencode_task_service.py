@@ -3147,6 +3147,153 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("recover", [True, False])
+def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_path, monkeypatch, recover):
+    import httpx
+    import task_agent.serve_client as serve
+
+    async def run():
+        sessions = []
+        output = []
+        manager = serve.OpenCodeServeManager()
+        manager._port = 4096
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._register_event_state = AsyncMock()
+
+        async def acquire(*args, **kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        async def respond(request):
+            path = request.url.path
+            if request.method == "POST" and path == "/session":
+                session = f"ses_{len(sessions) + 1}"
+                sessions.append(session)
+                return httpx.Response(200, json={"id": session})
+            if path.endswith("/message"):
+                if "ses_1" in path or not recover:
+                    await asyncio.Future()
+                if request.method == "POST":
+                    return httpx.Response(200, json={
+                        "info": {"id": "msg-2", "sessionID": "ses_2", "role": "assistant"},
+                        "parts": [{"type": "text", "text": "recovered"}],
+                    })
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[] if path.endswith("/children") else {})
+
+        real_client = httpx.AsyncClient
+        transport = httpx.MockTransport(respond)
+        monkeypatch.setattr(serve.httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+        monkeypatch.setattr(serve, "_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(serve, "_SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
+        manager._acquire_session = acquire
+        config = _config()
+        config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
+            required_capability="high", timeout_seconds=0.1, max_retries=1,
+        ))
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path), "provider/model-low", _source(),
+        ))
+        patches = _service_patches(manager, runtime_config=config)
+        with patches[0], patches[1], patches[2] as release, patches[3] as update, patches[4], patches[5]:
+            with _task_context(tmp_path, task_metadata={
+                "task_type": "threat_analysis", "standalone_console": True,
+            }, on_output=output.append):
+                result = await asyncio.wait_for(service.run_task(OpenCodeTaskSpec(
+                    task_name="threat deadline", prompt="analyze", directory=tmp_path,
+                )), timeout=2)
+        assert sessions == ["ses_1", "ses_2"]
+        assert result.session_id == "ses_2"
+        assert result.status == ("success" if recover else "timeout")
+        assert manager._active_sessions == 0
+        assert release.await_count == 2
+        assert [call.kwargs["record_completion"] for call in release.await_args_list] == [False, True]
+        assert release.await_args_list[0].kwargs["health_outcome"] == "timeout"
+        events = update.await_args_list[-1].args[1]["session_events"]
+        assert [event["session_id"] for event in events] == sessions
+        assert [event["outcome"] for event in events] == ["timeout", result.status]
+        assert any("RETRY 1/1" in line for line in output)
+        assert all(record.status == result.status for record in service._records.values())
+
+    asyncio.run(run())
+
+
+def test_host_validation_uses_remaining_call_budget_without_model_penalty(tmp_path):
+    async def run():
+        service = OpenCodeTaskService()
+        calls = []
+        cancelled = asyncio.Event()
+
+        async def run_prompt(**kwargs):
+            session = f"ses_{len(calls) + 1}"
+            calls.append(kwargs)
+            await kwargs["on_session_id"](session)
+            return OpenCodePromptResult(session_id=session, message_id="msg", lines=["ok"], text="ok")
+
+        async def validate():
+            if len(calls) == 1:
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancelled.set()
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        config = _config()
+        config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
+            required_capability="high", timeout_seconds=0.05, max_retries=1,
+        ))
+        patches = _service_patches(manager, runtime_config=config)
+        with patches[0], patches[1], patches[2] as release, patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path, task_metadata={"task_type": "threat_analysis"}):
+                result = await asyncio.wait_for(service.run_task(OpenCodeTaskSpec(
+                    task_name="validation deadline", prompt="analyze", directory=tmp_path,
+                    post_session_validator=validate,
+                )), timeout=1)
+        assert result.status == "success"
+        assert cancelled.is_set()
+        assert len(calls) == 2
+        assert release.await_args_list[0].kwargs["outcome"] == "timeout"
+        assert release.await_args_list[0].kwargs["health_outcome"] is None
+
+    asyncio.run(run())
+
+
+def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path):
+    async def run():
+        service = OpenCodeTaskService()
+        session_arguments = []
+
+        async def run_prompt(**kwargs):
+            session_arguments.append(kwargs["session_id"])
+            await kwargs["on_session_id"]("ses_same")
+            await asyncio.sleep(0.03)
+            return OpenCodePromptResult(session_id="ses_same", message_id="msg", lines=["ok"], text="ok")
+
+        async def validate():
+            await asyncio.sleep(0.03)
+            return "repair artifact" if len(session_arguments) == 1 else None
+
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        config = _config()
+        config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
+            required_capability="high", timeout_seconds=0.09, max_retries=0,
+        ))
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), runtime_config=config)
+        with patches[0], patches[1] as acquire, patches[2] as release, patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path, task_metadata={"task_type": "threat_analysis"}):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="correction deadline", prompt="analyze", directory=tmp_path,
+                    post_session_validator=validate, post_session_validation_retry_count=1,
+                ))
+        assert result.status == "success"
+        assert session_arguments == [None, "ses_same"]
+        assert acquire.await_count == release.await_count == 1
+
+    asyncio.run(run())
+
+
 def test_serve_startup_timeout_is_not_a_model_timeout_or_fresh_session_retry(
     tmp_path: Path,
 ) -> None:
