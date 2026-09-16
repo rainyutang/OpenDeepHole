@@ -21,6 +21,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .api import OpenCodeResult
+from .bash_commands import command_binding_metadata
 from .config_json import dump_opencode_config, parse_opencode_jsonc
 from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline
 from .host import (
@@ -331,6 +332,7 @@ class OpenCodeTaskSpec:
     readable_paths: tuple[Path, ...] = ()
     allowed_bash_commands: tuple[str, ...] = ()
     required_bash_commands: tuple[str, ...] = ()
+    bash_command_match_mode: str = "exact"
     required_bash_retry_count: int = 0
     required_bash_success_markers: tuple[tuple[str, str], ...] = ()
     required_bash_path_prepend: tuple[str, ...] = ()
@@ -582,6 +584,10 @@ class OpenCodeTaskService:
         required_bash_commands = _normalize_bash_commands(
             spec.required_bash_commands,
             parameter="required_bash_commands",
+        )
+        command_binding_metadata(
+            (*allowed_bash_commands, *required_bash_commands),
+            match_mode=spec.bash_command_match_mode,
         )
         required_bash_retry_count = int(spec.required_bash_retry_count)
         if required_bash_retry_count < 0:
@@ -1091,6 +1097,7 @@ class OpenCodeTaskService:
                                     task_attempt=session_attempt,
                                     allowed_bash_commands=spec.allowed_bash_commands,
                                     required_bash_commands=spec.required_bash_commands,
+                                    bash_command_match_mode=spec.bash_command_match_mode,
                                     required_bash_success_markers=(
                                         spec.required_bash_success_markers
                                     ),
@@ -3572,6 +3579,7 @@ async def _run_component_task(
     readable_paths: tuple[str, ...],
     allowed_bash_commands: tuple[str, ...],
     required_bash_commands: tuple[str, ...],
+    bash_command_match_mode: str,
     required_bash_retry_count: int,
     required_bash_success_markers: tuple[tuple[str, str], ...],
     post_session_validator: Callable[[], Any] | None,
@@ -3618,6 +3626,7 @@ async def _run_component_task(
                 readable_paths=configured_read_roots,
                 allowed_bash_commands=allowed_bash_commands,
                 required_bash_commands=required_bash_commands,
+                bash_command_match_mode=bash_command_match_mode,
                 required_bash_retry_count=required_bash_retry_count,
                 required_bash_success_markers=required_bash_success_markers,
                 required_bash_path_prepend=(

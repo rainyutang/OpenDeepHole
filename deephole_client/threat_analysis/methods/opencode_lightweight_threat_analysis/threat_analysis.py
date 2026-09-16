@@ -16,7 +16,7 @@ reference_paths = _lightweight_contract.reference_paths
 reference_root = _lightweight_contract.reference_root
 validate_artifacts_locally = _lightweight_contract.validate_artifacts_locally
 validate_artifacts_locally_async = _lightweight_contract.validate_artifacts_locally_async
-validation_command = _lightweight_contract.validation_command
+validation_command = _lightweight_contract.opencode_validation_command
 
 
 _FINAL_DIR = "final"
@@ -159,6 +159,7 @@ async def _run_task(
         output_schema=None,
         readable_paths=(reference_root,),
         allowed_bash_commands=(validation_command_value,),
+        bash_command_match_mode="bound_python_script",
         post_session_validator=lambda: _artifact_validation_feedback(
             guidance_path=guidance_path,
             paths=paths,

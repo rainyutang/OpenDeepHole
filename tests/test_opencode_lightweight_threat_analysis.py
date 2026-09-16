@@ -123,9 +123,17 @@ def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
     )[0]
     assert "是否执行该命令不作为 Session 完成条件" in opencode_prompt
     assert "宿主会在本次回复结束后独立校验产物" in opencode_prompt
+    assert "调用校验命令时必须逐字复制" in opencode_prompt
+    assert "不得额外增加、删除或替换空格、引号及参数" in opencode_prompt
+    assert "不得换行、添加 cd 前缀或拼接其他命令" in opencode_prompt
+    assert "调用校验命令时必须逐字复制" not in codex_prompt
+    assert len(opencode_prompt) <= lightweight_contract.MAX_LIGHTWEIGHT_PROMPT_CHARS
     assert "必须在本 Goal 内执行以下校验命令" in codex_prompt
     assert "命令退出码为0才允许结束 Goal" in codex_prompt
-    assert "\npython " in opencode_prompt
+    expected_command = lightweight_contract.opencode_validation_command(
+        guidance_path=guidance_path, paths=opencode_paths,
+    )
+    assert f"\n{expected_command}\n" in opencode_prompt
     assert "\npython " in codex_prompt
 
 
@@ -188,7 +196,7 @@ def test_method_runs_one_task_with_read_only_references_and_exact_command(
     assert calls[0]["reference_root"] == codex_runtime_reference_root()
     assert calls[0]["guidance_path"] == guidance_path
     assert calls[0]["paths"] == paths
-    assert calls[0]["validation_command_value"] == validation_command(
+    assert calls[0]["validation_command_value"] == lightweight_contract.opencode_validation_command(
         guidance_path=guidance_path,
         paths=paths,
     )
@@ -247,6 +255,7 @@ def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
         "output_schema": None,
         "readable_paths": (reference_root,),
         "allowed_bash_commands": (command,),
+        "bash_command_match_mode": "bound_python_script",
         "post_session_validation_retry_count": 1,
         "session_id": "ses-existing",
     }
@@ -282,6 +291,9 @@ def test_windows_validation_command_uses_cmd_safe_double_quotes(
     assert "'" not in command
     assert f'"{method_root / "schema_validation.py"}"' in command
     assert f'"{paths["value_asset_path"]}"' in command
+    assert lightweight_contract.opencode_validation_command(
+        guidance_path=guidance_path, paths=paths,
+    ) == command
 
 
 def test_local_validation_executes_an_argv_without_a_shell(

@@ -14,6 +14,7 @@ from os import PathLike, fspath
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from .bash_commands import command_binding_metadata
 
 _SUPPORTED_TASK_TYPES = frozenset({
     "vulnerability_mining",
@@ -241,6 +242,7 @@ async def run_opencode_task(
     readable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     allowed_bash_commands: str | Sequence[str] | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
+    bash_command_match_mode: Literal["exact", "bound_python_script"] = "exact",
     required_bash_retry_count: int = 0,
     required_bash_success_markers: Mapping[str, str] | None = None,
     post_session_validator: Callable[[], Any] | None = None,
@@ -267,6 +269,7 @@ async def run_opencode_task(
         readable_paths=readable_paths,
         allowed_bash_commands=allowed_bash_commands,
         required_bash_commands=required_bash_commands,
+        bash_command_match_mode=bash_command_match_mode,
         required_bash_retry_count=required_bash_retry_count,
         required_bash_success_markers=required_bash_success_markers,
         post_session_validator=post_session_validator,
@@ -311,6 +314,7 @@ async def _run_opencode_task_local(
     readable_paths: _PathValues | None = None,
     allowed_bash_commands: str | Sequence[str] | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
+    bash_command_match_mode: Literal["exact", "bound_python_script"] = "exact",
     required_bash_retry_count: int = 0,
     required_bash_success_markers: Mapping[str, str] | None = None,
     post_session_validator: Callable[[], Any] | None = None,
@@ -356,6 +360,10 @@ async def _run_opencode_task_local(
     )
     normalized_required_bash_commands = _normalize_required_bash_commands(
         required_bash_commands
+    )
+    command_binding_metadata(
+        (*normalized_allowed_bash_commands, *normalized_required_bash_commands),
+        match_mode=bash_command_match_mode,
     )
     bash_retry_count = int(required_bash_retry_count)
     if bash_retry_count < 0:
@@ -412,6 +420,7 @@ async def _run_opencode_task_local(
             readable_paths=normalized_readable_paths,
             allowed_bash_commands=normalized_allowed_bash_commands,
             required_bash_commands=normalized_required_bash_commands,
+            bash_command_match_mode=bash_command_match_mode,
             required_bash_retry_count=bash_retry_count,
             required_bash_success_markers=(
                 normalized_required_bash_success_markers

@@ -40,6 +40,7 @@ result = await run_opencode_task(
     readable_paths=None,
     allowed_bash_commands=None,
     required_bash_commands=None,
+    bash_command_match_mode="exact",
     required_bash_retry_count=0,
     required_bash_success_markers=None,
     post_session_validator=None,
@@ -68,6 +69,7 @@ result = await run_opencode_task(
 | `readable_paths` | 单个路径、路径序列或 `None` | `None` | 保留的兼容参数，用于显式声明本次 Session 的只读路径意图；最终全局配置已经允许读取全部本地路径，该参数不会获得编辑权限，也不参与文件保留。 |
 | `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许但不要求执行的命令。拒绝空值、换行和通配符；不会参与 Session 完成审计。 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的命令。拒绝空值、换行和通配符；除明确列出的完整命令外仍拒绝所有 shell。 |
+| `bash_command_match_mode` | `"exact"` 或 `"bound_python_script"` | `"exact"` | 默认按完整字符串匹配。显式选择脚本模式时，识别 Python 对绑定脚本的直接调用，并在执行前将整条命令替换为任务声明的标准命令，包括所有固定参数。 |
 | `required_bash_retry_count` | `int` | `0` | 必需命令校验失败后，在同一个 Session 追加诊断和纠正消息的次数；耗尽后才进入既有 fresh Session 重试。大于 `0` 时必须同时声明 `required_bash_commands`。 |
 | `required_bash_success_markers` | `Mapping[str, str]` 或 `None` | `None` | 可选的“完整命令 → 单行成功标记”。仅在 OpenCode Hook 无法取得退出码时，以命令输出中完全匹配的一整行作为成功依据；键必须属于 `required_bash_commands`。 |
 | `post_session_validator` | 无参数 callable 或 `None` | `None` | 每次 Session 消息完整结束后由宿主调用。返回 `None`/空白表示通过，返回非空字符串表示失败诊断；同步回调直接调用，返回 awaitable 时等待完成。 |
@@ -98,7 +100,7 @@ standalone 默认仍只允许写 `work_dir`；嵌入宿主可通过
 `permission` 覆盖；兼容参数 `readable_paths` 继续显式记录只读路径，但全局读取不依赖该参数。
 调用方不能传原生权限规则，所有非白名单路径仍不可编辑，`bash` 默认保持禁用。显式
 传入 `allowed_bash_commands` 或 `required_bash_commands` 时，Task Agent 才会先拒绝所有命令再按
-完整字符串放行；受管 Session 绑定 Hook 对父、子 Session 再做一次精确检查。前者只提供可选执行
+完整字符串放行；受管 Session 绑定 Hook 默认对父、子 Session 再做一次精确检查。前者只提供可选执行
 权限，不会因为缺失或失败阻止 Session 完成；后者还记录命令退出码和文件写入顺序，并要求每条必需
 命令必须在最后一次受管文件写入后完成：正常以退出码 0 判定；调用方显式配置成功标记时，若
 OpenCode 没有暴露退出码，也可由输出中的完全匹配行判定。失败审计会保留至多末尾 16 KiB 命令输出。
@@ -108,6 +110,18 @@ Session，要求模型修复产物并再次执行同一命令；再次失败并�
 非空诊断会按 `post_session_validation_retry_count` 回传同一 Session，纠正消息明确诊断不是新指令且
 不要求模型自行执行校验命令，预算耗尽后沿用 fresh Session 重试。Windows 任务会给绑定了任一精确
 命令的 Session 临时前置当前 Python 目录到 `PATH`；面向模型的便携命令可直接使用 `python`。
+
+OpenCode 轻量威胁分析显式使用 `bash_command_match_mode="bound_python_script"`：允许
+`python`、`python3`、对应 `.exe` 名称或宿主 Python 绝对路径直接调用绑定的 `.py` 脚本。
+脚本必须使用绝对路径，按宿主平台规范化后匹配，不能仅凭文件名或命令中包含关键词放行。
+Hook 识别成功后原地替换命令；模型遗漏、改写或调整顺序的参数均由绑定的完整参数覆盖，
+原生权限和执行审计始终使用该标准命令。所有绑定命令必须是单条字面量 Python 脚本调用，
+同一脚本不能绑定多个不同命令；旧绑定缺少策略字段时仍按精确匹配处理。
+引号及空格变化可被识别，命令拼接、管道、重定向、变量/命令展开、`python -c/-m` 和其它脚本仍被拒绝。
+轻量分析提示仍要求逐字复制原命令，不增删空格、引号或参数；宿主最终校验及失败纠正保持独立执行。
+非 Windows 的 OpenCode 校验命令使用宿主 Python 绝对路径，无需系统提供 `python` 别名；
+Windows 保持 `python` 加绑定 Session 的 PATH 前置方式，Codex 的便携命令保持原样。
+更新后需重启 Agent 及其受管 Serve，以加载新的 Hook。
 
 宿主编排层还可以在 `opencode_task_context()` 中绑定稳定的 `execution_kind` 与
 `execution_id`。停止一个业务执行时调用

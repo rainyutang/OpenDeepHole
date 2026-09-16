@@ -478,9 +478,11 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("match_mode", ["exact", "bound_python_script"])
 def test_run_prompt_allows_optional_command_without_completion_audit(
     monkeypatch,
     tmp_path: Path,
+    match_mode: str,
 ) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
@@ -500,7 +502,7 @@ def test_run_prompt_allows_optional_command_without_completion_audit(
         runtime = tmp_path / "runtime"
         project.mkdir()
         runtime.mkdir()
-        command = "python validate.py"
+        command = f'python "{project / "validate.py"}"'
 
         with (
             patch(
@@ -520,10 +522,12 @@ def test_run_prompt_allows_optional_command_without_completion_audit(
                 model="provider/model",
                 timeout=30,
                 allowed_bash_commands=(command,),
+                bash_command_match_mode=match_mode,
             )
 
         assert lines == ["done"]
         assert binding_mock.call_args.kwargs["required_commands"] == (command,)
+        assert binding_mock.call_args.kwargs["bash_command_match_mode"] == match_mode
         audit_mock.assert_not_called()
         assert not list(
             (runtime / ".opendeephole-plugins" / "command-bindings").glob("*")

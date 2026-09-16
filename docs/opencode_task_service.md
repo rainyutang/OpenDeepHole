@@ -36,6 +36,7 @@ result = await run_opencode_task(
     readable_paths=None,
     allowed_bash_commands=None,
     required_bash_commands=None,
+    bash_command_match_mode="exact",
     required_bash_retry_count=0,
     required_bash_success_markers=None,
     post_session_validator=None,
@@ -47,7 +48,7 @@ result = await run_opencode_task(
 )
 ```
 
-参数只有以下二十个：
+调用参数如下：
 
 | 参数 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
@@ -63,6 +64,7 @@ result = await run_opencode_task(
 | `readable_paths` | 单个路径、路径序列或 `None` | `None` | 保留的兼容参数，用于显式声明本次 Session 的只读路径意图；最终全局配置已允许读取全部本地路径，不授予编辑权限，也不改变保留规则 |
 | `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许但不要求执行的完整 shell 命令；拒绝空值、换行与通配符，不参与完成审计 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的完整 shell 命令；拒绝空值、换行与通配符 |
+| `bash_command_match_mode` | `"exact"` 或 `"bound_python_script"` | `"exact"` | 默认精确匹配；脚本模式识别 Python 对绑定脚本的直接调用后，将整条命令替换为任务标准命令，覆盖模型提供的参数 |
 | `required_bash_retry_count` | `int` | `0` | 必需命令失败后在原 Session 追加诊断并重新校验的次数；耗尽后才进入 fresh Session 重试 |
 | `required_bash_success_markers` | `Mapping[str, str] \| None` | `None` | 可选的完整命令到单行成功标记映射；只在 Hook 无法取得退出码时使用，键必须属于必需命令 |
 | `post_session_validator` | 无参数 callable 或 `None` | `None` | 每次 Session 消息结束后执行；`None`/空白为通过，非空字符串为失败诊断，awaitable 会被等待 |
@@ -72,7 +74,7 @@ result = await run_opencode_task(
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`allowed_bash_commands` 与 `required_bash_commands` 是仅有的 shell 例外入口：两者都只放行精确完整命令，前者不要求执行，后者还执行完成审计；其它 `required_bash_*` 参数只控制必需命令恢复。`post_session_validator` 独立于模型是否执行命令，在每次消息结束后由宿主校验产物并可把诊断回传同一 Session。上述参数都不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`allowed_bash_commands` 与 `required_bash_commands` 是仅有的 shell 例外入口：两者都只执行声明的完整命令，前者不要求执行，后者还执行完成审计；`bash_command_match_mode` 控制识别方式，其它 `required_bash_*` 参数只控制必需命令恢复。`post_session_validator` 独立于模型是否执行命令，在每次消息结束后由宿主校验产物并可把诊断回传同一 Session。上述参数都不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。其中 `serve_session_id` 始终回填为生成该结果的最终 OpenCode `session_id`；问题详情页会把它直接显示在对应输出来源中，历史结果缺少该字段时保持兼容。
 
@@ -368,6 +370,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `readable_paths`：保留的兼容参数，用于显式声明调用方希望读取的文件或目录；最终全局配置已允许读取全部本地路径，该参数不获得 `edit`，也不参与保留。
 - `allowed_bash_commands`：调用方声明的可选精确命令；先拒绝 `*`，再按声明顺序逐条放行。模型可以不执行，执行失败或之后继续写文件也不参与任务完成审计。
 - `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，但命令必须在最后一次受管文件写入后完成，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。
+- `bash_command_match_mode`：默认 `exact`。轻量分析显式选择 `bound_python_script`，允许 `python`、`python3`、对应 `.exe` 名称或宿主 Python 绝对路径直接调用绑定脚本；脚本绝对路径按宿主平台规范化匹配，同名其它路径不能命中。前置 Hook 将命令原地替换为当前任务的标准命令，所有产物路径和参考目录均使用宿主已绑定的值，模型遗漏或改写的参数不会参与实际执行；父子 Session 继承同一绑定，并发任务各自独立。同一脚本不能声明多个不同的标准命令，旧绑定默认精确匹配。
 - `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
 - `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令、无需模型执行校验命令。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
 - `scan_id`、`execution_kind` / `execution_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。执行身份只用于精确取消一个扫描、去误报或验证作业；共享同一 Serve 的其它任务不会被终止。
@@ -380,7 +383,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 - 全局允许 `read`、`list`、`glob`、`grep` 与 `external_directory`，使 OpenCode 可读取运行账户有权访问的全部本地路径；这包括项目工作目录、其它版本的真实项目路径、全局 workspace、Skill 资源、隐藏文件和配置文件。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
-- 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令。只有后者会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
+- 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行声明的标准命令。默认策略拒绝变形命令；脚本策略允许引号、空格、Python 名称及参数写法差异，并在原生权限检查前还原标准命令，不扩大原生 shell 白名单。受管 Hook 拒绝未绑定脚本、命令拼接、管道、重定向、变量/命令展开及 `python -c/-m`。只有必需命令会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
 原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。

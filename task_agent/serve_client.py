@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .bash_commands import command_binding_metadata
 from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
@@ -120,6 +121,68 @@ const resolveBinding = async (sessionID) => {
 
 const commandText = (args) => pathText(args?.command) || pathText(args?.cmd)
 const objectValue = (value) => value && typeof value === "object" ? value : {}
+// Recognition only: the submitted command is never executed after a match.
+// Keep the literal grammar aligned with task_agent/bash_commands.py.
+const literalCommandArgs = (command, windows) => {
+  if (/[\x00-\x08\x0a-\x1f]/.test(command)) return null
+  const words = []
+  let word = "", quote = "", active = false
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]
+    if (windows && "$`%!".includes(char)) return null
+    if (quote) {
+      if (char === quote) quote = ""
+      else if (quote === '"' && !windows && char === "\\") {
+        if (index + 1 < command.length && '\\"$`'.includes(command[index + 1])) {
+          word += command[++index]
+        } else word += char
+      } else if (quote === '"' && "$`".includes(char)) return null
+      else word += char
+    } else if (char === " " || char === "\t") {
+      if (active) { words.push(word); word = ""; active = false }
+    } else if (char === '"' || char === "'") {
+      quote = char
+      active = true
+    } else if (char === "\\" && !windows) {
+      if (++index === command.length) return null
+      word += command[index]
+      active = true
+    } else if ("|&;<>(){}[]*?~$`#".includes(char)) return null
+    else { word += char; active = true }
+  }
+  if (quote) return null
+  if (active) words.push(word)
+  return words
+}
+const absoluteCommandPath = (value, windows) => {
+  const paths = windows ? path.win32 : path.posix
+  if (!paths.isAbsolute(value)) return ""
+  const normalized = paths.normalize(value)
+  if (!windows) return normalized
+  const root = paths.parse(normalized).root
+  if (!root.includes(":") && !root.startsWith("\\\\")) return ""
+  return normalized.toLowerCase()
+}
+const boundCommand = (binding, command) => {
+  if (binding.allowed_commands.includes(command)) return command
+  if (binding.bash_command_match_mode !== "bound_python_script") return ""
+  const windows = binding.command_platform === "win32"
+  const argv = literalCommandArgs(command, windows)
+  if (!argv || argv.length < 2) return ""
+  const pythonNames = ["python", "python3", "python.exe", "python3.exe"]
+  const hostPython = absoluteCommandPath(pathText(binding.python_executable), windows)
+  if (!pythonNames.includes(windows ? argv[0].toLowerCase() : argv[0])
+    && !(hostPython && absoluteCommandPath(argv[0], windows) === hostPython)) return ""
+  const script = absoluteCommandPath(argv[1], windows)
+  if (!script) return ""
+  const canonical = objectValue(binding.python_script_commands)[script]
+  return typeof canonical === "string" && binding.allowed_commands.includes(canonical)
+    ? canonical : ""
+}
+const unboundCommandError = (binding, phase) => new Error(
+  `Shell command is not bound to this OpenDeepHole task (${phase}). `
+  + `Copy one bound command verbatim:\n${binding.allowed_commands.join("\n")}`,
+)
 const commandOutputText = (output, metadata) => {
   const values = [
     output?.output,
@@ -216,10 +279,13 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
     if (!binding) return
     const tool = normalizedTool(input?.tool)
     if (!["bash", "shell"].includes(tool)) return
-    const command = commandText(output?.args)
-    if (!binding.allowed_commands.includes(command)) {
-      throw new Error("Shell command is not bound to this OpenDeepHole task")
-    }
+    const args = objectValue(output?.args)
+    const command = boundCommand(binding, commandText(args))
+    if (!command) throw unboundCommandError(binding, "before")
+    // Mutate the same args object consumed by native permissions and execution.
+    // Replacing output.args alone would leave OpenCode executing the old input.
+    if (typeof args.command === "string") args.command = command
+    if (typeof args.cmd === "string") args.cmd = command
   },
   "tool.execute.after": async (input, output) => {
     const tool = normalizedTool(input?.tool)
@@ -232,7 +298,7 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
       if (!binding) return
       const command = commandText(args)
       if (!binding.allowed_commands.includes(command)) {
-        throw new Error("Shell command is not bound to this OpenDeepHole task")
+        throw unboundCommandError(binding, "after")
       }
       const outputMetadata = objectValue(output?.structured)
       const nestedMetadata = objectValue(originalMetadata.structured)
@@ -1030,6 +1096,7 @@ def _write_command_binding(
     *,
     session_id: str,
     required_commands: tuple[str, ...],
+    bash_command_match_mode: str = "exact",
     success_markers: tuple[tuple[str, str], ...] = (),
     path_prepend: tuple[str, ...] = (),
 ) -> tuple[Path, Path]:
@@ -1040,6 +1107,10 @@ def _write_command_binding(
         raise ValueError("Command binding requires non-empty commands")
     if any("\n" in command or "\r" in command for command in normalized_commands):
         raise ValueError("Command binding commands cannot contain newlines")
+    match_metadata = command_binding_metadata(
+        normalized_commands,
+        match_mode=bash_command_match_mode,
+    )
     binding_path = _command_binding_path(cwd, session_id)
     audit_path = _command_audit_path(cwd, session_id)
     _remove_file(audit_path)
@@ -1054,6 +1125,7 @@ def _write_command_binding(
                 "success_markers": dict(success_markers),
                 "path_prepend": list(path_prepend),
                 "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
+                **match_metadata,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -6282,6 +6354,7 @@ class OpenCodeServeManager:
         task_attempt: int = 0,
         allowed_bash_commands: tuple[str, ...] = (),
         required_bash_commands: tuple[str, ...] = (),
+        bash_command_match_mode: str = "exact",
         required_bash_success_markers: tuple[tuple[str, str], ...] = (),
         required_bash_path_prepend: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
@@ -6592,6 +6665,7 @@ class OpenCodeServeManager:
                         binding_workspace,
                         session_id=active_session_id,
                         required_commands=bound_bash_commands,
+                        bash_command_match_mode=bash_command_match_mode,
                         success_markers=required_bash_success_markers,
                         path_prepend=required_bash_path_prepend,
                     )

@@ -97,6 +97,19 @@ def validation_command(
     ))
 
 
+def opencode_validation_command(
+    *,
+    guidance_path: Path,
+    paths: Mapping[str, Path],
+) -> str:
+    """Bind the host interpreter without relying on a POSIX ``python`` alias."""
+    if sys.platform == "win32":
+        # A quoted executable path requires shell-specific invocation syntax on
+        # Windows. The bound Session already prepends the host Python directory.
+        return validation_command(guidance_path=guidance_path, paths=paths)
+    return shlex.join(validation_argv(guidance_path=guidance_path, paths=paths))
+
+
 def build_lightweight_prompt(
     *,
     code_root: Path,
@@ -109,7 +122,10 @@ def build_lightweight_prompt(
     """Build the shared prompt with method-specific validation ownership."""
 
     attack_mode_path = guidance_path.parent / ATTACK_MODE_FILE
-    command = validation_command(guidance_path=guidance_path, paths=paths)
+    command_builder = (
+        opencode_validation_command if validation_owner == "host" else validation_command
+    )
+    command = command_builder(guidance_path=guidance_path, paths=paths)
     if validation_owner == "session":
         validation_completion = f"""1. 三份文件写完后，必须在本 Goal 内执行以下校验命令：
 {command}
@@ -117,6 +133,7 @@ def build_lightweight_prompt(
     elif validation_owner == "host":
         validation_completion = f"""1. 三份文件写完后可执行以下命令辅助自检：
 {command}
+调用校验命令时必须逐字复制。保留原有空格和引号，不得额外增加、删除或替换空格、引号及参数；不得换行、添加 cd 前缀或拼接其他命令。
 是否执行该命令不作为 Session 完成条件。宿主会在本次回复结束后独立校验产物；如果校验失败，宿主会把校验结果发回当前 Session，请根据错误修正产物；"""
     else:
         raise ValueError(f"Unknown lightweight validation owner: {validation_owner}")
@@ -241,4 +258,5 @@ __all__ = [
     "validate_artifacts_locally_async",
     "validation_argv",
     "validation_command",
+    "opencode_validation_command",
 ]

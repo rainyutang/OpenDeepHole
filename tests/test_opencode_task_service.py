@@ -473,6 +473,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "readable_paths",
         "allowed_bash_commands",
         "required_bash_commands",
+        "bash_command_match_mode",
         "required_bash_retry_count",
         "required_bash_success_markers",
         "post_session_validator",
@@ -496,8 +497,13 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
     assert "cancelled" not in get_args(get_type_hints(OpenCodeResult)["status"])
 
 
-def test_public_interface_uses_bound_directories_and_returns_only_public_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("match_mode", ["exact", "bound_python_script"])
+def test_public_interface_uses_bound_directories_and_returns_only_public_result(
+    tmp_path: Path, match_mode: str,
+) -> None:
     async def run() -> None:
+        optional_command = f'python "{tmp_path / "optional.py"}"'
+        required_command = f'python "{tmp_path / "validate.py"}"'
         internal = OpenCodeTaskResult(
             task_id="task-1",
             session_id="ses-1",
@@ -539,11 +545,12 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                     "generated",
                 ],
                 readable_paths=["references", external_dir / "schemas"],
-                allowed_bash_commands="python optional.py",
-                required_bash_commands="python validate.py",
+                allowed_bash_commands=optional_command,
+                required_bash_commands=required_command,
+                bash_command_match_mode=match_mode,
                 required_bash_retry_count=1,
                 required_bash_success_markers={
-                    "python validate.py": "VALID: artifacts passed",
+                    required_command: "VALID: artifacts passed",
                 },
                 post_session_validator=post_session_validator,
                 post_session_validation_retry_count=1,
@@ -577,11 +584,12 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             (tmp_path / "references").resolve(),
             (external_dir / "schemas").resolve(),
         )
-        assert spec.allowed_bash_commands == ("python optional.py",)
-        assert spec.required_bash_commands == ("python validate.py",)
+        assert spec.allowed_bash_commands == (optional_command,)
+        assert spec.required_bash_commands == (required_command,)
+        assert spec.bash_command_match_mode == match_mode
         assert spec.required_bash_retry_count == 1
         assert spec.required_bash_success_markers == ((
-            "python validate.py",
+            required_command,
             "VALID: artifacts passed",
         ),)
         assert spec.post_session_validator is post_session_validator
@@ -601,6 +609,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 required_capability="low",
             )
         assert plain.structured is None
+        assert service.run_task.await_args.args[0].bash_command_match_mode == "exact"
 
     asyncio.run(run())
 
@@ -2733,11 +2742,13 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("match_mode", ["exact", "bound_python_script"])
 def test_post_session_validator_returns_feedback_to_the_same_session(
-    tmp_path: Path,
+    tmp_path: Path, match_mode: str,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
+        command = f'python "{tmp_path / "validate.py"}"'
         calls: list[tuple[str, str | None, tuple[str, ...]]] = []
         rogue_path = tmp_path / "post-validation-rogue.json"
         validation_calls = 0
@@ -2750,6 +2761,11 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
             return None
 
         async def run_prompt(**kwargs):
+            assert kwargs["bash_command_match_mode"] == match_mode
+            assert [rule for rule in kwargs["permissions"] if rule["permission"] == "bash"] == [
+                {"permission": "bash", "pattern": "*", "action": "deny"},
+                {"permission": "bash", "pattern": command, "action": "allow"},
+            ]
             calls.append((
                 kwargs["prompt"],
                 kwargs["session_id"],
@@ -2791,7 +2807,8 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
                     task_name="post-session validation correction",
                     prompt="run",
                     directory=tmp_path,
-                    allowed_bash_commands=("python validate.py",),
+                    allowed_bash_commands=(command,),
+                    bash_command_match_mode=match_mode,
                     post_session_validator=validate,
                     post_session_validation_retry_count=1,
                 ))
@@ -2802,7 +2819,7 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
             None,
             "ses_post_validation",
         ]
-        assert all(commands == ("python validate.py",) for _, _, commands in calls)
+        assert all(commands == (command,) for _, _, commands in calls)
         assert validation_calls == 2
         assert not rogue_path.exists()
         assert "missing required property 'nodes'" in calls[1][0]
