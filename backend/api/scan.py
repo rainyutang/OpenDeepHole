@@ -15,7 +15,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -211,6 +211,15 @@ def _is_threat_analysis_only_mode(value: str | None) -> bool:
     return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
 
 
+def _validate_absolute_scan_path(value: str, label: str) -> None:
+    # Paths belong to the Agent, which may use a different OS than the server.
+    if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label}必须填写绝对路径，不能使用相对路径",
+        )
+
+
 def _validated_multi_versions(
     values: list[MultiVersionTarget],
 ) -> list[MultiVersionTarget]:
@@ -231,6 +240,8 @@ def _validated_multi_versions(
                 status_code=422,
                 detail="每个版本都必须填写版本名称和项目总路径",
             )
+        _validate_absolute_scan_path(project_path, f"版本「{name}」的项目总路径")
+        _validate_absolute_scan_path(code_scan_path, f"版本「{name}」的扫描模块路径")
         key = name.casefold()
         if key in seen_names:
             raise HTTPException(
@@ -1526,6 +1537,20 @@ async def create_agent_scan(
         if requested_scan_mode == SCAN_MODE_MULTI_VERSION
         else []
     )
+    project_path = (
+        multi_versions[0].project_path
+        if multi_versions
+        else body.project_path.strip()
+    )
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    code_scan_path = (
+        multi_versions[0].code_scan_path
+        if multi_versions
+        else body.code_scan_path.strip() or project_path
+    )
+    _validate_absolute_scan_path(project_path, "项目总路径")
+    _validate_absolute_scan_path(code_scan_path, "扫描模块路径")
     fixed_profile = requested_scan_mode in {
         SCAN_MODE_QUICK,
         SCAN_MODE_STANDARD,
@@ -1638,18 +1663,6 @@ async def create_agent_scan(
         checker_packages = _checker_packages_for(validated_checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    project_path = (
-        multi_versions[0].project_path
-        if multi_versions
-        else body.project_path.strip()
-    )
-    if not project_path:
-        raise HTTPException(status_code=400, detail="project_path is required")
-    code_scan_path = (
-        multi_versions[0].code_scan_path
-        if multi_versions
-        else body.code_scan_path.strip() or project_path
-    )
     requested_scan_name = str(body.scan_name or "").strip()
     generated_name_base = _default_scan_name_base(project_path)
     generated_name_seed = secrets.randbelow(0x10000)

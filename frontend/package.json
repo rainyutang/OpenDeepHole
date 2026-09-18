@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:scan-paths": "node tests/scanPathValidation.test.mjs",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
     "test:scan-sharing": "node tests/scanSharing.test.mjs",
     "test:scan-resume-progress": "node tests/scanResumeProgress.test.mjs",
