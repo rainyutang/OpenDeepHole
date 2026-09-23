@@ -47,6 +47,48 @@ def patch_snapshots(monkeypatch):
     monkeypatch.setattr("task_agent.model_pool.wait_for_model_pool_update", wait_for_update)
 
 
+def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch):
+    patch_snapshots(monkeypatch)
+
+    async def run():
+        posts = []
+        review_published = asyncio.Event()
+        async def handler(request):
+            payload = json.loads(request.content)
+            posts.append(payload)
+            if payload.get("execution_owner", {}).get("kind") == "fp_review":
+                review_published.set()
+            return httpx.Response(200)
+        reporter = await make_reporter(handler)
+        scan_stop, review_stop = asyncio.Event(), asyncio.Event()
+        scan = asyncio.create_task(publisher(reporter, "scan-1", scan_stop))
+        review = asyncio.create_task(reporter.publish_opencode_pool_until(
+            "scan-1", review_stop, debounce_seconds=0, unchanged_heartbeat_seconds=0.005,
+            execution_owner={"kind": "fp_review", "id": "review-1", "revision": 9},
+        ))
+        try:
+            await asyncio.sleep(0.03)
+            state = reporter._scan_pool_publishers["scan-1"]
+            assert len(state.owners) == 2
+            assert len(reporter._opencode_pool_wakeups["scan-1"]) == 1
+            scan_stop.set()
+            await asyncio.wait_for(scan, 1)
+            await asyncio.wait_for(review_published.wait(), 1)
+            assert not state.task.done()
+            assert posts[-1]["execution_owner"] == {"kind": "fp_review", "id": "review-1", "revision": 9}
+            assert posts[-1]["execution_revision"] == 1
+            review_stop.set()
+            await asyncio.wait_for(review, 1)
+            assert reporter._scan_pool_publishers == {}
+            assert reporter._opencode_pool_wakeups == {}
+        finally:
+            scan_stop.set()
+            review_stop.set()
+            await asyncio.gather(scan, review, return_exceptions=True)
+            await reporter._client.aclose()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("scope", ["scan-1", ""])
 @pytest.mark.parametrize("initial_success", [False, True])
 @pytest.mark.parametrize("cancel", [False, True])

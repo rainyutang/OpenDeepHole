@@ -412,6 +412,10 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配、同 Session JSON 纠正或同 Session 命令纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`json_format`、`json_retry` 和 `validation_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/重试序号、模型、结果、时间、耗时和失败原因；校验输出正文只用于当次纠正 Prompt，不进入历史。`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
 
+完成记录上报与模型额度释放分开执行：释放时在内存保留待上报记录并唤醒后续任务，后台线程再写入 Agent 的持久 outbox；写入失败保留记录并重试，日志输出 `OpenCode completion report pending`。尚未写入 outbox 的记录仍依赖当前 Agent 进程，正常退出最多等待 10 秒落盘，失败会明确记录。outbox 的入队、领取、确认和重试操作均离开事件循环执行；领取或发送被取消时归还该次领取，迟到清理不能影响后续领取。相同 Lease 的重复或迟到释放不重复计数，也不能释放下一次尝试的额度。Task Service 的收尾异常会记录错误并结束结果与 Session 等待，不留下永远运行的任务。
+
+扫描级模型池发布器由主扫描和各去误报任务共同持有，最后一个持有者结束后才停止。复核入队立即登记 `planned_tasks`，申请模型时进入 `queued_tasks` 并隐藏计划占位，取得额度后消费占位并进入 `active_tasks`；失败、取消及没有实际发起模型调用也会清理占位。每个任务携带 `execution_kind`、`execution_id`、`execution_revision` 和 `agent_session_id`，复核发布器以 `execution_owner={kind: "fp_review", id: review_id, revision: ...}` 校验自身身份。服务端在主扫描完成、出错或续扫时只移除主扫描的运行状态，保留仍有效的独立复核；用户停止整个扫描或 Agent 离线取消复核时同步清除。GET/SSE 顶层仍使用主扫描版本，防止独立复核版本误触发前端的旧轮次过滤。此协议需同步更新后端和 Agent，不需要数据库迁移。
+
 JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invalid_json`、`schema_mismatch`，独立格式匹配判定无法无损转换时另记 `source_unrelated`。诊断不会持久化模型原始回复、目标 Schema 或字段路径；普通终态错误会保存 Task Agent 已规范化且长度受限的安全错误说明。旧模型池历史没有 `session_events` 时继续使用最终 `serve_session_id` 兼容展示，无法反推已丢失的中间 Session。
 
 创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
@@ -419,6 +423,8 @@ JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invali
 `timeout_seconds` 保持单次调用口径：取得模型 Lease 后，每次调用从 Serve 准备开始使用单调时钟截止时间，覆盖共享 Serve 等待、MCP 准备、Session 创建、消息等待、响应恢复和宿主校验。模型排队不计入，同 Session 的下一次纠正调用及新 Session 重试分别重新计时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
 
 超时会输出 `TIMEOUT phase=... task=... attempt=... elapsed=...`。后续 Session 中止、请求/事件回收、MCP 释放及 HTTP 关闭共用最多 10 秒清理预算；取消不合作的操作不会无限阻塞模型 Lease 释放。Session 中止未确认或请求未退出时，标记共享 Serve 在空闲边界恢复，不强制终止其它扫描的活动 Session。关闭旧调用的结果和文件事件回调，迟到回复不能更新新尝试。Session 树 Token 补采最多等待 2 秒，保留已取得的统计并使用现有 `complete=false` 标记不完整；补采失败不替换原始失败原因。
+
+共享 Serve 启动锁内的 MCP 同步和事件订阅清理也共用有界预算；超时后退休旧任务并隔离其进程/事件代次，迟到回调不能恢复旧连接或覆盖新状态。Task Service 对每次业务调用额外限制为调用截止时间加最多 10 秒清理，即使底层请求不响应取消也能返回超时、释放模型额度并继续既有重试。收尾或上报失败不替换已确定的原始超时结果。
 
 OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验器，最长运行 60 秒，且受本次调用剩余时间约束；主动取消或超时会终止并回收校验进程，Agent 心跳与状态上报继续运行。校验器自身超时作为明确的校验诊断，沿用一次同 Session 纠正及后续新 Session 重试；调用总时限耗尽则直接进入超时重试。恢复扫描时校验已完成产物的同步路径同样限制为 60 秒。校验规则、任务策略默认值、重试次数及轻量分析失败后的一次 DeepHole 回退均保持不变。部署需更新并重启 Agent，然后续扫受影响任务，无需数据库迁移。
 

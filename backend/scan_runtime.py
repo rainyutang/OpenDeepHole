@@ -1,11 +1,14 @@
 """Shared scan lifecycle helpers.
 
 The persisted scan row is the authority for top-level lifecycle state.  Model
-pool snapshots contain both durable history and transient scheduler state, so
-every terminal scan transition must clear only the latter.
+pool snapshots contain both durable history and transient scheduler state.
+Terminal transitions clear live work owned by the scan, while independent
+review jobs retain their own lifecycle.
 """
 
 from __future__ import annotations
+
+from typing import Callable
 
 from backend.models import OpenCodePoolStatus, ScanItemStatus
 
@@ -34,19 +37,22 @@ def is_terminal_scan_status(status: ScanItemStatus | str | None) -> bool:
 
 def terminal_opencode_pool_status(
     status: OpenCodePoolStatus | None,
+    *,
+    keep_task: Callable[[dict], bool] | None = None,
 ) -> OpenCodePoolStatus | None:
-    """Clear live scheduler fields while preserving accumulated task history."""
+    """Clear live work except explicit survivors; preserve accumulated history."""
     if status is None:
         return None
     cleared = status.model_copy(deep=True)
-    cleared.global_running = 0
-    cleared.global_queued = 0
-    cleared.queued_tasks = []
-    cleared.planned_tasks = []
+    keep = keep_task or (lambda _task: False)
+    cleared.queued_tasks = [task for task in cleared.queued_tasks if keep(task)]
+    cleared.planned_tasks = [task for task in cleared.planned_tasks if keep(task)]
     for model in cleared.models:
-        model.running = 0
-        model.queued = 0
-        model.active_tasks = []
-        if model.last_status in {"running", "queued"}:
+        model.active_tasks = [task for task in model.active_tasks if keep(task)]
+        model.running = len(model.active_tasks)
+        model.queued = sum(task.get("model_id") == model.id for task in cleared.queued_tasks)
+        if not model.running and not model.queued and model.last_status in {"running", "queued"}:
             model.last_status = ""
+    cleared.global_running = sum(model.running for model in cleared.models)
+    cleared.global_queued = len(cleared.queued_tasks)
     return cleared

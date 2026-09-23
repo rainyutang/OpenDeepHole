@@ -134,7 +134,10 @@ async def _run(task, is_resume: bool) -> None:
 
     with (
         scan_execution_context(task.scan_id, task.execution_revision),
-        bind_opencode_execution_context(task_metadata={"execution_revision": task.execution_revision}),
+        bind_opencode_execution_context(task_metadata={
+            "execution_revision": task.execution_revision,
+            "agent_session_id": getattr(_reporter, "agent_session_id", ""),
+        }),
     ):
         await _run_scan(task, is_resume)
 
@@ -619,6 +622,26 @@ async def enqueue_fp_review(
         _fp_review_cancel_events[review_id] = cancel_event
     _fp_review_scan_ids[review_id] = scan_id
     _fp_review_active_items.add(item_key)
+    from task_agent.model_pool import register_planned_task
+
+    try:
+        planned_task_id = await register_planned_task(
+            scan_id,
+            {
+                "task_type": "fp_review",
+                "task_name": f"fp-review-{review_id}-{vuln_index}",
+                "vuln_index": vuln_index,
+                "execution_kind": "fp_review",
+                "execution_id": review_id,
+                "execution_revision": effective_execution_revision,
+                "agent_session_id": getattr(effective_reporter, "agent_session_id", ""),
+                "required_capability": "high",
+            },
+            task_key=f"fp-review:{review_id}:{effective_execution_revision}:{vuln_index}",
+        )
+    except BaseException:
+        _fp_review_active_items.discard(item_key)
+        raise
     queue = _fp_review_queues.setdefault(review_id, deque())
     queue.append(_FpReviewQueueItem(
         config=effective_config,
@@ -643,7 +666,7 @@ async def enqueue_fp_review(
         ),
         cancel_event=cancel_event,
         processed_offset=max(0, int(processed_offset or 0)),
-        planned_task_id="",
+        planned_task_id=planned_task_id,
         execution_revision=effective_execution_revision,
     ))
     _fp_review_queue_events.setdefault(review_id, asyncio.Event()).set()
@@ -670,6 +693,16 @@ async def _run_fp_review_worker(review_id: str) -> None:
     concurrency = 1
     launch_sequence = 0
     in_flight: dict[asyncio.Task, tuple[int, _FpReviewQueueItem]] = {}
+    pool_stop = asyncio.Event()
+    pool_task = None
+    first_item = next(iter(_fp_review_queues.get(review_id, ())), None)
+    if first_item is not None:
+        publish_pool = getattr(first_item.reporter, "publish_opencode_pool_until", None)
+        if callable(publish_pool):
+            pool_task = asyncio.create_task(publish_pool(
+                first_item.scan_id, pool_stop,
+                execution_owner={"kind": "fp_review", "id": review_id, "revision": first_item.execution_revision},
+            ))
 
     async def run_item(
         item: _FpReviewQueueItem,
@@ -735,6 +768,10 @@ async def _run_fp_review_worker(review_id: str) -> None:
         finally:
             running.discard(vuln_index)
             _fp_review_active_items.discard((review_id, vuln_index))
+            if item.planned_task_id:
+                from task_agent.model_pool import clear_planned_task
+
+                await clear_planned_task(item.planned_task_id)
 
     async def cancel_in_flight() -> None:
         tasks = tuple(in_flight)
@@ -946,6 +983,9 @@ async def _run_fp_review_worker(review_id: str) -> None:
                 )
             except Exception:
                 pass
+        pool_stop.set()
+        if pool_task is not None:
+            await asyncio.gather(pool_task, return_exceptions=True)
         _fp_review_running_indices.pop(review_id, None)
         current = asyncio.current_task()
         if _fp_review_tasks.get(review_id) is current:
@@ -967,12 +1007,8 @@ async def _run_single_fp_review_item(
     item: _FpReviewQueueItem,
 ) -> dict[str, Any]:
     from deephole_client.config import apply_network_env, apply_remote_config
-    from task_agent.model_pool import clear_planned_task
     from task_agent import opencode_task_context
     from backend.models import OutputSource, ScanEvent
-
-    if item.planned_task_id:
-        await clear_planned_task(item.planned_task_id)
 
     if item.reporter is not None and _agent_id is not None:
         try:
@@ -1029,7 +1065,13 @@ async def _run_single_fp_review_item(
         knowledge_base_mcp=item.knowledge_base_mcp,
         cancel_event=item.cancel_event,
         skill_paths=list(loaded.manifest.skill_paths) or None,
-        task_metadata={"scan_mode": item.scan_mode},
+        task_metadata={
+            "scan_mode": item.scan_mode,
+            "planned_task_id": item.planned_task_id,
+            "execution_revision": item.execution_revision,
+            "agent_session_id": getattr(item.reporter, "agent_session_id", ""),
+            "vuln_index": vuln_index,
+        },
     ):
         result = await run_fp_review(
             scan_mode=item.scan_mode,

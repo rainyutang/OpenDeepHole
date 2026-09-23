@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -2051,7 +2052,7 @@ def test_completed_task_sink_receives_history_once_and_snapshot_stays_bounded() 
             }],
         })
         await release_model_lease(lease, outcome="success", duration_seconds=1.0)
-
+        assert await model_pool_module.drain_completed_task_reports(timeout=1)
         snapshot = model_pool_snapshot("scan-incremental")
         assert snapshot["completed_task_count"] == 1
         assert snapshot["completed_tasks"] == []
@@ -2082,3 +2083,34 @@ def test_binding_completed_task_sink_migrates_legacy_in_memory_history() -> None
     snapshot = model_pool_snapshot("scan-upgrade")
     assert snapshot["completed_task_count"] == 1
     assert snapshot["completed_tasks"] == []
+
+
+def test_failed_completion_sink_does_not_block_next_lease_or_duplicate_release(monkeypatch):
+    async def run():
+        captured = []
+        attempts = 0
+        next_lease_started = threading.Event()
+        def sink(task):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                assert next_lease_started.wait(2), "completion sink held model capacity"
+                raise OSError("disk temporarily unavailable")
+            captured.append(task)
+        monkeypatch.setattr(model_pool_module, "COMPLETED_REPORT_RETRY_SECONDS", 0.01)
+        model_pool_module.set_completed_task_sink(sink)
+        cfg = SimpleNamespace(models=[{"id": "m", "model": "p/m", "max_concurrency": 1}])
+        first = await acquire_model_lease(cfg, stats_scope_id="scan", task_id="first")
+        second_task = asyncio.create_task(acquire_model_lease(cfg, stats_scope_id="scan", task_id="second"))
+        await asyncio.sleep(0)
+        await release_model_lease(first, outcome="timeout")
+        second = await asyncio.wait_for(second_task, 0.5)
+        next_lease_started.set()
+        await release_model_lease(first, outcome="timeout")
+        assert model_pool_snapshot("scan")["global_running"] == 1
+        assert await model_pool_module.drain_completed_task_reports(timeout=1)
+        assert len(captured) == 1 and captured[0]["outcome"] == "timeout"
+        await release_model_lease(second, outcome="success")
+        assert await model_pool_module.drain_completed_task_reports(timeout=1)
+        assert model_pool_snapshot("scan")["completed_task_count"] == 2
+    asyncio.run(run())

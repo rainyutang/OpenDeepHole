@@ -9,7 +9,7 @@ import logging
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 from typing import Awaitable, Callable, Optional
@@ -45,6 +45,16 @@ logger = logging.getLogger(__name__)
 
 _OutboxDeliveryCallback = Callable[[httpx.Response], Awaitable[None]]
 _PoolIdentity = tuple[str, str, int]
+
+
+@dataclass
+class _ScanPoolPublisher:
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
+    owners: dict[str, dict] = field(default_factory=dict)
+    last_owner: dict | None = None
+    task: asyncio.Task | None = None
+
+
 _scan_execution: ContextVar[tuple[str, int] | None] = ContextVar("scan_execution", default=None)
 
 
@@ -87,6 +97,7 @@ def _compact_pool_task(value: object) -> dict:
         "duration_seconds",
         "outcome",
         "blocked_reason",
+        "execution_kind", "execution_id", "execution_revision", "agent_session_id",
         "prompt_length",
     }
     compact = {key: item for key, item in value.items() if key in allowed}
@@ -191,6 +202,8 @@ class Reporter:
         self._outbox_stop = asyncio.Event()
         self._outbox_wakeup = asyncio.Event()
         self._outbox_loop: asyncio.AbstractEventLoop | None = None
+        # Register delivery receipts before the worker can claim newly saved rows.
+        self._outbox_claim_lock = asyncio.Lock()
         self._outbox_delivery_receipts: dict[
             tuple[int, int],
             _OutboxDeliveryReceipt,
@@ -222,6 +235,7 @@ class Reporter:
         self._opencode_pool_push_failures: dict[str, tuple[int, float]] = {}
         self._opencode_pool_stale_identities: set[_PoolIdentity] = set()
         self._opencode_pool_wakeups: dict[str, set[asyncio.Event]] = {}
+        self._scan_pool_publishers: dict[str, _ScanPoolPublisher] = {}
 
     @property
     def agent_session_id(self) -> str:
@@ -234,11 +248,32 @@ class Reporter:
             self._wake_opencode_pool_publishers()
 
     def _pool_identity(self, scope_id: str) -> _PoolIdentity:
+        owner = self._pool_execution_owner(scope_id)
+        if owner is not None:
+            return (
+                f"{owner['kind']}:{owner['id']}:pool:{scope_id}",
+                self.agent_session_id, int(owner["revision"]),
+            )
         return (
             f"scan:{scope_id}" if scope_id else f"agent:{self.agent_id}",
             self.agent_session_id,
             self.scan_execution_revision(scope_id) if scope_id else 0,
         )
+
+    def _pool_execution_owner(self, scope_id: str) -> dict | None:
+        publisher = self._scan_pool_publishers.get(scope_id)
+        if publisher is None:
+            return None
+        owners = list(publisher.owners.values())
+        scans = [item for item in owners if item["kind"] == "scan"]
+        owner = max(scans, key=lambda item: int(item["revision"])) if scans else None
+        if owner is not None:
+            owner = {**owner, "revision": max(int(owner["revision"]), self.scan_execution_revision(scope_id))}
+        if owner is None and owners:
+            owner = owners[-1]
+        if owner is not None:
+            publisher.last_owner = owner
+        return publisher.last_owner
 
     def _wake_opencode_pool_publishers(self, scope_id: str | None = None) -> None:
         for scope, wakeups in self._opencode_pool_wakeups.items():
@@ -640,31 +675,34 @@ class Reporter:
                         exc,
                     )
             return response
-        report = self._outbox.enqueue(
-            target_url=self.server_url,
-            stream_key=stream_key,
-            dedupe_key=dedupe_key,
-            path=path,
-            payload=payload,
-            query=query,
-            timeout_seconds=timeout,
-        )
-        self._discard_stale_outbox_deliveries(report)
-        waiter = None
-        if on_delivered is not None or wait_for_delivery:
-            waiter = self._register_outbox_delivery(
-                report,
-                callback=on_delivered,
-                wait_for_delivery=wait_for_delivery,
+        async with self._outbox_claim_lock:
+            report = await asyncio.to_thread(
+                self._outbox.enqueue,
+                target_url=self.server_url,
+                stream_key=stream_key,
+                dedupe_key=dedupe_key,
+                path=path,
+                payload=payload,
+                query=query,
+                timeout_seconds=timeout,
             )
+            self._discard_stale_outbox_deliveries(report)
+            waiter = None
+            if on_delivered is not None or wait_for_delivery:
+                waiter = self._register_outbox_delivery(
+                    report,
+                    callback=on_delivered,
+                    wait_for_delivery=wait_for_delivery,
+                )
+            claimed = await self._claim_outbox(report)
         self._wake_outbox()
-        if self._outbox.claim(report):
+        if claimed:
             return await self._deliver_outbox_report(report)
         if waiter is None or not wait_for_delivery:
             return None
         self.start_outbox_worker()
         self._wake_outbox()
-        if not self._outbox.stream_can_progress(report):
+        if not await asyncio.to_thread(self._outbox.stream_can_progress, report):
             self._detach_outbox_waiter(report, waiter)
             return None
         try:
@@ -693,16 +731,56 @@ class Reporter:
             }
         return False
 
+    async def _claim_outbox(self, report: PendingReport | None = None) -> bool | list[PendingReport]:
+        """A cancelled thread wait must not leave a stream permanently claimed."""
+        from task_agent.deadline import retire_task
+
+        assert self._outbox is not None
+        outbox = self._outbox
+
+        async def claim():
+            if report is not None:
+                return await asyncio.to_thread(outbox.claim, report)
+            return await asyncio.to_thread(outbox.claim_ready, self.server_url, limit=16)
+
+        async def retire_claim(operation):
+            try:
+                result = await operation
+                reports = ([report] if result else []) if report is not None else result
+                for item in reports:
+                    await asyncio.to_thread(outbox.release_claim, item)
+            except Exception:
+                logger.exception("Failed to retire interrupted outbox claim")
+            self._wake_outbox()
+
+        operation = asyncio.create_task(claim())
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            retire_task(asyncio.create_task(retire_claim(operation)))
+            raise
+
     async def _deliver_outbox_report(
+        self,
+        report: PendingReport,
+    ) -> httpx.Response | None:
+        try:
+            return await self._send_outbox_report(report)
+        finally:
+            if self._outbox is not None:
+                await asyncio.to_thread(self._outbox.release_claim, report)
+
+    async def _send_outbox_report(
         self,
         report: PendingReport,
     ) -> httpx.Response | None:
         if self._outbox is None:
             return None
         if "{agent_id}" in report.path and not self.agent_id:
-            self._outbox.defer(report, "Agent is not connected", retry_after=2.0)
+            await asyncio.to_thread(self._outbox.defer, report, "Agent is not connected", retry_after=2.0)
             self._resolve_outbox_stream_waiters(report.stream_key)
             return None
+
         path = report.path.replace("{agent_id}", self.agent_id)
         try:
             response = await self._client.post(
@@ -712,7 +790,7 @@ class Reporter:
                 timeout=report.timeout_seconds,
             )
             if 200 <= response.status_code < 300:
-                acknowledged = self._outbox.acknowledge(report)
+                acknowledged = await asyncio.to_thread(self._outbox.acknowledge, report)
                 if acknowledged:
                     await self._complete_outbox_delivery(report, response)
                 else:
@@ -732,17 +810,17 @@ class Reporter:
                     report.payload.get("execution_revision", 0),
                     _response_context(response),
                 )
-                self._outbox.acknowledge(report)
+                await asyncio.to_thread(self._outbox.acknowledge, report)
                 self._discard_outbox_delivery(report, response)
                 self._wake_outbox()
                 return response
             error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
             if self._retryable_response(response):
                 delay = min(60.0, 2.0 ** min(report.attempts, 6))
-                self._outbox.defer(report, error, retry_after=delay)
+                await asyncio.to_thread(self._outbox.defer, report, error, retry_after=delay)
                 self._resolve_outbox_stream_waiters(report.stream_key)
             else:
-                self._outbox.block(report, error)
+                await asyncio.to_thread(self._outbox.block, report, error)
                 self._discard_outbox_delivery(report)
                 self._resolve_outbox_stream_waiters(report.stream_key)
                 print(
@@ -753,7 +831,8 @@ class Reporter:
             return None
         except Exception as exc:
             delay = min(60.0, 2.0 ** min(report.attempts, 6))
-            self._outbox.defer(
+            await asyncio.to_thread(
+                self._outbox.defer,
                 report,
                 f"{type(exc).__name__}: {exc}",
                 retry_after=delay,
@@ -764,13 +843,17 @@ class Reporter:
     async def _run_outbox_worker(self) -> None:
         assert self._outbox is not None
         while not self._outbox_stop.is_set():
-            ready = self._outbox.claim_ready(self.server_url, limit=16)
-            if ready:
-                await asyncio.gather(*(
-                    self._deliver_outbox_report(report)
-                    for report in ready
-                ))
-                continue
+            try:
+                async with self._outbox_claim_lock:
+                    ready = await self._claim_outbox()
+                if ready:
+                    await asyncio.gather(*(
+                        self._deliver_outbox_report(report)
+                        for report in ready
+                    ))
+                    continue
+            except Exception:
+                logger.exception("Local report outbox unavailable; delivery will retry")
             self._outbox_wakeup.clear()
             try:
                 await asyncio.wait_for(self._outbox_wakeup.wait(), timeout=2.0)
@@ -1269,7 +1352,7 @@ class Reporter:
     async def _enqueue_validation_update(self, scan_id: str, state: dict, changes: list[dict]) -> None:
         key = (scan_id, int(state["vuln_index"]), int(state["execution_revision"]))
         scope = f"{self.server_url}:validation:{scan_id}:{key[1]}:{key[2]}"
-        sequence = self._outbox.next_sequence(scope) if self._outbox else self._validation_delta_sequences.get(key, 0) + 1
+        sequence = await asyncio.to_thread(self._outbox.next_sequence, scope) if self._outbox else self._validation_delta_sequences.get(key, 0) + 1
         path = f"/api/agent/v2/scan/{scan_id}/validation"
         update = {"state": state, "changes": changes, "sequence": sequence}
         if self._outbox is not None:
@@ -1963,6 +2046,7 @@ class Reporter:
         # Capture the request identity before yielding: a late response must
         # never disable a newer execution or change the 413 retry's target.
         identity = self._pool_identity(scope_id)
+        owner = self._pool_execution_owner(scope_id)
         if identity in self._opencode_pool_stale_identities:
             return False
         failure_key, session_id, revision = identity
@@ -1971,7 +2055,9 @@ class Reporter:
         payload = dict(snapshot)
         payload["agent_session_id"] = session_id
         if scope_id:
-            payload["execution_revision"] = revision
+            payload["execution_revision"] = self.scan_execution_revision(scope_id)
+            if owner is not None:
+                payload["execution_owner"] = dict(owner)
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
@@ -2011,16 +2097,41 @@ class Reporter:
         interval_seconds: float | None = None,
         debounce_seconds: float = OPENCODE_POOL_DEBOUNCE_SECONDS,
         unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
+        *,
+        execution_owner: dict | None = None,
     ) -> None:
-        """Publish scan-local model-pool stats until *stop_event* is set."""
-        await self._publish_opencode_pool_until(
-            stop_event,
-            scope_id=scan_id,
-            push_snapshot=lambda snapshot: self.push_opencode_pool_status(scan_id, snapshot),
-            interval_seconds=interval_seconds,
-            debounce_seconds=debounce_seconds,
-            unchanged_heartbeat_seconds=unchanged_heartbeat_seconds,
-        )
+        """Keep one publisher alive while any scan/review owner needs it."""
+        publisher = self._scan_pool_publishers.get(scan_id)
+        if publisher is None or publisher.stop.is_set() or (publisher.task and publisher.task.done()):
+            publisher = _ScanPoolPublisher()
+            self._scan_pool_publishers[scan_id] = publisher
+        token = uuid4().hex
+        publisher.owners[token] = dict(execution_owner or {
+            "kind": "scan", "id": scan_id, "revision": self.scan_execution_revision(scan_id),
+        })
+        self._wake_opencode_pool_publishers(scan_id)
+        if publisher.task is None:
+            publisher.task = asyncio.create_task(self._publish_opencode_pool_until(
+                publisher.stop,
+                scope_id=scan_id,
+                push_snapshot=lambda snapshot: self.push_opencode_pool_status(scan_id, snapshot),
+                interval_seconds=interval_seconds,
+                debounce_seconds=debounce_seconds,
+                unchanged_heartbeat_seconds=unchanged_heartbeat_seconds,
+            ))
+        try:
+            await stop_event.wait()
+        finally:
+            self._pool_execution_owner(scan_id)
+            publisher.owners.pop(token, None)
+            self._wake_opencode_pool_publishers(scan_id)
+            if not publisher.owners:
+                publisher.stop.set()
+                try:
+                    await asyncio.shield(publisher.task)
+                finally:
+                    if self._scan_pool_publishers.get(scan_id) is publisher:
+                        self._scan_pool_publishers.pop(scan_id, None)
 
     async def push_agent_opencode_pool_status(self, snapshot: dict) -> bool:
         """Push the latest Agent-wide OpenCode model-pool status snapshot."""
@@ -2163,6 +2274,10 @@ class Reporter:
                 await publish_if_needed()
         finally:
             try:
+                identity = self._pool_identity(scope_id)
+                if identity != last_identity:
+                    last_identity = identity
+                    retry_at = 0.0
                 await publish_if_needed(force=True)
             finally:
                 wakeups.discard(identity_changed)
@@ -2425,6 +2540,11 @@ class Reporter:
             print(f"Warning: failed to signal FP review finish: {e}")
 
     async def close(self) -> None:
+        if self._model_pool_sink_bound:
+            from task_agent.model_pool import drain_completed_task_reports
+
+            if not await drain_completed_task_reports():
+                logger.error("OpenCode completion reports could not be persisted before Reporter shutdown")
         self._unbind_model_pool_reporting()
         self._outbox_stop.set()
         self._outbox_wakeup.set()
@@ -2443,4 +2563,4 @@ class Reporter:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._client.aclose()
         if self._outbox is not None:
-            self._outbox.close()
+            await asyncio.to_thread(self._outbox.close)

@@ -443,6 +443,7 @@ class _TaskRecord:
     started_at: str = ""
     worker: asyncio.Task[None] | None = None
     requeue_requested: bool = False
+    last_session_id: str = ""
 
 
 class OpenCodeTaskHandle:
@@ -835,6 +836,30 @@ class OpenCodeTaskService:
         }
 
     async def _run_record(self, record: _TaskRecord) -> None:
+        """Always settle public waiters, including unexpected finalization errors."""
+        try:
+            await self._execute_record(record)
+        except asyncio.CancelledError:
+            if not record.requeue_requested and not record.result_future.done():
+                self._finish_record(
+                    record, status="cancelled", session_id=record.last_session_id,
+                    source=OutputSource(), error="OpenCode task cancelled",
+                )
+        except Exception as exc:
+            logger.exception("OpenCode task worker exited unexpectedly task=%s", record.task_id)
+            if not record.result_future.done():
+                self._finish_record(
+                    record, status="failure", session_id=record.last_session_id,
+                    source=OutputSource(), error=f"OpenCode task worker failed: {exc}",
+                )
+        finally:
+            if not record.requeue_requested and not record.result_future.done():
+                self._finish_record(
+                    record, status="failure", session_id=record.last_session_id,
+                    source=OutputSource(), error="OpenCode task worker exited without a result",
+                )
+
+    async def _execute_record(self, record: _TaskRecord) -> None:
         spec = record.spec
         context = record.execution_context
         write_roots = _effective_file_write_roots(spec, context)
@@ -972,6 +997,7 @@ class OpenCodeTaskService:
                     nonlocal session_id, final_session_id
                     session_id = str(value or "").strip()
                     final_session_id = session_id
+                    record.last_session_id = session_id
                     if not session_id or runtime is None:
                         return
                     self._session_directories[session_id] = spec.directory
@@ -1064,20 +1090,39 @@ class OpenCodeTaskService:
                             call_deadline = OperationDeadline(
                                 timeout_seconds, cancel_event=combined_cancel,
                             )
+                            prompt_deadline = OperationDeadline(
+                                0, cancel_event=combined_cancel,
+                                expires_at=call_deadline.expires_at + CLEANUP_TIMEOUT_SECONDS,
+                            )
+                            callbacks_open = True
+
+                            def guard(callback):
+                                if callback is None:
+                                    return None
+                                if inspect.iscoroutinefunction(callback):
+                                    async def invoke(*args):
+                                        if callbacks_open:
+                                            return await callback(*args)
+                                    return invoke
+                                def invoke(*args):
+                                    if callbacks_open:
+                                        return callback(*args)
+                                return invoke
+
                             message_writes.clear()
                             parsed_written_json = None
                             try:
-                                result = await get_serve_manager().run_prompt(
+                                result = await prompt_deadline.wait(get_serve_manager().run_prompt(
                                     **runtime.kwargs(),
                                     prompt=message_prompt,
                                     model=model,
                                     timeout=timeout_seconds,
-                                    on_line=context.on_output,
-                                    on_session_id=record_session,
-                                    on_model_request_failure=record_model_request_failure,
-                                    on_response_model=record_model,
-                                    on_token_usage=record_token_usage,
-                                    on_file_write=record_file_write,
+                                    on_line=guard(context.on_output),
+                                    on_session_id=guard(record_session),
+                                    on_model_request_failure=guard(record_model_request_failure),
+                                    on_response_model=guard(record_model),
+                                    on_token_usage=guard(record_token_usage),
+                                    on_file_write=guard(record_file_write),
                                     cancel_event=combined_cancel,
                                     session_id=session_id or None,
                                     session_title=spec.task_name,
@@ -1104,11 +1149,22 @@ class OpenCodeTaskService:
                                     required_bash_path_prepend=(
                                         spec.required_bash_path_prepend
                                     ),
-                                )
+                                ), phase="prompt_and_cleanup")
                             except BaseException:
+                                callbacks_open = False
+                                drained = await prompt_deadline.drain(expires_at=min(
+                                    prompt_deadline.expires_at,
+                                    time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+                                ))
+                                if not drained:
+                                    mark_restart = getattr(get_serve_manager(), "_mark_serve_restart_required", None)
+                                    if callable(mark_restart):
+                                        mark_restart("Task Service deadline expired before prompt cleanup returned")
                                 cleanup_message_writes()
                                 message_writes.clear()
                                 raise
+                            finally:
+                                callbacks_open = False
                             assert isinstance(result, OpenCodePromptResult)
                             try:
                                 feedback = ""
@@ -1636,15 +1692,22 @@ class OpenCodeTaskService:
                         else ""
                     ),
                 ))
-                await update_model_lease_context(lease, context_updates)
-                await release_model_lease(
-                    lease,
-                    outcome=attempt_outcome,
-                    health_outcome=health_outcome,
-                    quota_retry_after_seconds=quota_retry_after_seconds,
-                    duration_seconds=attempt_duration if lease is not None else None,
-                    record_completion=terminal_release,
-                )
+                try:
+                    await update_model_lease_context(lease, context_updates)
+                except Exception:
+                    logger.exception("OpenCode lease metadata update failed task=%s", record.task_id)
+                finally:
+                    try:
+                        await release_model_lease(
+                            lease,
+                            outcome=attempt_outcome,
+                            health_outcome=health_outcome,
+                            quota_retry_after_seconds=quota_retry_after_seconds,
+                            duration_seconds=attempt_duration if lease is not None else None,
+                            record_completion=terminal_release,
+                        )
+                    except Exception:
+                        logger.exception("OpenCode lease finalization failed task=%s outcome=%s", record.task_id, attempt_outcome)
 
             if recovery_required:
                 recovery_started_at = time.monotonic()
@@ -2841,6 +2904,8 @@ def _model_pool_task_context(
     prompt = spec.prompt
     context = {
         **record.execution_context.task_metadata,
+        "execution_kind": record.execution_context.execution_kind,
+        "execution_id": record.execution_context.execution_id,
         "task_name": spec.task_name,
         "prompt": prompt,
         "prompt_length": len(prompt),

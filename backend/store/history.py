@@ -81,6 +81,7 @@ TASK_METADATA_FIELDS = frozenset({
     "status", "duration_seconds", "serve_session_id", "failure_kind",
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
     "token_category", "token_category_label", "mining_engine_id", "mining_engine_label",
+    "execution_kind", "execution_id", "execution_revision", "agent_session_id",
 })
 
 
@@ -143,6 +144,57 @@ class ScanHistoryMixin:
             "execution_agent_session_id FROM scans WHERE scan_id = ?" + suffix,
             (scan_id,),
         ).fetchone()
+
+    def normalize_scan_pool(self, scan_id, status, *, row=None, terminal_scan=False):
+        """Fence live rows by their business owner, independently of scan completion."""
+        if status is None:
+            return None
+        row = row if row is not None else self.get_scan_identity(scan_id)
+        if row is None:
+            return terminal_opencode_pool_status(status)
+        tasks = [*status.planned_tasks, *status.queued_tasks]
+        tasks.extend(task for model in status.models for task in model.active_tasks)
+        reviews = {}
+        if any(task.get("execution_kind") == "fp_review" for task in tasks):
+            reviews = {item["review_id"]: dict(item) for item in self._conn.execute(
+                "SELECT review_id, execution_revision, execution_agent_session_id "
+                "FROM fp_review_jobs WHERE scan_id = ? AND status IN ('pending', 'running')",
+                (scan_id,),
+            ).fetchall()}
+
+        def matches(task, owner):
+            revision = int(owner["execution_revision"] or 0)
+            try:
+                task_revision = int(task.get("execution_revision") or 0)
+            except (TypeError, ValueError):
+                return False
+            return revision <= 0 or (
+                task_revision == revision
+                and str(task.get("agent_session_id") or status.agent_session_id or "")
+                == str(owner["execution_agent_session_id"] or "")
+            )
+
+        def keep(task):
+            kind = task.get("execution_kind")
+            if kind == "fp_review":
+                review = reviews.get(str(task.get("execution_id") or ""))
+                return review is not None and matches(task, review)
+            if terminal_scan or is_terminal_scan_status(row["status"]):
+                return False
+            if kind == "scan":
+                return task.get("execution_id") == scan_id and matches(task, row)
+            # Old Agents have only the scan-wide identity.
+            return matches({"execution_revision": status.execution_revision}, row)
+
+        if all(keep(task) for task in tasks) and not (
+            terminal_scan or is_terminal_scan_status(row["status"])
+        ):
+            return status
+        return terminal_opencode_pool_status(status, keep_task=keep)
+
+    def _terminal_scan_pool_json(self, scan_id, raw):
+        pool = OpenCodePoolStatus.model_validate_json(raw or "{}")
+        return self.normalize_scan_pool(scan_id, pool, terminal_scan=True).model_dump_json()
 
     def _archive_legacy_locked(self, scan_id: str, kind: str, payload: str) -> None:
         digest = hashlib.sha256(payload.encode()).hexdigest()
@@ -255,8 +307,8 @@ class ScanHistoryMixin:
             compact.completed_task_count + max(compact.global_running, sum(len(model.active_tasks) for model in compact.models))
             + max(compact.global_queued, len(compact.queued_tasks) + len(compact.planned_tasks)),
         )
-        if is_terminal_scan_status(row["status"]):
-            compact = terminal_opencode_pool_status(compact) or compact
+        compact = self.normalize_scan_pool(scan_id, compact, row=row)
+        compact.execution_owner = None
         self._conn.execute(
             "UPDATE scans SET opencode_pool = ?, history_version = 1, "
             "total_task_count = ?, completed_task_count = ? WHERE scan_id = ?",
@@ -330,7 +382,7 @@ class ScanHistoryMixin:
             return None
         pool = OpenCodePoolStatus.model_validate_json(row["opencode_pool"] or "{}")
         pool.completed_tasks = []
-        return pool
+        return self.normalize_scan_pool(scan_id, pool)
 
     def list_task_page(self, scan_id: str, *, limit: int = 50, before_sort_time: str | None = None,
                        before_task_id: str = "",

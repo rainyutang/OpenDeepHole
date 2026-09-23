@@ -63,6 +63,24 @@ test("history uses real UTC time, microseconds and stable ID ties, with invalid 
 });
 
 for (const publicAccess of [false, true]) {
+  test(`review-only queue shows planned, waiting and running work (${publicAccess ? "public" : "authenticated"})`, async () => {
+    if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });
+    client.api.defaults.adapter = async (config) => response(config, { items: [], next_cursor: null });
+    const owner = { task_type: "fp_review", execution_kind: "fp_review", execution_id: "review", execution_revision: 2 };
+    const value = pool({ completed_task_count: 0, total_tasks: 3, global_running: 1, global_queued: 1,
+      models: [{ id: "m", model: "p/m", active_tasks: [{ ...owner, task_id: "run" }] }],
+      queued_tasks: [{ ...owner, request_id: "wait" }],
+      planned_tasks: [{ ...owner, planned_task_id: "next" }] });
+    const root = await mount(value);
+    assert.deepEqual(rows(root).map((row) => text(row.findAllByType("td")[0])), ["运行中", "排队中", "计划中"]);
+    assert.equal((text(root.toJSON()).match(/去误报/g) || []).length, 3);
+    const next = { ...value, global_queued: 0, planned_tasks: [], queued_tasks: [],
+      models: [{ id: "m", model: "p/m", active_tasks: [{ ...owner, task_id: "next-run" }] }], updated_at: "next" };
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: next })));
+    assert.equal(rows(root).length, 1);
+    assert.equal(text(rows(root)[0].findAllByType("td")[0]), "运行中");
+  });
+
   test(`queue keeps active states first, loads 50 at a time and preserves history on refresh (${publicAccess ? "public" : "authenticated"})`, async () => {
     if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });
     const prefix = publicAccess ? "/api/public/scans/s" : "/api/v2/scans/s";

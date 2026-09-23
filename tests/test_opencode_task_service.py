@@ -3164,6 +3164,59 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
     asyncio.run(run())
 
 
+def test_timeout_result_is_set_even_when_lease_finalization_raises(tmp_path):
+    async def run():
+        manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=asyncio.TimeoutError("deadline expired")))
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", _source()))
+        patches = _service_patches(manager, max_retries=0)
+        with patches[0], patches[1], patches[2] as release, patches[3], patches[4], patches[5]:
+            release.side_effect = OSError("completion write failed")
+            with _task_context(tmp_path):
+                handle = service.submit_task(OpenCodeTaskSpec(task_name="timeout finalization", prompt="test", directory=tmp_path))
+                result = await asyncio.wait_for(handle.result(), 0.5)
+                assert result.status == "timeout"
+                assert "deadline expired" in result.error
+                assert await asyncio.wait_for(handle.wait_session_id(), 0.5) == ""
+                assert handle._record.worker.done()
+    asyncio.run(run())
+
+
+def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(tmp_path, monkeypatch):
+    async def run():
+        gate = asyncio.Event()
+        async def prompt(**kwargs):
+            while not gate.is_set():
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    continue
+            await kwargs["on_session_id"]("late-session")
+            return OpenCodePromptResult(session_id="late-session", message_id="late", text="late", lines=[], model="p/m")
+        manager = SimpleNamespace(run_prompt=prompt)
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", _source()))
+        config = _config(max_retries=0)
+        config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(timeout_seconds=0.03, max_retries=0))
+        patches = _service_patches(manager, runtime_config=config)
+        monkeypatch.setattr("task_agent.task_service.CLEANUP_TIMEOUT_SECONDS", 0.03)
+        try:
+            with patches[0], patches[1], patches[2] as release, patches[3], patches[4], patches[5]:
+                with _task_context(tmp_path, task_metadata={"task_type": "threat_analysis"}):
+                    handle = service.submit_task(OpenCodeTaskSpec(task_name="outer deadline", prompt="test", directory=tmp_path))
+                    result = await asyncio.wait_for(handle.result(), 0.5)
+                assert result.status == "timeout"
+                assert release.await_count == 1
+                gate.set()
+                await asyncio.sleep(0.03)
+                assert handle._record.last_session_id == ""
+                assert "late-session" not in service._active_session_tasks
+        finally:
+            gate.set()
+            await asyncio.sleep(0.01)
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("recover", [True, False])
 def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_path, monkeypatch, recover):
     import httpx

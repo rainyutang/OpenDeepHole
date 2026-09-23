@@ -1997,8 +1997,7 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
             pool = self.hydrate_pool_history(row["scan_id"], pool)
         elif pool is not None:
             pool.completed_tasks = []
-        if is_terminal_scan_status(scan_status):
-            pool = terminal_opencode_pool_status(pool)
+        pool = self.normalize_scan_pool(row["scan_id"], pool, row=row)
         return ScanStatus(
             scan_id=row["scan_id"],
             execution_revision=int(row["execution_revision"] or 0),
@@ -3060,7 +3059,7 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
                     self._conn.execute(
                         "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
                         (
-                            _terminal_opencode_pool_json(row["opencode_pool"]),
+                            self._terminal_scan_pool_json(scan_id, row["opencode_pool"]),
                             scan_id,
                         ),
                     )
@@ -3114,7 +3113,7 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
             if row is None:
                 self._conn.commit()
                 return None
-            pool = json.loads(_terminal_opencode_pool_json(row["opencode_pool"]))
+            pool = json.loads(self._terminal_scan_pool_json(scan_id, row["opencode_pool"]))
             pool["execution_revision"] = int(row["execution_revision"])
             pool["agent_session_id"] = row["execution_agent_session_id"] or ""
             self._conn.execute(
@@ -5398,7 +5397,7 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
             if row is not None:
                 self._conn.execute(
                     "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
-                    (_terminal_opencode_pool_json(row["opencode_pool"]), scan_id),
+                    (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
                 )
             self._conn.commit()
             return row is not None

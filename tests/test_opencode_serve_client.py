@@ -9262,3 +9262,42 @@ def test_managed_mcp_reset_does_not_respawn_cancelled_sync(tmp_path: Path) -> No
         assert manager._managed_mcp_directories == {}
 
     asyncio.run(run())
+
+
+def test_shared_cleanup_releases_startup_lock_when_mcp_ignores_cancellation(monkeypatch):
+    async def run():
+        manager = OpenCodeServeManager()
+        manager._start_locked = AsyncMock()
+        gate = asyncio.Event()
+        async def stuck(*args, **kwargs):
+            while not gate.is_set():
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    continue
+        manager._sync_managed_mcp_target = AsyncMock(side_effect=stuck)
+        task = manager._spawn_managed_mcp_sync("directory", "product_info")
+        await asyncio.sleep(0)
+        monkeypatch.setattr("task_agent.serve_client.CLEANUP_TIMEOUT_SECONDS", 0.03)
+        key = OpenCodeServeKey(tool="opencode", executable="opencode", env_hash="", config_hash="")
+        try:
+            await asyncio.wait_for(manager._acquire_session(key), 0.3)
+            assert not manager._lock.locked()
+            assert manager._start_locked.await_count == 1
+            assert not task.done()
+            await manager._release_active_session()
+            await asyncio.wait_for(manager._acquire_session(key), 0.3)
+            assert manager._start_locked.await_count == 2
+            await manager._release_active_session()
+            manager._managed_mcp_directories["directory"] = Path("/new-process")
+            manager._managed_mcp_specs["product_info"] = {"fingerprint": "new"}
+            manager._managed_mcp_force_pending.add(("directory", "product_info"))
+            gate.set()
+            await task
+            await asyncio.sleep(0)
+            assert manager._sync_managed_mcp_target.await_count == 1
+            assert ("directory", "product_info") in manager._managed_mcp_force_pending
+        finally:
+            gate.set()
+            await task
+    asyncio.run(run())

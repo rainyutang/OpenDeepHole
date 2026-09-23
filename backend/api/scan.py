@@ -3089,7 +3089,9 @@ async def _continue_scan(
         else:
             command = resume_payload
 
-        scan.opencode_pool = terminal_opencode_pool_status(scan.opencode_pool)
+        scan.opencode_pool = await run_store_call(
+            store, "normalize_scan_pool", scan_id, scan.opencode_pool, terminal_scan=True,
+        )
         if scan.opencode_pool is not None:
             scan.opencode_pool = scan.opencode_pool.model_copy(update={
                 "execution_revision": execution_revision,

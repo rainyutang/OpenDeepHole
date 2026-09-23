@@ -26,6 +26,22 @@ def retire_task(task: asyncio.Future) -> None:
     task.add_done_callback(done)
 
 
+async def cancel_tasks_bounded(
+    tasks: list[asyncio.Future], *, expires_at: float,
+) -> bool:
+    """Cancel background work without awaiting cancellation acknowledgement forever."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+        retire_task(task)
+    pending = {task for task in tasks if not task.done()}
+    if pending:
+        _, pending = await asyncio.wait(
+            pending, timeout=max(0.0, expires_at - time.monotonic()),
+        )
+    return not pending
+
+
 class OperationDeadline:
     def __init__(
         self,

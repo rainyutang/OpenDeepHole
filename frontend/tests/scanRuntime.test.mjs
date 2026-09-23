@@ -78,6 +78,20 @@ test("resume accepts the new task start time and retains completed history", () 
   assert.equal(merged.opencode_pool.completed_tasks[0].started_at, oldTask.started_at);
 });
 
+for (const status of ["complete", "error", "cancelled"]) {
+  test(`terminal scan ${status} accepts current review updates without restoring main work`, () => {
+    const current = { scan_id: "scan-1", status, opencode_pool: pool("2026-09-23T01:00:00Z", { execution_revision: 7 }) };
+    const task = { task_id: "review-running", task_type: "fp_review", execution_kind: "fp_review", execution_id: "review", execution_revision: 1 };
+    const incoming = { ...current, opencode_pool: pool("2026-09-23T01:00:01Z", { execution_revision: 7, global_running: 1,
+      models: [{ model: "p/m", active_tasks: [task] }], planned_tasks: [{ ...task, task_id: undefined, planned_task_id: "next" }] }) };
+    const merged = runtime.mergeScanSnapshot(current, incoming);
+    assert.equal(merged.status, status);
+    assert.equal(merged.opencode_pool.global_running, 1);
+    assert.equal(merged.opencode_pool.models[0].active_tasks[0].task_id, "review-running");
+    assert.equal(merged.opencode_pool.planned_tasks[0].planned_task_id, "next");
+  });
+}
+
 test("scan revisions protect progress even without a model-pool snapshot", () => {
   const old = { scan_id: "s", execution_revision: 1, status: "complete", progress: 1,
     processed_candidates: 100, total_candidates: 100, opencode_pool: null };

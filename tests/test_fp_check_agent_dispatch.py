@@ -110,6 +110,86 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
             server._config = original_config
             server._reporter = original_reporter
 
+    async def test_review_only_publishes_backlog_then_model_queue_and_cleans_up(self) -> None:
+        import task_agent.model_pool as pool
+
+        review_id, scan_id = "visible-review", "visible-review-scan"
+        config = SimpleNamespace(models=[{"id": "fp-visible", "model": "p/fp-visible", "max_concurrency": 1}])
+        stop = asyncio.Event()
+        publisher_started = asyncio.Event()
+        publisher_stopped = asyncio.Event()
+        item_started = asyncio.Event()
+        owner = None
+
+        async def publish(scope, stop_event, *, execution_owner):
+            nonlocal owner
+            self.assertEqual(scope, scan_id)
+            owner = execution_owner
+            publisher_started.set()
+            await stop_event.wait()
+            publisher_stopped.set()
+
+        reporter = SimpleNamespace(agent_session_id="review-agent", push_fp_progress=AsyncMock(),
+                                   finish_fp_review=AsyncMock(), publish_opencode_pool_until=publish)
+        processed = []
+
+        async def run_item(item):
+            lease = await pool.acquire_model_lease(config, stats_scope_id=scan_id, task_context={
+                "planned_task_id": item.planned_task_id, "task_type": "fp_review",
+                "execution_kind": "fp_review", "execution_id": review_id,
+                "execution_revision": item.execution_revision, "agent_session_id": "review-agent",
+            })
+            try:
+                processed.append(item.vulnerability["index"])
+                item_started.set()
+                await stop.wait()
+                return {"status": "success", "verdict": "true_positive"}
+            finally:
+                await pool.release_model_lease(lease, outcome="success")
+
+        with patch.object(pool, "_condition", asyncio.Condition()), patch(
+            "deephole_client.server._run_single_fp_review_item", new=run_item,
+        ), patch("deephole_client.fp_review.load_fp_review_methods", return_value={
+            "adversarial": SimpleNamespace(manifest=SimpleNamespace(max_concurrency=1)),
+        }):
+            occupied = await pool.acquire_model_lease(config, stats_scope_id="other-scan")
+            worker = None
+            try:
+                for index in range(2):
+                    await server.enqueue_fp_review(config=config, reporter=reporter, scan_id=scan_id,
+                        review_id=review_id, method="adversarial", project_path="/repo", code_scan_path="/repo/src",
+                        vulnerability={"index": index}, execution_revision=3)
+                worker = server._fp_review_tasks[review_id]
+                self.assertEqual(len(pool.model_pool_snapshot(scan_id)["planned_tasks"]), 2)
+                await asyncio.wait_for(publisher_started.wait(), 1)
+                async def wait_for_queue():
+                    while not pool.model_pool_snapshot(scan_id)["queued_tasks"]:
+                        await asyncio.sleep(0.001)
+                await asyncio.wait_for(wait_for_queue(), 1)
+                snapshot = pool.model_pool_snapshot(scan_id)
+                self.assertEqual(len(snapshot["planned_tasks"]), 1)
+                self.assertEqual(len(snapshot["queued_tasks"]), 1)
+                self.assertEqual(snapshot["queued_tasks"][0]["execution_revision"], 3)
+                self.assertEqual(owner, {"kind": "fp_review", "id": review_id, "revision": 3})
+                await pool.release_model_lease(occupied, outcome="success")
+                await asyncio.wait_for(item_started.wait(), 1)
+                self.assertEqual(pool.model_pool_snapshot(scan_id)["global_running"], 1)
+                self.assertFalse(publisher_stopped.is_set())
+                stop.set()
+                await asyncio.wait_for(worker, 1)
+                self.assertEqual(processed, [0, 1])
+                self.assertTrue(publisher_stopped.is_set())
+                snapshot = pool.model_pool_snapshot(scan_id)
+                self.assertEqual(snapshot["global_running"], 0)
+                self.assertEqual(snapshot["planned_tasks"], [])
+                self.assertEqual(snapshot["queued_tasks"], [])
+            finally:
+                stop.set()
+                await pool.release_model_lease(occupied, outcome="success")
+                if worker is not None and not worker.done():
+                    worker.cancel()
+                    await asyncio.gather(worker, return_exceptions=True)
+
     async def test_failed_wave_does_not_block_later_incremental_item(self) -> None:
         reporter = SimpleNamespace(
             push_fp_progress=AsyncMock(),

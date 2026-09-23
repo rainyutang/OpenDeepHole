@@ -202,6 +202,8 @@ _active_tasks: dict[str, dict[str, Any]] = {}
 _completed_tasks_by_scope: dict[str, list[dict[str, Any]]] = {}
 _completed_task_count_by_scope: dict[str, int] = {}
 _completed_task_sink: Callable[[dict[str, Any]], None] | None = None
+_completed_delivery_task: asyncio.Task | None = None
+COMPLETED_REPORT_RETRY_SECONDS = 2.0
 _token_usage_by_scope: dict[str, OpenCodeTokenUsage] = {}
 _global_token_usage: OpenCodeTokenUsage | None = None
 _peak_total_tasks_by_scope: dict[str, int] = {}
@@ -223,25 +225,78 @@ def set_completed_task_sink(
     global _completed_task_sink
     if sink is _completed_task_sink:
         return
+    _completed_task_sink = sink
     if sink is not None:
         # A backend may gain incremental-report support after an Agent has
         # already accumulated legacy in-memory history.  Persist those rows
         # before hiding them from subsequent bounded pool snapshots.
-        for tasks in _completed_tasks_by_scope.values():
-            for task in tasks:
-                sink(copy.deepcopy(task))
-        _completed_tasks_by_scope.clear()
-    _completed_task_sink = sink
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Legacy synchronous hosts bind outside an event loop.
+            for tasks in _completed_tasks_by_scope.values():
+                while tasks:
+                    sink(copy.deepcopy(tasks[0]))
+                    tasks.pop(0)
+            _completed_tasks_by_scope.clear()
+        else:
+            _schedule_completed_task_delivery()
+
+
+def _schedule_completed_task_delivery() -> None:
+    global _completed_delivery_task
+    if _completed_task_sink is not None and (
+        _completed_delivery_task is None or _completed_delivery_task.done()
+    ):
+        _completed_delivery_task = asyncio.create_task(_deliver_completed_tasks())
+
+
+async def _deliver_completed_tasks() -> None:
+    """Keep undelivered history until the host has durably accepted it."""
+    failed = False
+    while _completed_task_sink is not None:
+        selected = next((
+            (scope, tasks[0]) for scope, tasks in _completed_tasks_by_scope.items() if tasks
+        ), None)
+        if selected is None:
+            return
+        scope, task = selected
+        sink = _completed_task_sink
+        try:
+            # A host sink may use SQLite/fsync or a blocking file lock. Neither
+            # model-pool locks nor the Agent loop may wait synchronously for it.
+            result = await asyncio.to_thread(sink, copy.deepcopy(task))
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            if not failed:
+                logger.exception("OpenCode completion report pending; model capacity already released")
+            failed = True
+            await asyncio.sleep(COMPLETED_REPORT_RETRY_SECONDS)
+            continue
+        failed = False
+        tasks = _completed_tasks_by_scope.get(scope, [])
+        if tasks and tasks[0] is task:
+            tasks.pop(0)
+        if not tasks:
+            _completed_tasks_by_scope.pop(scope, None)
+
+
+async def drain_completed_task_reports(timeout: float = 10.0) -> bool:
+    """Bound shutdown flushing without discarding reports after a failed write."""
+    _schedule_completed_task_delivery()
+    task = _completed_delivery_task
+    if task is not None and not task.done():
+        await asyncio.wait({task}, timeout=timeout)
+    return not any(_completed_tasks_by_scope.values())
 
 
 def _record_completed_task_locked(scope_id: str, task: dict[str, Any]) -> None:
     if not scope_id:
         return
     snapshot = copy.deepcopy(task)
-    if _completed_task_sink is None:
-        _completed_tasks_by_scope.setdefault(scope_id, []).append(snapshot)
-    else:
-        _completed_task_sink(snapshot)
+    _completed_tasks_by_scope.setdefault(scope_id, []).append(snapshot)
+    _schedule_completed_task_delivery()
     _completed_task_count_by_scope[scope_id] = (
         _completed_task_count_by_scope.get(scope_id, 0) + 1
     )
@@ -1070,6 +1125,7 @@ def _grant_lease_locked(
         "model_id": option.id,
         "scope_id": request.stats_scope_id,
         "started_at": started_at_iso,
+        "lease_started_at": started_at,
         "context": dict(request.task_context or {}),
     }
     if request.stats_scope_id:
@@ -1371,6 +1427,8 @@ async def release_model_lease(
     async with _condition:
         finished_at = _now_iso()
         active_task = _active_tasks.get(lease.task_id)
+        if active_task is None or active_task.get("lease_started_at") != lease.started_at:
+            return
         _global_running = max(0, _global_running - 1)
         current = _running_by_model.get(lease.option.id, 0)
         if current <= 1:
@@ -1455,7 +1513,8 @@ async def clear_completed_tasks(scope_id: str) -> None:
     if not scope_id:
         return
     async with _condition:
-        _completed_tasks_by_scope.pop(scope_id, None)
+        if _completed_task_sink is None:
+            _completed_tasks_by_scope.pop(scope_id, None)
         _completed_task_count_by_scope.pop(scope_id, None)
         _token_usage_by_scope.pop(scope_id, None)
         _peak_total_tasks_by_scope.pop(scope_id, None)
@@ -1490,7 +1549,7 @@ async def update_model_lease_context(lease: ModelLease | None, updates: dict[str
         return
     async with _condition:
         task = _active_tasks.get(lease.task_id)
-        if task is None:
+        if task is None or task.get("lease_started_at") != lease.started_at:
             return
         context = task.setdefault("context", {})
         if not isinstance(context, dict):

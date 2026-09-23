@@ -32,7 +32,7 @@ from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
 )
-from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline, retire_task
+from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline, cancel_tasks_bounded, retire_task
 from .output_format import format_task_output, task_output_stage
 from .token_usage import (
     OpenCodeTokenUsage,
@@ -5146,6 +5146,8 @@ class OpenCodeServeManager:
             asyncio.Task[OpenCodeModelListResult],
         ] = {}
         self._managed_mcp_specs: dict[str, dict[str, Any]] = {}
+        self._process_generation = 0
+        self._event_generation = 0
         self._managed_mcp_directories: dict[str, Path] = {}
         self._managed_mcp_status: dict[str, dict[str, dict[str, Any]]] = {}
         self._managed_mcp_applied: dict[str, dict[str, dict[str, Any]]] = {}
@@ -5276,12 +5278,17 @@ class OpenCodeServeManager:
                 self._managed_mcp_force_pending.add(key)
             return existing
         self._managed_mcp_force_pending.discard(key)
+        generation = self._process_generation
         task = asyncio.create_task(
             self._sync_managed_mcp_target(directory_key, target, force=force)
         )
         self._managed_mcp_tasks[key] = task
 
         def done(completed: asyncio.Task) -> None:
+            if generation != self._process_generation:
+                with contextlib.suppress(BaseException):
+                    completed.result()
+                return
             if self._managed_mcp_tasks.get(key) is completed:
                 self._managed_mcp_tasks.pop(key, None)
             with contextlib.suppress(BaseException):
@@ -5380,6 +5387,7 @@ class OpenCodeServeManager:
         directory: Path,
         applied: dict[str, Any],
     ) -> None:
+        generation = self._process_generation
         name = str(applied.get("name") or "").strip()
         if not name:
             return
@@ -5388,6 +5396,8 @@ class OpenCodeServeManager:
             params=_serve_context_params(directory),
             headers=_serve_context_headers(directory),
         )
+        if generation != self._process_generation:
+            return
         if response.status_code == 404:
             config = applied.get("config")
             if isinstance(config, dict):
@@ -5407,8 +5417,11 @@ class OpenCodeServeManager:
         *,
         force: bool = False,
     ) -> None:
+        generation = self._process_generation
         lock = self._managed_mcp_locks.setdefault((directory_key, target), asyncio.Lock())
         async with lock:
+            if generation != self._process_generation:
+                return
             spec = self._managed_mcp_specs.get(target)
             directory = self._managed_mcp_directories.get(directory_key)
             if spec is None or directory is None:
@@ -5446,6 +5459,8 @@ class OpenCodeServeManager:
                     timeout=request_timeout,
                     trust_env=False,
                 ) as client:
+                    if generation != self._process_generation:
+                        return
                     state = "disabled"
                     error = ""
                     if spec.get("enabled"):
@@ -5459,6 +5474,8 @@ class OpenCodeServeManager:
                             headers=_serve_context_headers(directory),
                             json={"name": str(spec.get("name") or ""), "config": config},
                         )
+                        if generation != self._process_generation:
+                            return
                         response.raise_for_status()
                         statuses = self._mcp_status_map(response.json())
                         state, error = self._mcp_native_status(
@@ -5478,6 +5495,8 @@ class OpenCodeServeManager:
                     # a newer desired fingerprint. The follow-up sync then knows
                     # which just-connected stale name/config must be replaced or
                     # disconnected.
+                    if generation != self._process_generation:
+                        return
                     if state == "connected":
                         self._managed_mcp_applied.setdefault(directory_key, {})[target] = dict(spec)
                     else:
@@ -5496,6 +5515,8 @@ class OpenCodeServeManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if generation != self._process_generation:
+                    return
                 self._managed_mcp_applied.setdefault(directory_key, {}).pop(target, None)
                 self._record_managed_mcp_status(
                     directory_key,
@@ -7492,6 +7513,7 @@ class OpenCodeServeManager:
         is_global: bool,
         initial_reconnect_delay: float = _SERVE_EVENT_RECONNECT_DELAY_SECONDS,
     ) -> None:
+        generation = self._event_generation
         reconnect_delay = initial_reconnect_delay
         directory_key = "" if is_global else runtime.key.removeprefix("legacy:")
         request_headers = dict(runtime.headers)
@@ -7506,6 +7528,8 @@ class OpenCodeServeManager:
                 trust_env=False,
             ) as client:
                 while True:
+                    if generation != self._event_generation:
+                        return
                     try:
                         async with client.stream(
                             "GET",
@@ -7513,6 +7537,8 @@ class OpenCodeServeManager:
                             params=runtime.params,
                             headers=request_headers,
                         ) as response:
+                            if generation != self._event_generation:
+                                return
                             status_code = int(getattr(response, "status_code", 200) or 200)
                             if is_global and status_code in {404, 405, 501}:
                                 await self._mark_global_event_unsupported(runtime)
@@ -7530,6 +7556,8 @@ class OpenCodeServeManager:
                                 )
                             received_event = False
                             async for event in _stream_sse_events(response):
+                                if generation != self._event_generation:
+                                    return
                                 if not self._dispatch_event(event, directory_key=directory_key):
                                     continue
                                 payload = self._global_event_payload(event)
@@ -7545,6 +7573,8 @@ class OpenCodeServeManager:
                                     self._note_event_channel_connected(runtime)
                                 if confirmed_recovery:
                                     reconnect_delay = _SERVE_EVENT_RECONNECT_DELAY_SECONDS
+                            if generation != self._event_generation:
+                                return
                             reason = (
                                 "event stream closed"
                                 if received_event
@@ -7558,6 +7588,8 @@ class OpenCodeServeManager:
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
+                        if generation != self._event_generation:
+                            return
                         self._note_event_channel_failure(
                             runtime,
                             error=exc,
@@ -7568,12 +7600,16 @@ class OpenCodeServeManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if generation != self._event_generation:
+                return
             self._note_event_channel_failure(
                 runtime,
                 error=exc,
                 retry_in=reconnect_delay,
             )
             await asyncio.sleep(reconnect_delay)
+            if generation != self._event_generation:
+                return
             runtime.task = asyncio.create_task(self._run_event_channel(
                 runtime,
                 is_global=is_global,
@@ -8986,7 +9022,8 @@ class OpenCodeServeManager:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
             return False
 
-    async def _stop_event_hub(self) -> None:
+    async def _stop_event_hub(self, *, expires_at: float | None = None) -> None:
+        self._event_generation += 1
         async with self._event_lock:
             channels = [
                 channel
@@ -9011,12 +9048,13 @@ class OpenCodeServeManager:
             self._event_failure_attempts = 0
             self._event_last_failure_summary_at = 0.0
             self._event_poll_failure_reported = False
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if not await cancel_tasks_bounded(
+            tasks, expires_at=expires_at if expires_at is not None else time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+        ):
+            logger.warning("OpenCode event cleanup timed out; retired old event channels")
 
-    async def _reset_managed_mcp_process_state(self) -> None:
+    async def _reset_managed_mcp_process_state(self, *, expires_at: float | None = None) -> None:
+        self._process_generation += 1
         tasks = [task for task in self._managed_mcp_tasks.values() if not task.done()]
         self._managed_mcp_tasks.clear()
         # Clear directory ownership before cancellation callbacks run. Otherwise
@@ -9030,10 +9068,10 @@ class OpenCodeServeManager:
         self._scan_mcp_states.clear()
         self._scan_mcp_conditions.clear()
         self._scan_mcp_names.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if not await cancel_tasks_bounded(
+            tasks, expires_at=expires_at if expires_at is not None else time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+        ):
+            logger.warning("OpenCode MCP cleanup timed out; retired old MCP synchronization")
 
     async def _stop_locked(
         self,
@@ -9041,8 +9079,9 @@ class OpenCodeServeManager:
         reason: str = "serve shutdown",
         requested_key: OpenCodeServeKey | None = None,
     ) -> None:
-        await self._reset_managed_mcp_process_state()
-        await self._stop_event_hub()
+        cleanup_expires = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
+        await self._reset_managed_mcp_process_state(expires_at=cleanup_expires)
+        await self._stop_event_hub(expires_at=cleanup_expires)
         proc = self._proc
         port = self._port
         listener_pids = set(self._listener_pids)

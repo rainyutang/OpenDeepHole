@@ -36,7 +36,7 @@ class ReportOutbox:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._inflight_ids: set[int] = set()
+        self._inflight_reports: dict[int, PendingReport] = {}
         new_database = not self.path.exists()
         self._conn = sqlite3.connect(
             self.path,
@@ -183,7 +183,7 @@ class ReportOutbox:
         """Claim one exact ready report for this process."""
         now = time.time()
         with self._lock:
-            if report.row_id in self._inflight_ids:
+            if report.row_id in self._inflight_reports:
                 return False
             row = self._conn.execute(
                 """
@@ -204,7 +204,7 @@ class ReportOutbox:
             ).fetchone()
             if row is None:
                 return False
-            self._inflight_ids.add(report.row_id)
+            self._inflight_reports[report.row_id] = report
             return True
 
     def claim_ready(
@@ -220,11 +220,17 @@ class ReportOutbox:
             for report in candidates:
                 if len(claimed) >= limit:
                     break
-                if report.row_id in self._inflight_ids:
+                if report.row_id in self._inflight_reports:
                     continue
-                self._inflight_ids.add(report.row_id)
+                self._inflight_reports[report.row_id] = report
                 claimed.append(report)
             return claimed
+
+    def release_claim(self, report: PendingReport) -> None:
+        """Retire an interrupted delivery without releasing a subsequent claim."""
+        with self._lock:
+            if self._inflight_reports.get(report.row_id) is report:
+                self._inflight_reports.pop(report.row_id, None)
 
     def stream_can_progress(self, report: PendingReport) -> bool:
         """Return whether a worker can currently advance toward ``report``.
@@ -259,7 +265,7 @@ class ReportOutbox:
             if head is None:
                 return False
             head_id = int(head["id"])
-            if head_id in self._inflight_ids:
+            if head_id in self._inflight_reports:
                 return True
             return (
                 not bool(head["blocked"])
@@ -282,7 +288,7 @@ class ReportOutbox:
             if remaining == 0:
                 self._conn.execute("PRAGMA incremental_vacuum")
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            self._inflight_ids.discard(report.row_id)
+            self.release_claim(report)
         return removed
 
     def defer(self, report: PendingReport, error: str, *, retry_after: float) -> None:
@@ -305,7 +311,7 @@ class ReportOutbox:
                 ),
             )
             self._conn.commit()
-            self._inflight_ids.discard(report.row_id)
+            self.release_claim(report)
 
     def block(self, report: PendingReport, error: str) -> None:
         with self._lock:
@@ -326,7 +332,7 @@ class ReportOutbox:
                 ),
             )
             self._conn.commit()
-            self._inflight_ids.discard(report.row_id)
+            self.release_claim(report)
 
     def pending_count(self, target_url: str | None = None) -> int:
         with self._lock:

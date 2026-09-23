@@ -5318,8 +5318,8 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
                 scan_id,
             )
         previous_pool = reported_pool
-    final_pool = _terminal_opencode_pool_status(
-        previous_pool
+    final_pool = await run_store_call(
+        store, "normalize_scan_pool", scan_id, previous_pool, terminal_scan=True,
     )
     if final_pool is not None:
         await run_store_call(
@@ -5686,16 +5686,26 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     loaded = await run_store_call(store, "get_scan_identity", scan_id)
     if loaded is None:
         _scan_not_found(scan_id, endpoint="opencode-pool", store=store)
+    owner = body.execution_owner
+    if owner is not None and owner.kind == "fp_review":
+        review = await run_store_call(store, "get_fp_review_job_state", owner.id)
+        if review is None or review.scan_id != scan_id:
+            raise HTTPException(status_code=409, detail="stale fp_review execution")
+    elif owner is not None and owner.id != scan_id:
+        raise HTTPException(status_code=409, detail="stale scan execution")
     if not await run_store_call(
         store,
         "execution_matches",
-        "scan",
-        scan_id,
+        owner.kind if owner is not None else "scan",
+        owner.id if owner is not None else scan_id,
         None,
         agent_session_id=body.agent_session_id,
-        execution_revision=body.execution_revision,
+        execution_revision=owner.revision if owner is not None else body.execution_revision,
     ):
         raise HTTPException(status_code=409, detail="stale scan execution")
+    # The source can be an independently resumed review. GET/SSE ordering still
+    # uses the parent scan revision, never the review's revision counter.
+    body.execution_revision = int(loaded["execution_revision"] or 0)
     if hasattr(store, "upsert_scan_opencode_token_usage"):
         await run_store_call(
             store,
@@ -5711,12 +5721,11 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
             scan_id,
         )
     terminal = loaded is not None and loaded["status"] not in _RUNNING_SCAN_STATUSES
-    status = _terminal_opencode_pool_status(body) if terminal else body
     status = await run_store_call(
         store,
         "persist_opencode_pool",
         scan_id,
-        status,
+        body,
     )
 
     scan = None if terminal else _running_scans.get(scan_id)

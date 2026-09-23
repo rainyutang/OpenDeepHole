@@ -734,11 +734,18 @@ class OpenCodeTokenUsage(OpenCodeTokenCounters):
     by_category: list[OpenCodeCategoryTokenUsage] = Field(default_factory=list)
 
 
+class OpenCodePoolExecutionOwner(BaseModel):
+    kind: Literal["scan", "fp_review"]
+    id: str = Field(min_length=1)
+    revision: int = Field(ge=0)
+
+
 class OpenCodePoolStatus(BaseModel):
     scope_id: str = ""
     agent_name: str = ""
     agent_session_id: str = ""
     execution_revision: int = 0
+    execution_owner: OpenCodePoolExecutionOwner | None = None
     global_running: int = 0
     global_queued: int = 0
     total_tasks: int = 0

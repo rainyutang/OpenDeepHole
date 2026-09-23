@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -21,6 +22,44 @@ from deephole_client.report_outbox import ReportOutbox
 from deephole_client.reporter import Reporter
 
 
+def test_slow_outbox_does_not_block_agent_loop_or_lose_delivery_receipt(tmp_path):
+    async def exercise():
+        reporter = Reporter("http://server", outbox_path=tmp_path / "slow.sqlite3")
+        entered, release = threading.Event(), threading.Event()
+        enqueue = reporter._outbox.enqueue
+        delivered = AsyncMock()
+        ticks = []
+
+        def slow_enqueue(**kwargs):
+            entered.set()
+            assert release.wait(2), "Agent event loop could not release the blocked write"
+            return enqueue(**kwargs)
+
+        async def heartbeat():
+            while not entered.is_set():
+                await asyncio.sleep(0.001)
+            ticks.append("alive")
+            release.set()
+
+        reporter.start_outbox_worker()
+        try:
+            with patch.object(reporter._outbox, "enqueue", slow_enqueue), patch.object(
+                reporter._client, "post", AsyncMock(return_value=httpx.Response(200)),
+            ):
+                await asyncio.gather(heartbeat(), reporter._queue_post(
+                    stream_key="scan:one", dedupe_key="result", path="/api/report", payload={},
+                    on_delivered=delivered, wait_for_delivery=True,
+                ))
+            assert ticks == ["alive"]
+            delivered.assert_awaited_once()
+            assert reporter._outbox.pending_count() == 0
+        finally:
+            release.set()
+            await reporter.close()
+
+    asyncio.run(exercise())
+
+
 def _enqueue(outbox: ReportOutbox, key: str, *, stream: str = "scan:one"):
     return outbox.enqueue(
         target_url="http://server",
@@ -29,6 +68,72 @@ def _enqueue(outbox: ReportOutbox, key: str, *, stream: str = "scan:one"):
         path="/api/report",
         payload={"key": key},
     )
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_cancelled_thread_claim_releases_the_report_for_retry(tmp_path, batch):
+    async def exercise():
+        reporter = Reporter("http://server", outbox_path=tmp_path / "cancelled.sqlite3")
+        report = _enqueue(reporter._outbox, "cancelled-claim")
+        entered, release = threading.Event(), threading.Event()
+        method = "claim_ready" if batch else "claim"
+        claim = getattr(reporter._outbox, method)
+
+        def slow_claim(*args, **kwargs):
+            result = claim(*args, **kwargs)
+            entered.set()
+            assert release.wait(2)
+            return result
+
+        task = None
+        try:
+            with patch.object(reporter._outbox, method, slow_claim):
+                task = asyncio.create_task(reporter._claim_outbox(None if batch else report))
+                while not entered.is_set():
+                    await asyncio.sleep(0.001)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                release.set()
+                async def wait_for_release():
+                    while reporter._outbox._inflight_reports:
+                        await asyncio.sleep(0.001)
+                await asyncio.wait_for(wait_for_release(), 1)
+            ready = reporter._outbox.claim_ready("http://server")
+            assert [item.dedupe_key for item in ready] == ["cancelled-claim"]
+            # A delayed cleanup must not release the newer delivery.
+            reporter._outbox.release_claim(report)
+            assert reporter._outbox.claim_ready("http://server") == []
+        finally:
+            release.set()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            await reporter.close()
+    asyncio.run(exercise())
+
+
+def test_cancelled_http_delivery_leaves_report_available_to_worker(tmp_path):
+    async def exercise():
+        reporter = Reporter("http://server", outbox_path=tmp_path / "cancelled-http.sqlite3")
+        report = _enqueue(reporter._outbox, "cancelled-send")
+        reporter._outbox.claim(report)
+        entered = asyncio.Event()
+
+        async def post(*args, **kwargs):
+            entered.set()
+            await asyncio.Future()
+
+        try:
+            with patch.object(reporter._client, "post", post):
+                sending = asyncio.create_task(reporter._deliver_outbox_report(report))
+                await entered.wait()
+                sending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await sending
+            assert len(reporter._outbox.claim_ready("http://server")) == 1
+        finally:
+            await reporter.close()
+    asyncio.run(exercise())
 
 
 def test_reporter_fp_execution_revision_is_monotonic() -> None:

@@ -576,7 +576,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         agent_server.active_validation_snapshots()
                         + pending_validation_snapshots()
                     ),
-                    "pending_terminal_reports": reporter.pending_terminal_work(),
+                    "pending_terminal_reports": await asyncio.to_thread(reporter.pending_terminal_work),
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
