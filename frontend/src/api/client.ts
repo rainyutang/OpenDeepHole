@@ -101,8 +101,10 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     const sharedRequest = error.config?.url?.startsWith("/api/shared/scans/");
+    // Missing optional resources such as /fp-review/overview do not invalidate the share.
+    const sharedOverview = /^\/api\/shared\/scans\/[^/]+\/overview$/.test(error.config?.url ?? "");
     if (sharedRequest && (error.response?.status === 403
-      || (error.response?.status === 404 && error.config.url.endsWith("/overview")))) {
+      || (error.response?.status === 404 && sharedOverview))) {
       const params = error.config.params;
       const token = params instanceof URLSearchParams ? params.get("token") : params?.token;
       const scanId = decodeURIComponent(error.config.url.split("/")[4] || "");

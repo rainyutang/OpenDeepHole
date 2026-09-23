@@ -201,6 +201,50 @@ def test_share_reads_and_downloads_real_report_content(environment):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("status,auto_fp_review", [
+    (ScanItemStatus.AUDITING, True),
+    (ScanItemStatus.COMPLETE, False),
+    (ScanItemStatus.COMPLETE, True),
+], ids=["scan-running", "auto-review-disabled", "no-findings"])
+def test_share_remains_valid_before_and_after_fp_review_creation(environment, status, auto_fp_review):
+    env = environment
+    scan_id = env.scan_id + "-without-review"
+    env.store.save_scan(
+        env.status.model_copy(update={"scan_id": scan_id, "status": status,
+                                      "total_candidates": 0, "processed_candidates": 0}),
+        env.meta.model_copy(update={"scan_name": scan_id, "auto_fp_review": auto_fp_review}),
+    )
+    shared_scan = SimpleNamespace(scan_id=scan_id, tokens=env.tokens)
+
+    async def run():
+        async with client_for(env) as client:
+            token = await create_share(client, shared_scan)
+            base = f"/api/shared/scans/{scan_id}"
+            params = {"token": token}
+            overview = await client.get(base + "/overview", params=params)
+            assert overview.status_code == 200, overview.text
+            assert overview.json()["auto_fp_review"] == auto_fp_review
+            review = await client.get(base + "/fp-review/overview", params=params)
+            assert review.status_code == 404
+            assert review.json()["detail"] == "No FP review found"
+            results = await client.get(base + "/fp-review/results", params=params)
+            assert results.status_code == 200
+            assert results.json()["items"] == []
+            assert (await client.get(base + "/overview", params=params)).status_code == 200
+            assert await create_share(client, shared_scan) == token
+
+            review_id = "review-" + scan_id
+            env.store.create_fp_review_job(review_id, scan_id, 0, env.meta.created_at)
+            review = await client.get(base + "/fp-review/overview", params=params)
+            assert review.status_code == 200, review.text
+            assert review.json()["review_id"] == review_id
+            assert (await client.get(base + "/overview", params=params)).status_code == 200
+            assert await create_share(client, shared_scan) == token
+            assert env.store.get_scan_share(scan_id)["token"] == token
+
+    asyncio.run(run())
+
+
 def test_owner_public_and_shared_overviews_preserve_category_usage(environment):
     env = environment
     pool = OpenCodePoolStatus(scope_id=env.scan_id, agent_session_id="usage-session", token_usage={

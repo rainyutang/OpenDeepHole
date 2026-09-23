@@ -54,9 +54,9 @@ async function mount(Component, props = {}) {
   roots.push(root); return root;
 }
 
-function installApi(status = "complete", intercept = () => undefined) {
+function installApi(status = "complete", intercept = () => undefined, { autoFpReview = true, vulnerabilityCount = 53 } = {}) {
   const calls = [];
-  const vulnerabilities = Array.from({ length: 53 }, (_, ordinal) => ({
+  const vulnerabilities = Array.from({ length: vulnerabilityCount }, (_, ordinal) => ({
     vuln_index: ordinal * 3, file: `issue-${ordinal}.c`, function: "parse", line: 10, vuln_type: "npd",
     severity: "high", confirmed: true, ai_verdict: "confirmed", description: `问题 ${ordinal}`,
     ai_analysis: "analysis", vulnerability_report: `# 报告 ${ordinal}`,
@@ -70,9 +70,9 @@ function installApi(status = "complete", intercept = () => undefined) {
     if (config.url.endsWith("/checkers") || config.url.endsWith("/checkers/catalog")) return response(config, []);
     if (config.url.endsWith("/overview") && !config.url.includes("fp-review")) return response(config, {
       scan_id: "s", project_id: "p", status, progress: 0.5, total_candidates: 53, processed_candidates: 20,
-      auto_fp_review: true, fp_review_method: "adversarial", agent_online: true,
+      auto_fp_review: autoFpReview, fp_review_method: "adversarial", agent_online: true,
       vulnerability_validation_enabled: true, can_continue: true, continuable_task_count: 1,
-      scan_items: [], detail_counts: { vulnerabilities: 53, human_confirmed_issue_count: 0 },
+      scan_items: [], detail_counts: { vulnerabilities: vulnerabilityCount, human_confirmed_issue_count: 0 },
     });
     if (config.url.endsWith("/fp-review/overview")) return response(config, {
       review_id: "review-s", scan_id: "s", status: "running", method: "adversarial", total: 53, processed: 52, results: [],
@@ -133,6 +133,89 @@ for (const status of ["auditing", "complete"]) {
       assert.equal(call.params.token, access.token);
       assert.equal(call.headers.get("Authorization"), undefined);
     }
+  });
+}
+
+for (const scenario of [
+  { name: "scan still running", status: "auditing", autoFpReview: true, vulnerabilityCount: 53 },
+  { name: "automatic review disabled", status: "complete", autoFpReview: false, vulnerabilityCount: 53 },
+  { name: "no findings to review", status: "complete", autoFpReview: true, vulnerabilityCount: 0 },
+]) {
+  test(`missing FP review keeps the shared scan accessible (${scenario.name})`, async () => {
+    client.setPublicScanAccess(access);
+    const calls = installApi(scenario.status, (config) => {
+      if (config.url.endsWith("/fp-review/overview")) {
+        throw new AxiosError("Not Found", "ERR_BAD_REQUEST", config, null, {
+          ...response(config, { detail: "No FP review found" }), status: 404,
+        });
+      }
+      if (config.url.endsWith("/fp-review/results")) return { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
+    }, scenario);
+    const root = await mount(SharedView, { access, onBack() {} });
+    assert.ok(calls.some((config) => config.url === "/api/shared/scans/s/overview"));
+    assert.ok(calls.some((config) => config.url === "/api/shared/scans/s/fp-review/overview"));
+    assert.equal(root.root.findAllByType(ScanStatus).length, 1);
+    assert.ok(!content(root.toJSON()).includes("分享已关闭或链接无效"));
+    assert.ok(button(root, "导出报告"));
+    assert.equal(streams.length, 1);
+    assert.equal(streams[0].closed, false);
+    assert.deepEqual(removedKeys, []);
+  });
+}
+
+test("a shared scan loads a later FP review without replacing the link or stream", async () => {
+  client.setPublicScanAccess(access);
+  let reviewCreated = false;
+  const calls = installApi("auditing", (config) => {
+    if (reviewCreated) return;
+    if (config.url.endsWith("/fp-review/overview")) {
+      throw new AxiosError("Not Found", "ERR_BAD_REQUEST", config, null, {
+        ...response(config, { detail: "No FP review found" }), status: 404,
+      });
+    }
+    if (config.url.endsWith("/fp-review/results")) return { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
+  });
+  const root = await mount(SharedView, { access, onBack() {} });
+  assert.equal(root.root.findAllByType(ScanStatus).length, 1);
+  const initialRequests = calls.filter((config) => config.url.endsWith("/fp-review/overview")).length;
+  reviewCreated = true;
+  await act(async () => {
+    streams[0].emit("resource_changed", { resource: "fp-review" });
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  assert.ok(calls.filter((config) => config.url.endsWith("/fp-review/overview")).length > initialRequests);
+  const reviewNav = buttons(root).find((node) => content(node).startsWith("adversarial"));
+  assert.ok(reviewNav);
+  await act(async () => reviewNav.props.onClick());
+  assert.equal(root.root.findByType(FpReviewPanel).props.canControl, false);
+  assert.equal(root.root.findByType(FpReviewPanel).props.fpReview?.review_id, "review-s");
+  assert.ok(!content(root.toJSON()).includes("分享已关闭或链接无效"));
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].closed, false);
+  for (const config of calls.filter((config) => config.url.startsWith("/api/shared/scans/"))) {
+    assert.equal(config.params.token, access.token);
+  }
+  assert.deepEqual(removedKeys, []);
+});
+
+for (const failure of [
+  { suffix: "/overview", status: 404, detail: "Scan not found" },
+  { suffix: "/fp-review/overview", status: 403, detail: "分享已关闭或链接无效" },
+]) {
+  test(`share invalidation still handles ${failure.status} on ${failure.suffix}`, async () => {
+    client.setPublicScanAccess(access);
+    installApi("complete", (config) => {
+      if (config.url === `/api/shared/scans/s${failure.suffix}`) {
+        throw new AxiosError(failure.detail, "ERR_BAD_REQUEST", config, null, {
+          ...response(config, { detail: failure.detail }), status: failure.status,
+        });
+      }
+    });
+    const root = await mount(SharedView, { access, onBack() {} });
+    assert.ok(content(root.toJSON()).includes("分享已关闭或链接无效"));
+    assert.equal(root.root.findAllByType(ScanStatus).length, 0);
+    assert.ok(streams.length > 0 && streams.every((stream) => stream.closed));
+    assert.deepEqual(removedKeys, []);
   });
 }
 

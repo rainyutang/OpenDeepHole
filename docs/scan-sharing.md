@@ -35,9 +35,13 @@
 
 分享不可用时返回 `403`，提示“分享已关闭或链接无效”。活动 SSE 在关闭前发出 `share_unavailable` 事件，网页停止刷新并提示失效；不会清除浏览器已有登录信息。允许操作的参数校验和结果不存在错误沿用原扫描接口。
 
+扫描尚未创建去误报任务时，`/fp-review/overview` 返回 `404`、`detail: "No FP review found"`，表示暂无去误报任务。扫描仍在运行、未启用自动去误报或没有问题结果时都可能出现；分享页继续显示扫描详情并保持实时连接，后续创建任务后可通过同一链接查看。网页仅把扫描主概览 `/api/shared/scans/{scan_id}/overview` 的 `404` 判为分享不可用，子资源的 `404` 由对应页面处理。
+
 ## 部署与验证
 
 更新后端和前端资源。后端启动时自动创建独立 `scan_shares` 表并接入扫描删除清理，支持 SQLite 和 PostgreSQL；历史扫描默认未分享。令牌不进入扫描状态快照，扫描进度写回、续扫和服务重启均不会重置分享。现有外部集成链接继续使用原有令牌和权限。
+
+已部署分享功能的环境，去误报 `404` 误判修复只需更新前端资源，无需数据库迁移或重新生成分享链接。
 
 在仓库根目录执行后端测试；PostgreSQL 命令复用已有缓存，为本次测试创建临时数据库：
 
@@ -46,4 +50,4 @@ PYTHONPATH=. python3 -m pytest -q tests/test_scan_sharing.py tests/test_external
 python3 scripts/run_postgres_tests.py -q tests/test_scan_sharing.py tests/test_storage_deletion.py
 ```
 
-在 `frontend/` 执行 `npm run test:scan-sharing`、`npm run test:issue-loading` 和 `npm run build`。成功标准是匿名查看、人工标记及报告内容正确，越权请求被拒绝，关闭分享后 API 和活动 SSE 均失效，两种数据库测试通过。
+在 `frontend/` 执行 `npm run test:scan-sharing`、`npm run test:issue-loading` 和 `npm run build`。成功标准是匿名查看、人工标记及报告内容正确，暂无去误报任务时仍可访问且后续任务可在同一链接加载，越权请求被拒绝，关闭分享后 API 和活动 SSE 均失效，两种数据库测试通过。
