@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent } from "react";
 import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
@@ -9,9 +9,16 @@ import type {
   ScanEvent,
   ThreatAnalysis,
 } from "../../types";
+import { moduleSourcePaths, scanRelativePaths } from "./coverage";
+import type { ThreatCoverage } from "./coverage";
+import { ThreatCoverageView } from "./ThreatCoveragePanel";
+import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatAnalysisPanel.css";
 
 interface ThreatAnalysisPanelProps {
+  scanId: string;
+  coverageRevision: number;
+  analysisStatus?: string;
   analysis: ThreatAnalysis | null;
   events: ScanEvent[];
   loading: boolean;
@@ -20,7 +27,6 @@ interface ThreatAnalysisPanelProps {
   resultTab: ThreatAnalysisResultTab;
   onResultTabChange: (tab: ThreatAnalysisResultTab) => void;
   errorMessage?: string;
-  coverage?: ReactNode;
 }
 
 export type ThreatAnalysisResultTab = "valueAssets" | "highRiskModules" | "internalNodes" | "attackTrees";
@@ -96,6 +102,9 @@ export function getThreatAnalysisResultCounts(
 }
 
 export function ThreatAnalysisPanel({
+  scanId,
+  coverageRevision,
+  analysisStatus,
   analysis,
   events,
   loading,
@@ -104,8 +113,9 @@ export function ThreatAnalysisPanel({
   resultTab,
   onResultTabChange,
   errorMessage = "",
-  coverage,
 }: ThreatAnalysisPanelProps) {
+  const coverageState = useThreatCoverage(scanId, coverageRevision);
+  const coverage = <ThreatCoverageView {...coverageState} analysisStatus={analysisStatus} />;
   const assets = artifactArray<NativeThreatValueAsset>(
     analysis,
     "value_asset_path",
@@ -225,7 +235,7 @@ export function ThreatAnalysisPanel({
             unit={THREAT_ANALYSIS_RESULT_TABS.find((item) => item.key === resultTab)?.unit ?? "项"}
           />
           {resultTab === "valueAssets" && <ValueAssetsTable assets={assets} />}
-          {resultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} />}
+          {resultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} coverage={coverageState.data} pathError={coverageState.error} />}
           {resultTab === "internalNodes" && <InternalNodesTable nodes={internalNodes} />}
           {resultTab === "attackTrees" && <AttackTrees trees={trees} />}
         </section>
@@ -330,12 +340,16 @@ function ValueAssetsTable({ assets }: { assets: NativeThreatValueAsset[] }) {
 
 function HighRiskModulesTable({
   modules,
+  coverage,
+  pathError,
 }: {
   modules: NativeThreatHighRiskModule[];
+  coverage: ThreatCoverage | null;
+  pathError: string;
 }) {
   const headers = [
     "模块名称",
-    "代码目录",
+    "代码目录（相对扫描路径）",
     "面临威胁",
     "管理控制",
     "不可信数据",
@@ -360,7 +374,7 @@ function HighRiskModulesTable({
           ) : modules.map((module, index) => (
             <tr key={`${module["模块名称"]}-${index}`}>
               <td>{displayValue(module["模块名称"])}</td>
-              <td>{displayValue(module["代码目录"])}</td>
+              <td><ModuleCodePaths module={module} index={index} coverage={coverage} error={pathError} /></td>
               <td>{displayValue(module["面临威胁"])}</td>
               <td><YesNoBadge value={module[HIGH_RISK_FIELDS.management]} /></td>
               <td><YesNoBadge value={module[HIGH_RISK_FIELDS.untrusted]} /></td>
@@ -375,6 +389,26 @@ function HighRiskModulesTable({
       </table>
     </div>
   );
+}
+
+function ModuleCodePaths({ module, index, coverage, error }: {
+  module: NativeThreatHighRiskModule; index: number; coverage: ThreatCoverage | null; error: string;
+}) {
+  const source = moduleSourcePaths(module["代码目录"]);
+  const projected = coverage?.analysis_ready
+    ? coverage.modules.find((item) => item.id === `module-${index}`
+      && item.name === String(module["模块名称"] || "").trim()
+      && item.paths.length === source.length && item.paths.every((path, i) => path === source[i]))
+    : undefined;
+  // Never pair a refreshed artifact with the preceding coverage response,
+  // including when multiple modules share a name.
+  if (!projected) return <span>{error ? "路径解析失败，请刷新" : "正在解析路径…"}</span>;
+  const paths = scanRelativePaths(projected);
+  const unmapped = coverage?.unmapped.some((item) => item.kind === "module" && item.id === projected.id);
+  return <>
+    <span>{paths.length ? displayValue(paths) : "路径无法映射"}</span>
+    {unmapped && <small className="block" title={projected.paths.join("\n")}>存在未映射路径，见范围说明</small>}
+  </>;
 }
 
 function InternalNodesTable({ nodes }: { nodes: NativeThreatTreeNode[] }) {

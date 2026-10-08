@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CoverageNode, ThreatCoverage } from "./coverage";
-import { buildCoverageTree, coveragePercent } from "./coverage";
+import { buildCoverageTree, coveragePercent, scanRelativePaths } from "./coverage";
 import { CoverageTreemap } from "./CoverageTreemap";
 import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatCoveragePanel.css";
@@ -23,13 +23,13 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
     <p>{node.files.toLocaleString()} 个文件 · {node.highRisk.toLocaleString()} 个高风险文件</p>
     {node.kind !== "file" && <button type="button" className="coverage-button" onClick={() => onOpen(node.path)}>进入此目录</button>}
     <h4>高风险模块 <span>{modules.length}</span></h4>
-    {modules.length ? <div className="coverage-module-list">{modules.map((module) => <div key={module.id} title={module.paths.join("\n")}>{module.name}</div>)}</div>
+    {modules.length ? <div className="coverage-module-list">{modules.map((module) => <div key={module.id} title={scanRelativePaths(module).join("\n")}>{module.name}</div>)}</div>
       : <p className="coverage-muted">{data.analysis_ready ? "此范围未标注高风险模块。" : "等待威胁分析结果。"}</p>}
     <h4>攻击模式关联 <span>{targets.length}</span></h4>
     {targets.slice(currentPage * 8, currentPage * 8 + 8).map((target) => <details className="coverage-pattern" key={target.id}>
       <summary><span>{target.pattern_id || "未编号"}</span><strong>{target.pattern_name}</strong><small>{target.module_name}</small></summary>
       {target.fallback && <p className="coverage-warning">产物缺少模块路径，按现有目标构建规则回退到扫描根目录。</p>}
-      <p className="coverage-paths">{target.paths.join("\n")}</p>
+      <p className="coverage-paths">{scanRelativePaths(target).join("\n") || "路径无法映射"}</p>
       {target.sources.map((source, index) => <div key={index} className="coverage-source">
         <strong>{source.path_name || source.path_id || "攻击路径"}</strong>
         <small>{[source.tree_id, source.path_id].filter(Boolean).join(" / ")}</small>
@@ -43,7 +43,10 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
 }
 
 export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: { scanId: string; revision: number; analysisStatus?: string }) {
-  const { data, loading, error, refresh } = useThreatCoverage(scanId, revision);
+  return <ThreatCoverageView {...useThreatCoverage(scanId, revision)} analysisStatus={analysisStatus} />;
+}
+
+export function ThreatCoverageView({ data, loading, error, refresh, analysisStatus = "" }: ReturnType<typeof useThreatCoverage> & { analysisStatus?: string }) {
   const panel = useRef<HTMLElement>(null);
   const [history, setHistory] = useState<string[]>(["."]);
   const [selected, setSelected] = useState(".");

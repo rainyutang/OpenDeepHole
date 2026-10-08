@@ -7,7 +7,9 @@ import inspect
 import json
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
+
+from backend.threat_paths import ModulePathResolver
 
 from task_agent import opencode_task_context, run_sync_component
 
@@ -111,6 +113,7 @@ def _project_relative_module_path(
     *,
     project_path: Path,
     code_path: Path,
+    path_base: Literal["project", "scan"] = "scan",
 ) -> str:
     if not isinstance(value, str) or not value.strip():
         raise TypeError("high-risk module code paths must be non-empty strings")
@@ -119,16 +122,15 @@ def _project_relative_module_path(
     if ".." in path.parts:
         raise ValueError(f"high-risk module code path cannot contain '..': {value}")
 
-    if path.is_absolute():
-        resolved = path.resolve()
-    else:
-        project_scan_prefix = code_path.relative_to(project_path)
-        prefix_parts = project_scan_prefix.parts
-        already_project_relative = bool(
-            prefix_parts and path.parts[: len(prefix_parts)] == prefix_parts
-        )
-        base = project_path if already_project_relative else code_path
-        resolved = (base / path).resolve()
+    resolver = ModulePathResolver(
+        str(project_path), str(code_path),
+        match=lambda relative: relative if (code_path / relative).exists() else None,
+        allow_repair=True,
+    )
+    relative = resolver.resolve(str(path), base=path_base).scan_relative
+    if relative is None:
+        raise ValueError(f"high-risk module code path escapes code_path or is ambiguous: {value}")
+    resolved = (code_path / relative).resolve()
 
     if not _path_is_within(resolved, code_path):
         raise ValueError(
@@ -143,12 +145,14 @@ def _normalize_module_code_paths(
     *,
     project_path: Path,
     code_path: Path,
+    path_base: Literal["project", "scan"] = "scan",
 ) -> str | list[str]:
     if isinstance(value, str):
         return _project_relative_module_path(
             value,
             project_path=project_path,
             code_path=code_path,
+            path_base=path_base,
         )
     if isinstance(value, list):
         return [
@@ -156,6 +160,7 @@ def _normalize_module_code_paths(
                 item,
                 project_path=project_path,
                 code_path=code_path,
+                path_base=path_base,
             )
             for item in value
         ]
@@ -170,10 +175,9 @@ def _adapt_high_risk_modules_for_project(
     output_path: Path,
 ) -> dict[str, Any]:
     """Expose project-relative paths without mutating native resume artifacts."""
-    if project_path == code_path:
-        return result
-
     source_path = Path(result["high_risk_modules_path"]).expanduser().resolve()
+    platform_path = (output_path / _PLATFORM_HIGH_RISK_MODULES_PATH).resolve()
+    path_base = "project" if source_path == platform_path else "scan"
     if not _path_is_within(source_path, output_path):
         raise ValueError(
             "high-risk module artifact escapes output_path: "
@@ -207,10 +211,13 @@ def _adapt_high_risk_modules_for_project(
             module["代码目录"],
             project_path=project_path,
             code_path=code_path,
+            path_base=path_base,
         )
         normalized_modules.append(normalized)
 
-    platform_path = (output_path / _PLATFORM_HIGH_RISK_MODULES_PATH).resolve()
+    if project_path == code_path and normalized_modules == modules:
+        return result
+
     if not _path_is_within(platform_path, output_path):
         raise ValueError(
             "platform high-risk module artifact escapes output_path: "

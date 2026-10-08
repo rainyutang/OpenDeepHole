@@ -167,6 +167,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
     }
 
     def native_entry(**kwargs):
+        (output_path / "high-risk-modules.json").write_text("[]", encoding="utf-8")
         context = get_opencode_execution_context()
         captured.update({
             "kwargs": kwargs,

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import ntpath
-import posixpath
 import re
 from typing import Any
+
+from backend.threat_paths import ModulePathResolver
 
 
 def _text(value: Any) -> str:
@@ -81,7 +81,7 @@ def analysis_targets(attack_tree: dict, modules: list, fallback: str) -> list[di
     return list(targets.values())
 
 
-def build_threat_coverage(inventory: dict | None, analysis: dict | None) -> dict:
+def build_threat_coverage(inventory: dict | None, analysis: dict | None, *, scan_scope: dict | None = None) -> dict:
     analysis = _record(analysis)
     artifacts = _record(analysis.get("artifacts"))
     raw_modules = _record(artifacts.get("high_risk_modules_path")).get("content")
@@ -89,47 +89,31 @@ def build_threat_coverage(inventory: dict | None, analysis: dict | None) -> dict
     ready = bool(_record(analysis.get("entrypoint_result")).get("result") is True
                  and isinstance(raw_modules, list) and isinstance(attack_tree, dict)
                  and isinstance(attack_tree.get("attack_trees"), list))
-    scope = _record(analysis.get("scan_scope"))
-    root = str((inventory or {}).get("scan_root") or scope.get("code_scan_path") or "")
-    project = str((inventory or {}).get("project_path") or scope.get("project_path") or "")
-    windows = bool(ntpath.splitdrive(root)[0])
-    path_module = ntpath if windows else posixpath
-
-    def canonical(path: str) -> str:
-        value = path_module.normpath(path)
-        return path_module.normcase(value).replace("\\", "/") if windows else value
-
+    scope, fallback_scope = _record(analysis.get("scan_scope")), _record(scan_scope)
+    root = str((inventory or {}).get("scan_root") or scope.get("code_scan_path") or fallback_scope.get("code_scan_path") or "")
+    project = str((inventory or {}).get("project_path") or scope.get("project_path") or fallback_scope.get("project_path") or "")
     entries = (inventory or {}).get("entries") or []
-    known = {canonical(entry["path"]): entry["path"] for entry in entries}
-    absolute_paths = {canonical(path_module.join(root, entry["path"])): entry["path"] for entry in entries}
+    resolver = ModulePathResolver(
+        project, root, match=lambda path: known.get(resolver.canonical(path)),
+        allow_repair=(inventory or {}).get("status") == "complete",
+    )
+    known = {resolver.canonical(entry["path"]): entry["path"] for entry in entries}
     unmapped = []
-
-    def resolve(raw: str) -> str | None:
-        if not entries:
-            return None
-        # The legacy target normalizer collapses // in UNC paths. Resolve only
-        # that exact recorded UNC root, never by basename or suffix matching.
-        if root.replace("\\", "/").startswith("//") and raw.startswith("/"):
-            unc = canonical("//" + raw.lstrip("/"))
-            if unc in absolute_paths:
-                return absolute_paths[unc]
-        absolute = canonical(path_module.join(project, raw))
-        try:
-            relative = canonical(path_module.relpath(absolute, canonical(root)))
-        except ValueError:
-            return None
-        return known.get(relative)
 
     def annotate(item: dict, kind: str) -> dict:
         matched = []
+        relative_paths = []
         for raw in item["paths"]:
-            path = resolve(raw)
-            if path is None:
+            resolved = resolver.resolve(raw)
+            path = resolved.scan_relative
+            if path is not None and path not in relative_paths:
+                relative_paths.append(path)
+            if not resolved.matched:
                 if entries:
                     unmapped.append({"kind": kind, "id": item["id"], "path": raw})
             elif path not in matched:
                 matched.append(path)
-        return {**item, "mapped_paths": matched}
+        return {**item, "scan_relative_paths": relative_paths, "mapped_paths": matched}
 
     modules = [annotate({"id": f"module-{index}", "name": _module_name(module), "paths": _module_paths(module)}, "module")
                for index, module in enumerate(raw_modules if ready else []) if isinstance(module, dict)]

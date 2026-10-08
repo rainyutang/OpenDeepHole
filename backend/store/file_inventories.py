@@ -74,4 +74,8 @@ class ScanFileInventoriesMixin:
         with self._lock:
             inventory = self.get_file_inventory(scan_id)
             analysis = self.get_threat_analysis(scan_id)
-        return build_threat_coverage(inventory, analysis)
+            meta = self.get_scan_meta(scan_id) if not inventory else None
+        return build_threat_coverage(inventory, analysis, scan_scope={
+            "project_path": meta.project_path,
+            "code_scan_path": meta.code_scan_path or meta.project_path,
+        } if meta else None)

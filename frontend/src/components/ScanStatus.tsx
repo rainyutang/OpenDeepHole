@@ -14,7 +14,6 @@ import {
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
 import { useThreatAnalysisResult } from "../features/threatAnalysis/useThreatAnalysisResult";
-import { ThreatCoveragePanel } from "../features/threatAnalysis/ThreatCoveragePanel";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
 import type { ThreatAuditTaskResult } from "../types";
 import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
@@ -2279,7 +2278,10 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         )}
         {activeTab === "threat" && isThreatAnalysisSelected(scan) && (
           <ThreatAnalysisPanel
-            coverage={<ThreatCoveragePanel key={scanId} scanId={scanId} revision={coverageRevision} analysisStatus={scan.threat_analysis_run?.status} />}
+            key={scanId}
+            scanId={scanId}
+            coverageRevision={coverageRevision}
+            analysisStatus={scan.threat_analysis_run?.status}
             analysis={scan.threat_analysis ?? null}
             events={threatAnalysisEvents}
             loading={(threatAnalysisLoading || scan.threat_analysis_run?.status === "running") && !isThreatAnalysisResultReady(scan.threat_analysis)}

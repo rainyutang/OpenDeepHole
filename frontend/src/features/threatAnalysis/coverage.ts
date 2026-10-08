@@ -14,6 +14,7 @@ export interface CoverageModule {
   id: string;
   name: string;
   paths: string[];
+  scan_relative_paths?: string[];
   mapped_paths: string[];
 }
 export interface CoverageTarget {
@@ -22,6 +23,7 @@ export interface CoverageTarget {
   pattern_id: string;
   pattern_name: string;
   paths: string[];
+  scan_relative_paths?: string[];
   mapped_paths: string[];
   fallback: boolean;
   sources: Array<{ tree_id: string; path_id: string; path_name: string; description: string }>;
@@ -45,6 +47,21 @@ export interface CoverageNode {
   highRisk: number;
   riskOnly: number;
   covered: number;
+}
+
+/** Source comparison only; path resolution belongs to the shared backend resolver. */
+export function moduleSourcePaths(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  return [...new Set(values.map((item) => {
+    let path = String(item || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+    while (path.startsWith("./")) path = path.slice(2);
+    return path === "/" ? path : path.replace(/\/+$/, "");
+  }).filter(Boolean))];
+}
+
+export function scanRelativePaths(item: CoverageModule | CoverageTarget): string[] {
+  // During a rolling backend upgrade, mapped paths already use the scan root.
+  return item.scan_relative_paths ?? item.mapped_paths;
 }
 
 function node(path: string, kind: CoverageNode["kind"]): CoverageNode {
