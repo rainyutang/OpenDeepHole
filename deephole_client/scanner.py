@@ -6,6 +6,7 @@ import asyncio
 import copy
 import shutil
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from task_agent.model_pool import clear_planned_task, register_planned_task
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
-from .file_inventory import collect_and_report_file_inventory
+from .file_inventory import file_inventory_lifecycle
 from .codex_runtime import (
     CodexRuntimeState,
     get_codex_runtime_state,
@@ -631,16 +632,84 @@ async def run_scan(
     multi_versions: list[dict[str, Any]] | None = None,
 ) -> None:
     """Run the selected directory-discovered mining engines."""
+    scan_dir = (
+        Path.home() / ".opendeephole" / "scans" / str(scan_id)
+    ).expanduser().resolve()
+    project, scan_root = _resolve_scan_paths(project_path, code_scan_path)
+    async with file_inventory_lifecycle(
+        project=project, scan_root=scan_root, scan_dir=scan_dir, scan_id=scan_id,
+        reporter=reporter, cancel_event=cancel_event, is_resume=is_resume,
+    ) as start_file_inventory:
+        if is_resume and (
+            threat_analysis_enabled
+            or normalize_scan_mode(scan_mode) == SCAN_MODE_THREAT_ANALYSIS_ONLY
+        ):
+            # Historical scans may have analysis artifacts but no inventory.
+            # Do not wait for indexing or a new analysis attempt to fill it in.
+            start_file_inventory()
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        await _run_scan_pipeline(
+            config=config, project=project, scan_root=scan_root,
+            scan_dir=scan_dir, start_file_inventory=start_file_inventory,
+            reporter=reporter, scan_name=scan_name, product=product,
+            validation_environment=validation_environment,
+            checker_names=checker_names, scan_id=scan_id, cancel_event=cancel_event,
+            feedback_entries=feedback_entries, checker_packages=checker_packages,
+            refresh_skill_packages=refresh_skill_packages, is_resume=is_resume,
+            retry_candidates=retry_candidates, retry_total_candidates=retry_total_candidates,
+            retry_processed_offset=retry_processed_offset,
+            resume_threat_analysis=resume_threat_analysis,
+            retry_mining_engine_ids=retry_mining_engine_ids,
+            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+            scan_mode=scan_mode, threat_analysis_enabled=threat_analysis_enabled,
+            threat_analysis_method=threat_analysis_method,
+            vulnerability_validation=vulnerability_validation,
+            code_graph_mcp=code_graph_mcp, knowledge_base_mcp=knowledge_base_mcp,
+            mining_engines=mining_engines, codex_model_ids=codex_model_ids,
+            multi_versions=multi_versions,
+        )
+
+
+async def _run_scan_pipeline(
+    *,
+    config: AgentConfig,
+    project: Path,
+    scan_root: Path,
+    scan_dir: Path,
+    start_file_inventory: Callable[[], None],
+    reporter: Reporter,
+    scan_name: str,
+    product: str,
+    validation_environment: str,
+    checker_names: list[str],
+    scan_id: str,
+    cancel_event: threading.Event,
+    feedback_entries: list[dict] | None,
+    checker_packages: list[dict] | None,
+    refresh_skill_packages: bool | None,
+    is_resume: bool,
+    retry_candidates: list[dict] | None,
+    retry_total_candidates: int | None,
+    retry_processed_offset: int,
+    resume_threat_analysis: bool,
+    retry_mining_engine_ids: list[str] | None,
+    retry_threat_audit_task_ids: list[str] | None,
+    scan_mode: str,
+    threat_analysis_enabled: bool,
+    threat_analysis_method: str,
+    vulnerability_validation: dict[str, Any] | None,
+    code_graph_mcp: dict[str, Any] | None,
+    knowledge_base_mcp: dict[str, Any] | None,
+    mining_engines: list[dict[str, Any]] | None,
+    codex_model_ids: list[str] | None,
+    multi_versions: list[dict[str, Any]] | None,
+) -> None:
+    """Existing model and engine workflow, with inventory lifetime owned above."""
     feedback_entries = list(feedback_entries or [])
     checker_packages = list(checker_packages or [])
     multi_versions = [
         dict(item) for item in (multi_versions or []) if isinstance(item, dict)
     ]
-    scan_dir = (
-        Path.home() / ".opendeephole" / "scans" / str(scan_id)
-    ).expanduser().resolve()
-    scan_dir.mkdir(parents=True, exist_ok=True)
-    project, scan_root = _resolve_scan_paths(project_path, code_scan_path)
     configure_platform_runtime(config, scan_dir)
 
     normalized_mode = normalize_scan_mode(scan_mode)
@@ -992,7 +1061,6 @@ async def run_scan(
 
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
-    inventory_task: asyncio.Task[None] | None = None
     threat_analysis_task: asyncio.Task[
         tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]
     ] | None = None
@@ -1038,14 +1106,6 @@ async def run_scan(
     def task_output(line: str) -> None:
         if line:
             print(str(line), flush=True)
-
-    def start_file_inventory() -> None:
-        nonlocal inventory_task
-        if inventory_task is None and callable(getattr(reporter, "push_file_inventory", None)):
-            inventory_task = asyncio.create_task(collect_and_report_file_inventory(
-                project=project, scan_root=scan_root, scan_dir=scan_dir, scan_id=scan_id,
-                reporter=reporter, cancel_event=cancel_event, is_resume=is_resume,
-            ))
 
     async def execute_threat_analysis(
     ) -> tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]:
@@ -1608,8 +1668,6 @@ async def run_scan(
                 threat_analysis_task = asyncio.create_task(
                     execute_threat_analysis()
                 )
-            elif threat_analysis_selected:
-                start_file_inventory()
             engine_tasks = [
                 asyncio.create_task(execute_engine(selection))
                 for selection in enabled_selections
@@ -1745,15 +1803,6 @@ async def run_scan(
                 await pool_task
             except Exception:
                 pass
-        if inventory_task is not None:
-            if cancel_event.is_set():
-                inventory_task.cancel()
-            try:
-                # A fast/failed analysis must not discard an unfinished tree.
-                # The collector owns its own deadline and upload retry policy.
-                await inventory_task
-            except asyncio.CancelledError:
-                inventory_task.cancel()
 
 
 __all__ = ["run_scan"]

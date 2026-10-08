@@ -36,7 +36,7 @@ export interface ThreatCoverage {
 export interface CoverageNode {
   path: string;
   name: string;
-  kind: "file" | "directory" | "group";
+  kind: "file" | "directory";
   children: CoverageNode[];
   directModules: Set<string>;
   moduleIds: Set<string>;
@@ -100,16 +100,6 @@ export function buildCoverageTree(data: ThreatCoverage) {
   return { root, byPath };
 }
 
-/** Group tiny entries without omitting their area, counts or navigation. */
-export function visibleChildren(parent: CoverageNode): CoverageNode[] {
-  if (parent.children.length <= 80) return parent.children;
-  const rest = node(`${parent.path}/\0remaining`, "group");
-  rest.children = parent.children.slice(79);
-  rest.name = `其余 ${rest.children.length.toLocaleString()} 项`;
-  sumChildren(rest);
-  return [...parent.children.slice(0, 79), rest];
-}
-
 export interface CoverageTile { node: CoverageNode; x: number; y: number; width: number; height: number }
 
 /** Balanced binary treemap, weighted by file count (empty dirs get one unit). */
@@ -140,6 +130,39 @@ export function layoutTreemap(nodes: CoverageNode[], width: number, height: numb
   return result;
 }
 
+export interface CoverageTreeTile extends CoverageTile { nested: boolean }
+
+/** Fit every item into the viewport. Risk module directories remain a single
+ * scope until opened; other directories show their descendants without paging.
+ * Tiny cells lose labels/padding, never their area or annotations. */
+export function layoutCoverageTree(parent: CoverageNode, width: number, height: number): CoverageTreeTile[] {
+  const result: CoverageTreeTile[] = [];
+  if (width <= 0 || height <= 0) return result;
+  function visit(item: CoverageNode, x: number, y: number, w: number, h: number) {
+    for (const tile of layoutTreemap(item.children, w, h)) {
+      const nested = tile.node.children.length > 0 && tile.node.directModules.size === 0;
+      const placed = { ...tile, x: x + tile.x, y: y + tile.y, nested };
+      result.push(placed);
+      if (nested) {
+        const inset = Math.min(tile.width, tile.height) >= 16 ? 1 : 0;
+        const header = tile.width >= 64 && tile.height >= 40 ? 16 : 0;
+        visit(tile.node, placed.x + inset, placed.y + header + inset,
+          tile.width - 2 * inset, tile.height - header - 2 * inset);
+      }
+    }
+  }
+  visit(parent, 0, 0, width, height);
+  return result;
+}
+
+export function hitCoverageTile(tiles: CoverageTreeTile[], x: number, y: number): CoverageTreeTile | undefined {
+  // Descendants are painted after their parents, so pick the deepest scope.
+  for (let index = tiles.length - 1; index >= 0; index--) {
+    const tile = tiles[index];
+    if (x >= tile.x && y >= tile.y && x < tile.x + tile.width && y < tile.y + tile.height) return tile;
+  }
+}
+
 export function coveragePercent(count: number, total: number): string {
   return total ? `${(count / total * 100).toFixed(1)}%` : "—";
 }
@@ -148,5 +171,5 @@ export function coverageBackground(item: CoverageNode): string {
   if (!item.files) return "var(--coverage-neutral)";
   const covered = item.covered / item.files * 100;
   const risk = covered + item.riskOnly / item.files * 100;
-  return `linear-gradient(110deg, var(--coverage-covered) 0% ${covered}%, var(--coverage-risk) ${covered}% ${risk}%, var(--coverage-neutral) ${risk}% 100%)`;
+  return `linear-gradient(90deg, var(--coverage-covered) 0% ${covered}%, var(--coverage-risk) ${covered}% ${risk}%, var(--coverage-neutral) ${risk}% 100%)`;
 }

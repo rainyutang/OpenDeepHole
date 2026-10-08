@@ -9,6 +9,8 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,47 @@ from backend.file_inventory import MAX_INVENTORY_ENTRIES, ScanFileInventory
 
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def file_inventory_lifecycle(
+    *, project: Path, scan_root: Path, scan_dir: Path, scan_id: str,
+    reporter: Any, cancel_event: Any, is_resume: bool,
+) -> AsyncIterator[Callable[[], None]]:
+    """Own collection across setup, indexing, analysis and every early return."""
+    task: asyncio.Task[None] | None = None
+
+    def start() -> None:
+        nonlocal task
+        if task is None and callable(getattr(reporter, "push_file_inventory", None)):
+            task = asyncio.create_task(collect_and_report_file_inventory(
+                project=project, scan_root=scan_root, scan_dir=scan_dir,
+                scan_id=scan_id, reporter=reporter, cancel_event=cancel_event,
+                is_resume=is_resume,
+            ))
+
+    cancelled = False
+    try:
+        yield start
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    finally:
+        if task is not None:
+            if cancelled or cancel_event.is_set():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            else:
+                try:
+                    # Setup/index failures must still let the collected tree
+                    # reach the server. Only cancellation stops this work.
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
+                except Exception as exc:
+                    logger.warning("File inventory failed for %s: %s", scan_id, exc)
 
 
 def collect_file_inventory(

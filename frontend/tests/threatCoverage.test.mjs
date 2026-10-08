@@ -6,7 +6,7 @@ import { createServer } from "vite";
 
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
-const { buildCoverageTree, layoutTreemap, visibleChildren } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
+const { buildCoverageTree, layoutTreemap, layoutCoverageTree, hitCoverageTile } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
 const { ThreatCoveragePanel } = await server.ssrLoadModule("/src/features/threatAnalysis/ThreatCoveragePanel.tsx");
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { getThreatCoverage } = await server.ssrLoadModule("/src/features/threatAnalysis/api.ts");
@@ -14,7 +14,14 @@ const originalAdapter = client.api.defaults.adapter;
 const originalSetInterval = globalThis.setInterval;
 const originalClearInterval = globalThis.clearInterval;
 const polls = new Map();
+const resizers = new Set();
 const roots = [];
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; resizers.add(this); }
+  observe(element) { this.element = element; }
+  disconnect() { resizers.delete(this); }
+};
+globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#456789" });
 globalThis.setInterval = (callback, delay) => {
   assert.equal(delay, 30_000);
   const id = Symbol("coverage poll");
@@ -29,7 +36,10 @@ globalThis.window = new EventTarget();
 afterEach(async () => {
   await act(async () => { roots.splice(0).forEach((root) => root.unmount()); });
   assert.equal(polls.size, 0);
+  assert.equal(resizers.size, 0);
   document.hidden = false;
+  document.fullscreenElement = null;
+  window.devicePixelRatio = 1;
   client.api.defaults.adapter = originalAdapter;
   client.setPublicScanAccess(null);
 });
@@ -39,6 +49,8 @@ after(async () => {
   delete globalThis.localStorage;
   delete globalThis.document;
   delete globalThis.window;
+  delete globalThis.ResizeObserver;
+  delete globalThis.getComputedStyle;
   await server.close();
 });
 
@@ -94,7 +106,25 @@ function installApi(value) {
 function component(scanId = "s", revision = 0) { return createElement(ThreatCoveragePanel, { scanId, revision, analysisStatus: "running" }); }
 async function mount(scanId = "s") {
   let root;
-  await act(async () => { root = create(component(scanId)); });
+  const host = { clientWidth: 960, clientHeight: 360 };
+  const fills = [], scales = [];
+  const context = {
+    fillRect: (...args) => fills.push(args), scale: (...args) => scales.push(args),
+    save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, fillText() {},
+  };
+  const bitmap = { getContext: () => context };
+  const panel = { requestFullscreen: async () => { document.fullscreenElement = panel; document.dispatchEvent(new Event("fullscreenchange")); } };
+  document.exitFullscreen = async () => { document.fullscreenElement = null; document.dispatchEvent(new Event("fullscreenchange")); };
+  await act(async () => { root = create(component(scanId), { createNodeMock(element) {
+    if (element.props.className === "coverage-canvas") return host;
+    if (element.type === "canvas") return bitmap;
+    if (element.props.className === "threat-coverage") return panel;
+    return null;
+  } }); });
+  root.host = host;
+  root.bitmap = bitmap;
+  root.fills = fills;
+  root.scales = scales;
   roots.push(root);
   return root;
 }
@@ -111,25 +141,101 @@ test("directory inheritance and overlapping paths count each file once without l
   assert.equal(buildCoverageTree(fixture(false)).root.covered, 0);
 });
 
-test("large directories retain all file counts and area through drillable groups", () => {
+test("all directory items fit the viewport without grouped leftovers, at wide and narrow sizes", () => {
   const data = fixture(false);
   data.inventory.entries = [{ path: ".", kind: "directory" }, ...Array.from({ length: 250 }, (_, i) => ({ path: `file-${i}`, kind: "file" }))];
   const { root } = buildCoverageTree(data);
-  let children = visibleChildren(root);
-  assert.equal(children.length, 80);
-  assert.equal(children.reduce((sum, child) => sum + child.files, 0), 250);
-  const tiles = layoutTreemap(children, 1000, 480);
-  assert.ok(Math.abs(tiles.reduce((sum, tile) => sum + tile.width * tile.height, 0) - 480000) < 0.001);
-  for (const tile of tiles) assert.ok(Math.abs(tile.width * tile.height / 480000 - tile.node.files / 250) < 0.000001);
-  let total = 0;
-  while (children.length) {
-    total += children.filter((child) => child.kind === "file").length;
-    const group = children.find((child) => child.kind === "group");
-    children = group ? visibleChildren(group) : [];
+  for (const [width, height] of [[1200, 540], [320, 240], [200, 640]]) {
+    const tiles = layoutCoverageTree(root, width, height);
+    assert.equal(tiles.length, 250);
+    assert.equal(new Set(tiles.map((tile) => tile.node.path)).size, 250);
+    assert.ok(Math.abs(tiles.reduce((sum, tile) => sum + tile.width * tile.height, 0) - width * height) < 0.001);
+    for (const tile of tiles) {
+      assert.ok(tile.x >= 0 && tile.y >= 0 && tile.width > 0 && tile.height > 0);
+      assert.ok(tile.x + tile.width <= width + 0.001 && tile.y + tile.height <= height + 0.001);
+      assert.equal(hitCoverageTile(tiles, tile.x + tile.width / 2, tile.y + tile.height / 2)?.node.path, tile.node.path);
+    }
   }
-  assert.equal(total, 250);
   data.inventory.entries = [{ path: ".", kind: "directory" }, { path: "empty", kind: "directory" }];
   assert.ok(layoutTreemap(buildCoverageTree(data).root.children, 100, 100)[0].width > 0);
+});
+
+test("nested overview includes deep files and keeps risk module directory boundaries", () => {
+  const data = fixture();
+  for (const path of ["deep", "deep/a", "deep/a/b", "deep/a/b/c"]) data.inventory.entries.push({ path, kind: "directory" });
+  data.inventory.entries.push({ path: "deep/a/b/c/tiny.c", kind: "file" });
+  const tree = buildCoverageTree(data);
+  const tiles = layoutCoverageTree(tree.root, 320, 240);
+  assert.ok(tiles.some((tile) => tile.node.path === "deep/a/b/c/tiny.c"));
+  assert.ok(tiles.some((tile) => tile.node.path === "auth" && !tile.nested));
+  assert.ok(!tiles.some((tile) => tile.node.path === "auth/a.c"));
+  const opened = layoutCoverageTree(tree.byPath.get("auth"), 320, 240);
+  assert.deepEqual(opened.map((tile) => tile.node.path), ["auth/a.c", "auth/b.c"]);
+});
+
+test("resize, fullscreen, and returning to overview fit cells without losing selection or filters", async () => {
+  installApi(fixture());
+  const root = await mount();
+  const cells = () => root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile "));
+  const assertBounds = () => {
+    assert.ok(cells().length > 0);
+    for (const cell of cells()) {
+      const { left, top, width, height } = cell.props.style;
+      assert.ok(left + width <= root.host.clientWidth + .001 && top + height <= root.host.clientHeight + .001);
+    }
+  };
+  const auth = cells().find((node) => node.props["aria-label"].startsWith("auth，"));
+  await act(async () => auth.props.onClick());
+  await act(async () => root.root.findByType("select").props.onChange({ target: { value: "P2" } }));
+  for (const [width, height] of [[320, 480], [1200, 600], [700, 260]]) {
+    await act(async () => {
+      root.host.clientWidth = width; root.host.clientHeight = height;
+      [...resizers].forEach((observer) => observer.callback());
+    });
+    assertBounds();
+    assert.equal(cells().find((node) => node.props["aria-pressed"])?.props["aria-label"].split("，")[0], "auth");
+    assert.equal(root.root.findByType("select").props.value, "P2");
+  }
+  await act(async () => button(root, "全屏总览").props.onClick());
+  assert.ok(button(root, "退出全屏"));
+  await act(async () => document.exitFullscreen());
+  assert.ok(button(root, "全屏总览"));
+  await act(async () => button(root, "收起详情").props.onClick());
+  assert.equal(root.root.findAllByProps({ "aria-label": "路径覆盖详情" }).length, 0);
+  await act(async () => cells()[0].props.onDoubleClick());
+  assert.match(text(section(root, "覆盖图目录")), /auth/);
+  await act(async () => button(root, "返回全图").props.onClick());
+  assert.equal(text(section(root, "覆盖图目录")), "扫描范围");
+  assertBounds();
+});
+
+test("dense maps draw every cell at device resolution and preserve hit testing after zoom", async () => {
+  const data = fixture(false);
+  data.inventory.entries = [{ path: ".", kind: "directory" }, ...Array.from({ length: 5000 }, (_, i) => ({ path: `file-${i}`, kind: "file" }))];
+  installApi(data);
+  const root = await mount();
+  assert.equal(section(root, "文件树矩形图").props["data-renderer"], "canvas");
+  assert.equal(root.fills.length, 5000);
+  assert.equal(root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile ")).length, 0);
+  await act(async () => {
+    root.host.clientWidth = 400; root.host.clientHeight = 280;
+    window.devicePixelRatio = 2;
+    window.dispatchEvent(new Event("resize"));
+  });
+  assert.equal(root.bitmap.width, 800);
+  assert.equal(root.bitmap.height, 560);
+  assert.deepEqual(root.scales.at(-1), [2, 2]);
+  const tiles = layoutCoverageTree(buildCoverageTree(data).root, 400, 280);
+  const chosen = tiles[4200];
+  // Simulate CSS-scaled coordinates as well as a device pixel ratio change.
+  await act(async () => root.root.findByType("canvas").props.onClick({
+    currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 20, width: 600, height: 420 }) },
+    clientX: 10 + (chosen.x + chosen.width / 2) * 1.5,
+    clientY: 20 + (chosen.y + chosen.height / 2) * 1.5,
+  }));
+  assert.match(text(section(root, "路径覆盖详情")), new RegExp(chosen.node.path));
+  await act(async () => root.root.findByType("canvas").props.onKeyDown({ key: "End", preventDefault() {} }));
+  assert.match(text(section(root, "路径覆盖详情")), new RegExp(tiles.at(-1).node.path));
 });
 
 test("inventory renders before analysis, annotation refresh preserves selected directory and uses union rates", async () => {

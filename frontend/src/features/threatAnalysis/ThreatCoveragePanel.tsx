@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
-import type { CoverageNode, CoverageTarget, ThreatCoverage } from "./coverage";
-import { buildCoverageTree, coverageBackground, coveragePercent, layoutTreemap, visibleChildren } from "./coverage";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CoverageNode, ThreatCoverage } from "./coverage";
+import { buildCoverageTree, coveragePercent } from "./coverage";
+import { CoverageTreemap } from "./CoverageTreemap";
 import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatCoveragePanel.css";
 
@@ -10,46 +11,6 @@ const ISSUE_LABELS: Record<string, string> = {
   path_limit: "路径长度超过清单限制",
 };
 
-function resolveNode(byPath: Map<string, CoverageNode>, path: string): CoverageNode | undefined {
-  const parts = path.split("/\0remaining");
-  let result = byPath.get(parts[0]);
-  for (let index = 1; result && index < parts.length; index++) {
-    result = visibleChildren(result).find((item) => item.kind === "group");
-  }
-  return result;
-}
-
-function TreemapTiles({ parent, width, height, depth = 0, selected, highlighted, targets, onSelect, onOpen }: {
-  parent: CoverageNode; width: number; height: number; depth?: number; selected: string;
-  highlighted: Set<string> | null; targets: Map<string, CoverageTarget>;
-  onSelect: (path: string) => void; onOpen: (path: string) => void;
-}) {
-  const tiles = layoutTreemap(visibleChildren(parent), width, height);
-  return <>{tiles.map(({ node, x, y, width: w, height: h }) => {
-    const nested = node.children.length > 0 && node.kind !== "group" && depth < 2
-      && node.directModules.size === 0 && w > 180 && h > 110;
-    const matches = !highlighted || [...node.targetIds].some((id) => highlighted.has(id));
-    const firstPattern = targets.get([...node.targetIds][0])?.pattern_name;
-    return <div key={node.path} className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${matches ? "" : "is-dimmed"}`}
-      style={{ left: `${x / width * 100}%`, top: `${y / height * 100}%`, width: `${w / width * 100}%`, height: `${h / height * 100}%` }}>
-      <button type="button" className="coverage-tile__surface" style={{ background: coverageBackground(node) }}
-        aria-label={`${node.name}，${node.files} 个文件，${node.highRisk} 个高风险文件，${node.covered} 个文件关联攻击模式`}
-        aria-pressed={selected === node.path}
-        title={`${node.kind === "group" ? node.name : node.path}\n${node.files} 个文件 · ${node.highRisk} 个高风险文件 · ${node.covered} 个文件关联攻击模式${firstPattern ? `\n${firstPattern}` : ""}\n单击查看关联，双击目录下钻`}
-        onClick={() => onSelect(node.path)} onDoubleClick={() => { if (node.kind !== "file") onOpen(node.path); }}>
-        <span className="coverage-tile__name">{node.kind === "file" ? "·" : "▱"} {node.name}</span>
-        {!nested && w > 90 && h > 62 && <span className="coverage-tile__body">
-          <strong>{node.files.toLocaleString()} <small>个文件</small></strong>
-          {node.directModules.size > 0 && <span>高风险模块范围</span>}
-          {firstPattern && h > 115 && <span className="coverage-tile__pattern">{firstPattern}{node.targetIds.size > 1 ? ` +${node.targetIds.size - 1}` : ""}</span>}
-        </span>}
-      </button>
-      {nested && <div className="coverage-tile__children"><TreemapTiles parent={node} width={Math.max(1, w - 8)} height={Math.max(1, h - 30)}
-        depth={depth + 1} selected={selected} highlighted={highlighted} targets={targets} onSelect={onSelect} onOpen={onOpen} /></div>}
-    </div>;
-  })}</>;
-}
-
 function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: ThreatCoverage; onOpen: (path: string) => void }) {
   const [page, setPage] = useState(0);
   const targets = data.targets.filter((target) => node.targetIds.has(target.id));
@@ -57,8 +18,8 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
   const pages = Math.max(1, Math.ceil(targets.length / 8));
   const currentPage = Math.min(page, pages - 1);
   return <aside className="coverage-detail" aria-label="路径覆盖详情">
-    <span className="coverage-eyebrow">{node.kind === "file" ? "文件" : node.kind === "group" ? "聚合路径" : "目录"}</span>
-    <h3>{node.kind === "group" ? node.name : node.path}</h3>
+    <span className="coverage-eyebrow">{node.kind === "file" ? "文件" : "目录"}</span>
+    <h3>{node.path}</h3>
     <p>{node.files.toLocaleString()} 个文件 · {node.highRisk.toLocaleString()} 个高风险文件</p>
     {node.kind !== "file" && <button type="button" className="coverage-button" onClick={() => onOpen(node.path)}>进入此目录</button>}
     <h4>高风险模块 <span>{modules.length}</span></h4>
@@ -83,10 +44,29 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
 
 export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: { scanId: string; revision: number; analysisStatus?: string }) {
   const { data, loading, error, refresh } = useThreatCoverage(scanId, revision);
+  const panel = useRef<HTMLElement>(null);
   const [history, setHistory] = useState<string[]>(["."]);
   const [selected, setSelected] = useState(".");
   const [query, setQuery] = useState("");
   const [pattern, setPattern] = useState("");
+  const [showDetails, setShowDetails] = useState(() => !window.matchMedia?.("(max-width: 640px)").matches);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState("");
+  useEffect(() => {
+    const changed = () => setFullscreen(document.fullscreenElement === panel.current);
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
+  const toggleFullscreen = async () => {
+    setFullscreenError("");
+    try {
+      if (document.fullscreenElement === panel.current) await document.exitFullscreen();
+      else if (panel.current?.requestFullscreen) await panel.current.requestFullscreen();
+      else setFullscreenError("当前浏览器不支持全屏，可收起详情扩大图表。");
+    } catch {
+      setFullscreenError("未能进入全屏，可收起详情扩大图表。");
+    }
+  };
   const tree = useMemo(() => data ? buildCoverageTree(data) : null, [data]);
   const targetMap = useMemo(() => new Map(data?.targets.map((target) => [target.id, target]) ?? []), [data]);
   const patterns = useMemo(() => [...new Map(data?.targets.map((target) => [target.pattern_id || target.pattern_name,
@@ -106,8 +86,8 @@ export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: {
   const inventory = data?.inventory;
   const hasTree = Boolean(inventory?.entries.length && tree);
   const root = tree?.root;
-  const view = tree ? resolveNode(tree.byPath, history[history.length - 1]) ?? tree.root : null;
-  const detail = tree ? resolveNode(tree.byPath, selected) ?? tree.root : null;
+  const view = tree ? tree.byPath.get(history[history.length - 1]) ?? tree.root : null;
+  const detail = tree ? tree.byPath.get(selected) ?? tree.root : null;
   const percent = (count: number) => data?.analysis_ready && inventory?.status === "complete" ? coveragePercent(count, root?.files ?? 0) : "—";
   const open = (path: string) => {
     if (path !== history[history.length - 1]) setHistory([...history, path]);
@@ -116,14 +96,16 @@ export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: {
   const locate = (item: CoverageNode) => {
     const parent = item.kind === "directory" ? item.path : item.path.includes("/") ? item.path.slice(0, item.path.lastIndexOf("/")) : ".";
     const steps = parent === "." ? [] : parent.split("/").map((_part, index, parts) => parts.slice(0, index + 1).join("/"));
-    setHistory([".", ...steps]); setSelected(item.path); setQuery("");
+    setHistory([".", ...steps]); setSelected(item.path); setQuery(""); setShowDetails(true);
   };
 
-  return <section className="threat-coverage" aria-label="威胁分析覆盖图">
+  return <section ref={panel} className="threat-coverage" aria-label="威胁分析覆盖图">
     <header className="coverage-header"><div><span className="coverage-eyebrow">扫描范围 / 覆盖统计</span><h2>威胁分析覆盖图</h2>
       <p>面积按文件数量计算，标注来自高风险模块与攻击树产物。</p></div>
-      <button type="button" className="coverage-button" onClick={refresh} disabled={loading}>{loading ? "加载中…" : "刷新"}</button></header>
+      <div className="coverage-actions"><button type="button" className="coverage-button" onClick={refresh} disabled={loading}>{loading ? "加载中…" : "刷新"}</button>
+        {hasTree && <button type="button" className="coverage-button" onClick={toggleFullscreen}>{fullscreen ? "退出全屏" : "全屏总览"}</button>}</div></header>
     {error && <p role="alert" className="coverage-warning">{error}</p>}
+    {fullscreenError && <p role="alert" className="coverage-warning">{fullscreenError}</p>}
     {!hasTree && <div className="coverage-empty" role="status">
       {inventory?.status === "failed" ? `文件清单采集失败：${inventory.error_message}`
         : inventory?.status === "cancelled" ? "文件清单采集已取消，续扫时可重新采集。"
@@ -152,15 +134,18 @@ export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: {
         <p>{searchResults.length ? `显示 ${searchResults.length} 项${searchResults.length === 100 ? "，可缩小搜索范围查看其它路径" : ""}` : "没有匹配的路径或模块。"}</p>
       </div>}
       <div className="coverage-legend"><span><i className="is-neutral" />{data.analysis_ready ? "未标注" : "尚未标注"}</span><span><i className="is-risk" />高风险未关联模式</span><span><i className="is-covered" />已关联攻击模式</span><small>筛选高亮不改变全扫描统计</small></div>
-      <nav className="coverage-breadcrumb" aria-label="覆盖图目录">
+      <div className="coverage-navigation"><nav className="coverage-breadcrumb" aria-label="覆盖图目录">
         {history.map((path, index) => <button type="button" key={`${index}:${path}`} onClick={() => { setHistory(history.slice(0, index + 1)); setSelected(path); }}
-          aria-current={index === history.length - 1 ? "location" : undefined}>{index ? "› " : ""}{resolveNode(tree!.byPath, path)?.name ?? "扫描范围"}</button>)}
-      </nav>
-      <div className="coverage-workspace"><div><div className="coverage-canvas" aria-label="文件树矩形图">
-        {view.children.length ? <TreemapTiles parent={view} width={1000} height={480} selected={selected} highlighted={highlighted} targets={targetMap} onSelect={setSelected} onOpen={open} />
-          : <div className="coverage-empty">此目录没有已采集文件。</div>}
-      </div><p className="coverage-caption">单击查看关联，双击目录下钻。目录块按后代文件数分配面积，空目录保留最小方块。</p></div>
-        <SelectionDetails key={detail.path} node={detail} data={data} onOpen={open} /></div>
+          aria-current={index === history.length - 1 ? "location" : undefined}>{index ? "› " : ""}{tree!.byPath.get(path)?.name ?? "扫描范围"}</button>)}
+      </nav><div className="coverage-actions">
+        <button type="button" className="coverage-button" onClick={() => { setHistory(["."]); setSelected("."); }} disabled={history.length === 1}>返回全图</button>
+        <button type="button" className="coverage-button" aria-expanded={showDetails} onClick={() => setShowDetails(!showDetails)}>{showDetails ? "收起详情" : "显示详情"}</button>
+      </div></div>
+      <div className={`coverage-workspace ${showDetails ? "" : "is-map-only"}`}><div className="coverage-map-column">
+        <CoverageTreemap parent={view} selected={selected} highlighted={highlighted} targets={targetMap}
+          onSelect={setSelected} onOpen={open} />
+        <p className="coverage-caption">自动适配全部格子 · 单击查看关联，双击目录下钻 · 小格子可悬停或搜索查看完整路径</p></div>
+        {showDetails && <SelectionDetails key={detail.path} node={detail} data={data} onOpen={open} />}</div>
       {(data.unmapped.length > 0 || inventory.issues.length > 0 || inventory.excluded_paths.length > 0) && <details className="coverage-diagnostics"><summary>范围说明与未映射路径（{data.unmapped.length + inventory.issue_count + inventory.excluded_paths.length}）</summary>
         {inventory.excluded_paths.map((path) => <p key={`excluded:${path}`}><code>{path}</code>：排除本次扫描工作目录</p>)}
         {inventory.issues.map((issue, index) => <p key={`issue:${index}`}><code>{issue.path}</code>：{ISSUE_LABELS[issue.reason] ?? issue.reason}</p>)}

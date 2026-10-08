@@ -129,7 +129,9 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
 function component(scanId) { return createElement(ThemeProvider, null, createElement(ScanStatus, { scanId, onBack() {} })); }
 async function mount(scanId = "s") {
   let root;
-  await act(async () => { root = create(component(scanId)); });
+  await act(async () => { root = create(component(scanId), { createNodeMock(element) {
+    return element.props.className === "coverage-canvas" ? { clientWidth: 960, clientHeight: 360 } : null;
+  } }); });
   roots.push(root);
   return root;
 }
@@ -141,6 +143,38 @@ async function notify(...events) {
 }
 async function poll() { await act(async () => { [...polls.values()].forEach((callback) => callback()); }); }
 const threatNotice = ["resource_changed", { resource: "threat-analysis", index: null }];
+
+test("resuming a historical scan shows existing annotations on inventory arrival alone", async () => {
+  const value = fixture();
+  value.overview.status = "cancelled";
+  const calls = installApi([value], async (config) => {
+    if (config.url.endsWith("/resume")) value.overview.status = "auditing";
+  });
+  const root = await mount();
+  await act(async () => button(root, "价值资产2 项").props.onClick());
+  assert.match(text(root.toJSON()), /当前扫描尚无独立文件清单/);
+  await act(async () => button(root, "续扫").props.onClick());
+  assert.ok(calls.some((call) => call.url.endsWith("/resume") && call.method === "post"));
+  const analysisRequests = calls.filter((call) => call.url.endsWith("/threat-analysis")).length;
+  value.coverage = {
+    analysis_ready: true, unmapped: [],
+    modules: [{ id: "m", name: "已有认证模块", paths: ["src/auth"], mapped_paths: ["auth"] }],
+    targets: [{ id: "t", module_name: "已有认证模块", pattern_id: "P1", pattern_name: "已有认证绕过模式",
+      paths: ["src/auth"], mapped_paths: ["auth"], fallback: false, sources: [] }],
+    inventory: {
+      snapshot_id: "resumed", status: "complete", project_path: "/project", scan_root: "/project/src",
+      captured_at: "2026-10-08T01:00:00Z", issues: [], issue_count: 0, excluded_paths: [], error_message: "",
+      entries: [{ path: ".", kind: "directory" }, { path: "auth", kind: "directory" }, { path: "auth/a.c", kind: "file" }],
+    },
+  };
+  await notify(["resource_changed", { resource: "file-inventory", index: null }]);
+  assert.match(text(root.toJSON()), /已有认证模块/);
+  assert.match(text(root.toJSON()), /已有认证绕过模式/);
+  assert.match(text(root.toJSON()), /100\.0%/);
+  assert.doesNotMatch(text(root.toJSON()), /等待威胁分析结果/);
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-analysis")).length, analysisRequests);
+  assetCount(root, 2);
+});
 
 for (const event of [
   ["resource_changed", { resource: "file-inventory", index: null }],
