@@ -6432,13 +6432,18 @@ class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixi
         return None if row is None else dict(row)
 
     def list_agent_records(self, user_id: str | None = None) -> list[dict]:
-        if user_id is None:
-            cur = self._conn.execute("SELECT * FROM agents ORDER BY updated_at DESC")
-        else:
-            cur = self._conn.execute(
-                "SELECT * FROM agents WHERE user_id = ? ORDER BY updated_at DESC",
-                (user_id,),
-            )
+        query = """\
+            SELECT agents.*, COALESCE(users.username, '') AS owner_username
+            FROM agents
+            LEFT JOIN users ON users.user_id = agents.user_id
+        """
+        params: tuple = ()
+        if user_id is not None:
+            query += " WHERE agents.user_id = ?"
+            params = (user_id,)
+        # Heartbeats and configuration changes must not move existing Agents.
+        query += " ORDER BY agents.created_at ASC, agents.agent_key ASC"
+        cur = self._conn.execute(query, params)
         return [dict(row) for row in cur.fetchall()]
 
     def upsert_agent_record(

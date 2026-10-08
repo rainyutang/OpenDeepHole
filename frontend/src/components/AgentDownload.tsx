@@ -5,6 +5,7 @@ import {
   requestAgentRuntimeUpdate,
 } from "../api/client";
 import type { AgentInfo } from "../types";
+import { agentOwnerLabel } from "../agentPresentation";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
@@ -162,8 +163,8 @@ export default function AgentDownload({ onBack }: Props) {
                 const isPending = status === "pending";
                 const isUpdating = status === "updating";
                 const isFailed = status === "failed";
-                const submitting = updatingKey === agent.agent_key;
                 const supportsOnlineUpdate = Boolean(agent.agent_key);
+                const submitting = supportsOnlineUpdate && updatingKey === agent.agent_key;
                 const disabled = (
                   submitting
                   || !agent.online
@@ -202,7 +203,7 @@ export default function AgentDownload({ onBack }: Props) {
                             : "Agent 离线";
 
                 return (
-                  <div key={agent.agent_key} className="rounded-lg border border-slate-700 bg-slate-950/50 p-4">
+                  <div key={agent.agent_key || agent.agent_id} className="rounded-lg border border-slate-700 bg-slate-950/50 p-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -225,6 +226,9 @@ export default function AgentDownload({ onBack }: Props) {
                         </div>
                         <p className="mt-1 truncate text-xs text-slate-500" title={`${agent.ip}${agent.name ? ` · ${agent.name}` : ""}`}>
                           {agent.ip}{agent.name && agent.name !== agent.machine_name ? ` · ${agent.name}` : ""}
+                        </p>
+                        <p className="mt-1 truncate text-xs text-slate-400" title={agentOwnerLabel(agent)}>
+                          {agentOwnerLabel(agent)}
                         </p>
                         {isFailed && agent.runtime_update_error && (
                           <p className="mt-2 text-xs text-red-300">{agent.runtime_update_error}</p>

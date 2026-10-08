@@ -20,6 +20,7 @@ import type {
   CheckerInfo,
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import { agentOwnerLabel } from "../agentPresentation";
 
 interface Props {
   onBack: () => void;
@@ -424,9 +425,9 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
         <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
         <h1 className="text-lg font-bold whitespace-nowrap">客户端配置</h1>
-        <select disabled={saving} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+        <select disabled={saving} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} title={selectedAgent ? agentOwnerLabel(selectedAgent) : undefined} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无客户端</option>}
-          {agents.map((agent) => <option key={agent.agent_key} value={agent.agent_key}>{agent.machine_name || agent.name} / {agent.ip} / {agent.online ? "在线" : "离线"}</option>)}
+          {agents.map((agent) => <option key={agent.agent_key || agent.agent_id} value={agent.agent_key} title={agentOwnerLabel(agent)}>{agent.machine_name || agent.name} / {agent.ip} / {agentOwnerLabel(agent)} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
         <ThemeToggle />
         <button disabled={!dirty || saving} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>

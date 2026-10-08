@@ -3653,6 +3653,7 @@ async def list_agents_prefixed(
 async def list_agents(current_user: User = Depends(get_current_user)) -> list:
     """Return agents with online status. Admin sees all; users see only their own.
 
+    Online agents come first; each group retains registration order.
     WebSocket agents: online = WebSocket connection is active.
     Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
     """
@@ -3674,8 +3675,12 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             shared_by_key.setdefault(agent.agent_key, (agent.agent_id, agent))
     result = []
     known_keys: set[str] = set()
+    owner_usernames: dict[str, str] = {"": ""}
     for record in records:
         agent_key = str(record.get("agent_key") or "")
+        user_id = str(record.get("user_id") or "")
+        owner_username = str(record.get("owner_username") or "")
+        owner_usernames[user_id] = owner_username
         local_live = _live_agent_for_key(agent_key)
         live = local_live or shared_by_key.get(agent_key)
         agent = live[1] if live else None
@@ -3688,7 +3693,8 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             "ip": agent.ip if agent else str(record.get("ip") or ""),
             "port": agent.port if agent else 0,
             "last_seen": agent.last_seen if agent else str(record.get("last_seen") or ""),
-            "user_id": str(record.get("user_id") or ""),
+            "user_id": user_id,
+            "owner_username": owner_username,
             "runtime_hash": agent.runtime_hash if agent else "",
             "agent_session_id": agent.agent_session_id if agent else "",
             "online": bool(
@@ -3712,7 +3718,7 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             ),
         })
     # Keep legacy HTTP agents visible until they migrate to the stable catalog.
-    for agent in _registered_agents.values():
+    for agent in list(_registered_agents.values()):
         if agent.agent_key in known_keys:
             continue
         if current_user.role != "admin" and agent.user_id != current_user.user_id:
@@ -3722,14 +3728,19 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             or _agent_configs.get(agent.name)
             or AgentRemoteConfig()
         )
+        if agent.user_id not in owner_usernames:
+            owner = await run_store_call(store, "get_user_by_id", agent.user_id)
+            owner_usernames[agent.user_id] = owner.username if owner else ""
         result.append({
             **agent.model_dump(),
+            "owner_username": owner_usernames[agent.user_id],
             "online": _is_agent_online(agent),
             "has_explicit_model": agent_config_has_explicit_model(
                 compatibility_config
             ),
         })
-    return result
+    # Python's stable sort preserves catalog and legacy registration order.
+    return sorted(result, key=lambda item: not item["online"])
 
 
 # ---------------------------------------------------------------------------

@@ -750,6 +750,8 @@ export interface ScanSummaryPage {
 export interface AgentInfo {
   agent_id: string;
   agent_key: string;
+  user_id?: string;
+  owner_username?: string;
   name: string;
   machine_name: string;
   ip: string;
