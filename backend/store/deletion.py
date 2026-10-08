@@ -23,7 +23,7 @@ SCAN_CHILDREN = (
     "validation_output_chunks", "validation_update_receipts", "scan_task_current", "opencode_task_reports", "scan_task_versions",
     "scan_candidates", "vulnerabilities", "vulnerability_validations",
     "events", "processed_keys", "agent_resume_manifests", "skill_reports",
-    "threat_analysis", "threat_audit_tasks", "git_history_patterns",
+    "threat_analysis", "threat_audit_tasks", "scan_file_inventories", "git_history_patterns",
     "scan_opencode_token_usage", "scan_audit_versions", "scan_migration_checks",
     "scan_opencode_category_token_usage", "scan_token_category_recovery",
     "scan_legacy_payloads", "scan_issue_facts", "scan_checker_totals",

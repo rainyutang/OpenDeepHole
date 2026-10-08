@@ -20,6 +20,7 @@
     "test:fp-review": "node tests/fpReview.test.mjs",
     "test:issue-loading": "node tests/issueLoading.test.mjs",
     "test:threat-analysis-loading": "node tests/threatAnalysisLoading.test.mjs",
+    "test:threat-coverage": "node tests/threatCoverage.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

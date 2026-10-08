@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
@@ -20,6 +20,7 @@ interface ThreatAnalysisPanelProps {
   resultTab: ThreatAnalysisResultTab;
   onResultTabChange: (tab: ThreatAnalysisResultTab) => void;
   errorMessage?: string;
+  coverage?: ReactNode;
 }
 
 export type ThreatAnalysisResultTab = "valueAssets" | "highRiskModules" | "internalNodes" | "attackTrees";
@@ -103,6 +104,7 @@ export function ThreatAnalysisPanel({
   resultTab,
   onResultTabChange,
   errorMessage = "",
+  coverage,
 }: ThreatAnalysisPanelProps) {
   const assets = artifactArray<NativeThreatValueAsset>(
     analysis,
@@ -130,6 +132,7 @@ export function ThreatAnalysisPanel({
                 : "等待威胁分析结果。"
           }
         />
+        {coverage}
         <ThreatEventList events={events} />
       </div>
     );
@@ -146,6 +149,7 @@ export function ThreatAnalysisPanel({
           <ThreatAnalysisError methodLabel={methodLabel} message={errorMessage} />
         )}
         <EmptyState text="该扫描使用旧版威胁分析格式，当前版本不再提供兼容展示。" />
+        {coverage}
         <ThreatEventList events={events} />
       </div>
     );
@@ -227,6 +231,7 @@ export function ThreatAnalysisPanel({
         </section>
       </section>
 
+      {coverage}
       <ArtifactPaths analysis={analysis} />
       <ThreatEventList events={events} />
     </div>

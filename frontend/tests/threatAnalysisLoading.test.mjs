@@ -114,7 +114,8 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
         else if (config.url.endsWith("/threat-analysis")) {
           if (value.analysis === null) throw Object.assign(new Error("Not found"), { response: { status: 404 } });
           data = structuredClone(value.analysis);
-        } else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
+        } else if (config.url.endsWith("/threat-coverage")) data = structuredClone(value.coverage ?? { inventory: null, analysis_ready: false, modules: [], targets: [], unmapped: [] });
+        else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
         else if (config.url.endsWith("/git_history")) data = [];
         else if (/\/(stop|resume)$/.test(config.url)) data = {};
         else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|validations|results)$/.test(config.url)) data = { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
@@ -140,6 +141,46 @@ async function notify(...events) {
 }
 async function poll() { await act(async () => { [...polls.values()].forEach((callback) => callback()); }); }
 const threatNotice = ["resource_changed", { resource: "threat-analysis", index: null }];
+
+for (const event of [
+  ["resource_changed", { resource: "file-inventory", index: null }],
+  ["file_inventory", { snapshot_id: "snapshot", status: "complete" }],
+]) {
+  test(`independent inventory event renders a base map while analysis is running (${event[0]})`, async () => {
+    const value = fixture();
+    value.analysis = null;
+    value.overview.status = "auditing";
+    value.overview.threat_analysis_run = { status: "running" };
+    const calls = installApi([value]);
+    const root = await mount();
+    const threatNav = root.root.findAllByType("button").find((node) => text(node).startsWith("威胁分析"));
+    assert.ok(threatNav);
+    await act(async () => threatNav.props.onClick());
+    const coverage = root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" });
+    assert.equal(coverage.length, 1);
+    value.coverage = {
+      analysis_ready: false, modules: [], targets: [], unmapped: [],
+      inventory: {
+        snapshot_id: "snapshot", status: "complete", project_path: "/project", scan_root: "/project/src",
+        captured_at: "2026-10-08T01:00:00Z", issues: [], issue_count: 0, excluded_paths: [], error_message: "",
+        entries: [{ path: ".", kind: "directory" }, { path: "auth", kind: "directory" }, { path: "auth/main.c", kind: "file" }],
+      },
+    };
+    const before = calls.filter((call) => call.url.endsWith("/threat-coverage")).length;
+    await notify(event);
+    assert.ok(calls.filter((call) => call.url.endsWith("/threat-coverage")).length > before);
+    assert.match(text(root.toJSON()), /文件清单已就绪，等待威胁分析结果/);
+    assert.ok(root.root.findByProps({ "aria-label": "文件树矩形图" }));
+    const directory = root.root.findAllByType("button").find((node) => node.props["aria-label"]?.startsWith("auth，"));
+    await act(async () => directory.props.onDoubleClick());
+    value.coverage.analysis_ready = true;
+    value.coverage.modules = [{ id: "m", name: "入口模块", paths: ["src/auth"], mapped_paths: ["auth"] }];
+    value.analysis = analysis();
+    await notify(event[0] === "file_inventory" ? ["threat_analysis_run", { run: { status: "success" } }] : threatNotice);
+    assert.match(text(root.toJSON()), /100\.0%/);
+    assert.equal(text(root.root.findByProps({ "aria-label": "覆盖图目录" })), "扫描范围› auth");
+  });
+}
 
 for (const publicAccess of [false, true]) {
   test("loaded counts survive connection resync and visibility refresh (" + (publicAccess ? "public" : "authenticated") + ")", async () => {

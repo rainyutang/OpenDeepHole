@@ -1449,6 +1449,31 @@ class Reporter:
         except Exception as e:
             print(f"Warning: failed to upload skill reports: {e}")
 
+    async def push_file_inventory(
+        self, scan_id: str, inventory: dict, *, execution_revision: int, agent_session_id: str,
+    ) -> None:
+        """Upload independently; never queue behind a model's analysis result."""
+        if self.dry_run:
+            return
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}:file-inventory",
+            dedupe_key=f"scan:{scan_id}:file-inventory:{execution_revision}:{inventory['snapshot_id']}:{inventory['status']}",
+            path=f"/api/agent/scan/{scan_id}/file-inventory",
+            payload={"inventory": inventory, "execution_revision": execution_revision, "agent_session_id": agent_session_id},
+            timeout=10.0,
+        )
+
+    async def get_file_inventory(self, scan_id: str) -> dict | None:
+        if self.dry_run:
+            return None
+        response = await self._client.get(
+            f"{self.server_url}/api/agent/scan/{scan_id}/file-inventory", timeout=5.0,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
     async def push_threat_analysis(self, scan_id: str, analysis: dict) -> None:
         """Upload an opaque bundle of threat-analysis artifacts."""
         if self.dry_run:

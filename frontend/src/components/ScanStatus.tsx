@@ -14,6 +14,7 @@ import {
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
 import { useThreatAnalysisResult } from "../features/threatAnalysis/useThreatAnalysisResult";
+import { ThreatCoveragePanel } from "../features/threatAnalysis/ThreatCoveragePanel";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
 import type { ThreatAuditTaskResult } from "../types";
 import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
@@ -762,6 +763,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget, fpReview, setFpReview);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
+  const [coverageRevision, setCoverageRevision] = useState(0);
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewPageLoading, setFpReviewPageLoading] = useState(false);
   const [fpReviewPageFailed, setFpReviewPageFailed] = useState(false);
@@ -1329,6 +1331,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       });
     },
     onThreatAnalysisRefresh: refreshThreatAnalysis,
+    onThreatCoverageRefresh: () => setCoverageRevision((value) => value + 1),
     onThreatAnalysisRun: (data) => {
       setScan((prev) => prev ? { ...prev, threat_analysis_run: data.run } : prev);
     },
@@ -2276,6 +2279,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         )}
         {activeTab === "threat" && isThreatAnalysisSelected(scan) && (
           <ThreatAnalysisPanel
+            coverage={<ThreatCoveragePanel key={scanId} scanId={scanId} revision={coverageRevision} analysisStatus={scan.threat_analysis_run?.status} />}
             analysis={scan.threat_analysis ?? null}
             events={threatAnalysisEvents}
             loading={(threatAnalysisLoading || scan.threat_analysis_run?.status === "running") && !isThreatAnalysisResultReady(scan.threat_analysis)}

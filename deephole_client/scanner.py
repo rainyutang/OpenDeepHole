@@ -27,6 +27,7 @@ from task_agent.model_pool import clear_planned_task, register_planned_task
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
+from .file_inventory import collect_and_report_file_inventory
 from .codex_runtime import (
     CodexRuntimeState,
     get_codex_runtime_state,
@@ -991,6 +992,7 @@ async def run_scan(
 
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
+    inventory_task: asyncio.Task[None] | None = None
     threat_analysis_task: asyncio.Task[
         tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]
     ] | None = None
@@ -1037,6 +1039,14 @@ async def run_scan(
         if line:
             print(str(line), flush=True)
 
+    def start_file_inventory() -> None:
+        nonlocal inventory_task
+        if inventory_task is None and callable(getattr(reporter, "push_file_inventory", None)):
+            inventory_task = asyncio.create_task(collect_and_report_file_inventory(
+                project=project, scan_root=scan_root, scan_dir=scan_dir, scan_id=scan_id,
+                reporter=reporter, cancel_event=cancel_event, is_resume=is_resume,
+            ))
+
     async def execute_threat_analysis(
     ) -> tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]:
         output_path = scan_dir / "threat_analysis"
@@ -1076,6 +1086,7 @@ async def run_scan(
                         f"{type(exc).__name__}: {str(exc).strip()}",
                     )
                 else:
+                    start_file_inventory()
                     await emit(
                         "threat_analysis",
                         "复用本次扫描已成功的威胁分析结果，不创建新的分析 Session",
@@ -1090,6 +1101,7 @@ async def run_scan(
             scan_id,
             run.model_copy(deep=True),
         )
+        start_file_inventory()
         result: dict[str, Any] | None = None
 
         async def run_method_attempt(
@@ -1596,6 +1608,8 @@ async def run_scan(
                 threat_analysis_task = asyncio.create_task(
                     execute_threat_analysis()
                 )
+            elif threat_analysis_selected:
+                start_file_inventory()
             engine_tasks = [
                 asyncio.create_task(execute_engine(selection))
                 for selection in enabled_selections
@@ -1731,6 +1745,15 @@ async def run_scan(
                 await pool_task
             except Exception:
                 pass
+        if inventory_task is not None:
+            if cancel_event.is_set():
+                inventory_task.cancel()
+            try:
+                # A fast/failed analysis must not discard an unfinished tree.
+                # The collector owns its own deadline and upload retry policy.
+                await inventory_task
+            except asyncio.CancelledError:
+                inventory_task.cancel()
 
 
 __all__ = ["run_scan"]

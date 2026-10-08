@@ -117,6 +117,7 @@ from backend.scan_runtime import (
     terminal_opencode_pool_status as _terminal_opencode_pool_status,
 )
 from backend.threat_data import parse_threat_analysis_data
+from backend.file_inventory import FileInventoryUpload
 from backend.vulnerability_identity import vulnerability_report_identity
 
 from backend.report_routes import HistoricalReportRoute
@@ -4894,6 +4895,29 @@ async def agent_get_git_history(scan_id: str) -> list[HistoryPattern]:
     """Return the mined git-history patterns for a scan (used by FP review)."""
     store = get_scan_store()
     return await run_store_call(store, "get_git_history_patterns", scan_id)
+
+
+@router.post("/scan/{scan_id}/file-inventory")
+async def agent_push_file_inventory(scan_id: str, body: FileInventoryUpload) -> dict:
+    store = get_scan_store()
+    try:
+        changed = await run_store_call(store, "replace_file_inventory", scan_id, body)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if changed:
+        from backend.sse import publish
+        publish(scan_id, "file_inventory", {"snapshot_id": body.inventory.snapshot_id, "status": body.inventory.status})
+    return {"ok": True, "changed": changed}
+
+
+@router.get("/scan/{scan_id}/file-inventory", response_model=dict)
+async def agent_get_file_inventory(scan_id: str) -> dict:
+    value = await run_store_call(get_scan_store(), "get_file_inventory", scan_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="File inventory not found")
+    return value
 
 
 @router.post("/scan/{scan_id}/threat-analysis")

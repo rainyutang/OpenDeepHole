@@ -182,6 +182,7 @@ export interface ScanSSEHandlers {
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
   onThreatAnalysisRefresh?: (force?: boolean) => void;
+  onThreatCoverageRefresh?: () => void;
   onThreatAnalysisRun?: (data: ThreatAnalysisRunEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
   onMiningEngineRun?: (data: MiningEngineRunEvent) => void;
@@ -334,6 +335,8 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
       return isRecord(value.validation) && isFiniteNumber(value.validation.vuln_index);
     case "threat_analysis":
       return isRecord(value.analysis);
+    case "file_inventory":
+      return isString(value.snapshot_id) && isString(value.status);
     case "threat_analysis_run":
       return isRecord(value.run) && isString(value.run.status);
     case "threat_audit_task":
@@ -504,8 +507,11 @@ export function useScanSSE(
       if (reloadAll || notices.some((notice) => notice.resource === "threat-analysis")) {
         handlersRef.current.onThreatAnalysisRefresh?.(true);
       }
+      if (reloadAll || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
+        handlersRef.current.onThreatCoverageRefresh?.();
+      }
       try {
-        if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && notice.resource !== "threat-analysis")) {
+        if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && !["threat-analysis", "file-inventory"].includes(notice.resource))) {
           const requestedFrom = stateSettersRef.current.getScan();
           const data = await getScanStatus(scanId);
           if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, data, requestedFrom) : previous);
@@ -514,7 +520,7 @@ export function useScanSSE(
         } else {
           for (const notice of notices) {
             if (disposed) break;
-            if (notice.resource === "threat-analysis") continue;
+            if (["threat-analysis", "file-inventory"].includes(notice.resource)) continue;
             const item = await getScanDetailItem(scanId, notice.resource, notice.index!, notice.resource !== "validations");
             if (disposed) break;
             if (notice.resource === "candidates") handlersRef.current.onScanCandidateAudit?.({ candidate: normalizeScanCandidate(item, notice.index!) });
@@ -582,10 +588,17 @@ export function useScanSSE(
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.({
       validation: normalizeValidation(d.validation),
     }));
-    handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
+    handle<ThreatAnalysisEvent>("threat_analysis", (d) => {
+      handlersRef.current.onThreatAnalysis?.(d);
+      handlersRef.current.onThreatCoverageRefresh?.();
+    });
+    handle<{ status: string }>("file_inventory", () => handlersRef.current.onThreatCoverageRefresh?.());
     handle<ThreatAnalysisRunEvent>("threat_analysis_run", (d) => {
       handlersRef.current.onThreatAnalysisRun?.(d);
-      if (d.run.status === "success") handlersRef.current.onThreatAnalysisRefresh?.(true);
+      if (d.run.status === "success") {
+        handlersRef.current.onThreatAnalysisRefresh?.(true);
+        handlersRef.current.onThreatCoverageRefresh?.();
+      }
     });
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.({
       task: normalizeThreatTask(d.task),
@@ -597,6 +610,7 @@ export function useScanSSE(
       setConnected(true);
       refreshState();
       handlersRef.current.onThreatAnalysisRefresh?.(true);
+      handlersRef.current.onThreatCoverageRefresh?.();
     };
 
     es.onerror = () => {

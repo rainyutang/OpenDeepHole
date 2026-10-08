@@ -83,6 +83,7 @@ from .shares import SHARE_SCHEMA, ScanSharesMixin
 from .migration import ScanStorageMigrationMixin
 from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixin
 from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
+from .file_inventories import FILE_INVENTORY_SCHEMA, ScanFileInventoriesMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 
@@ -986,6 +987,7 @@ _SCHEMA += DELETION_SCHEMA
 _SCHEMA += VALIDATION_SCHEMA
 _SCHEMA += SHARE_SCHEMA
 _SCHEMA += TOKEN_CATEGORY_SCHEMA
+_SCHEMA += FILE_INVENTORY_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1007,7 +1009,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:

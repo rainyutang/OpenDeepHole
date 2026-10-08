@@ -10,6 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from backend.scan_metrics import VulnStat
+from backend.file_inventory import FileInventoryUpload
 from backend.models import (
     CandidateAuditTaskResult,
     VulnerabilityAuditSource,
@@ -393,6 +394,18 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_threat_analysis(self, scan_id: str) -> dict | None:
         """Return the opaque threat-analysis artifact bundle if present."""
+
+    def get_file_inventory(self, scan_id: str) -> dict | None:
+        """Read the separately uploaded file inventory, independent of analysis."""
+        raise NotImplementedError
+
+    def replace_file_inventory(self, scan_id: str, report: FileInventoryUpload) -> bool:
+        """Store an inventory for the current scan execution; return whether changed."""
+        raise NotImplementedError
+
+    def get_threat_coverage(self, scan_id: str) -> dict:
+        """Join the independent inventory to the existing analysis artifacts."""
+        raise NotImplementedError
 
     @abstractmethod
     def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:
