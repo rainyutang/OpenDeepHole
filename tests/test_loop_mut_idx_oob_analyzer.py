@@ -35,7 +35,7 @@ def test_loop_mut_idx_oob_skips_when_semgrep_missing(tmp_path: Path) -> None:
 
 def test_loop_mut_idx_oob_rule_yaml_is_valid() -> None:
     data = yaml.safe_load(RULE_FILE.read_text(encoding="utf-8"))
-    assert len(data["rules"]) == 5
+    assert len(data["rules"]) == 6
     rule_ids = {rule["id"] for rule in data["rules"]}
     assert "c.loop-mutated-index-array-access.broad" in rule_ids
     assert "c.loop-bound-unchecked-index-access.broad" not in rule_ids
@@ -43,6 +43,7 @@ def test_loop_mut_idx_oob_rule_yaml_is_valid() -> None:
     assert "c.loop-mutated-index-pointer-access.broad" in rule_ids
     assert "c.loop-mutated-index-memory-call.broad" in rule_ids
     assert "c.loop-mutated-index-derived-pointer-sink.broad" in rule_ids
+    assert "c.loop-mutated-pointer-cursor-access.broad" in rule_ids
 
 
 def test_loop_mut_idx_oob_semgrep_runner_arguments(tmp_path: Path) -> None:
@@ -235,6 +236,57 @@ def test_loop_mut_idx_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None
         ),
     ):
         assert list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path)) == []
+
+
+def test_member_message_fallback_uses_exact_utf8_access_and_deduplicates(tmp_path: Path) -> None:
+    source = "// 中文注释影响字节偏移\nvoid f(State *ctx) {\nwhile (remain) {\n*(ctx->p++) = 0;\n}\n}\n"
+    path = tmp_path / "member.c"
+    path.write_text(source, encoding="utf-8")
+    access = "*(ctx->p++)"
+    offset = source.encode().index(access.encode())
+    first = _match(
+        path=str(path), line=4,
+        check_id="c.loop-mutated-pointer-cursor-access.broad",
+        message="Broad candidate: loop-updated expression `ctx->p` reaches a memory access. "
+                "Loop condition `remain`; update step `$STEP`.",
+        metavars={}, metadata={"source_kind": "pointer-cursor"},
+        lines="requires login",
+    )
+    first["start"]["offset"] = offset
+    first["end"] = {"offset": offset + len(access.encode())}
+    second = dict(first, check_id="another-equivalent-cursor-pattern")
+    result = CompletedProcess(["semgrep"], 0, stdout=json.dumps({"results": [first, second]}), stderr="")
+    with (
+        patch("shutil.which", return_value="semgrep"),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.rules.loop_mut_idx_oob.analyzer.run_semgrep", return_value=result),
+    ):
+        candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
+    assert len(candidates) == 1
+    assert candidates[0].line == 4
+    assert "循环变化指针: ctx->p" in candidates[0].description
+    assert "循环条件: remain" in candidates[0].description
+    assert "内存访问: *(ctx->p++)" in candidates[0].description
+    assert "$STEP" not in candidates[0].description
+
+
+def test_member_copy_fallback_preserves_paths_and_metadata(tmp_path: Path) -> None:
+    output = _semgrep_output(
+        path=str(tmp_path / "missing.c"), line=12,
+        check_id="c.loop-mutated-copy-from-user-sink.broad",
+        message="Broad candidate: copy_from_user-family sink `copy_from_user` uses destination "
+                "variable `ctx->items[k].p` inside a loop while `ctx->items[k].p` is updated by "
+                "length variable `ctx->items[k].len` in the same loop. Loop condition `$COND`.",
+        metavars={}, metadata={"source_kind": "copy-from-user"},
+    )
+    with (
+        patch("shutil.which", return_value="semgrep"),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.rules.loop_mut_idx_oob.analyzer.run_semgrep", return_value=output),
+    ):
+        candidate, = LoopMutIdxOobAnalyzer().find_candidates(tmp_path)
+    assert candidate.metadata["target_variable"] == "ctx->items[k].p"
+    assert candidate.metadata["focus_variable"] == "ctx->items[k].len"
+    assert "copy_from_user(ctx->items[k].p, ..., ctx->items[k].len)" in candidate.description
+    assert "$COND" not in candidate.description
 
 
 def _semgrep_output(
