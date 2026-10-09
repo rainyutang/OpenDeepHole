@@ -21,6 +21,23 @@ def targets(candidates):
     ]
 
 
+def test_large_coordinates_lambda_and_diagnostic_paths(tmp_path, caplog):
+    # Values beyond CPython's small-integer cache expose the 0.26.0 Point
+    # borrowed-reference bug. Repeat parsing to exercise allocation/release.
+    source = "\n" * 300 + " " * 300 + "void f() { for(int i=0;i<n;++i) work(); }\n"
+    source += " " * 300 + "void g() { auto h=[](){ for(;ready;++ctx->idx) process(ctx); }; }\n"
+    source += "void bad() { for(int j=0;j<m;++j) { int x = ; } }\n"
+    for _ in range(30):
+        result = scan(tmp_path, source)
+        assert [item.line for item in result] == [301, 302]
+        assert result[0].metadata["loops"][0]["column"] == 312
+        assert result[1].function == "<lambda@302:319>"
+        variable = result[1].metadata["loops"][0]["unused_variables"][0]
+        assert variable["updates"][0]["line"] == 302
+        assert variable["possible_indirect_uses"][0]["line"] == 302
+    assert "skipping incomplete loop at line 303" in caplog.text
+
+
 @pytest.mark.parametrize("update", [
     "j++", "++j", "j--", "--j", "j += step", "j -= step",
     "j = j + step", "j = step + j", "j = j - step", "j = (j) + step",

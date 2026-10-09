@@ -25,6 +25,17 @@ function vulnerability(overrides = {}) {
   };
 }
 
+test("static failures support legacy snapshots and preserve each version", () => {
+  assert.deepEqual(audit.staticAnalysisFailures({}), []);
+  assert.deepEqual(audit.staticAnalysisFailures({ mining_engine_runs: [{ engine_id: "static_candidate" }] }), []);
+  const errors = ["v1", "v2"].map((version_name) => ({
+    checker_name: "loop_var_misuse", error: "native crash", version_name,
+  }));
+  assert.deepEqual(audit.staticAnalysisFailures({ mining_engine_runs: [{
+    engine_id: "multi_version", status: "success", static_analysis_errors: errors,
+  }] }), errors.map((error) => ({ ...error, engine_id: "multi_version" })));
+});
+
 test("candidate variables use the same subject and fallback order as the audit prompt", () => {
   const candidate = { description: "变量 old_description 不应参与取值" };
   assert.equal(audit.staticCandidateRelatedVariable({ ...candidate,

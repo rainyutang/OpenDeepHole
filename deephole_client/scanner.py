@@ -14,6 +14,7 @@ from typing import Any
 from backend.models import (
     MiningEngineSelection,
     ScanEvent,
+    StaticAnalysisError,
     ThreatAnalysisRunStatus,
     Vulnerability,
 )
@@ -217,6 +218,32 @@ def _resolve_scan_paths(
             "code_scan_path must be inside project_path",
         ) from exc
     return project, scan_root
+
+
+def _update_static_analysis_errors(run: MiningEngineRun, event: dict[str, Any]) -> bool:
+    if event.get("process") != "static_analysis":
+        return False
+    kind = event.get("kind")
+    data = dict(event.get("data") or {})
+    version = str(data.get("version_name") or "")
+    previous = run.static_analysis_errors
+    if kind == "checker_summary":
+        current = [item for item in previous if item.get("version_name", "") != version]
+        current.extend(
+            StaticAnalysisError.model_validate({**item, "version_name": version}).model_dump(mode="json")
+            for item in data.get("checker_errors") or []
+        )
+    elif kind in {"checker_start", "checker_error"}:
+        name = str(data.get("checker_name") or "")
+        current = [item for item in previous if (item.get("version_name", ""), item["checker_name"]) != (version, name)]
+        if kind == "checker_error":
+            current.append(StaticAnalysisError.model_validate({**data, "version_name": version}).model_dump(mode="json"))
+    else:
+        return False
+    if current == previous:
+        return False
+    run.static_analysis_errors = current
+    return True
 
 
 def _format_process_console_line(phase: str, message: str) -> str:
@@ -1382,6 +1409,11 @@ async def _run_scan_pipeline(
 
         async def process_engine_output(event: dict[str, Any]) -> None:
             await process_output(event)
+            if str(event.get("process") or "") == "static_analysis":
+                async with progress_lock:
+                    if _update_static_analysis_errors(run, event):
+                        await _publish_engine_run(reporter, scan_id, run)
+                return
             if str(event.get("process") or "") != selection.engine_id:
                 return
             counts = _event_progress_counts(event)

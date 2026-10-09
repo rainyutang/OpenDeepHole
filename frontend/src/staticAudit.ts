@@ -1,4 +1,12 @@
-import type { Candidate, ScanCandidate, Vulnerability } from "./types";
+import type { Candidate, ScanCandidate, ScanStatus, StaticAnalysisError, Vulnerability } from "./types";
+
+export function staticAnalysisFailures(scan: Pick<ScanStatus, "mining_engine_runs">): Array<StaticAnalysisError & { engine_id: string }> {
+  return (scan.mining_engine_runs ?? []).flatMap((run) => (
+    Array.isArray(run.static_analysis_errors)
+      ? run.static_analysis_errors.map((failure) => ({ ...failure, engine_id: run.engine_id }))
+      : []
+  ));
+}
 
 export function staticCandidateRelatedVariable(candidate: Candidate): string {
   const metadata = candidate.metadata;

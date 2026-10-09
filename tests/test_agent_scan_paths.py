@@ -597,6 +597,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 _resolve_scan_paths(project, outside)
 
     async def test_full_scan_coordinates_graph_static_and_audit_processes(self) -> None:
+        await self._check_graph_static_audit_pipeline()
+
+    async def test_partial_static_scan_continues_audit_and_keeps_failure_snapshot(self) -> None:
+        await self._check_graph_static_audit_pipeline(partial=True)
+
+    async def _check_graph_static_audit_pipeline(self, partial: bool = False) -> None:
         calls: list[str] = []
         reporter = _reporter()
         config = AgentConfig()
@@ -627,8 +633,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("static_analysis")
                 self.assertEqual(kwargs["index_db_path"], index_path)
                 self.assertIn("static_candidate/rules", kwargs["checker_dirs"][0].as_posix())
+                errors = [{"checker_name": "loop_var_misuse", "error": "0xC0000005 ACCESS_VIOLATION", "exit_code": 3221225477}] if partial else []
+                await kwargs["output"]({
+                    "process": "static_analysis", "kind": "checker_summary", "message": "static complete",
+                    "data": {"checker_errors": errors},
+                })
                 return {
-                    "status": "success",
+                    "status": "partial" if partial else "success",
+                    "checker_errors": errors,
                     "candidates": [{
                         "file": "src/a.c",
                         "line": 10,
@@ -729,6 +741,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ["code_graph_build", "static_analysis", "candidate_audit"],
         )
         reporter.report_candidates.assert_awaited_once()
+        final_run = reporter.report_mining_engine_run.await_args.args[1]
+        self.assertEqual(final_run["status"], "success")
+        self.assertEqual(len(final_run["static_analysis_errors"]), int(partial))
+        if partial:
+            self.assertEqual(final_run["static_analysis_errors"][0]["checker_name"], "loop_var_misuse")
         reported_candidates = reporter.report_candidates.await_args.args[1]
         self.assertEqual(len(reported_candidates), 1)
         self.assertEqual(reported_candidates[0].file, "src/a.c")

@@ -255,6 +255,16 @@ class MiningEngineSelection(BaseModel):
         return self
 
 
+class StaticAnalysisError(BaseModel):
+    """A failed static rule, retained independently of engine success."""
+
+    checker_name: str
+    checker_label: str = ""
+    error: str
+    exit_code: int | None = None
+    version_name: str = ""
+
+
 class MiningEngineRunStatus(BaseModel):
     """One engine's lifecycle state within a scan."""
 
@@ -266,6 +276,7 @@ class MiningEngineRunStatus(BaseModel):
     finished_at: str = ""
     total_candidates: int | None = Field(default=None, ge=0)
     processed_candidates: int | None = Field(default=None, ge=0)
+    static_analysis_errors: list[StaticAnalysisError] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _canonicalize_engine_label(self):

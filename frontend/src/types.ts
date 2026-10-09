@@ -874,6 +874,14 @@ export interface MiningEngineSelection {
   enabled: boolean;
 }
 
+export interface StaticAnalysisError {
+  checker_name: string;
+  checker_label?: string;
+  error: string;
+  exit_code?: number | null;
+  version_name?: string;
+}
+
 export interface MiningEngineRunStatus {
   engine_id: string;
   engine_label: string;
@@ -883,6 +891,7 @@ export interface MiningEngineRunStatus {
   finished_at: string;
   total_candidates?: number | null;
   processed_candidates?: number | null;
+  static_analysis_errors?: StaticAnalysisError[];
 }
 
 export interface ThreatAnalysisRunStatus {

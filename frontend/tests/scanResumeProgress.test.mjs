@@ -173,3 +173,61 @@ test("batched SSE never mixes old completion fields into a new execution", async
   );
   assertProgress(root, 80);
 });
+
+test("partial static failures survive SSE completion and a fresh overview", async () => {
+  const state = installApi(overview(80, 2));
+  const root = await mount();
+  const failure = {
+    checker_name: "loop_var_misuse", checker_label: "循环变量误用",
+    error: "worker stopped: 0xC0000005 ACCESS_VIOLATION\ncrash detail", exit_code: 3221225477,
+  };
+  const run = { ...state.overview.mining_engine_runs[0], static_analysis_errors: [failure] };
+  await notify(["mining_engine_run", { execution_revision: 2, run, runs: [run] }]);
+  const assertWarning = (view) => {
+    const alert = view.root.findAllByProps({ role: "alert" }).find((node) => text(node).includes("循环变量误用"));
+    assert.ok(alert, text(view.toJSON()));
+    assert.match(alert.props.className, /amber/);
+    assert.match(text(alert), /完成（部分规则失败）/);
+    assert.match(text(alert), /3221225477/);
+    assert.match(text(alert), /0xC0000005 ACCESS_VIOLATION/);
+    assert.match(text(alert), /crash detail/);
+    const staticNodes = view.root.findAllByType("button").filter((node) =>
+      text(node).includes("静态分析") && text(node).includes("1 条规则失败"));
+    assert.ok(staticNodes.length >= 2, "Sidebar and home must both retain the warning");
+    assert.ok(staticNodes.every((node) => text(node).includes("完成但有失败")));
+  };
+  assertWarning(root);
+  assertProgress(root, 80);
+  state.overview = { ...overview(100, 2), status: "complete", mining_engine_runs: [{ ...run, status: "success" }] };
+  await notify(
+    ["mining_engine_run", { execution_revision: 2, run: state.overview.mining_engine_runs[0], runs: state.overview.mining_engine_runs }],
+    ["scan_status", { execution_revision: 2, status: "complete", processed_candidates: 100, total_candidates: 100 }],
+    ["scan_finish", { execution_revision: 2, status: "complete", error_message: null }],
+  );
+  assertWarning(root);
+  assertProgress(root, 100);
+  const reloaded = await mount();
+  assertWarning(reloaded);
+  assertProgress(reloaded, 100);
+});
+
+test("all failed static rules stay failed when the overall scan completes", async () => {
+  const value = overview(0);
+  value.static_analysis_done = false;
+  value.total_candidates = 0;
+  value.detail_counts = { candidates: 0 };
+  value.mining_engine_runs[0] = {
+    ...value.mining_engine_runs[0], status: "error",
+    static_analysis_errors: [{ checker_name: "loop_var_misuse", error: "native crash" }],
+  };
+  installApi(value);
+  const root = await mount();
+  const staticNodes = root.root.findAllByType("button").filter((node) =>
+    text(node).includes("静态分析") && text(node).includes("1 条规则失败"));
+  assert.ok(staticNodes.length >= 2);
+  assert.ok(staticNodes.every((node) => text(node).includes("执行失败")));
+  await act(async () => staticNodes[0].props.onClick());
+  assert.doesNotMatch(text(root.toJSON()), /完成（部分规则失败）/);
+  assert.match(text(root.toJSON()), /存在失败的静态规则/);
+  assert.match(text(root.toJSON()), /异常/);
+});

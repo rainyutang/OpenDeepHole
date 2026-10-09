@@ -1810,6 +1810,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 engine_id="engine_b",
                 engine_label="Engine B",
                 status="success",
+                static_analysis_errors=[{
+                    "checker_name": "loop_var_misuse", "error": "native crash",
+                    "exit_code": 3221225477,
+                }],
             )]
             meta = _meta()
             meta.threat_analysis_enabled = True
@@ -1883,6 +1887,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 },
             )
             event_types = [event_type for _scan_id, event_type, _data in published]
+            completed_run = next(run for run in stored.mining_engine_runs if run.engine_id == "engine_b")
+            self.assertEqual(completed_run.static_analysis_errors[0].exit_code, 3221225477)
             self.assertIn("threat_analysis_run", event_types)
             self.assertIn("mining_engine_run", event_types)
             self.assertIn("scan_finish", event_types)

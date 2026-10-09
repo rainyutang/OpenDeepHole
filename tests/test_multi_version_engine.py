@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from backend.api.scan import _resolve_scan_mining_engines, _validated_multi_versions
 from backend.models import MultiVersionTarget
 from task_agent import opencode_task_context
@@ -187,8 +189,10 @@ def test_multi_version_indexes_each_version_under_its_scan_path(tmp_path: Path) 
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("partial", [False, True])
 def test_multi_version_resume_reuses_static_results_per_version(
     tmp_path: Path,
+    partial: bool,
 ) -> None:
     async def scenario() -> None:
         versions: list[dict] = []
@@ -245,8 +249,14 @@ def test_multi_version_resume_reuses_static_results_per_version(
                     "related_functions": [],
                     "metadata": {"subject": "buffer"},
                 })
+            errors = [{"checker_name": "loop_var_misuse", "error": "native crash", "exit_code": 3221225477}] if partial else []
+            await kwargs["output"]({
+                "process": "static_analysis", "kind": "checker_summary", "message": "static complete",
+                "data": {"checker_errors": errors},
+            })
             return {
-                "status": "success",
+                "status": "partial" if partial else "success",
+                "checker_errors": errors,
                 "candidates": candidates,
                 "stats": {"total": len(candidates)},
             }
@@ -298,6 +308,9 @@ def test_multi_version_resume_reuses_static_results_per_version(
             assert static_calls == ["project-1", "project-2"]
             assert len(list(checkpoint_root.glob("*.json"))) == 2
             resumed_events = events[resume_event_offset:]
+            summaries = [event["data"] for event in resumed_events if event["kind"] == "checker_summary"]
+            assert [summary["version_name"] for summary in summaries] == ["v1", "v2"]
+            assert all(len(summary["checker_errors"]) == int(partial) for summary in summaries)
             assert any(
                 event["data"].get("reused") is True
                 and event["data"].get("version_name") == "v1"

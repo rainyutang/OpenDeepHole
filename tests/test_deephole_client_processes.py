@@ -1466,6 +1466,7 @@ def test_static_analysis_external_cancellation_forces_spawn_worker_exit() -> Non
             "status": "cancelled",
             "candidates": [],
             "stats": {"total": 0, "checkers": {}},
+            "checker_errors": [],
         }
         assert any(event["kind"] == "checker_cancelled" for event in events)
         assert not [
@@ -1693,25 +1694,22 @@ def test_static_analysis_spawn_surfaces_checker_error() -> None:
         )
         events: list[dict] = []
 
-        try:
-            await asyncio.wait_for(run_static_analysis(
-                project_path=project,
-                work_dir=root / "static",
-                index_db_path=index_path,
-                checker_dirs=[checker_root],
-                output=events.append,
-            ), timeout=2)
-        except RuntimeError as exc:
-            assert "checker failed in child" in str(exc)
-            assert "Traceback" in str(exc)
-        else:
-            raise AssertionError("failing spawn checker did not raise")
+        result = await asyncio.wait_for(run_static_analysis(
+            project_path=project,
+            work_dir=root / "static",
+            index_db_path=index_path,
+            checker_dirs=[checker_root],
+            output=events.append,
+        ), timeout=2)
+        assert result["status"] == "error"
+        assert "checker failed in child" in result["checker_errors"][0]["error"]
+        assert "Traceback" in result["checker_errors"][0]["error"]
 
         error_event = next(
             event for event in events if event["kind"] == "checker_error"
         )
         assert error_event["data"]["checker_name"] == "failing_spawn"
-        assert error_event["data"]["error"] == "checker failed in child"
+        assert "checker failed in child" in error_event["data"]["error"]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -1739,18 +1737,17 @@ def test_static_analysis_spawn_reports_abrupt_worker_exit() -> None:
             ),
         )
 
-        try:
-            await asyncio.wait_for(run_static_analysis(
-                project_path=project,
-                work_dir=root / "static",
-                index_db_path=index_path,
-                checker_dirs=[checker_root],
-            ), timeout=2)
-        except RuntimeError as exc:
-            assert "stopped without a result" in str(exc)
-            assert "exit code 7" in str(exc)
-        else:
-            raise AssertionError("abrupt worker exit did not raise")
+        result = await asyncio.wait_for(run_static_analysis(
+            project_path=project,
+            work_dir=root / "static",
+            index_db_path=index_path,
+            checker_dirs=[checker_root],
+        ), timeout=2)
+        assert result["status"] == "error"
+        failure = result["checker_errors"][0]
+        assert "stopped without a result" in failure["error"]
+        assert "exit code 7" in failure["error"]
+        assert failure["exit_code"] == 7
 
         assert not [
             child

@@ -60,9 +60,11 @@ import {
   staticAuditStatus,
   staticCandidateRelatedVariable,
   staticCandidateTaskName,
+  staticAnalysisFailures,
 } from "../staticAudit";
 import type { StaticAuditStatus } from "../staticAudit";
 import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
+import StaticAnalysisFailures from "./StaticAnalysisFailures";
 
 const MAX_LOG_LINES = 200;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
@@ -476,7 +478,7 @@ function miningEngineRun(
 function engineFlowStatus(run: MiningEngineRunStatus | null): FlowNodeStatus {
   if (!run) return "unknown";
   if (run.status === "running") return "running";
-  if (run.status === "success") return "done";
+  if (run.status === "success") return run.static_analysis_errors?.length ? "warning" : "done";
   if (run.status === "error") return "error";
   if (run.status === "cancelled") return "cancelled";
   if (run.status === "skipped") return "skipped";
@@ -2186,6 +2188,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
           ].join(":")}
         >
         <>
+        <StaticAnalysisFailures scan={scan} />
         {(auditNavigation.loading || auditNavigation.error) && (
           <div role={auditNavigation.error ? "alert" : "status"} className="mb-4 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-slate-200">
             {auditNavigation.loading ? "正在定位目标记录…" : auditNavigation.error}
@@ -2710,8 +2713,10 @@ function buildProcessFlowModel({
   const staticSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
   const indexRequired = engines.some((engine) => miningEngineRequiresCodeIndex(engine.engine_id));
   const staticRun = miningEngineRun(scan, STATIC_ENGINE_ID);
-  const staticRunning = staticSelected && scan.status === "analyzing" && !scan.static_analysis_done;
-  const staticDone = staticSelected && (
+  const staticFailureCount = staticAnalysisFailures(scan).length;
+  const staticStageFailed = staticRun?.status === "error" && !scan.static_analysis_done;
+  const staticRunning = staticSelected && !staticStageFailed && scan.status === "analyzing" && !scan.static_analysis_done;
+  const staticDone = staticSelected && !staticStageFailed && (
     scan.static_analysis_done
     || candidateCount > 0
     || scan.status === "auditing"
@@ -2761,7 +2766,7 @@ function buildProcessFlowModel({
   const staticNodeStatus: FlowNodeStatus = !staticSelected
     ? "disabled"
     : staticDone
-      ? "done"
+      ? staticFailureCount > 0 ? "warning" : "done"
       : staticRunning
         ? "running"
         : staticRun?.status === "error"
@@ -2774,6 +2779,8 @@ function buildProcessFlowModel({
     label: "静态分析",
     detail: !staticSelected
       ? "本次扫描未选择代码风险点引擎"
+      : staticFailureCount > 0
+        ? `${staticFailureCount} 条规则失败 · ${candidateCount} 个候选点`
       : staticRunning
         ? `${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`
         : candidateCount > 0
@@ -4417,6 +4424,7 @@ function ScanOverview({
   const staticAnalysisDone = scan.static_analysis_done || (
     scan.status === "complete" && staticEngineRun?.status !== "error"
   );
+  const partialStatic = staticAnalysisDone && staticAnalysisFailures(scan).length > 0;
   const auditRunning = scan.status === "auditing";
   const fpReviewTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
   const threatAnalysisStatus = threatAnalysisFlowStatus(scan);
@@ -4508,14 +4516,14 @@ function ScanOverview({
             <TaskSummaryRow
               label="静态分析"
               status={staticEngineSelected
-                ? taskStateLabel(
+                ? partialStatic ? "完成（部分规则失败）" : taskStateLabel(
                     staticAnalysisDone,
                     scan.status === "analyzing" && !staticAnalysisDone,
                     scan.status === "error" || staticEngineRun?.status === "error",
                   )
                 : "已跳过"}
               tone={staticEngineSelected
-                ? staticAnalysisDone ? "green" : scan.status === "analyzing" ? "cyan" : scan.status === "error" || staticEngineRun?.status === "error" ? "red" : "slate"
+                ? partialStatic ? "amber" : staticAnalysisDone ? "green" : scan.status === "analyzing" ? "cyan" : scan.status === "error" || staticEngineRun?.status === "error" ? "red" : "slate"
                 : "slate"}
               progress={staticEngineSelected && scan.static_total_files ? percent(scan.static_scanned_files, scan.static_total_files) : undefined}
               detail={staticEngineSelected
@@ -5491,7 +5499,11 @@ export function StaticTaskPanel({
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
   const [findingFilter, setFindingFilter] = useState(ALL_STATIC_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
-  const running = scan.status === "analyzing" && !scan.static_analysis_done;
+  const failed = !scan.static_analysis_done && (
+    scan.status === "error" || miningEngineRun(scan, STATIC_ENGINE_ID)?.status === "error"
+  );
+  const running = !failed && scan.status === "analyzing" && !scan.static_analysis_done;
+  const partialStatic = scan.static_analysis_done && staticAnalysisFailures(scan).length > 0;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
   const scannedFiles = seen ? (scan.static_scanned_files || indexProgress.current) : 0;
   const totalFiles = seen ? (scan.static_total_files || indexProgress.total) : 0;
@@ -5627,8 +5639,8 @@ export function StaticTaskPanel({
   return (
     <TaskPanel
       title="静态分析"
-      status={taskStateLabel(scan.static_analysis_done, running, scan.status === "error")}
-      tone={scan.static_analysis_done ? "green" : running ? "cyan" : scan.status === "error" ? "red" : "slate"}
+      status={partialStatic ? "完成（部分规则失败）" : taskStateLabel(scan.static_analysis_done, running, failed)}
+      tone={partialStatic ? "amber" : scan.static_analysis_done ? "green" : running ? "cyan" : failed ? "red" : "slate"}
       summary="基于底层代码图谱运行静态规则，产出供漏洞挖掘阶段审计的候选点。"
     >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">

@@ -209,6 +209,10 @@ class AgentReporterTests(unittest.TestCase):
                     "status": "success",
                     "total_candidates": 4,
                     "processed_candidates": 4,
+                    "static_analysis_errors": [{
+                        "checker_name": "loop_var_misuse", "error": "native crash",
+                        "exit_code": 3221225477,
+                    }],
                 },
             )
             await reporter.report_mining_engine_run(
@@ -248,6 +252,10 @@ class AgentReporterTests(unittest.TestCase):
         self.assertEqual(
             finish["json"]["mining_engine_runs"][0]["total_candidates"],
             4,
+        )
+        self.assertEqual(
+            finish["json"]["mining_engine_runs"][0]["static_analysis_errors"][0]["exit_code"],
+            3221225477,
         )
         self.assertNotIn("scan-1", reporter._threat_analysis_run_snapshots)
         self.assertNotIn("scan-1", reporter._mining_engine_run_snapshots)
