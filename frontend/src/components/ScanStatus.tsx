@@ -4886,7 +4886,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                 <tr>
                   <th className={thCls}>状态</th>
                   <th className={thCls}>任务</th>
-                  <th className={thCls}>目标</th>
                   <th className={thCls}>模型</th>
                   <th className={thCls}>时间</th>
                 </tr>
@@ -4955,11 +4954,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                             </div>
                           </div>
                         </td>
-                        <td className="max-w-[28rem] px-3 py-3 align-top">
-                          <div className="truncate font-mono text-xs text-slate-400" title={scanQueueTaskTarget(task.task)}>
-                            {scanQueueTaskTarget(task.task) || "-"}
-                          </div>
-                        </td>
                         <td className="px-3 py-3 align-top text-xs text-slate-400">
                           {task.modelId || "-"}
                         </td>
@@ -4969,7 +4963,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                       </tr>
                       {isExpanded && (
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
-                          <td colSpan={5} className="px-3 pb-4 pt-0">
+                          <td colSpan={4} className="px-3 pb-4 pt-0">
                             {detailLoading === cacheKey(task.task) && <p className="mb-3 text-xs text-slate-400">正在加载完整 Prompt 和 Session 轨迹…</p>}
                             {detailError === cacheKey(task.task) && <button type="button" onClick={() => void loadTask(task.task)} className="mb-3 text-xs text-amber-300">完整任务加载失败，点击重试</button>}
 
@@ -5253,15 +5247,6 @@ function scanQueueTaskTitle(task: Record<string, unknown>): string {
   const vulnType = task.vuln_type ? String(task.vuln_type) : "";
   const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
   return [revision, type + stage, checker || vulnType].filter(Boolean).join(" · ");
-}
-
-function scanQueueTaskTarget(task: Record<string, unknown>): string {
-  const file = task.file ? String(task.file) : "";
-  const line = task.line ? `:${String(task.line)}` : "";
-  const fn = task.function ? String(task.function) : "";
-  const auditIndex = task.audit_index != null ? `#${String(task.audit_index)}` : "";
-  const vulnIndex = task.vuln_index != null ? `漏洞 #${String(task.vuln_index)}` : "";
-  return [auditIndex || vulnIndex, file ? `${file}${line}` : "", fn].filter(Boolean).join(" ");
 }
 
 function scanQueueTaskPrompt(task: Record<string, unknown>): string {

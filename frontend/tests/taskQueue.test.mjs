@@ -35,7 +35,7 @@ function pool(overrides = {}) {
     models: [], planned_tasks: [], queued_tasks: [], completed_tasks: [], updated_at: "", ...overrides };
 }
 function rows(root) { return root.root.findAllByType("tr").filter((row) => row.props["aria-expanded"] !== undefined); }
-function ids(root) { return rows(root).map((row) => text(row.findAllByType("td")[3])); }
+function ids(root) { return rows(root).map((row) => text(row.findAllByType("td")[2])); }
 function button(root, label) {
   const result = root.root.findAllByType("button").find((item) => text(item).includes(label));
   assert.ok(result, `Missing button: ${label}`);
