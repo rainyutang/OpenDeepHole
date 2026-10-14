@@ -90,7 +90,7 @@ class ScanStoreBase(ABC):
 
     @abstractmethod
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
-        """Persist the latest OpenCode model-pool status snapshot for a scan."""
+        """Ingest an Agent process snapshot and persist scan lifetime statistics."""
 
     def update_mining_engine_run(
         self,

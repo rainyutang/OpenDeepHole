@@ -14,6 +14,7 @@
     "test:agent-list": "node tests/agentList.test.mjs",
     "test:task-queue": "node tests/taskQueue.test.mjs",
     "test:token-usage": "node tests/tokenUsage.test.mjs",
+    "test:model-pool": "node tests/modelPoolDashboard.test.mjs",
     "test:static-audit": "node tests/staticAudit.test.mjs",
     "test:threat-audit": "node tests/threatAuditResults.test.mjs",
     "test:audit-navigation": "node tests/auditNavigation.test.mjs",

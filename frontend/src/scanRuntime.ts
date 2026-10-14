@@ -527,6 +527,8 @@ export function sameOpenCodePoolSnapshot(
   if (left === right) return true;
   if (!left || !right) return left == null && right == null;
   return left.scope_id === right.scope_id
+    && left.execution_revision === right.execution_revision
+    && left.agent_session_id === right.agent_session_id
     && left.updated_at === right.updated_at
     && left.global_running === right.global_running
     && left.global_queued === right.global_queued

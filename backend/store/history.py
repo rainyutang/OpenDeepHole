@@ -271,12 +271,23 @@ class ScanHistoryMixin:
         for task in tasks:
             self._store_task_version_locked(row["scan_id"], task)
 
-    def _store_pool_locked(self, scan_id: str, status: OpenCodePoolStatus, *, row=None):
+    def _store_pool_locked(
+        self, scan_id: str, status: OpenCodePoolStatus | None, *, row=None,
+        reported: bool = False, terminal_scan: bool = False,
+    ):
         row = row if row is not None else self._locked_scan(scan_id)
         if row is None:
             return None
         self._normalize_legacy_pool_locked(row)
         previous = json.loads(row["opencode_pool"] or "{}")
+        previous_pool = OpenCodePoolStatus.model_validate(previous)
+        reported = reported and status is not None
+        status = status if status is not None else previous_pool
+        self._seed_model_usage_locked(scan_id, previous_pool)
+        # A newly saved scan can already contain a legacy pool. Internal
+        # rewrites of an established aggregate must never become raw reports.
+        if not reported:
+            self._seed_model_usage_locked(scan_id, status)
         for task in status.completed_tasks:
             self._store_task_version_locked(scan_id, task)
         count = self._conn.execute(
@@ -288,7 +299,15 @@ class ScanHistoryMixin:
             status.execution_revision > 0
             and status.execution_revision < int(row["execution_revision"] or 0)
         )
-        compact = OpenCodePoolStatus.model_validate(previous) if stale else status.model_copy(deep=True)
+        if reported and not stale:
+            stale = not self._model_usage_execution_matches_locked(scan_id, status, row)
+            if not stale:
+                stale = not self._record_model_usage_locked(scan_id, status)
+        compact = previous_pool.model_copy(deep=True) if stale else status.model_copy(deep=True)
+        compact = self._aggregate_model_usage_locked(scan_id, compact, previous_pool)
+        # Only work belonging to a live execution can contribute outstanding
+        # tasks. A late terminal snapshot must not inflate the lifetime total.
+        compact = self.normalize_scan_pool(scan_id, compact, row=row, terminal_scan=terminal_scan)
         # Refresh under the scan lock: a delayed HTTP update may hold usage read
         # before another writer or a historical-category recovery committed.
         persisted_usage = self.get_scan_opencode_token_usage(scan_id)
@@ -307,8 +326,8 @@ class ScanHistoryMixin:
             compact.completed_task_count + max(compact.global_running, sum(len(model.active_tasks) for model in compact.models))
             + max(compact.global_queued, len(compact.queued_tasks) + len(compact.planned_tasks)),
         )
-        compact = self.normalize_scan_pool(scan_id, compact, row=row)
         compact.execution_owner = None
+        self._stamp_pool_projection(compact, previous_pool)
         self._conn.execute(
             "UPDATE scans SET opencode_pool = ?, history_version = 1, "
             "total_task_count = ?, completed_task_count = ? WHERE scan_id = ?",
@@ -316,10 +335,16 @@ class ScanHistoryMixin:
         )
         return compact
 
-    def persist_opencode_pool(self, scan_id: str, status: OpenCodePoolStatus):
+    def persist_opencode_pool(
+        self, scan_id: str, status: OpenCodePoolStatus | None, *,
+        reported: bool = True, terminal_scan: bool = False,
+    ):
+        """Ingest raw Agent counters, or explicitly refresh a stored projection."""
         with self._lock:
             try:
-                compact = self._store_pool_locked(scan_id, status)
+                compact = self._store_pool_locked(
+                    scan_id, status, reported=reported, terminal_scan=terminal_scan,
+                )
                 self._conn.commit()
                 return compact
             except BaseException:

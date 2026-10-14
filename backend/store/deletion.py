@@ -26,6 +26,7 @@ SCAN_CHILDREN = (
     "threat_analysis", "threat_audit_tasks", "scan_file_inventories", "git_history_patterns",
     "scan_opencode_token_usage", "scan_audit_versions", "scan_migration_checks",
     "scan_opencode_category_token_usage", "scan_token_category_recovery",
+    "scan_opencode_model_usage", "scan_opencode_pool_sources",
     "scan_legacy_payloads", "scan_issue_facts", "scan_checker_totals",
     "scan_resource_counts", "scan_summary_state",
 )

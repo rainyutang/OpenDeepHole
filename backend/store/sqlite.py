@@ -84,6 +84,7 @@ from .migration import ScanStorageMigrationMixin
 from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixin
 from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
 from .file_inventories import FILE_INVENTORY_SCHEMA, ScanFileInventoriesMixin
+from .model_usage import MODEL_USAGE_SCHEMA, ScanModelUsageMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 
@@ -988,6 +989,7 @@ _SCHEMA += VALIDATION_SCHEMA
 _SCHEMA += SHARE_SCHEMA
 _SCHEMA += TOKEN_CATEGORY_SCHEMA
 _SCHEMA += FILE_INVENTORY_SCHEMA
+_SCHEMA += MODEL_USAGE_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1009,7 +1011,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -3125,6 +3127,9 @@ class SqliteScanStore(ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSh
             if row is None:
                 self._conn.commit()
                 return None
+            self._seed_model_usage_locked(
+                scan_id, OpenCodePoolStatus.model_validate_json(row["opencode_pool"] or "{}"),
+            )
             pool = json.loads(self._terminal_scan_pool_json(scan_id, row["opencode_pool"]))
             pool["execution_revision"] = int(row["execution_revision"])
             pool["agent_session_id"] = row["execution_agent_session_id"] or ""

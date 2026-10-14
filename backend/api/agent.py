@@ -5374,11 +5374,14 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         if scan is not None
         else existing_scan.opencode_pool
     )
+    reported_pool = None
     if body.opencode_pool is not None:
         reported_pool = _merge_completed_opencode_tasks(
             previous_pool,
             body.opencode_pool,
         )
+        reported_pool.agent_session_id = body.agent_session_id or reported_pool.agent_session_id
+        reported_pool.execution_revision = body.execution_revision or reported_pool.execution_revision
         if hasattr(store, "upsert_scan_opencode_token_usage"):
             await run_store_call(
                 store,
@@ -5393,17 +5396,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
                 "get_scan_opencode_token_usage",
                 scan_id,
             )
-        previous_pool = reported_pool
+    # Without a raw final snapshot, read the current projection under the store
+    # lock. A cached lifetime aggregate is not another process accumulator.
     final_pool = await run_store_call(
-        store, "normalize_scan_pool", scan_id, previous_pool, terminal_scan=True,
+        store, "persist_opencode_pool", scan_id, reported_pool,
+        reported=reported_pool is not None, terminal_scan=True,
     )
-    if final_pool is not None:
-        await run_store_call(
-            store,
-            "update_opencode_pool_status",
-            scan_id,
-            final_pool,
-        )
     if scan is not None:
         scan.status = final_status
         scan.vulnerabilities = final_vulnerabilities

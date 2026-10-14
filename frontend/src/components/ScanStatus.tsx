@@ -7073,7 +7073,7 @@ function EventLine({ event }: { event: ScanEvent }) {
   );
 }
 
-function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
+export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
   const plannedTasks = pool?.planned_tasks ?? [];
   const queuedTasks = pool?.queued_tasks ?? [];
@@ -7109,6 +7109,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
 
   return (
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
+      <p className="text-xs text-slate-500">按本扫描累计，含续扫及重试；运行中、排队中和计划中为当前状态。</p>
       {!hasEnabledModel && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-6 text-amber-200">
           当前没有启用的模型，新的 OpenCode 任务会保持阻塞排队，直到启用满足能力要求的模型或用户取消。
