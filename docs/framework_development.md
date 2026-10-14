@@ -11,6 +11,7 @@
 - [去误报方法扩展](../deephole_client/fp_review/README.md)
 - [Task Agent 公共任务接口](opencode_task_service.md)
 - [漏洞验证方法](vulnerability_validation.md)
+- [Checker 开发参考](checker-development.md)：规则测试工具、索引 API、候选去重和同模式过滤的当前行为。
 
 ## 1. 先选择正确的扩展类型
 

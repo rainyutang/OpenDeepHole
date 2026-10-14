@@ -70,7 +70,9 @@ export OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT=120
 
 4 个 Worker、每个最大 10 个 psycopg 连接，再加每 Worker 一个通知连接，峰值约 44 个 PostgreSQL 连接。数据库的 `max_connections` 需要为应用、迁移和运维连接留出余量。
 
-仓库的 `docker-compose.yml` 已提供 PostgreSQL 16、健康检查和 4 Worker 默认值。生产部署必须在 `.env` 或密钥系统中同时覆盖 `OPENDEEPHOLE_POSTGRES_PASSWORD` 和与其一致的 `OPENDEEPHOLE_DATABASE_URL`；URL 中的密码需要正确编码 URI 保留字符。不要把密码提交到仓库。
+仓库的 `docker-compose.yml` 声明了 PostgreSQL 16、健康检查和 4 Worker 默认值，但当前 Dockerfile 未打包完整后端运行及 Agent 分发资源，不能直接视为可用的一键部署，见[现有 Docker 文件的限制](getting-started.md#现有-docker-文件的限制)。使用该编排自建部署时，应在 `.env` 或密钥系统中同时覆盖 `OPENDEEPHOLE_POSTGRES_PASSWORD` 和与其一致的 `OPENDEEPHOLE_DATABASE_URL`；URL 中的密码需要正确编码 URI 保留字符。不要把密码提交到仓库。
+
+多 Worker 还必须在所有进程读取的 `config.yaml` 中配置相同的 `auth.secret_key`。留空会由每个进程分别生成随机签名密钥，无法保证跨 Worker 验证同一个登录 Token。
 
 ## PostgreSQL 重启恢复
 
