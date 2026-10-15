@@ -41,6 +41,28 @@ def task_page_cursor(item):
     return {"before_sort_time": item["sort_time"], "before_task_id": item["task_id"]}
 
 
+def test_live_detail_supports_legacy_request_ids_without_exposing_planned_tasks(tmp_path):
+    store = make_store(tmp_path)
+    legacy = {"scope_id": "s", "queued_tasks": [{"request_id": "queued", "prompt": "排队正文"}],
+              "planned_tasks": [{"planned_task_id": "planned"}], "completed_tasks": [task()]}
+    store._conn.execute("UPDATE scans SET history_version = 0, opencode_pool = ?", (json.dumps(legacy),))
+    store._conn.commit()
+    try:
+        assert store.get_task_detail("s", "queued", revision=1) == {
+            "request_id": "queued", "task_id": "queued", "prompt": "排队正文",
+        }
+        assert store.get_task_detail("s", "queued", revision=2) is None
+        assert store.get_task_detail("s", "planned") is None
+        assert store.get_task_detail("missing-scan", "queued") is None
+        assert store.get_task_detail("s", task()["task_id"]) == task()
+        assert store.get_task_detail("s", task()["task_id"], record_id="missing-record") is None
+        store._conn.execute("UPDATE scans SET status = 'complete'")
+        store._conn.commit()
+        assert store.get_task_detail("s", "queued") is None
+    finally:
+        store.close()
+
+
 def test_receipt_body_once_and_old_revision_does_not_replace_current(tmp_path):
     store = make_store(tmp_path)
     try:

@@ -278,3 +278,169 @@ test("changing scans renews cursor recovery and ignores an old scan's pending er
   assert.equal(firstPageCalls.other, 2);
   assert.deepEqual(ids(root), ["other"]);
 });
+
+for (const access of ["authenticated", "public", "shared"]) {
+  test(`live queue reads prompts after SSE strips bodies and retains them on refresh (${access})`, async () => {
+    if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
+    const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;
+    const calls = [];
+    const pending = new Map();
+    const running = { task_id: "running", revision: 2, prompt: "运行任务完整 Prompt" };
+    const queued = { task_id: "queued", request_id: "queued", revision: 2, prompt: "排队任务完整 Prompt" };
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.startsWith(prefix));
+      if (access !== "authenticated") assert.equal(config.params.token, "token");
+      if (config.url === `${prefix}/tasks`) return response(config, { items: [], next_cursor: null });
+      calls.push(config);
+      return new Promise((resolve) => pending.set(config.url, (value) => resolve(response(config, value))));
+    };
+    const initial = pool({ completed_task_count: 0, total_tasks: 3,
+      models: [{ id: "m", active_tasks: [running] }], queued_tasks: [queued],
+      planned_tasks: [{ planned_task_id: "planned" }] });
+    const root = await mount(initial);
+    await act(async () => rows(root)[0].props.onClick());
+    assert.match(text(root.toJSON()), /运行任务完整 Prompt/);
+    assert.equal(calls.length, 0);
+
+    // Older SSE summaries keep task_id but can omit request_id as well as the body.
+    const summary = { ...initial, updated_at: "sse",
+      models: [{ id: "m", active_tasks: [{ task_id: "running", revision: 2, prompt_length: running.prompt.length }] }],
+      queued_tasks: [{ task_id: "queued", revision: 2, prompt_length: queued.prompt.length }] };
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: summary })));
+    assert.match(text(root.toJSON()), /正在读取完整 Prompt/);
+    assert.doesNotMatch(text(root.toJSON()), /尚未生成|未保存完整 Prompt/);
+    assert.equal(calls[0].params.revision, 2);
+    await act(async () => pending.get(`${prefix}/tasks/running`)({ ...running, serve_session_id: "loaded-session" }));
+    assert.match(text(root.toJSON()), /运行任务完整 Prompt/);
+    assert.match(text(root.toJSON()), /loaded-session/);
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...summary, updated_at: "heartbeat" } })));
+    assert.match(text(root.toJSON()), /运行任务完整 Prompt/);
+    assert.equal(calls.length, 1);
+
+    await act(async () => rows(root)[1].props.onClick());
+    assert.match(text(root.toJSON()), /正在读取完整 Prompt/);
+    assert.doesNotMatch(text(root.toJSON()), /尚未生成|运行任务完整 Prompt/);
+    await act(async () => pending.get(`${prefix}/tasks/queued`)(queued));
+    assert.match(text(root.toJSON()), /排队任务完整 Prompt/);
+    await act(async () => rows(root)[2].props.onClick());
+    assert.match(text(root.toJSON()), /尚未生成，进入排队或运行后显示/);
+    assert.equal(calls.length, 2);
+    await act(async () => rows(root)[0].props.onClick());
+    assert.match(text(root.toJSON()), /运行任务完整 Prompt/);
+    assert.equal(calls.length, 2);
+  });
+}
+
+function poolWithLiveTask(task, status = "running", overrides = {}) {
+  return pool({ completed_task_count: 0, total_tasks: 1,
+    ...(status === "queued" ? { queued_tasks: [task] } : { models: [{ id: "m", active_tasks: [task] }] }),
+    ...overrides });
+}
+
+for (const status of ["queued", "running"]) {
+  test(`${status} task distinguishes request failure from an unsynced prompt and allows retry`, async () => {
+    const task = { task_id: "live", revision: 1, prompt_length: 42 };
+    let calls = 0;
+    client.api.defaults.adapter = async (config) => {
+      if (config.url.endsWith("/tasks")) return response(config, { items: [], next_cursor: null });
+      calls += 1;
+      if (calls === 1) throw new Error("Network error");
+      return response(config, calls === 2 ? task : { ...task, prompt: "补读成功的 Prompt" });
+    };
+    const value = poolWithLiveTask(task, status, { details_truncated: true });
+    const root = await mount(value);
+    await act(async () => rows(root)[0].props.onClick());
+    assert.match(text(root.toJSON()), /完整 Prompt 加载失败/);
+    assert.doesNotMatch(text(root.toJSON()), /尚未生成|暂未同步/);
+    await act(async () => button(root, "完整任务加载失败，点击重试").props.onClick());
+    assert.match(text(root.toJSON()), /完整 Prompt 暂未同步，已记录长度 42 chars/);
+    assert.doesNotMatch(text(root.toJSON()), /加载失败|尚未生成/);
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...value, updated_at: "heartbeat" } })));
+    assert.equal(calls, 2);
+    await act(async () => button(root, "重新读取完整 Prompt").props.onClick());
+    assert.match(text(root.toJSON()), /补读成功的 Prompt/);
+    assert.equal(calls, 3);
+  });
+}
+
+test("live detail requests follow revisions, executions and sessions while ignoring superseded responses", async () => {
+  const pending = [];
+  client.api.defaults.adapter = async (config) => {
+    if (config.url.endsWith("/tasks")) return response(config, { items: [], next_cursor: null });
+    return new Promise((resolve) => pending.push({ config, resolve: (prompt) => resolve(response(config, { prompt })) }));
+  };
+  let current = { task_id: "same", revision: 1, execution_revision: 3, agent_session_id: "agent-a" };
+  const root = await mount(poolWithLiveTask(current));
+  await act(async () => rows(root)[0].props.onClick());
+  current = { ...current, revision: 2 };
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: poolWithLiveTask(current) })));
+  assert.equal(pending.length, 2);
+  assert.equal(pending[0].config.signal.aborted, true);
+  assert.equal(pending[1].config.params.revision, 2);
+  await act(async () => pending[1].resolve("第二次执行正文"));
+  await act(async () => pending[0].resolve("旧任务正文"));
+  assert.match(text(root.toJSON()), /第二次执行正文/);
+  assert.doesNotMatch(text(root.toJSON()), /旧任务正文/);
+
+  for (const change of [{ execution_revision: 4 }, { agent_session_id: "agent-b" }, { serve_session_id: "new-session" }]) {
+    current = { ...current, ...change };
+    const count = pending.length;
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: poolWithLiveTask(current) })));
+    assert.equal(pending.length, count + 1);
+    assert.doesNotMatch(text(root.toJSON()), /第二次执行正文/);
+    await act(async () => pending.at(-1).resolve("当前执行正文"));
+    assert.match(text(root.toJSON()), /当前执行正文/);
+  }
+});
+
+test("changing tasks or scans cancels pending details and keeps cache scoped to the scan", async () => {
+  const pending = [];
+  client.api.defaults.adapter = async (config) => {
+    if (config.url.endsWith("/tasks")) return response(config, { items: [], next_cursor: null });
+    return new Promise((resolve) => pending.push({ config, resolve: (prompt) => resolve(response(config, { prompt })) }));
+  };
+  const value = poolWithLiveTask({ task_id: "same", revision: 1 }, "running", {
+    queued_tasks: [{ task_id: "queued", revision: 1 }],
+  });
+  const root = await mount(value);
+  await act(async () => rows(root)[0].props.onClick());
+  await act(async () => rows(root)[1].props.onClick());
+  assert.equal(pending[0].config.signal.aborted, true);
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "other", pool: value })));
+  assert.equal(pending[1].config.signal.aborted, true);
+  assert.equal(pending.length, 2);
+  await act(async () => rows(root)[0].props.onClick());
+  assert.equal(pending[2].config.url, "/api/v2/scans/other/tasks/same");
+  await act(async () => pending[2].resolve("新扫描正文"));
+  await act(async () => { pending[0].resolve("旧扫描运行正文"); pending[1].resolve("旧扫描排队正文"); });
+  assert.match(text(root.toJSON()), /新扫描正文/);
+  assert.doesNotMatch(text(root.toJSON()), /旧扫描|加载失败|尚未生成/);
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: value })));
+  await act(async () => rows(root)[0].props.onClick());
+  assert.equal(pending.length, 4);
+  assert.doesNotMatch(text(root.toJSON()), /新扫描正文|旧扫描/);
+  await act(async () => pending[3].resolve("重新读取正文"));
+  assert.match(text(root.toJSON()), /重新读取正文/);
+});
+
+test("queued task details do not become stale running or historical details", async () => {
+  let calls = 0;
+  const current = { task_id: "transition", revision: 1 };
+  let terminal = false;
+  client.api.defaults.adapter = async (config) => {
+    if (config.url.endsWith("/tasks")) return response(config, { items: terminal ? [task("transition", "2026-10-15T00:00:00Z")] : [], next_cursor: null });
+    calls += 1;
+    return response(config, { ...current, prompt: `${calls} 阶段正文` });
+  };
+  const root = await mount(poolWithLiveTask(current, "queued"));
+  await act(async () => rows(root)[0].props.onClick());
+  assert.match(text(root.toJSON()), /1 阶段正文/);
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: poolWithLiveTask(current) })));
+  await act(async () => rows(root)[0].props.onClick());
+  assert.match(text(root.toJSON()), /2 阶段正文/);
+  terminal = true;
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool() })));
+  await act(async () => rows(root)[0].props.onClick());
+  assert.match(text(root.toJSON()), /3 阶段正文/);
+  assert.equal(calls, 3);
+});

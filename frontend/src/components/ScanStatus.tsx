@@ -4681,6 +4681,9 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   const historyRef = useRef<Record<string, unknown>[]>([]);
   const [historyGaps, setHistoryGaps] = useState<{ cursor: string; boundary: Record<string, unknown> }[]>([]);
   const [details, setDetails] = useState<Record<string, Record<string, unknown>>>({});
+  const detailsRef = useRef(details);
+  detailsRef.current = details;
+  const [detailRetry, setDetailRetry] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
@@ -4693,6 +4696,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   const nextCursorRef = useRef<string | null>(null);
   const historyGeneration = useRef(0);
   const activeScanId = useRef(scanId);
+  const scanChanged = activeScanId.current !== scanId;
   activeScanId.current = scanId;
   useEffect(() => {
     setPage(1);
@@ -4700,6 +4704,10 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     historyRef.current = [];
     setHistoryGaps([]);
     setDetails({});
+    detailsRef.current = {};
+    setDetailLoading(null);
+    setDetailError(null);
+    setDetailRetry(0);
     setExpandedTaskId(null);
     setNextCursor(null);
     setHistoryLoading(false);
@@ -4711,7 +4719,15 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     nextCursorRef.current = null;
     historyGeneration.current += 1;
   }, [scanId]);
-  const cacheKey = (task: Record<string, unknown>) => String(task.record_id || `${task.task_id}:${task.revision || 1}`);
+  const cacheKey = (item: ScanQueueTask) => JSON.stringify([
+    scanId, item.status, item.id, item.task.revision || 1,
+    item.task.record_id || [
+      item.task.execution_kind, item.task.execution_id,
+      item.task.execution_revision ?? pool?.execution_revision,
+      item.task.agent_session_id ?? pool?.agent_session_id,
+      item.task.serve_session_id,
+    ],
+  ]);
   const mergeHistory = (incoming: Record<string, unknown>[]) => {
     const merged = new Map(historyRef.current.map((task) => [String(task.task_id), task]));
     incoming.forEach((task) => {
@@ -4805,28 +4821,49 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
       }
     } finally { if (isCurrent()) setHistoryLoading(false); }
   };
-  const loadTask = async (task: Record<string, unknown>) => {
-    const key = cacheKey(task);
-    if (details[key] || detailLoading === key) return;
-    setDetailLoading(key);
-    setDetailError(null);
-    try {
-      const result = await getScanTaskDetail(scanId, task);
-      setDetails((previous) => ({ ...previous, [key]: { ...task, ...result, task_id: task.task_id } }));
-    } catch { setDetailError(key); }
-    finally { setDetailLoading((current) => current === key ? null : current); }
-  };
   const tasks = useMemo(() => {
     const merged = new Map((pool?.completed_tasks ?? []).map((task) => [String(task.task_id), task]));
     history.forEach((task) => {
       const previous = merged.get(String(task.task_id));
-      if (shouldMergeTaskHistory(previous, task)) merged.set(String(task.task_id), details[cacheKey(task)] ?? task);
+      if (shouldMergeTaskHistory(previous, task)) merged.set(String(task.task_id), task);
     });
     const combined = { scope_id: scanId, global_running: 0, global_queued: 0, total_tasks: 0,
       completed_task_count: 0, models: [], queued_tasks: [], planned_tasks: [], updated_at: "", ...pool,
       completed_tasks: [...merged.values()] };
     return collectScanQueueTasks(combined);
-  }, [scanId, pool, history, details]);
+  }, [scanId, pool, history]);
+  const expandedTask = scanChanged ? undefined : tasks.find((task) => scanQueueTaskKey(task) === expandedTaskId);
+  const expandedDetailKey = expandedTask ? cacheKey(expandedTask) : null;
+  const hasInlinePrompt = Boolean(expandedTask && scanQueueTaskPrompt(expandedTask.task));
+  const expandedTaskRef = useRef(expandedTask);
+  expandedTaskRef.current = expandedTask;
+  useEffect(() => {
+    setDetailLoading(null);
+    setDetailError(null);
+    const selected = expandedTaskRef.current;
+    const key = expandedDetailKey;
+    if (!selected || !key || selected.status === "planned" || detailsRef.current[key]) return;
+    if (["queued", "running"].includes(selected.status) && hasInlinePrompt) return;
+    const controller = new AbortController();
+    setDetailLoading(key);
+    // The SSE snapshot is only a summary. Read the selected task's body once,
+    // and retain it across subsequent summary-only heartbeats.
+    void getScanTaskDetail(scanId, { ...selected.task, task_id: selected.id }, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setDetails((previous) => ({ ...previous, [key]: result }));
+      })
+      .catch(() => { if (!controller.signal.aborted) setDetailError(key); })
+      .finally(() => { if (!controller.signal.aborted) setDetailLoading(null); });
+    return () => controller.abort();
+  }, [scanId, expandedDetailKey, hasInlinePrompt, detailRetry]);
+  const retryTask = (key: string) => {
+    setDetails((previous) => {
+      const next = { ...previous };
+      delete next[key];
+      return next;
+    });
+    setDetailRetry((current) => current + 1);
+  };
   const runningCount = tasks.filter((task) => task.status === "running").length;
   const queuedCount = tasks.filter((task) => task.status === "queued").length;
   const plannedCount = tasks.filter((task) => task.status === "planned").length;
@@ -4837,8 +4874,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   const pagedTasks = tasks.slice((safePage - 1) * SCAN_QUEUE_PAGE_SIZE, safePage * SCAN_QUEUE_PAGE_SIZE);
   const toggleTask = (taskId: string) => {
     setExpandedTaskId((current) => (current === taskId ? null : taskId));
-    const selected = tasks.find((task) => scanQueueTaskKey(task) === taskId);
-    if (selected && !["planned", "queued", "running"].includes(selected.status)) void loadTask(selected.task);
   };
 
   useEffect(() => {
@@ -4894,19 +4929,21 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                 {pagedTasks.map((task) => {
                   const taskKey = scanQueueTaskKey(task);
                   const isExpanded = expandedTaskId === taskKey;
-                  const prompt = scanQueueTaskPrompt(task.task);
-                  const promptLength = scanQueueTaskPromptLength(task.task, prompt);
-                  const failureReason = typeof task.task.failure_reason === "string"
-                    ? task.task.failure_reason.trim()
+                  const detailKey = cacheKey(task);
+                  const detail = { ...details[detailKey], ...task.task };
+                  const prompt = scanQueueTaskPrompt(task.task) || scanQueueTaskPrompt(details[detailKey] ?? {});
+                  const promptLength = scanQueueTaskPromptLength(detail, prompt);
+                  const failureReason = typeof detail.failure_reason === "string"
+                    ? detail.failure_reason.trim()
                     : "";
-                  const failureKind = typeof task.task.failure_kind === "string"
-                    ? task.task.failure_kind.trim()
+                  const failureKind = typeof detail.failure_kind === "string"
+                    ? detail.failure_kind.trim()
                     : "";
-                  const blockedReason = typeof task.task.blocked_reason === "string"
-                    ? task.task.blocked_reason.trim()
+                  const blockedReason = typeof detail.blocked_reason === "string"
+                    ? detail.blocked_reason.trim()
                     : "";
-                  const sessionId = scanQueueTaskSessionId(task.task);
-                  const tokenUsage = taskTokenUsage(task.task);
+                  const sessionId = scanQueueTaskSessionId(detail);
+                  const tokenUsage = taskTokenUsage(detail);
                   const isTerminal = !["planned", "queued", "running"].includes(task.status);
                   const terminalFailureReason = scanQueueTaskFailureReason(
                     task.status,
@@ -4914,7 +4951,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                     failureReason,
                   );
                   const sessionEvents = scanQueueTaskSessionEvents(
-                    task.task,
+                    detail,
                     task.status,
                     task.modelId,
                     task.timestamp,
@@ -4964,8 +5001,8 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                       {isExpanded && (
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
                           <td colSpan={4} className="px-3 pb-4 pt-0">
-                            {detailLoading === cacheKey(task.task) && <p className="mb-3 text-xs text-slate-400">正在加载完整 Prompt 和 Session 轨迹…</p>}
-                            {detailError === cacheKey(task.task) && <button type="button" onClick={() => void loadTask(task.task)} className="mb-3 text-xs text-amber-300">完整任务加载失败，点击重试</button>}
+                            {detailLoading === detailKey && <p className="mb-3 text-xs text-slate-400">正在加载完整 Prompt 和 Session 轨迹…</p>}
+                            {detailError === detailKey && <button type="button" onClick={() => retryTask(detailKey)} className="mb-3 text-xs text-amber-300">完整任务加载失败，点击重试</button>}
 
                             <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
                               {terminalFailureReason && (
@@ -5087,13 +5124,24 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                                   <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
                                     {prompt}
                                   </pre>
-                                ) : !["planned", "queued", "running"].includes(task.status) ? (
+                                ) : task.status === "planned" ? (
+                                  <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
+                                    完整 prompt 尚未生成，进入排队或运行后显示。
+                                  </div>
+                                ) : detailLoading === detailKey ? (
+                                  <p className="text-xs text-slate-400">正在读取完整 Prompt…</p>
+                                ) : detailError === detailKey ? (
+                                  <p className="text-xs text-amber-300">完整 Prompt 加载失败，请重试。</p>
+                                ) : isTerminal ? (
                                   <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
                                     该历史任务未保存完整 Prompt{promptLength > 0 ? `，仅记录长度 ${promptLength} chars` : ""}。
                                   </div>
                                 ) : (
                                   <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                    完整 prompt 尚未生成，进入排队或运行后显示。
+                                    完整 Prompt 暂未同步{promptLength > 0 ? `，已记录长度 ${promptLength} chars` : ""}。
+                                    <button type="button" onClick={() => retryTask(detailKey)} className="ml-2 text-cyan-300">
+                                      重新读取完整 Prompt
+                                    </button>
                                   </div>
                                 )}
                               </div>
@@ -5151,7 +5199,7 @@ function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueueTask[]
   }
   for (const [index, task] of (pool.queued_tasks ?? []).entries()) {
     out.push({
-      id: String(task.request_id || `queued-${index}`),
+      id: String(task.task_id || task.request_id || `queued-${index}`),
       status: "queued",
       modelId: "",
       scopeId: String(task.scope_id || pool.scope_id || ""),

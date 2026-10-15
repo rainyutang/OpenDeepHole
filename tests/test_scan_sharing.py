@@ -86,6 +86,98 @@ async def create_share(client, env, role="owner"):
     return response.json()["token"]
 
 
+def test_live_task_details_preserve_versions_and_access_boundaries(environment):
+    env = environment
+    store = env.store
+    owner = {"scope_id": env.scan_id, "execution_kind": "scan", "execution_id": env.scan_id,
+             "execution_revision": 4, "agent_session_id": "current-agent"}
+    running = {**owner, "task_id": "running", "revision": 2, "prompt": "运行任务完整正文",
+               "serve_session_id": "session", "session_events": [{"session_id": "session"}]}
+    queued = {**owner, "task_id": "queued", "request_id": "queued", "revision": 2,
+              "prompt": "排队任务完整正文"}
+    old = {"task_id": "running", "revision": 1, "outcome": "success", "prompt": "历史正文"}
+    with store._lock:
+        record_id, _ = store._store_task_version_locked(env.scan_id, old)
+        store._conn.execute(
+            "UPDATE scans SET status = 'auditing', execution_revision = 4, "
+            "execution_agent_session_id = 'current-agent' WHERE scan_id = ?", (env.scan_id,),
+        )
+        store._conn.commit()
+    store.persist_opencode_pool(env.scan_id, OpenCodePoolStatus(
+        scope_id=env.scan_id, execution_revision=4, agent_session_id="current-agent",
+        global_running=1, global_queued=2, completed_tasks=[old],
+        queued_tasks=[queued, {**queued, "task_id": "truncated", "prompt": "", "prompt_length": 42}],
+        models=[{"id": "m", "active_tasks": [running]}],
+    ))
+
+    async def run():
+        async with client_for(env) as client:
+            share = await create_share(client, env)
+            for prefix, params, headers in (
+                (f"/api/v2/scans/{env.scan_id}", {}, env.tokens["owner"]),
+                (f"/api/public/scans/{env.scan_id}", {"token": env.meta.public_access_token}, {}),
+                (f"/api/shared/scans/{env.scan_id}", {"token": share}, {}),
+            ):
+                for value in (running, queued):
+                    response = await client.get(prefix + "/tasks/" + value["task_id"],
+                                                params={**params, "revision": 2}, headers=headers)
+                    assert response.status_code == 200, response.text
+                    assert response.json() == value
+                response = await client.get(prefix + "/tasks/running", params=params, headers=headers)
+                assert response.json()["prompt"] == running["prompt"]
+                for selector in ({"revision": 1}, {"record_id": record_id}):
+                    response = await client.get(prefix + "/tasks/running", params={**params, **selector}, headers=headers)
+                    assert response.json() == old
+                for selector in ({"revision": 3}, {"record_id": "unknown-record"}):
+                    assert (await client.get(prefix + "/tasks/running", params={**params, **selector}, headers=headers)).status_code == 404
+                response = await client.get(prefix + "/tasks/truncated", params=params, headers=headers)
+                assert response.status_code == 200
+                assert response.json()["prompt_length"] == 42
+                page = (await client.get(prefix + "/tasks", params=params, headers=headers)).json()
+                assert [item["record_id"] for item in page["items"]] == [record_id]
+            assert (await client.get(f"/api/v2/scans/{env.scan_id}/tasks/running", headers=env.tokens["other"])).status_code == 403
+            for kind in ("public", "shared"):
+                assert (await client.get(f"/api/{kind}/scans/{env.scan_id}/tasks/running", params={"token": "wrong"})).status_code == 403
+
+    asyncio.run(run())
+    assert store.get_opencode_pool_status(env.scan_id).completed_task_count == 1
+
+    # Stale execution data must not be readable as a current task, even if
+    # a pre-upgrade pool remains in the scan row after a resume.
+    for revision, session in ((5, "current-agent"), (4, "new-agent")):
+        with store._lock:
+            store._conn.execute(
+                "UPDATE scans SET execution_revision = ?, execution_agent_session_id = ? WHERE scan_id = ?",
+                (revision, session, env.scan_id),
+            )
+            store._conn.commit()
+        assert store.get_task_detail(env.scan_id, "queued", revision=2) is None
+        assert store.get_task_detail(env.scan_id, "running", revision=2) is None
+        assert store.get_task_detail(env.scan_id, "running", record_id=record_id) == old
+
+
+def test_live_review_task_detail_remains_available_after_scan_completion(environment):
+    env = environment
+    store = env.store
+    with store._lock:
+        store._conn.execute(
+            "UPDATE fp_review_jobs SET status = 'running', execution_revision = 3, "
+            "execution_agent_session_id = 'review-agent' WHERE review_id = ?", (env.review_id,),
+        )
+        store._conn.commit()
+    review_task = {"task_id": "review", "revision": 1, "prompt": "独立复核正文",
+                   "execution_kind": "fp_review", "execution_id": env.review_id,
+                   "execution_revision": 3, "agent_session_id": "review-agent"}
+    store.persist_opencode_pool(env.scan_id, OpenCodePoolStatus(
+        agent_session_id="review-agent",
+        execution_owner={"kind": "fp_review", "id": env.review_id, "revision": 3},
+        queued_tasks=[review_task],
+    ))
+    assert store.get_task_detail(env.scan_id, "review", revision=1) == review_task
+    store.update_fp_review_job(env.review_id, status=FpReviewStatus.COMPLETE)
+    assert store.get_task_detail(env.scan_id, "review", revision=1) is None
+
+
 def test_share_management_and_token_isolation(environment):
     env = environment
     async def run():

@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS scan_migration_checks (
 # full text into list responses or SSE notifications.
 TASK_METADATA_FIELDS = frozenset({
     "task_id", "scope_id", "revision", "task_type", "task_name", "title",
+    "request_id", "planned_task_id", "planned_at", "queued_at", "prompt_length",
     "model", "model_id", "capability", "started_at", "finished_at", "outcome",
     "status", "duration_seconds", "serve_session_id", "failure_kind",
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
@@ -456,6 +457,18 @@ class ScanHistoryMixin:
 
     def get_task_detail(self, scan_id: str, task_id: str, *, revision: int | None = None,
                         record_id: str | None = None) -> dict | None:
+        # Live SSE carries only metadata. Read the body from the current,
+        # execution-fenced pool without adding unfinished work to history.
+        # An explicit immutable record must never resolve to a live task.
+        if not record_id:
+            pool = self.get_opencode_pool_status(scan_id)
+            if pool is not None:
+                live_tasks = [task for model in pool.models for task in model.active_tasks]
+                live_tasks.extend(pool.queued_tasks)
+                for task in live_tasks:
+                    live_id = str(task.get("task_id") or task.get("request_id") or "")
+                    if live_id == task_id and (revision is None or task_identity(task)[1] == revision):
+                        return {**task, "task_id": live_id}
         if record_id:
             sql = "SELECT task_json FROM scan_task_versions WHERE scan_id = ? AND task_id = ? AND record_id = ?"
             params = (scan_id, task_id, record_id)
@@ -470,6 +483,8 @@ class ScanHistoryMixin:
         row = self._conn.execute(sql, params).fetchone()
         if row:
             return json.loads(row["task_json"])
+        if record_id:
+            return None
         pool = self._legacy_pool(scan_id)
         return next((task for task in pool.completed_tasks if task_identity(task)[0] == task_id
                      and (revision is None or task_identity(task)[1] == revision)), None) if pool else None
