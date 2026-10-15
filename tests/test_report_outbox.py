@@ -18,7 +18,7 @@ from backend.models import (
     ThreatAuditTask,
     Vulnerability,
 )
-from deephole_client.report_outbox import ReportOutbox
+from deephole_client.report_outbox import OPENCODE_TASK_REPORT_PATH, ReportOutbox
 from deephole_client.reporter import Reporter
 
 
@@ -606,7 +606,7 @@ def test_distinct_findings_from_one_task_are_not_coalesced(tmp_path: Path) -> No
     asyncio.run(exercise())
 
 
-def test_queued_vulnerability_receives_response_after_prior_task_report(
+def test_inflight_task_history_does_not_delay_vulnerability_receipt(
     tmp_path: Path,
 ) -> None:
     class OrderedClient:
@@ -649,6 +649,7 @@ def test_queued_vulnerability_receives_response_after_prior_task_report(
             outbox_path=tmp_path / "queued-response.sqlite3",
         )
         reporter.set_agent_id("agent-1")
+        reporter.capabilities = {"incremental_opencode_task_reports": True}
         fake = OrderedClient()
         reporter._client = fake  # type: ignore[assignment]
         reporter.start_outbox_worker()
@@ -676,10 +677,6 @@ def test_queued_vulnerability_receives_response_after_prior_task_report(
             ),
             on_delivered=delivered,
         ))
-        await asyncio.sleep(0)
-        assert report_task.done() is False
-
-        fake.release_task.set()
         response = await asyncio.wait_for(report_task, timeout=1.0)
         assert response is not None
         assert response["index"] == 7
@@ -689,7 +686,12 @@ def test_queued_vulnerability_receives_response_after_prior_task_report(
             "http://server/api/agent/scan/scan-1/vulnerability",
         ]
         assert reporter._outbox is not None
-        assert reporter._outbox.pending_count() == 0
+        assert reporter._outbox.pending_count() == 1
+        fake.release_task.set()
+        async def drained():
+            while reporter._outbox.pending_count():
+                await asyncio.sleep(0.001)
+        await asyncio.wait_for(drained(), timeout=1.0)
         await reporter.close()
 
     asyncio.run(exercise())

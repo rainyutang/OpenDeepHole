@@ -28,6 +28,7 @@ SQLite 仍用于单机兼容和开发环境，但只允许一个后端 Worker。
 - Agent 的 outbox 位于 `~/.opendeephole/report_outbox.sqlite3`，只包含尚未得到后端确认的记录；成功项不保留历史副本，并在删除后执行增量空间回收，队列清空时截断 WAL。该机制只防止升级后新产生的数据遗漏，不从旧日志反推或补造升级前已经丢失的审计结果。
 - Agent 重连时会把当前进程的活动扫描、去误报、验证以及现有 outbox 待发终态身份与服务端持久状态对账。服务端在原扫描、复核和验证行上保存固定大小的 Agent process session 与单调 execution revision：活动任务只换连接，进程重启后缺失的非终态任务原子增加 revision 并从已有检查点恢复；“Agent 断开连接”属于基础设施中断，可以在宽限期后继续恢复。用户手动取消不恢复；如果 Agent 仍把它报告为活动扫描，服务端会在 welcome 后重新发送停止命令，直到客户端任务真正退出。待发终态先补传，旧 revision 的 409 报告记录结构化身份后直接删除。复核已有有效最终结果但只缺 finish 时直接收敛为完成，否则只重排无有效结果的漏洞。客户端不新增恢复表、恢复行或完成历史，因此该机制不会扩大 outbox 的持久存储边界。
 - OpenCode 模型池仍周期上报累计 token、完成数、总任务数和当前运行/排队等小型快照；完成逻辑任务的 Session ID、成功/失败、错误分类及 Session 尝试轨迹改为按 `(Agent, scan_id, task_id, revision)` 单点上报。服务端通过 WebSocket capability 协商后才启用新模式；旧服务端仍接收旧版累计历史快照，支持先升级服务端再滚动升级 Agent。
+- OpenCode 任务历史单点报告使用 `scan:{scan_id}:opencode-task:{task_id}` 独立 outbox 队列，同一任务各版本仍按入队顺序发送；其失败或退避不会挡住原扫描业务队列的漏洞、产物和结束报告。Agent 启动时自动迁移已有任务报告的队列标识，保留载荷、去重身份和重试记录。未协商增量报告能力时暂停这些历史项；新连接确认能力后重新启用此前因 404 阻塞的历史项，并使用最新连接 ID 回传原会话的报告。
 - 候选审计和威胁审计的“排队中”只来自真实模型租约等待队列，“运行中”只在取得租约后产生；OpenCode 轻量级威胁分析会先登记一个扫描级“计划中”逻辑任务，首次 Lease 消费同一身份，因此页面连续显示计划、排队、运行和终态而不会重复计数。扫描级快照在首次租约前也包含已配置模型的零值容量行。模型池 POST 会检查非 2xx，失败时每 2 秒以内重试最新快照；首次失败及持续失败的限频采样会写 Agent 日志，恢复后记录恢复日志；若服务端以 413 拒绝，Agent 去除 Prompt 和非身份明细、标记 `details_truncated` 后重发。
 - 用户停止扫描时，服务端先持久化取消意图，再通过带 request ID 的命令等待 Agent 有界确认；Agent 按扫描执行身份取消精确归属的 Task Agent 记录和 OpenCode Session，不终止共享 Serve。未收到确认时 API 返回 `agent_stop_state="pending"`，页面明确提示并依赖上述重连对账继续补发；迟到的同 revision 完成报告不能覆盖已持久化的“用户手动停止”。
 - 恢复状态通过短期 HTTP manifest 获取，不再把大列表塞进 WebSocket 控制帧。
@@ -73,6 +74,22 @@ export OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT=120
 仓库的 `docker-compose.yml` 声明了 PostgreSQL 16、健康检查和 4 Worker 默认值，但当前 Dockerfile 未打包完整后端运行及 Agent 分发资源，不能直接视为可用的一键部署，见[现有 Docker 文件的限制](getting-started.md#现有-docker-文件的限制)。使用该编排自建部署时，应在 `.env` 或密钥系统中同时覆盖 `OPENDEEPHOLE_POSTGRES_PASSWORD` 和与其一致的 `OPENDEEPHOLE_DATABASE_URL`；URL 中的密码需要正确编码 URI 保留字符。不要把密码提交到仓库。
 
 多 Worker 还必须在所有进程读取的 `config.yaml` 中配置相同的 `auth.secret_key`。留空会由每个进程分别生成随机签名密钥，无法保证跨 Worker 验证同一个登录 Token。
+
+## 可选资源与任务回传的 404
+
+`GET /api/scan/{scan_id}/threat-analysis` 和 `GET /api/v2/scans/{scan_id}/fp-review/overview` 在尚无对应结果时默认返回 404。页面显式传入 `allow_missing=true` 后，只有扫描存在且权限检查通过时才返回 `200/null`，已有结果和其他错误保持原语义。公开及分享入口支持同一参数。页面保留 SSE 和 30 秒兜底刷新，等待产物或复核任务稍后生成。
+
+`POST /api/agent/{agent_id}/opencode-task-report` 的 404 需要按实际响应正文定位，不能把 URL 相邻的页面扫描 ID 当作报告的扫描 ID。后端 `OPENCODE_TASK_REPORT_REJECTED` 与 Agent `OPENCODE_TASK_REPORT` 日志包含 Agent、`scope_id`、任务 ID、版本及原会话 ID；Agent 只在首次失败、原因变化及成功恢复时记录状态变化。
+
+| 响应或日志原因 | 核对内容 |
+| --- | --- |
+| `agent_not_found` | Agent 是否已重连、发送使用的连接 ID、后端共享 Agent 会话是否可见 |
+| `scan_not_found` | 请求正文的 `scope_id`、实际扫描归属、各后端副本连接的数据库是否一致 |
+| 普通 `Not Found` / `route_not_found` | 所有后端副本是否包含该路由、WebSocket 协商能力和 HTTP 路由的部署版本是否一致 |
+
+任务报告的 404 保留在本地并指数退避重试，间隔上限 60 秒；修复部署或重连后继续回传。未知扫描不会自动创建或被确认成功，只有服务端确认的删除标记可返回删除回执。不要通过清空 outbox 消除错误日志，否则会丢失待发送证据。
+
+升级顺序为全部后端副本、前端、Agent；无需服务端数据库迁移。验收时确认页面正常空状态不再产生轮询 404，任务历史回传失败时产物与扫描终态仍可同步，恢复后待发送历史完成回传且不重复计数。
 
 ## PostgreSQL 重启恢复
 

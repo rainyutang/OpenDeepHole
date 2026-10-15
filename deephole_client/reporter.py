@@ -16,7 +16,13 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
-from deephole_client.report_outbox import PendingReport, ReportOutbox
+from deephole_client.report_outbox import (
+    OPENCODE_TASK_REPORT_PATH,
+    TASK_REPORT_CAPABILITY_WAIT,
+    PendingReport,
+    ReportOutbox,
+    task_report_stream,
+)
 
 from backend.models import (
     Candidate,
@@ -209,6 +215,8 @@ class Reporter:
             _OutboxDeliveryReceipt,
         ] = {}
         self._model_pool_sink_bound = False
+        self._resume_task_reports = False
+        self._task_report_failures: dict[str, str] = {}
         self._static_progress_warning_at: dict[str, float] = {}
         self._batch_lock = asyncio.Lock()
         self._event_buffers: dict[str, list[ScanEvent]] = {}
@@ -461,6 +469,7 @@ class Reporter:
             str(key): value is True
             for key, value in capabilities.items()
         } if isinstance(capabilities, dict) else {}
+        self._resume_task_reports = bool(self.capabilities.get("incremental_opencode_task_reports"))
         if self.capabilities.get("incremental_opencode_task_reports"):
             self.bind_model_pool_reporting()
         else:
@@ -502,11 +511,11 @@ class Reporter:
             raise ValueError("OpenCode task report requires scope_id and task_id")
         self._outbox.enqueue(
             target_url=self.server_url,
-            stream_key=f"scan:{scope_id}",
+            stream_key=task_report_stream(scope_id, task_id),
             dedupe_key=(
                 f"scan:{scope_id}:opencode-task:{task_id}:revision:{revision}"
             ),
-            path="/api/agent/{agent_id}/opencode-task-report",
+            path=OPENCODE_TASK_REPORT_PATH,
             payload={
                 "agent_session_id": self.agent_session_id,
                 "scope_id": scope_id,
@@ -776,12 +785,20 @@ class Reporter:
     ) -> httpx.Response | None:
         if self._outbox is None:
             return None
+        is_task_report = report.path == OPENCODE_TASK_REPORT_PATH
+        if is_task_report and not self.capabilities.get("incremental_opencode_task_reports"):
+            await asyncio.to_thread(
+                self._outbox.defer, report, TASK_REPORT_CAPABILITY_WAIT, retry_after=60.0,
+            )
+            self._resolve_outbox_stream_waiters(report.stream_key)
+            return None
         if "{agent_id}" in report.path and not self.agent_id:
             await asyncio.to_thread(self._outbox.defer, report, "Agent is not connected", retry_after=2.0)
             self._resolve_outbox_stream_waiters(report.stream_key)
             return None
 
-        path = report.path.replace("{agent_id}", self.agent_id)
+        delivery_agent_id = self.agent_id
+        path = report.path.replace("{agent_id}", delivery_agent_id)
         try:
             response = await self._client.post(
                 f"{report.target_url}{path}",
@@ -792,6 +809,9 @@ class Reporter:
             if 200 <= response.status_code < 300:
                 acknowledged = await asyncio.to_thread(self._outbox.acknowledge, report)
                 if acknowledged:
+                    previous_failure = self._task_report_failures.pop(report.dedupe_key, None)
+                    if is_task_report and (previous_failure is not None or report.attempts):
+                        self._log_task_report(report, "recovered", delivery_agent_id, level=logging.INFO)
                     await self._complete_outbox_delivery(report, response)
                 else:
                     self._discard_outbox_delivery(report)
@@ -811,11 +831,22 @@ class Reporter:
                     _response_context(response),
                 )
                 await asyncio.to_thread(self._outbox.acknowledge, report)
+                self._task_report_failures.pop(report.dedupe_key, None)
                 self._discard_outbox_delivery(report, response)
                 self._wake_outbox()
                 return response
             error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
-            if self._retryable_response(response):
+            if is_task_report:
+                detail = _response_detail(response)
+                reason = str(detail.get("code") or "") if isinstance(detail, dict) else ""
+                if response.status_code == 404 and isinstance(detail, str):
+                    reason = {
+                        "agent not found": "agent_not_found",
+                        "scan not found": "scan_not_found",
+                        "not found": "route_not_found",
+                    }.get(detail.strip().lower(), "")
+                self._log_task_report_failure(report, reason or f"http_{response.status_code}", delivery_agent_id)
+            if self._retryable_response(response) or (is_task_report and response.status_code == 404):
                 delay = min(60.0, 2.0 ** min(report.attempts, 6))
                 await asyncio.to_thread(self._outbox.defer, report, error, retry_after=delay)
                 self._resolve_outbox_stream_waiters(report.stream_key)
@@ -830,6 +861,8 @@ class Reporter:
                 )
             return None
         except Exception as exc:
+            if is_task_report:
+                self._log_task_report_failure(report, type(exc).__name__, delivery_agent_id)
             delay = min(60.0, 2.0 ** min(report.attempts, 6))
             await asyncio.to_thread(
                 self._outbox.defer,
@@ -840,11 +873,33 @@ class Reporter:
             self._resolve_outbox_stream_waiters(report.stream_key)
             return None
 
+    def _log_task_report(self, report: PendingReport, reason: str, agent_id: str, *, level: int) -> None:
+        logger.log(
+            level,
+            "OPENCODE_TASK_REPORT reason=%s agent_id=%s scope_id=%s task_id=%s "
+            "revision=%s agent_session_id=%s attempts=%s",
+            reason, agent_id, report.payload.get("scope_id", ""),
+            report.payload.get("task_id", ""), report.payload.get("revision", 1),
+            report.payload.get("agent_session_id", ""), report.attempts,
+        )
+
+    def _log_task_report_failure(self, report: PendingReport, reason: str, agent_id: str) -> None:
+        if self._task_report_failures.get(report.dedupe_key) != reason:
+            self._task_report_failures[report.dedupe_key] = reason
+            self._log_task_report(report, reason, agent_id, level=logging.WARNING)
+
     async def _run_outbox_worker(self) -> None:
         assert self._outbox is not None
         while not self._outbox_stop.is_set():
             try:
                 async with self._outbox_claim_lock:
+                    if self._resume_task_reports:
+                        self._resume_task_reports = False
+                        try:
+                            await asyncio.to_thread(self._outbox.resume_task_reports, self.server_url)
+                        except BaseException:
+                            self._resume_task_reports = True
+                            raise
                     ready = await self._claim_outbox()
                 if ready:
                     await asyncio.gather(*(

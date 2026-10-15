@@ -220,10 +220,10 @@ async function refreshFullState(
   if (!isCurrent()) return;
   try {
     const job = await getFpReviewOverview(scanId);
-    if (!isCurrent() || job.scan_id !== scanId) return;
-    setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
+    if (!isCurrent()) return;
+    if (job) setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
   } catch {
-    // 404 = no review yet
+    // Retain loaded results on transient failures.
   }
   if (!isCurrent()) return;
   try {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
+import { AxiosError } from "axios";
 import { createElement } from "react";
 import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
@@ -7,6 +8,7 @@ import { createServer } from "vite";
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
+const threatApi = await server.ssrLoadModule("/src/features/threatAnalysis/api.ts");
 const { default: ScanStatus } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const originalAdapter = client.api.defaults.adapter;
@@ -100,6 +102,9 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
   const calls = [];
   client.api.defaults.adapter = async (config) => {
     calls.push(config);
+    if (config.url.endsWith("/threat-analysis") || config.url.endsWith("/fp-review/overview")) {
+      assert.equal(config.params.allow_missing, true);
+    }
     const overridden = await intercept(config);
     let data = overridden;
     if (data === undefined) {
@@ -112,7 +117,6 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
         if (config.url.endsWith("/fp-review/overview")) data = { review_id: "review-" + value.scanId, scan_id: value.scanId, status: "complete", total: 0, processed: 0, results: [] };
         else if (config.url.endsWith("/overview")) data = structuredClone(value.overview);
         else if (config.url.endsWith("/threat-analysis")) {
-          if (value.analysis === null) throw Object.assign(new Error("Not found"), { response: { status: 404 } });
           data = structuredClone(value.analysis);
         } else if (config.url.endsWith("/threat-coverage")) data = structuredClone(value.coverage ?? { inventory: null, analysis_ready: false, modules: [], targets: [], unmapped: [] });
         else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
@@ -143,6 +147,59 @@ async function notify(...events) {
 }
 async function poll() { await act(async () => { [...polls.values()].forEach((callback) => callback()); }); }
 const threatNotice = ["resource_changed", { resource: "threat-analysis", index: null }];
+
+for (const kind of ["authenticated", "integration", "shared"]) {
+  test(`optional result APIs distinguish absence from real failures (${kind})`, async () => {
+    if (kind !== "authenticated") client.setPublicScanAccess({ scanId: "s", kind, token: "public-token" });
+    const calls = [];
+    let failure;
+    client.api.defaults.adapter = async (config) => {
+      calls.push(config);
+      assert.equal(config.params.allow_missing, true);
+      if (kind !== "authenticated") {
+        assert.equal(config.params.token, "public-token");
+        assert.ok(config.url.startsWith(`/api/${kind === "shared" ? "shared" : "public"}/scans/s/`));
+      }
+      if (failure) {
+        throw new AxiosError("Request failed", "ERR_BAD_REQUEST", config, null, {
+          config, status: failure.status, data: { detail: failure.detail }, headers: {}, statusText: "Error",
+        });
+      }
+      return { config, data: null, status: 200, statusText: "OK", headers: {} };
+    };
+    for (const [load, absentDetail] of [
+      [() => client.getFpReview("s"), "No FP review found"],
+      [() => threatApi.getScanThreatAnalysis("s"), "No threat analysis found for this scan"],
+    ]) {
+      failure = undefined;
+      assert.equal(await load(), null);
+      failure = { status: 404, detail: absentDetail };
+      assert.equal(await load(), null);
+      for (const unexpected of [
+        { status: 404, detail: "Scan not found" },
+        { status: 404, detail: "Not Found" },
+        { status: 500, detail: absentDetail },
+        { status: 403, detail: "Access denied" },
+      ]) {
+        failure = unexpected;
+        await assert.rejects(load, (error) => error.response.status === unexpected.status);
+      }
+    }
+    assert.ok(calls.every((call) => !call.url.endsWith("/results")));
+  });
+}
+
+test("an empty refresh retains visible artifacts and still loads a later result", async () => {
+  const value = fixture();
+  installApi([value]);
+  const root = await mount();
+  value.analysis = null;
+  await notify(threatNotice);
+  assetCount(root, 2);
+  value.analysis = analysis(4);
+  await poll();
+  assetCount(root, 4);
+});
 
 test("resuming a historical scan shows existing annotations on inventory arrival alone", async () => {
   const value = fixture();

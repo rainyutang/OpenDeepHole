@@ -1017,7 +1017,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       .catch(() => {});
     getFpReview(scanId)
       .then((job) => {
-        if (!cancelled && job.scan_id === scanId) setFpReview(job);
+        if (!cancelled && job?.scan_id === scanId) setFpReview(job);
       })
       .catch(() => {})
       .finally(() => {
@@ -1660,7 +1660,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     try {
       await stopFpReview(scanId);
       const job = await getFpReview(scanId);
-      setFpReview(job);
+      if (job) setFpReview(job);
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail

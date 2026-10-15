@@ -2720,24 +2720,32 @@ async def report_agent_opencode_task(
     body: OpenCodeTaskReport,
 ) -> dict:
     """Persist one terminal logical task without resending prior Session history."""
+    def not_found(code: str) -> HTTPException:
+        detail = {
+            "code": code,
+            "endpoint": "opencode-task-report",
+            "agent_id": agent_id,
+            "scan_id": body.scope_id,
+            "scope_id": body.scope_id,
+            "task_id": body.task_id,
+            "revision": body.revision,
+            "agent_session_id": body.agent_session_id,
+        }
+        logger.warning(
+            "OPENCODE_TASK_REPORT_REJECTED code=%s agent_id=%s scope_id=%s "
+            "task_id=%s revision=%s agent_session_id=%s",
+            code, agent_id, body.scope_id, body.task_id, body.revision, body.agent_session_id,
+        )
+        return HTTPException(status_code=404, detail=detail)
+
     resolved = await resolve_agent_id_connection_async(agent_id)
     agent = resolved[1] if resolved is not None else None
     if agent is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "agent_not_found", "agent_id": agent_id},
-        )
+        raise not_found("agent_not_found")
     store = get_scan_store()
     loaded = await run_store_call(store, "get_scan_identity", body.scope_id)
     if loaded is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "scan_not_found",
-                "scan_id": body.scope_id,
-                "endpoint": "opencode-task-report",
-            },
-        )
+        raise not_found("scan_not_found")
     try:
         inserted = await run_store_call(
             store,

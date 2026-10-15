@@ -52,8 +52,10 @@ async def get_public_detail_item(scan_id: str, resource: str, index: int, token:
 
 
 @router.get("/api/public/scans/{scan_id}/fp-review/overview")
-async def get_public_fp_overview(scan_id: str, token: str = Query(...)):
-    return await scan_api.get_fp_review_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+async def get_public_fp_overview(scan_id: str, token: str = Query(...), allow_missing: bool = False):
+    return await scan_api.get_fp_review_overview_v2(
+        scan_id, await _public_user_for_scan_async(scan_id, token), allow_missing=allow_missing,
+    )
 
 
 @router.get("/api/public/scans/{scan_id}/fp-review/results")
@@ -649,12 +651,13 @@ async def get_public_threat_audit_results(
     return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
 
 
-@router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict)
+@router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict | None)
 async def get_public_scan_threat_analysis(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
-) -> dict:
-    return await scan_api.get_scan_threat_analysis(scan_id, current_user)
+    allow_missing: bool = False,
+) -> dict | None:
+    return await scan_api.get_scan_threat_analysis(scan_id, current_user, allow_missing=allow_missing)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-coverage", response_model=dict)

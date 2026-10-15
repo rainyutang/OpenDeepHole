@@ -13,6 +13,12 @@ from typing import Any
 
 
 DEFAULT_OUTBOX_PATH = Path.home() / ".opendeephole" / "report_outbox.sqlite3"
+OPENCODE_TASK_REPORT_PATH = "/api/agent/{agent_id}/opencode-task-report"
+TASK_REPORT_CAPABILITY_WAIT = "Waiting for incremental OpenCode task report capability"
+
+
+def task_report_stream(scope_id: str, task_id: str) -> str:
+    return f"scan:{scope_id}:opencode-task:{task_id}"
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,7 @@ class ReportOutbox:
                 );
                 """
             )
+            self._migrate_task_report_streams_locked()
             self._conn.commit()
         try:
             self.path.chmod(0o600)
@@ -89,6 +96,43 @@ class ReportOutbox:
     @staticmethod
     def _json(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def _migrate_task_report_streams_locked(self) -> None:
+        """Isolate old history rows before any delivery worker can claim them."""
+        rows = self._conn.execute(
+            "SELECT id, stream_key, payload_json FROM pending_reports WHERE path = ?",
+            (OPENCODE_TASK_REPORT_PATH,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            scope_id = str(payload.get("scope_id") or "").strip()
+            task_id = str(payload.get("task_id") or "").strip()
+            if not scope_id or not task_id:
+                continue
+            stream = task_report_stream(scope_id, task_id)
+            if row["stream_key"] != stream:
+                self._conn.execute(
+                    "UPDATE pending_reports SET stream_key = ? WHERE id = ?",
+                    (stream, row["id"]),
+                )
+
+    def resume_task_reports(self, target_url: str) -> int:
+        """A new capable connection can retry old 404s and capability waits."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE pending_reports SET blocked = 0, next_attempt_at = 0
+                   WHERE target_url = ? AND path = ?
+                     AND (last_error LIKE 'HTTP 404:%'
+                          OR (blocked = 0 AND last_error IN (?, 'Agent is not connected')))""",
+                (target_url.rstrip("/"), OPENCODE_TASK_REPORT_PATH, TASK_REPORT_CAPABILITY_WAIT),
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     def next_sequence(self, scope: str) -> int:
         """Persistent sequence allocation; gaps are harmless, reuse is not."""

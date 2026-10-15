@@ -122,8 +122,8 @@ async def validations(scan_id: str, user: SharedUser, after: int = Query(-1, ge=
 
 
 @shared.get("/fp-review/overview")
-async def fp_overview(scan_id: str, user: SharedUser):
-    return await scan_api.get_fp_review_overview_v2(scan_id, user)
+async def fp_overview(scan_id: str, user: SharedUser, allow_missing: bool = False):
+    return await scan_api.get_fp_review_overview_v2(scan_id, user, allow_missing=allow_missing)
 
 
 @shared.get("/fp-review/results")
@@ -159,8 +159,8 @@ async def threat_results(scan_id: str, user: SharedUser, task_ids: list[str] = Q
 
 
 @shared.get("/threat-analysis")
-async def threat_analysis(scan_id: str, user: SharedUser):
-    return await scan_api.get_scan_threat_analysis(scan_id, user)
+async def threat_analysis(scan_id: str, user: SharedUser, allow_missing: bool = False):
+    return await scan_api.get_scan_threat_analysis(scan_id, user, allow_missing=allow_missing)
 
 
 @shared.get("/threat-coverage")

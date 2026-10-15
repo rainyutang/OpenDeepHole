@@ -4691,11 +4691,17 @@ async def get_fp_review(
     )
 
 
-@router.get("/api/v2/scans/{scan_id}/fp-review/overview", response_model=FpReviewJob)
-async def get_fp_review_overview_v2(scan_id: str, current_user: User = Depends(get_current_user)):
+@router.get("/api/v2/scans/{scan_id}/fp-review/overview", response_model=FpReviewJob | None)
+async def get_fp_review_overview_v2(
+    scan_id: str, current_user: User = Depends(get_current_user), allow_missing: bool = False,
+):
     await _check_scan_owner(scan_id, current_user)
-    job = await run_store_call(get_scan_store(), "get_fp_review_overview", scan_id)
-    if job is None:
+    store = get_scan_store()
+    job = await run_store_call(store, "get_fp_review_overview", scan_id)
+    if (job is None and allow_missing
+            and await run_store_call(store, "get_scan_identity", scan_id) is None):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if job is None and not allow_missing:
         raise HTTPException(status_code=404, detail="No FP review found")
     return job
 
@@ -4726,19 +4732,24 @@ async def get_scan_git_history(
     )
 
 
-@router.get("/api/scan/{scan_id}/threat-analysis", response_model=dict)
+@router.get("/api/scan/{scan_id}/threat-analysis", response_model=dict | None)
 async def get_scan_threat_analysis(
     scan_id: str,
     current_user: User = Depends(get_current_user),
-) -> dict:
+    allow_missing: bool = False,
+) -> dict | None:
     """Return the opaque threat-analysis artifact bundle for a scan."""
     await _check_scan_owner(scan_id, current_user)
+    store = get_scan_store()
     analysis = await run_store_call(
-        get_scan_store(),
+        store,
         "get_threat_analysis",
         scan_id,
     )
-    if analysis is None:
+    if (analysis is None and allow_missing
+            and await run_store_call(store, "get_scan_identity", scan_id) is None):
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if analysis is None and not allow_missing:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
     return analysis
 

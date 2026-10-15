@@ -1,4 +1,4 @@
-import { api, isPublicScan, publicParams, publicScanPath } from "../../api/client";
+import { api, isMissingOptionalResult, isPublicScan, publicParams, publicScanPath } from "../../api/client";
 import type { ThreatAnalysis } from "../../types";
 import type { ThreatCoverage } from "./coverage";
 
@@ -10,14 +10,13 @@ export async function getThreatCoverage(scanId: string, signal?: AbortSignal): P
   return data;
 }
 
-export async function getScanThreatAnalysis(scanId: string, signal?: AbortSignal): Promise<ThreatAnalysis> {
-  if (isPublicScan(scanId)) {
-    const { data } = await api.get<ThreatAnalysis>(
-      publicScanPath("/threat-analysis"),
-      { params: publicParams(), signal },
-    );
-    return data;
-  }
-  const { data } = await api.get<ThreatAnalysis>(`/api/scan/${scanId}/threat-analysis`, { signal });
+export async function getScanThreatAnalysis(scanId: string, signal?: AbortSignal): Promise<ThreatAnalysis | null> {
+  const { data } = await api.get<ThreatAnalysis | null>(
+    isPublicScan(scanId) ? publicScanPath("/threat-analysis") : `/api/scan/${scanId}/threat-analysis`,
+    { params: { ...(isPublicScan(scanId) ? publicParams() : {}), allow_missing: true }, signal },
+  ).catch((error) => {
+    if (isMissingOptionalResult(error, ["No threat analysis found for this scan"])) return { data: null };
+    throw error;
+  });
   return data;
 }

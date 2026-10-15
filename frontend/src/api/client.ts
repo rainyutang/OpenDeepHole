@@ -1069,8 +1069,20 @@ export async function stopFpReview(scanId: string): Promise<{ ok: boolean; revie
   return data;
 }
 
-export async function getFpReviewOverview(scanId: string): Promise<FpReviewJob> {
-  const { data } = await api.get(scanV2Path(scanId, "/fp-review/overview"), { params: isPublicScan(scanId) ? publicParams() : undefined });
+/** Older servers still return explicit absence errors for optional scan results. */
+export function isMissingOptionalResult(error: unknown, details: readonly string[]): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 404
+    && details.includes(error.response.data?.detail);
+}
+
+export async function getFpReviewOverview(scanId: string): Promise<FpReviewJob | null> {
+  const { data } = await api.get(scanV2Path(scanId, "/fp-review/overview"), {
+    params: { ...(isPublicScan(scanId) ? publicParams() : {}), allow_missing: true },
+  }).catch((error) => {
+    if (isMissingOptionalResult(error, ["No FP review found", "No FP review found for this scan"])) return { data: null };
+    throw error;
+  });
+  if (data === null) return null;
   const job = normalizeFpReviewJob(data);
   if (!job || job.scan_id !== scanId) throw new Error("去误报状态响应无效");
   return job;
@@ -1110,8 +1122,10 @@ export async function getFpReviewResultsPage(scanId: string, after = -1, limit =
   };
 }
 
-export async function getFpReview(scanId: string): Promise<FpReviewJob> {
-  const [job, page] = await Promise.all([getFpReviewOverview(scanId), getFpReviewResultsPage(scanId)]);
+export async function getFpReview(scanId: string): Promise<FpReviewJob | null> {
+  const job = await getFpReviewOverview(scanId);
+  if (!job) return null;
+  const page = await getFpReviewResultsPage(scanId);
   return { ...job, results: page.items, next_cursor: page.next_cursor, result_vulnerabilities: page.vulnerabilities };
 }
 

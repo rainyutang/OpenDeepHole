@@ -169,9 +169,8 @@ test("a shared scan loads a later FP review without replacing the link or stream
   const calls = installApi("auditing", (config) => {
     if (reviewCreated) return;
     if (config.url.endsWith("/fp-review/overview")) {
-      throw new AxiosError("Not Found", "ERR_BAD_REQUEST", config, null, {
-        ...response(config, { detail: "No FP review found" }), status: 404,
-      });
+      assert.equal(config.params.allow_missing, true);
+      return null;
     }
     if (config.url.endsWith("/fp-review/results")) return { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
   });

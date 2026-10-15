@@ -82,7 +82,7 @@ export function useThreatAnalysisResult(
                 : previous);
             }
           } catch {
-            // 404 means no artifact yet. Keep existing results on all failures;
+            // Empty results and failures leave any existing artifacts intact;
             // the 30-second fallback can retry without reloading every resource.
           }
         } while (isCurrent() && state.rerun && !document.hidden);
