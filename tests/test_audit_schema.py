@@ -47,8 +47,7 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
 
 EXPECTED_FIELD_INSTRUCTIONS = """\
 ## description
-简明说明漏洞是什么（漏洞函数、漏洞类型、漏洞场景）、谁可以触发、会造成什么影响。
-需要在同一报告中汇总多个问题时，按问题编号分点描述，保留各问题的位置、触发方和影响。
+一句话说明漏洞是什么（漏洞函数、漏洞类型、漏洞场景）、谁可以触发、会造成什么影响。
 
 ## attack_entry
 描述这个漏洞的真实攻击入口：

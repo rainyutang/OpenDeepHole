@@ -56,6 +56,8 @@ def test_catalog_packaging_and_installed_skill_do_not_expose_catalog(tmp_path):
     assert [path.name for path in installed.iterdir()] == ["SKILL.md"]
     content = (installed / "SKILL.md").read_text()
     assert "审计 C/C++ 代码是否存在命令注入问题" in content
+    assert "按问题编号分点描述，保留各问题的位置、触发方和影响" in content
+    assert "不限于一句话" in content
     assert "已定位" not in content and "sink.json" not in content
     project = tmp_path / "project"
     project.mkdir()
@@ -134,8 +136,8 @@ def test_one_model_call_and_one_report_preserve_multiple_problems(tmp_path):
     assert run_task.await_count == 1
     assert run_task.await_args.kwargs["output_schema"] is VULNERABILITY_ITEM_SCHEMA
     prompt = run_task.await_args.kwargs["prompt"]
-    assert "按问题编号分点描述" in prompt
-    assert "一句话说明" not in prompt and "sink.json" not in prompt
+    assert "按问题编号分点描述" not in prompt
+    assert "一句话说明" in prompt and "sink.json" not in prompt
     assert all(match["api"] in prompt for match in candidate["metadata"]["matches"])
     assert len(result["vulnerabilities"]) == 1
     assert result["vulnerabilities"][0]["description"] == report["description"]
