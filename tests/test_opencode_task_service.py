@@ -2862,6 +2862,116 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("writes", "wrong_path", "reply", "expected_sessions", "expected_status"),
+    [
+        (("[]",), False, "审计完成", [None], "success"),
+        ((None, "[]"), False, "[]", [None, "ses_artifact_1"], "success"),
+        (("{}", "{}", "[]"), False, "[]", [None, "ses_artifact_1", None], "success"),
+        ((None,) * 4, False, "[]", [None, "ses_artifact_1", None, "ses_artifact_3"], "error"),
+        (("[]",) * 4, True, "[]", [None, "ses_artifact_1", None, "ses_artifact_3"], "error"),
+    ],
+)
+def test_threat_pattern_audit_queue_outcome_requires_the_designated_file(
+    tmp_path: Path, writes, wrong_path, reply, expected_sessions, expected_status,
+) -> None:
+    from deephole_client.vulnerability_mining.engines.threat_pattern_audit import engine
+
+    async def run():
+        service = OpenCodeTaskService()
+        work_dir = tmp_path / "work"
+        tree = tmp_path / "attack-tree.json"
+        modules = tmp_path / "modules.json"
+        tree.write_text("{}", encoding="utf-8")
+        modules.write_text("[]", encoding="utf-8")
+        target = {
+            "module_name": "auth", "code_paths": ["src/auth"],
+            "pattern_id": "AUTH-1", "pattern_name": "authentication bypass",
+            "pattern_description": "untrusted input bypasses authorization",
+        }
+        task_id = engine._task_id("scan-artifact", target)
+        result_path = work_dir / "task-results" / f"{task_id}.json"
+        calls = []
+
+        async def run_prompt(**kwargs):
+            calls.append(kwargs)
+            session_id = kwargs["session_id"] or f"ses_artifact_{len(calls)}"
+            if kwargs["session_id"] is None:
+                await kwargs["on_session_id"](session_id)
+            assert kwargs["required_bash_commands"] == ()
+            assert kwargs["bash_command_match_mode"] == "bound_python_script"
+            assert len(kwargs["allowed_bash_commands"]) == 1
+            payload = writes[len(calls) - 1]
+            if payload is not None:
+                path = result_path.with_name("wrong-task.json") if wrong_path else result_path
+                path.write_text(payload, encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id=f"write-{len(calls)}", path=str(path), created=True,
+                ))
+            # A valid JSON reply must never bypass the required file check.
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg_{len(calls)}",
+                lines=[reply], text=reply, model="provider/model-low",
+            )
+
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path), "provider/model-low", _source(),
+        ))
+        config = _config(max_retries=0)
+        config.vulnerability_mining = SimpleNamespace(max_retries=1)
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), runtime_config=config)
+        report = AsyncMock()
+        with (
+            patches[0], patches[1], patches[2] as release_mock,
+            patches[3], patches[4], patches[5],
+            patch.object(engine, "_build_targets", return_value=[target]),
+            patch("task_agent.task_service._get_opencode_task_service", return_value=service),
+        ):
+            result = await engine.run(
+                engine_id="threat_pattern_audit", scan_id="scan-artifact",
+                project_path=tmp_path, code_scan_path=tmp_path, work_dir=work_dir,
+                config=config, cancel_event=threading.Event(),
+                report_vulnerabilities=report,
+                threat_analysis_result={
+                    "result": True, "attack_tree_path": str(tree),
+                    "high_risk_modules_path": str(modules),
+                },
+            )
+            # Terminal result and pool release run on the service worker.
+            await asyncio.gather(*(record.worker for record in service._records.values()))
+
+        assert result["status"] == expected_status
+        assert [call["session_id"] for call in calls] == expected_sessions
+        report.assert_not_awaited()
+        terminal_releases = [
+            call.kwargs for call in release_mock.await_args_list
+            if call.kwargs["record_completion"]
+        ]
+        assert len(terminal_releases) == 1
+        terminal = terminal_releases[0]
+        assert terminal["outcome"] == ("success" if expected_status == "success" else "failure")
+        events = terminal["context_updates"]["session_events"]
+        assert all(
+            event["failure_kind"] == "post_session_validation_failed"
+            for event in events if event["outcome"] == "failure"
+        )
+        if len(calls) > 1:
+            assert str(result_path) in calls[1]["prompt"]
+            assert "产物纠正 1/1" in calls[1]["prompt"]
+        marker = work_dir / ".completed-task-results" / f"{task_id}.json"
+        if expected_status == "success":
+            assert result_path.read_text(encoding="utf-8") == "[]"
+            assert marker.is_file()
+        else:
+            assert not result_path.exists()
+            assert not marker.exists()
+            assert terminal["context_updates"]["failure_kind"] == "post_session_validation_failed"
+            assert str(result_path) in terminal["context_updates"]["failure_reason"]
+            assert str(result_path) in result["error_message"]
+
+    asyncio.run(run())
+
+
 def test_exhausted_post_session_validation_uses_existing_fresh_retry(
     tmp_path: Path,
 ) -> None:

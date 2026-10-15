@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import sys
 import threading
-from pathlib import Path
+import time
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -70,6 +72,14 @@ def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return attack_tree_path, modules_path
+
+
+async def _write_task_result(work_dir: Path, task: dict, value: list) -> Path:
+    path = work_dir / "task-results" / f"{task['task_name']}.json"
+    assert path.parent.is_dir()
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
+    assert await task["post_session_validator"]() is None
+    return path
 
 
 def test_prompt_is_concentrated_and_schema_carries_field_guidance() -> None:
@@ -156,7 +166,8 @@ def test_targets_are_deduplicated_by_module_and_pattern(tmp_path: Path) -> None:
     }]
 
 
-def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reply", ["审计完成", "[]"])
+def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, reply: str) -> None:
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
@@ -182,11 +193,12 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
 
     async def fake_run_opencode_task(**kwargs):
         captured.update(kwargs)
+        await _write_task_result(work_dir, kwargs, [_finding()])
         return OpenCodeResult(
             session_id="session-pattern",
             status="success",
-            text=json.dumps([_finding()], ensure_ascii=False),
-            structured=[_finding()],
+            text=reply,
+            structured=None,
             model="provider/model",
             output_source={
                 "backend": "api",
@@ -240,7 +252,11 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
         "total_candidates": 1,
         "processed_candidates": 1,
     }
-    assert captured["output_schema"] is THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA
+    assert captured["output_schema"] is None
+    assert captured["post_session_validation_retry_count"] == 1
+    assert captured["bash_command_match_mode"] == "bound_python_script"
+    assert captured["allowed_bash_commands"][0] in captured["prompt"]
+    assert "required_bash_commands" not in captured
     assert "认证模块" in captured["prompt"]
     assert "会话伪造" in captured["prompt"]
     assert len(reported) == 1
@@ -257,6 +273,9 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
     result_paths = list((work_dir / "task-results").glob("*.json"))
     assert schema_path.is_file()
     assert len(result_paths) == 1
+    assert result_paths[0].read_text(encoding="utf-8") == (
+        json.dumps([_finding()], ensure_ascii=False, indent=4) + "\n"
+    )
     completion_markers = list(
         (work_dir / ".completed-task-results").glob("*.json")
     )
@@ -295,11 +314,12 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
 
     async def fake_run_opencode_task(**kwargs):
         captured.update(kwargs)
+        await _write_task_result(work_dir, kwargs, [])
         return OpenCodeResult(
             session_id="session-empty",
             status="success",
-            text="[]",
-            structured=[],
+            text="审计完成，未发现漏洞",
+            structured=None,
             model="provider/model",
             output_source={},
         )
@@ -358,13 +378,14 @@ def test_session_success_at_stop_boundary_is_reused_on_resume(
     attack_tree_path, modules_path = _artifacts(tmp_path)
     stop_event = threading.Event()
 
-    async def complete_while_stopping(**_kwargs):
+    async def complete_while_stopping(**task):
+        await _write_task_result(work_dir, task, [])
         stop_event.set()
         return OpenCodeResult(
             session_id="session-finished-at-stop",
             status="success",
             text="[]",
-            structured=[],
+            structured=None,
             model="provider/model",
             output_source={"model": "provider/model"},
         )
@@ -488,11 +509,11 @@ def test_resume_reuses_completed_module_pattern_result_without_new_session(
 
 @pytest.mark.parametrize(
     ("stored_result", "has_completion_policy"),
-    [("not-json", False), ("[]", True)],
+    [(None, True), ("not-json", False), ("[]", True)],
 )
 def test_resume_reruns_untrusted_module_pattern_result_in_fresh_session(
     tmp_path: Path,
-    stored_result: str,
+    stored_result: str | None,
     has_completion_policy: bool,
 ) -> None:
     project_path = tmp_path / "project"
@@ -508,7 +529,8 @@ def test_resume_reruns_untrusted_module_pattern_result_in_fresh_session(
     task_id = engine._task_id("scan-corrupt", target)
     result_path = work_dir / "task-results" / f"{task_id}.json"
     result_path.parent.mkdir(parents=True)
-    result_path.write_text(stored_result, encoding="utf-8")
+    if stored_result is not None:
+        result_path.write_text(stored_result, encoding="utf-8")
     if has_completion_policy:
         (work_dir / "completion-policy.json").write_text(
             json.dumps({"completion_policy_version": 1}),
@@ -518,11 +540,13 @@ def test_resume_reruns_untrusted_module_pattern_result_in_fresh_session(
 
     async def run_task(**kwargs):
         calls.append(kwargs)
+        assert not result_path.exists()
+        await _write_task_result(work_dir, kwargs, [])
         return OpenCodeResult(
             session_id="session-fresh",
             status="success",
             text="[]",
-            structured=[],
+            structured=None,
             model="provider/model",
             output_source={},
         )
@@ -680,14 +704,15 @@ def test_cancelled_engine_counts_only_finished_audits(tmp_path: Path) -> None:
     events: list[dict] = []
     task_calls = 0
 
-    async def fake_run_opencode_task(**_kwargs):
+    async def fake_run_opencode_task(**task):
         nonlocal task_calls
         task_calls += 1
+        await _write_task_result(work_dir, task, [])
         return OpenCodeResult(
             session_id=f"session-{task_calls}",
             status="success",
             text="[]",
-            structured=[],
+            structured=None,
             model="provider/model",
             output_source={},
         )
@@ -738,6 +763,130 @@ def test_cancelled_engine_counts_only_finished_audits(tmp_path: Path) -> None:
         for event in events
         if event["message"] == "攻击模式审计进度"
     ] == [(0, 2), (1, 2)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "wrong_path"),
+    [
+        (None, False),
+        ("[]", True),
+        ("not-json", False),
+        ("{}", False),
+        ("[{}]", False),
+        (json.dumps([{**_finding(), "confirmed": True}]), False),
+        (json.dumps([_finding(), _finding()]), False),
+    ],
+)
+def test_required_artifact_validation_rejects_missing_or_invalid_results(
+    tmp_path: Path, payload: str | None, wrong_path: bool,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    work = tmp_path / "work"
+    tree, modules = _artifacts(tmp_path)
+    report = AsyncMock()
+    diagnostics = []
+
+    async def run_task(**task):
+        path = work / "task-results" / f"{task['task_name']}.json"
+        if payload is not None:
+            destination = path.with_name("wrong-task.json") if wrong_path else path
+            destination.write_text(payload, encoding="utf-8")
+        feedback = await task["post_session_validator"]()
+        assert feedback and str(path) in feedback
+        diagnostics.append(feedback)
+        return OpenCodeResult(
+            session_id="session-invalid", status="failure", text=feedback,
+            structured=None, model="provider/model", output_source={},
+        )
+
+    with patch.object(engine, "run_opencode_task", new=run_task):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit", scan_id="scan-invalid",
+            project_path=project, code_scan_path=project, work_dir=work,
+            config=SimpleNamespace(opencode_concurrency=1),
+            cancel_event=threading.Event(), report_vulnerabilities=report,
+            threat_analysis_result={
+                "result": True, "attack_tree_path": str(tree),
+                "high_risk_modules_path": str(modules),
+            },
+        ))
+
+    assert result["status"] == "error"
+    assert diagnostics[0] in result["error_message"]
+    assert not list((work / ".completed-task-results").glob("*.json"))
+    report.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+def test_async_result_validator_stays_responsive_and_reaps_process(
+    tmp_path: Path, monkeypatch, stop: str,
+) -> None:
+    validator = tmp_path / "slow-validator.py"
+    validator.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    result_path = tmp_path / "result.json"
+    result_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(engine, "RESULT_VALIDATION_TIMEOUT_SECONDS", 0.15)
+
+    async def run():
+        processes = []
+        create_process = asyncio.create_subprocess_exec
+
+        async def create(*args, **kwargs):
+            process = await create_process(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        task = asyncio.create_task(engine._validate_result_async(
+            validator_path=validator, schema_path=tmp_path / "schema.json",
+            result_path=result_path,
+        ))
+        started = time.monotonic()
+        ticks = 0
+        while not task.done():
+            await asyncio.sleep(0.01)
+            ticks += 1
+            if stop == "cancel" and ticks == 5:
+                task.cancel()
+            assert time.monotonic() - started < 2
+        error = asyncio.CancelledError if stop == "cancel" else ValueError
+        with pytest.raises(error) as exc:
+            await task
+        if stop == "timeout":
+            assert "validation timed out" in str(exc.value)
+            assert str(result_path) in str(exc.value)
+        assert ticks >= 5
+        assert len(processes) == 1
+        assert processes[0].returncode is not None
+
+    asyncio.run(run())
+
+
+def test_result_validation_command_quotes_posix_paths(tmp_path: Path) -> None:
+    paths = {
+        "validator_path": tmp_path / "scripts with spaces" / "validate.py",
+        "schema_path": tmp_path / "schema with spaces.json",
+        "result_path": tmp_path / "result with spaces.json",
+    }
+    assert shlex.split(engine._validation_command(**paths)) == [
+        sys.executable, *(str(path) for path in paths.values()),
+    ]
+
+
+def test_result_validation_command_quotes_windows_paths(monkeypatch) -> None:
+    monkeypatch.setattr(engine, "sys", SimpleNamespace(
+        platform="win32", executable=r"C:\Program Files\Python\python.exe",
+    ))
+    root = PureWindowsPath(r"C:\扫描目录\work with spaces")
+    paths = {
+        "validator_path": root / "validate_result.py",
+        "schema_path": root / "schema.json",
+        "result_path": root / "task-results" / "result.json",
+    }
+    command = engine._validation_command(**paths)
+    assert command == "python " + " ".join(f'"{path}"' for path in paths.values())
+    assert engine._validation_argv(**paths)[0] == r"C:\Program Files\Python\python.exe"
 
 
 def shlex_command_fragment(executable: str) -> str:

@@ -446,6 +446,10 @@ Agent 重连恢复按主扫描和独立去误报各自的执行身份处理；�
 
 OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验器，最长运行 60 秒，且受本次调用剩余时间约束；主动取消或超时会终止并回收校验进程，Agent 心跳与状态上报继续运行。校验器自身超时作为明确的校验诊断，沿用一次同 Session 纠正及后续新 Session 重试；调用总时限耗尽则直接进入超时重试。恢复扫描时校验已完成产物的同步路径同样限制为 60 秒。校验规则、任务策略默认值、重试次数及轻量分析失败后的一次 DeepHole 回退均保持不变。部署需更新并重启 Agent，然后续扫受影响任务，无需数据库迁移。
 
+攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合原有 Schema，允许 `[]` 表示未发现漏洞。现有 Prompt 模板保留；调用设置 `output_schema=None`，仅按指定文件判定结果，不从最终回复补写或覆盖文件。Prompt 中的校验命令通过 `allowed_bash_commands` 与 `bound_python_script` 供模型自检，宿主仍在每次回复结束后独立校验。
+
+文件缺失、无法读取、JSON 损坏或 Schema 不匹配时，先向原 Session 回传诊断纠正一次，仍失败则按 `vulnerability_mining.max_retries` 创建新 Session 重试；耗尽后队列记录 `post_session_validation_failed`，引擎报告失败。异步校验最长 30 秒且受调用剩余时间约束，超时或取消时回收校验进程。已通过校验的文件用于漏洞上报和完成标记，续扫继续复用合法结果，缺失或损坏的结果重新执行。该行为适用于所有调用该引擎的扫描，包括多版本基线审计；需更新并重启 Agent，无需数据库迁移，不追溯修改历史任务队列记录。
+
 OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Task Agent 会查询同一 Session 的消息历史，只接受相对于发送前基线新增且已经完成的 assistant 消息，并将其送回正常的错误、模型、Token、文本和文件写入处理链；恢复成功时控制台输出 `RESPONSE_RECOVERED reason=empty_body|invalid_json source=session_messages`。续写 Session 无法取得发送前基线时不会用历史消息兜底，避免把上一轮结果误认为本轮成功。若没有可确认的新消息，则错误只包含状态码、Content-Type、响应字节数和恢复失败类别，不包含响应正文或模型文本，并作为健康中性失败进入 fresh Session 换模重试，不降低模型权重。
 
 fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
