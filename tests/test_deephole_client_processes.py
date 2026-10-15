@@ -583,9 +583,14 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             description="bad length",
             vuln_type="oob",
         )])
+        async def audit_with_timeout_category(**kwargs):
+            from task_agent.task_service import get_opencode_execution_context
+            assert get_opencode_execution_context().task_metadata["timeout_task_kind"] == "threat_audit"
+            return audit_task_result
+
         with patch(
             "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
-            new=AsyncMock(return_value=audit_task_result),
+            new=AsyncMock(side_effect=audit_with_timeout_category),
         ) as run_task:
             audit_events: list[dict] = []
             audit = await run_threat_audit(

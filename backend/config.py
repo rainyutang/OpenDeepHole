@@ -8,7 +8,10 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
-from task_agent.timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
+from task_agent.timeouts import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS,
+    DEFAULT_REVIEW_TIMEOUT_SECONDS, DEFAULT_CORRECTION_TIMEOUT_SECONDS,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
@@ -53,6 +56,8 @@ class OpenCodeConfig(BaseModel):
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2  # fresh-Session retries for timeout and retryable failures
     serve_port: int | None = Field(default=None, ge=1, le=65535)
     mock: bool = False  # When True, skip real opencode and return fake results
@@ -87,6 +92,8 @@ class ModelTaskPolicyConfig(BaseModel):
     required_capability: str = "high"
     timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -98,6 +105,12 @@ class ModelTaskPolicyConfig(BaseModel):
         if normalized in {"", "any", "low"}:
             return "low"
         raise ValueError("required_capability must be low or high")
+
+
+class MiningTaskPolicyConfig(ModelTaskPolicyConfig):
+    threat_audit_timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    candidate_audit_timeout_seconds: int = DEFAULT_REVIEW_TIMEOUT_SECONDS
+    vulnerability_dedup_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
 
 
 class ThreatAnalysisConfig(BaseModel):
@@ -212,8 +225,8 @@ class AppConfig(BaseModel):
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
-    vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
-    false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
+    vulnerability_mining: MiningTaskPolicyConfig = MiningTaskPolicyConfig()
+    false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig(timeout_seconds=DEFAULT_REVIEW_TIMEOUT_SECONDS)
     code_graph: McpConfig = McpConfig(name="codegraph")
     product_info: McpConfig = McpConfig(name="product-info")
     knowledge_base: KnowledgeBaseConfig = KnowledgeBaseConfig()

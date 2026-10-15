@@ -805,7 +805,15 @@ export interface AgentModelTaskPolicy {
   required_capability: "low" | "high";
   timeout_seconds: number;
   idle_timeout_seconds: number;
+  json_correction_timeout_seconds: number;
+  validation_retry_timeout_seconds: number;
   max_retries: number;
+}
+
+export interface AgentMiningTaskPolicy extends AgentModelTaskPolicy {
+  threat_audit_timeout_seconds: number;
+  candidate_audit_timeout_seconds: number;
+  vulnerability_dedup_timeout_seconds: number;
 }
 
 export interface AgentMcpConfig {
@@ -936,11 +944,11 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 9;
+  schema_version: 10;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
-  vulnerability_mining: AgentModelTaskPolicy;
+  vulnerability_mining: AgentMiningTaskPolicy;
   false_positive: AgentModelTaskPolicy;
   vulnerability_validation: AgentVulnerabilityValidationConfig;
   checker_selection: AgentCheckerSelectionConfig;

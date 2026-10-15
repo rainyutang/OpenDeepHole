@@ -23,7 +23,10 @@ from .host import (
     _configure_standalone_opencode,
     _get_opencode_configuration_state,
 )
-from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
+from .timeouts import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS,
+    DEFAULT_CORRECTION_TIMEOUT_SECONDS, inherited_retry_timeout,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,8 @@ class StandaloneCLIConfig:
     models: tuple[StandaloneModelConfig, ...]
     model: str = ""
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -294,6 +299,8 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
             "port",
             "timeout",
             "idle_timeout",
+            "json_correction_timeout_seconds",
+            "validation_retry_timeout_seconds",
             "max_retries",
             "environment",
             "opencode_config",
@@ -392,19 +399,31 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         model_pool.get("models"),
         schema_version=version,
     )
+    session_timeout = _integer(
+        serve.get("timeout"), name="serve.timeout",
+        default=DEFAULT_SESSION_TIMEOUT_SECONDS, minimum=1,
+    )
+    retry_timeout_default = inherited_retry_timeout(session_timeout)
     cli_config = StandaloneCLIConfig(
         tool=tool,
         executable=executable,
-        timeout=_integer(
-            serve.get("timeout"),
-            name="serve.timeout",
-            default=DEFAULT_SESSION_TIMEOUT_SECONDS,
-            minimum=1,
-        ),
+        timeout=session_timeout,
         idle_timeout=_integer(
             serve.get("idle_timeout"),
             name="serve.idle_timeout",
             default=DEFAULT_IDLE_TIMEOUT_SECONDS,
+            minimum=1,
+        ),
+        json_correction_timeout_seconds=_integer(
+            serve.get("json_correction_timeout_seconds"),
+            name="serve.json_correction_timeout_seconds",
+            default=retry_timeout_default,
+            minimum=1,
+        ),
+        validation_retry_timeout_seconds=_integer(
+            serve.get("validation_retry_timeout_seconds"),
+            name="serve.validation_retry_timeout_seconds",
+            default=retry_timeout_default,
             minimum=1,
         ),
         max_retries=_integer(

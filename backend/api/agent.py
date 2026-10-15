@@ -674,6 +674,13 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")
         if policy.idle_timeout_seconds < 1:
             raise HTTPException(status_code=422, detail=f"{label}的无新内容超时必须大于 0")
+        for key in (
+            "json_correction_timeout_seconds", "validation_retry_timeout_seconds",
+            "threat_audit_timeout_seconds", "candidate_audit_timeout_seconds", "vulnerability_dedup_timeout_seconds",
+        ):
+            value = getattr(policy, key, None)
+            if value is not None and value < 1:
+                raise HTTPException(status_code=422, detail=f"{label}的 {key} 必须为正整数秒")
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
     # Dynamic method fields are validated and snapshotted by scan creation.

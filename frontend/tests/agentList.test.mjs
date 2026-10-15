@@ -138,12 +138,12 @@ test("download keeps legacy cards distinct and shows owner fallbacks and full ti
 
 test("configuration selector distinguishes same-name owners and loads the chosen Agent", async () => {
   const agents = [agent("first", "alice", { online: false }), agent("second", "bob", { online: false })];
-  const policy = { required_capability: "high", timeout_seconds: 10800, idle_timeout_seconds: 1200, max_retries: 2 };
+  const policy = { required_capability: "high", timeout_seconds: 10800, idle_timeout_seconds: 1200, json_correction_timeout_seconds: 1800, validation_retry_timeout_seconds: 1800, max_retries: 2 };
   const config = {
-    schema_version: 9,
+    schema_version: 10,
     base: { tool: "opencode", executable: "opencode", no_proxy: "", opencode_serve_port: null },
     model_pool: { models: [] }, threat_analysis: { enabled: true, model_policy: policy },
-    vulnerability_mining: policy, false_positive: policy,
+    vulnerability_mining: { ...policy, threat_audit_timeout_seconds: 10800, candidate_audit_timeout_seconds: 3600, vulnerability_dedup_timeout_seconds: 1800 }, false_positive: { ...policy, timeout_seconds: 3600 },
     vulnerability_validation: { supported_vulnerability_types: ["*"], concurrency: 1, validation_max_retries: 0, model_policy: policy },
     checker_selection: Object.fromEntries(["quick", "standard", "custom"].map((key) => [key, { disabled_checkers: [] }])),
   };

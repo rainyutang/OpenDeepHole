@@ -14,6 +14,8 @@ serve:
   # 每次调用的总超时，以及连续无新内容超时，单位均为秒。
   timeout: 10800
   idle_timeout: 1200
+  json_correction_timeout_seconds: 1800
+  validation_retry_timeout_seconds: 1800
   max_retries: 2
   # Serve 不继承 HTTP/HTTPS/ALL 代理变量；NO_PROXY/no_proxy 分别追加到父进程同名变量。
   # environment:

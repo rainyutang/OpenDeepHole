@@ -1,5 +1,5 @@
 # DeepHole 2.0 Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v9
+# server_url / agent_name / owner_token are local-only; the remaining v10
 # sections are managed by the Web "客户端配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 9
+schema_version: 10
 base:
   # OpenCode is the fixed implementation; executable may be opencode, nga, or a full path.
   tool: "opencode"
@@ -28,18 +28,27 @@ threat_analysis:
     required_capability: "high"
     timeout_seconds: 10800
     idle_timeout_seconds: 1200
+    json_correction_timeout_seconds: 1800
+    validation_retry_timeout_seconds: 1800
     max_retries: 5
 
 vulnerability_mining:
   required_capability: "high"
+  threat_audit_timeout_seconds: 10800
+  candidate_audit_timeout_seconds: 3600
+  vulnerability_dedup_timeout_seconds: 1800
   timeout_seconds: 10800
   idle_timeout_seconds: 1200
+  json_correction_timeout_seconds: 1800
+  validation_retry_timeout_seconds: 1800
   max_retries: 2
 
 false_positive:
   required_capability: "high"
-  timeout_seconds: 10800
+  timeout_seconds: 3600
   idle_timeout_seconds: 1200
+  json_correction_timeout_seconds: 1800
+  validation_retry_timeout_seconds: 1800
   max_retries: 2
 
 vulnerability_validation:
@@ -51,6 +60,8 @@ vulnerability_validation:
     required_capability: "high"
     timeout_seconds: 10800
     idle_timeout_seconds: 1200
+    json_correction_timeout_seconds: 1800
+    validation_retry_timeout_seconds: 1800
     max_retries: 2
 
 checker_selection:

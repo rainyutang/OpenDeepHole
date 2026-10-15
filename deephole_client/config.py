@@ -14,6 +14,10 @@ import yaml
 
 from task_agent.timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_REVIEW_TIMEOUT_SECONDS,
+    DEFAULT_CORRECTION_TIMEOUT_SECONDS,
+    MINING_TIMEOUT_DEFAULTS,
+    RETRY_TIMEOUT_FIELDS,
     DEFAULT_SESSION_TIMEOUT_SECONDS,
     upgrade_managed_timeouts,
 )
@@ -81,6 +85,8 @@ class OpenCodeConfig:
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2          # fresh-Session retries for timeout and retryable failures
     serve_port: int | None = None
     models: list[OpenCodeModelConfig] = field(default_factory=list)
@@ -113,7 +119,16 @@ class ModelTaskPolicyConfig:
     required_capability: str = "high"
     timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2
+
+
+@dataclass
+class MiningTaskPolicyConfig(ModelTaskPolicyConfig):
+    threat_audit_timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    candidate_audit_timeout_seconds: int = DEFAULT_REVIEW_TIMEOUT_SECONDS
+    vulnerability_dedup_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
 
 
 @dataclass
@@ -342,8 +357,10 @@ class AgentConfig:
         ),
     ))
     product_info: McpConfig = field(default_factory=lambda: McpConfig(name="product-info"))
-    vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
-    false_positive: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
+    vulnerability_mining: MiningTaskPolicyConfig = field(default_factory=MiningTaskPolicyConfig)
+    false_positive: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
+        timeout_seconds=DEFAULT_REVIEW_TIMEOUT_SECONDS,
+    ))
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
     vulnerability_validation: VulnerabilityValidationConfig = field(default_factory=VulnerabilityValidationConfig)
@@ -378,6 +395,9 @@ def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
     target.idle_timeout_seconds = _bounded_int(
         raw.get("idle_timeout_seconds"), target.idle_timeout_seconds, 1, 86400,
     )
+    for key in (*RETRY_TIMEOUT_FIELDS, *MINING_TIMEOUT_DEFAULTS):
+        if hasattr(target, key):
+            setattr(target, key, _bounded_int(raw.get(key), getattr(target, key), 1, 86400))
     target.max_retries = _bounded_int(raw.get("max_retries"), target.max_retries, 0, 20)
 
 
@@ -718,6 +738,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         if f.name in section and section[f.name] is not None:
             setattr(config.opencode, f.name, section[f.name])
     normalize_cli_config(config.opencode)
+    _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
+    _apply_policy(config.false_positive, remote.get("false_positive"))
     if "fp_review_cli" in remote:
         section = remote.get("fp_review_cli")
         if section is None:
@@ -828,7 +850,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 9,
+        "schema_version": 10,
         "base": {
             "tool": "opencode",
             "executable": config.opencode.executable,
@@ -990,13 +1012,15 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     _normalize_git_history_config(cfg.git_history)
     _apply_policy(cfg.threat_analysis.model_policy, threat_section.get("model_policy"))
     _normalize_threat_analysis_config(cfg.threat_analysis)
+    _apply_policy(cfg.vulnerability_mining, raw.get("vulnerability_mining"))
+    _apply_policy(cfg.false_positive, raw.get("false_positive"))
     if isinstance(raw.get("base"), dict) or isinstance(raw.get("model_pool"), dict):
         apply_remote_config(cfg, raw)
     return cfg
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v9 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v10 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

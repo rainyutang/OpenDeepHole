@@ -46,17 +46,21 @@ const policy = (
   max_retries = 2,
 ): AgentModelTaskPolicy => ({
   required_capability, timeout_seconds: 10800, idle_timeout_seconds: 1200, max_retries,
+  json_correction_timeout_seconds: 1800, validation_retry_timeout_seconds: 1800,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 9,
+  schema_version: 10,
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { models: [] },
   threat_analysis: {
     enabled: true,
     model_policy: policy("high", 2),
   },
-  vulnerability_mining: policy("high"),
-  false_positive: policy("high"),
+  vulnerability_mining: {
+    ...policy("high"), threat_audit_timeout_seconds: 10800,
+    candidate_audit_timeout_seconds: 3600, vulnerability_dedup_timeout_seconds: 1800,
+  },
+  false_positive: { ...policy("high"), timeout_seconds: 3600 },
   vulnerability_validation: {
     supported_vulnerability_types: ["*"],
     concurrency: 1,
@@ -89,7 +93,8 @@ function configuredWeekdays(window: AgentModelTimeWindow): number[] {
 
 function validateAgentConfig(config: AgentRemoteConfig): string {
   const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
-  const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds]);
+  const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds, policy.json_correction_timeout_seconds, policy.validation_retry_timeout_seconds]);
+  timeouts.push(config.vulnerability_mining.threat_audit_timeout_seconds, config.vulnerability_mining.candidate_audit_timeout_seconds, config.vulnerability_mining.vulnerability_dedup_timeout_seconds);
   timeouts.push(...config.model_pool.models.flatMap((model) => [model.timeout, model.idle_timeout].filter((value): value is number => value != null)));
   if (timeouts.some((value) => !Number.isInteger(value) || value < 1)) return "Session 超时和无新内容超时必须为正整数秒";
   for (const model of config.model_pool.models) {
@@ -102,13 +107,15 @@ function validateAgentConfig(config: AgentRemoteConfig): string {
   return "";
 }
 
-function PolicyEditor({ value, onChange }: { value: AgentModelTaskPolicy; onChange: (value: AgentModelTaskPolicy) => void }) {
+function PolicyEditor({ value, onChange, timeoutLabel = "Session 超时（秒）" }: { value: AgentModelTaskPolicy; onChange: (value: AgentModelTaskPolicy) => void; timeoutLabel?: string }) {
   return <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
     <Field label="需要的模型能力"><select className={input} value={value.required_capability} onChange={(e) => onChange({ ...value, required_capability: e.target.value as AgentModelTaskPolicy["required_capability"] })}>
       <option value="low">低能力</option><option value="high">高能力</option>
     </select></Field>
-    <Field label="Session 超时（秒）"><input className={input} type="number" min={1} value={value.timeout_seconds} onChange={(e) => onChange({ ...value, timeout_seconds: Number(e.target.value) })} /></Field>
+    <Field label={timeoutLabel}><input className={input} type="number" min={1} value={value.timeout_seconds} onChange={(e) => onChange({ ...value, timeout_seconds: Number(e.target.value) })} /></Field>
     <Field label="单次对话无新内容超时（秒）"><input className={input} type="number" min={1} value={value.idle_timeout_seconds} onChange={(e) => onChange({ ...value, idle_timeout_seconds: Number(e.target.value) })} /></Field>
+    <Field label="JSON 纠正超时（秒）"><input className={input} type="number" min={1} value={value.json_correction_timeout_seconds} onChange={(e) => onChange({ ...value, json_correction_timeout_seconds: Number(e.target.value) })} /></Field>
+    <Field label="产物校验重试超时（秒）"><input className={input} type="number" min={1} value={value.validation_retry_timeout_seconds} onChange={(e) => onChange({ ...value, validation_retry_timeout_seconds: Number(e.target.value) })} /></Field>
     <Field label="模型调用重试次数"><input className={input} type="number" min={0} value={value.max_retries} onChange={(e) => onChange({ ...value, max_retries: Number(e.target.value) })} /></Field>
     <p className="text-xs text-slate-400 md:col-span-2">每次调用独立计时，JSON 纠正和产物校验重试重新计时。新文本、推理及工具进展刷新无新内容计时。</p>
   </div>;
@@ -391,10 +398,15 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   const advancedContent = (target: AdvancedSection) => {
     if (target === "threat") return <div className="space-y-5">
       <PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} />
-      <p className="text-sm text-slate-400">是否运行威胁审计引擎在创建扫描时选择；这里仅配置其模型任务策略。</p>
+      <p className="text-sm text-slate-400">这里配置威胁分析的模型任务策略；基于威胁的代码审计超时在漏洞挖掘中设置。</p>
     </div>;
     if (target === "mining") return <div className="space-y-5">
-      <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">{([
+        ["threat_audit_timeout_seconds", "威胁审计 Session 超时（秒）"],
+        ["candidate_audit_timeout_seconds", "候选点审计 Session 超时（秒）"],
+        ["vulnerability_dedup_timeout_seconds", "漏洞去重 Session 超时（秒）"],
+      ] as const).map(([key, label]) => <Field key={key} label={label}><input className={input} type="number" min={1} value={config.vulnerability_mining[key]} onChange={(e) => setCfg({ ...config, vulnerability_mining: { ...config.vulnerability_mining, [key]: Number(e.target.value) } })} /></Field>)}</div>
+      <PolicyEditor value={config.vulnerability_mining} timeoutLabel="其他挖掘任务 Session 超时（秒）" onChange={(value) => setCfg({ ...config, vulnerability_mining: { ...config.vulnerability_mining, ...value } })} />
       <p className="text-sm text-slate-400">这里配置漏洞挖掘阶段的通用模型任务策略；自定义模式可在创建扫描时选择引擎，快速和标准模式固定运行两个内置引擎。</p>
       <div className="space-y-4 border-t border-slate-700 pt-5">
         <div><h3 className="text-sm font-semibold text-slate-200">基于代码风险点引擎规则</h3><p className="mt-1 text-xs leading-5 text-slate-500">三个模式分别保存。未出现在禁用列表中的规则默认启用，因此以后新增的可用规则也会自动选中。</p></div>

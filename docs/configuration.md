@@ -48,14 +48,14 @@ logging:
 
 ## Agent 配置
 
-根目录 [agent.yaml](../agent.yaml) 是 v9 模板。主要字段示例：
+根目录 [agent.yaml](../agent.yaml) 是 v10 模板。主要字段示例：
 
 ```yaml
 server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 9
+schema_version: 10
 base:
   tool: "opencode"
   executable: "opencode"
@@ -76,7 +76,7 @@ checker_selection:
 
 基础配置管理程序和模型池；高级配置管理威胁分析、漏洞挖掘、去误报和漏洞验证。各模式通过 Checker 排除列表表达选择，未被排除且当前启用、对用户可见的新增规则会进入后续新扫描。
 
-兼容迁移包括：v5→v6 固定 `base.tool=opencode` 并保留可执行文件；v6→v7 将旧排除列表迁移到自定义模式；v7→v8 将旧默认威胁分析超时 3600 秒迁移为 7200 秒；v8→v9 将各阶段原默认总超时升级为 10800 秒，补充无新内容超时 1200 秒。自定义值保留，v9 中的显式值不会重复迁移。历史 `full` / `threat_analysis_only` 的组件上下文按兼容规则处理，不批量重写历史记录。
+兼容迁移包括：v5→v6 固定 `base.tool=opencode` 并保留可执行文件；v6→v7 将旧排除列表迁移到自定义模式；v7→v8 将旧默认威胁分析超时 3600 秒迁移为 7200 秒；v8→v9 将各阶段原默认总超时升级为 10800 秒，补充无新内容超时 1200 秒。v9→v10 细分任务超时：旧默认值按下表更新，原阶段自定义总超时保留并继承到该阶段新增的任务和纠正重试项。判定使用原始版本及原始值，v10 中用户修改的值不再迁移。历史 `full` / `threat_analysis_only` 的组件上下文按兼容规则处理，不批量重写历史记录。
 
 ### 模型池与阶段策略
 
@@ -85,8 +85,20 @@ checker_selection:
 - 模型能力可标记低/中/高，任务要求归一为 `low` 或 `high`。阶段级能力、超时和重试策略优先于模型行的相应覆盖。
 - 模型 `time_windows` 按 Agent 本地时间判断，ISO 星期 `1..7` 为周一至周日；多段取并集，未设置时全天可用。跨夜窗口按当前日期判断，例如周一至周六 `22:00–06:00` 包括这些日期的凌晨与晚间，不包含周日。
 - 时间窗口只限制取得新模型 Lease，不会打断已运行任务。新阶段按派生容量创建工作协程，已有阶段不会随配置变化自动扩充协程。
-- 模型消息超时不包含排队时间。四个阶段分别配置 `timeout_seconds`（默认 10800 秒/3 小时）和 `idle_timeout_seconds`（默认 1200 秒/20 分钟）。新文本、推理及工具进展刷新无新内容计时；心跳和重试状态不刷新。同 Session JSON 纠正和产物校验重试每次独立计时，默认新 Session 重试 2 次；根目录 `agent.yaml` 的威胁分析模板写的是 5 次，实际运行应以 Web 保存并下发的值为准。
+- 模型消息超时不包含排队时间。四个阶段分别配置总超时和 `idle_timeout_seconds`（默认 1200 秒/20 分钟）；各类总超时见下表。新文本、推理及工具进展刷新无新内容计时；心跳和重试状态不刷新。同 Session JSON 纠正和产物校验重试每次独立计时，默认新 Session 重试 2 次；根目录 `agent.yaml` 的威胁分析模板写的是 5 次，实际运行应以 Web 保存并下发的值为准。
 - 任务类型固定优先级：漏洞验证 90、去误报 60、威胁分析与挖掘 50；相同优先级按 FIFO 调度。
+
+| 位置 / 字段 | 用途 | 默认秒数 |
+| --- | --- | ---: |
+| `threat_analysis.model_policy.timeout_seconds` | 威胁分析 | 10800 |
+| `vulnerability_mining.threat_audit_timeout_seconds` | 威胁审计 | 10800 |
+| `vulnerability_mining.candidate_audit_timeout_seconds` | 候选点审计，含该引擎内项目级审计 | 3600 |
+| `false_positive.timeout_seconds` | 去误报 | 3600 |
+| `vulnerability_mining.vulnerability_dedup_timeout_seconds` | 漏洞去重 | 1800 |
+| 各阶段策略的 `json_correction_timeout_seconds` | 新 Session 格式修复及同 Session JSON 纠正 | 1800 |
+| 各阶段策略的 `validation_retry_timeout_seconds` | 产物或必需命令校验失败后的模型修复调用 | 1800 |
+
+漏洞挖掘的 `timeout_seconds` 用于其它挖掘任务，漏洞验证业务调用继续使用 `model_policy.timeout_seconds`，两者默认 10800 秒。模型能力、调用重试次数及无新内容超时仍由所属阶段配置。纠正和产物校验重试每次获得各自完整时限；重新执行业务任务时恢复业务时限。本地产物校验脚本原有的 60 秒限制保持不变。已有验证任务从自身策略快照读取，旧快照缺失的纠正重试字段按原总超时补齐：10800 秒采用 1800 秒，其它自定义值继承，后续 Agent 配置修改不影响它。
 
 模型看板展示任务状态、并发与 Token 用量。任务重试可关联多个 Session，但逻辑任务保持统一身份；完整统计口径见[Token 分类](scan-token-categories.md)。
 

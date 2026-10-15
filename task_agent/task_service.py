@@ -58,7 +58,10 @@ from .serve_client import (
 )
 from .token_usage import OpenCodeTokenUsage, attribute_token_usage, merge_token_usages
 from .token_categories import token_category
-from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
+from .timeouts import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS,
+    MINING_TIMEOUT_DEFAULTS, inherited_retry_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1052,7 +1055,7 @@ class OpenCodeTaskService:
                     required_bash_commands=spec.required_bash_commands,
                 )
                 timeout_seconds = (
-                    (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
+                    _policy_session_timeout(context, task_policy)
                     or spec.timeout_seconds
                     or lease.option.timeout
                     or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", DEFAULT_SESSION_TIMEOUT_SECONDS))
@@ -1063,6 +1066,8 @@ class OpenCodeTaskService:
                     or lease.option.idle_timeout
                     or int(_cfg_value(_task_cli_config(record.execution_context), "idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS))
                 )
+                json_timeout_seconds = _task_retry_timeout_seconds(context, "json_correction_timeout_seconds")
+                validation_timeout_seconds = _task_retry_timeout_seconds(context, "validation_retry_timeout_seconds")
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
                 try:
@@ -1097,10 +1102,11 @@ class OpenCodeTaskService:
 
                         async def invoke_message(
                             message_prompt: str,
+                            call_timeout: float,
                         ) -> OpenCodePromptResult:
                             nonlocal parsed_written_json
                             call_deadline = OperationDeadline(
-                                timeout_seconds, cancel_event=combined_cancel,
+                                call_timeout, cancel_event=combined_cancel,
                             )
                             prompt_deadline = OperationDeadline(
                                 0, cancel_event=combined_cancel,
@@ -1128,7 +1134,7 @@ class OpenCodeTaskService:
                                     **runtime.kwargs(),
                                     prompt=message_prompt,
                                     model=model,
-                                    timeout=timeout_seconds,
+                                    timeout=call_timeout,
                                     idle_timeout=idle_timeout_seconds,
                                     on_line=guard(context.on_output),
                                     on_session_id=guard(record_session),
@@ -1216,7 +1222,7 @@ class OpenCodeTaskService:
                             message_started = time.monotonic()
                             message_started_at = _now_iso()
                             try:
-                                details = await invoke_message(spec.prompt)
+                                details = await invoke_message(spec.prompt, timeout_seconds)
                             except OpenCodeTaskQualityError as quality_error:
                                 failure_result = quality_error.prompt_result
                                 if failure_result is not None:
@@ -1279,7 +1285,7 @@ class OpenCodeTaskService:
                                     )
                                     try:
                                         details = await invoke_message(
-                                            correction_prompt
+                                            correction_prompt, validation_timeout_seconds,
                                         )
                                     except OpenCodeTaskQualityError as retry_error:
                                         retry_result = retry_error.prompt_result
@@ -1735,7 +1741,7 @@ class OpenCodeTaskService:
                         original_model_identity=(
                             lease.health_identity if lease is not None else ()
                         ),
-                        timeout_seconds=timeout_seconds,
+                        timeout_seconds=json_timeout_seconds,
                         idle_timeout_seconds=idle_timeout_seconds,
                         system_prompt=system_prompt,
                         validation_debug=validation_debug,
@@ -3604,13 +3610,37 @@ def _task_priority(task_type: str) -> int:
     return _TASK_TYPE_PRIORITIES.get(task_type, _DEFAULT_TASK_PRIORITY)
 
 
+def _policy_session_timeout(context: OpenCodeExecutionContext, policy: Any) -> int | float | None:
+    if policy is None:
+        return None
+    total = _cfg_value(policy, "timeout_seconds")
+    if context.task_metadata.get("task_type") == "vulnerability_mining":
+        kind = str(context.task_metadata.get("timeout_task_kind") or "")
+        key = f"{kind}_timeout_seconds"
+        if key in MINING_TIMEOUT_DEFAULTS:
+            # Missing fields can occur in old in-memory contexts. Preserve a
+            # custom shared budget, otherwise use the task-specific default.
+            return _cfg_value(policy, key) or (
+                total if total and total != DEFAULT_SESSION_TIMEOUT_SECONDS else MINING_TIMEOUT_DEFAULTS[key]
+            )
+    return total
+
+
+def _task_retry_timeout_seconds(context: OpenCodeExecutionContext, key: str) -> int | float:
+    policy = _task_model_policy(context)
+    if policy is not None:
+        return _cfg_value(policy, key) or inherited_retry_timeout(_cfg_value(policy, "timeout_seconds"))
+    cli = _task_cli_config(context)
+    return _cfg_value(cli, key) or inherited_retry_timeout(_cfg_value(cli, "timeout"))
+
+
 def _task_timeout_seconds(
     task_type: str,
     context: OpenCodeExecutionContext,
 ) -> int:
     policy = _task_model_policy(context)
     if policy is not None:
-        value = int(_cfg_value(policy, "timeout_seconds", 0) or 0)
+        value = int(_policy_session_timeout(context, policy) or 0)
         if value > 0:
             return value
     config = get_config()

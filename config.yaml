@@ -22,6 +22,8 @@ opencode:
   model: ""       # 已废弃兼容字段；模型调度只读取 models
   timeout: 10800  # total seconds per model message
   idle_timeout: 1200  # seconds without new model or tool progress
+  json_correction_timeout_seconds: 1800
+  validation_retry_timeout_seconds: 1800
   max_retries: 2  # fresh-Session retries for timeout and retryable failures
   mock: false    # set to false when opencode is configured
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"

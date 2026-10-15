@@ -1902,7 +1902,8 @@ def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
+@pytest.mark.parametrize("json_timeout", [1800, 41])
+def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_timeout: int) -> None:
     from task_agent.token_usage import TokenCounters, token_usage_from_models
 
     async def run() -> None:
@@ -1937,7 +1938,9 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
 
         manager = SimpleNamespace(run_prompt=run_prompt)
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
-        patches = _service_patches(manager)
+        config = _config()
+        config.opencode.json_correction_timeout_seconds = json_timeout
+        patches = _service_patches(manager, runtime_config=config)
         with (patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5],
               patch("task_agent.task_service.record_model_token_usage", new=AsyncMock()) as record_usage):
             with _task_context(
@@ -1959,7 +1962,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.structured == {"answer": 9}
         assert result.session_id == "ses_same"
-        assert [call["timeout"] for call in calls] == [77] * 4
+        assert [call["timeout"] for call in calls] == [77, json_timeout, json_timeout, json_timeout]
         assert [call["idle_timeout"] for call in calls] == [23] * 4
         assert result.token_usage["total_tokens"] == 48
         assert result.token_usage["by_category"] == [{
@@ -2675,9 +2678,11 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
     async def run() -> None:
         service = OpenCodeTaskService()
         calls: list[tuple[str, str | None]] = []
+        timeouts = []
 
         async def run_prompt(**kwargs):
             calls.append((kwargs["prompt"], kwargs["session_id"]))
+            timeouts.append(kwargs["timeout"])
             if len(calls) <= 2:
                 if len(calls) == 1:
                     callback = kwargs["on_session_id"]("ses_first")
@@ -2717,7 +2722,9 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
         service._runtime_for_task = AsyncMock(
             return_value=(_runtime(tmp_path), "provider/model-low", _source())
         )
-        patches = _service_patches(manager)
+        config = _config()
+        config.opencode.validation_retry_timeout_seconds = 1800
+        patches = _service_patches(manager, runtime_config=config)
         with (
             patches[0],
             patches[1] as acquire_mock,
@@ -2744,6 +2751,7 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
             None,
         ]
         assert calls[2][0] == "run"
+        assert timeouts == [30, 1800, 30]
         assert acquire_mock.await_count == 2
         final_updates = update_context_mock.await_args_list[-1].args[1]
         assert [
@@ -3348,13 +3356,16 @@ def test_host_validation_uses_remaining_call_budget_without_model_penalty(tmp_pa
     asyncio.run(run())
 
 
-def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path):
+@pytest.mark.parametrize("retry_timeout,expected", [(0.08, "success"), (0.01, "timeout")])
+def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path, retry_timeout, expected):
     async def run():
         service = OpenCodeTaskService()
         session_arguments = []
+        timeouts = []
 
         async def run_prompt(**kwargs):
             session_arguments.append(kwargs["session_id"])
+            timeouts.append(kwargs["timeout"])
             await kwargs["on_session_id"]("ses_same")
             await asyncio.sleep(0.03)
             return OpenCodePromptResult(session_id="ses_same", message_id="msg", lines=["ok"], text="ok")
@@ -3366,7 +3377,7 @@ def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path):
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         config = _config()
         config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
-            required_capability="high", timeout_seconds=0.09, max_retries=0,
+            required_capability="high", timeout_seconds=0.09, validation_retry_timeout_seconds=retry_timeout, max_retries=0,
         ))
         patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), runtime_config=config)
         with patches[0], patches[1] as acquire, patches[2] as release, patches[3], patches[4], patches[5]:
@@ -3375,8 +3386,9 @@ def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path):
                     task_name="correction deadline", prompt="analyze", directory=tmp_path,
                     post_session_validator=validate, post_session_validation_retry_count=1,
                 ))
-        assert result.status == "success"
+        assert result.status == expected
         assert session_arguments == [None, "ses_same"]
+        assert timeouts == [0.09, retry_timeout]
         assert acquire.await_count == release.await_count == 1
 
     asyncio.run(run())
@@ -3826,5 +3838,49 @@ def test_run_sync_component_cancellation_unwinds_owner_loop_task() -> None:
             with pytest.raises(asyncio.CancelledError):
                 await caller
             await asyncio.wait_for(owner_cancelled.wait(), timeout=1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("task_type,subtype,default", [
+    ("threat_analysis", "", 10800),
+    ("vulnerability_mining", "threat_audit", 10800),
+    ("vulnerability_mining", "candidate_audit", 3600),
+    ("vulnerability_mining", "vulnerability_dedup", 1800),
+    ("fp_review", "", 3600),
+    ("vulnerability_validation", "", 10800),
+    ("vulnerability_mining", "", 10800),
+])
+@pytest.mark.parametrize("custom", [False, True])
+def test_public_task_uses_category_session_timeout(tmp_path, task_type, subtype, default, custom):
+    from deephole_client.config import AgentConfig
+
+    async def run():
+        config = AgentConfig()
+        policy = {
+            "threat_analysis": config.threat_analysis.model_policy,
+            "vulnerability_mining": config.vulnerability_mining,
+            "fp_review": config.false_positive,
+            "vulnerability_validation": config.vulnerability_validation.model_policy,
+        }[task_type]
+        policy.max_retries = 0
+        if custom:
+            setattr(policy, f"{subtype}_timeout_seconds" if subtype else "timeout_seconds", 73)
+        manager = SimpleNamespace(run_prompt=AsyncMock(return_value=OpenCodePromptResult(
+            session_id="ses_kind", message_id="msg", lines=["ok"], text="ok",
+        )))
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        patches = _service_patches(manager, runtime_config=config)
+        with (patches[0], patches[1], patches[2], patches[3], patches[4], patches[5],
+              patch("task_agent.task_service._get_opencode_task_service", return_value=service)):
+            with _task_context(tmp_path, task_metadata={
+                "timeout_task_kind": subtype,
+                "mining_engine_id": "multi_version", "token_category": "multi_version",
+            }):
+                result = await run_opencode_task(task_name="task category budget", task_type=task_type, prompt="analyze", required_capability="high")
+        assert result.status == "success"
+        assert manager.run_prompt.await_args.kwargs["timeout"] == (73 if custom else default)
+        assert manager.run_prompt.await_args.kwargs["idle_timeout"] == 1200
 
     asyncio.run(run())

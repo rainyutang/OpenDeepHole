@@ -14,6 +14,8 @@ from backend.call_chain import normalize_call_chain_markdown
 
 from task_agent.timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_REVIEW_TIMEOUT_SECONDS,
+    DEFAULT_CORRECTION_TIMEOUT_SECONDS,
     DEFAULT_SESSION_TIMEOUT_SECONDS,
     upgrade_managed_timeouts,
 )
@@ -1126,6 +1128,8 @@ class AgentOpenCodeConfig(BaseModel):
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2
     serve_port: int | None = None
     models: list[AgentOpenCodeModelConfig] = []
@@ -1149,6 +1153,8 @@ class AgentModelTaskPolicy(BaseModel):
     required_capability: str = "high"
     timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
+    json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
+    validation_retry_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -1160,6 +1166,12 @@ class AgentModelTaskPolicy(BaseModel):
         if normalized in {"", "any", "low"}:
             return "low"
         raise ValueError("required_capability must be low or high")
+
+
+class AgentMiningTaskPolicy(AgentModelTaskPolicy):
+    threat_audit_timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    candidate_audit_timeout_seconds: int = DEFAULT_REVIEW_TIMEOUT_SECONDS
+    vulnerability_dedup_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
 
 
 class AgentMcpLocalConfig(BaseModel):
@@ -1473,7 +1485,7 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: Literal[9] = 9
+    schema_version: Literal[10] = 10
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1497,9 +1509,10 @@ class AgentRemoteConfig(BaseModel):
         default_factory=lambda: AgentMcpConfig(name="product-info"),
         exclude=True,
     )
-    vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
+    vulnerability_mining: AgentMiningTaskPolicy = AgentMiningTaskPolicy()
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
+        timeout_seconds=DEFAULT_REVIEW_TIMEOUT_SECONDS,
     )
     vulnerability_validation: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()
     checker_selection: AgentCheckerSelectionConfig = AgentCheckerSelectionConfig()
@@ -1679,6 +1692,8 @@ class AgentRemoteConfig(BaseModel):
             executable=self.base.executable,
             timeout=self.vulnerability_mining.timeout_seconds,
             idle_timeout=self.vulnerability_mining.idle_timeout_seconds,
+            json_correction_timeout_seconds=self.vulnerability_mining.json_correction_timeout_seconds,
+            validation_retry_timeout_seconds=self.vulnerability_mining.validation_retry_timeout_seconds,
             max_retries=self.vulnerability_mining.max_retries,
             serve_port=self.base.opencode_serve_port,
             models=self.model_pool.models,

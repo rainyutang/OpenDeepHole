@@ -128,7 +128,7 @@ class AgentConfigTests(unittest.TestCase):
             BackendThreatAnalysisConfig().model_policy.timeout_seconds,
             10800,
         )
-        self.assertEqual(AgentRemoteConfig().schema_version, 9)
+        self.assertEqual(AgentRemoteConfig().schema_version, 10)
         self.assertNotIn("opencode_config", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
@@ -162,7 +162,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(config.base.tool, "opencode")
         self.assertEqual(config.base.executable, "nga")
         model = config.model_pool.models[0].model_dump()
@@ -200,7 +200,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(
             config.checker_selection.quick.disabled_checkers,
             ["sensitive_clear", "skill_only_project_audit"],
@@ -224,7 +224,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(
             config.checker_selection.model_dump(),
             {
@@ -343,7 +343,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(config.vulnerability_mining.required_capability, "high")
         self.assertEqual(config.vulnerability_mining.timeout_seconds, 10800)
         self.assertEqual(config.vulnerability_mining.max_retries, 4)
@@ -405,7 +405,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertFalse(config.code_graph.enabled)
         self.assertNotIn("code_graph", config.model_dump(mode="json"))
 
@@ -423,14 +423,14 @@ class AgentConfigTests(unittest.TestCase):
         }
         config = AgentRemoteConfig.model_validate(payload)
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(config.base.opencode_serve_port, 4317)
         self.assertNotIn("mining_engines", config.model_dump())
 
         local = AgentConfig()
         apply_remote_config(local, payload)
         exported = remote_config_dict(local)
-        self.assertEqual(exported["schema_version"], 9)
+        self.assertEqual(exported["schema_version"], 10)
         self.assertEqual(exported["base"]["opencode_serve_port"], 4317)
         self.assertNotIn("mining_engines", exported)
 
@@ -533,7 +533,7 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 9)
+        self.assertEqual(remote["schema_version"], 10)
         self.assertNotIn("opencode_config", remote)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
@@ -551,6 +551,8 @@ class AgentConfigTests(unittest.TestCase):
                     "required_capability": "high",
                     "timeout_seconds": 10800,
                     "idle_timeout_seconds": 1200,
+                    "json_correction_timeout_seconds": 1800,
+                    "validation_retry_timeout_seconds": 1800,
                     "max_retries": 2,
                 },
             },
@@ -566,6 +568,8 @@ class AgentConfigTests(unittest.TestCase):
                 "required_capability": "high",
                 "timeout_seconds": 10800,
                 "idle_timeout_seconds": 1200,
+                "json_correction_timeout_seconds": 1800,
+                "validation_retry_timeout_seconds": 1800,
                 "max_retries": 2,
             },
         })
@@ -660,7 +664,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 9)
+            self.assertEqual(raw["schema_version"], 10)
             self.assertNotIn("opencode_config", raw)
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
@@ -675,6 +679,8 @@ class AgentConfigTests(unittest.TestCase):
                     "required_capability": "high",
                     "timeout_seconds": 10800,
                     "idle_timeout_seconds": 1200,
+                    "json_correction_timeout_seconds": 1800,
+                    "validation_retry_timeout_seconds": 1800,
                     "max_retries": 2,
                 },
             })
@@ -1029,7 +1035,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 9)
+        self.assertEqual(config.schema_version, 10)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertNotIn("opencode_config", config.model_dump())
         self.assertEqual(config.opencode_concurrency, 1)
