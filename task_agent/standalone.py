@@ -23,6 +23,7 @@ from .host import (
     _configure_standalone_opencode,
     _get_opencode_configuration_state,
 )
+from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class StandaloneModelConfig:
     max_concurrency: int
     enabled: bool
     timeout: int | None = None
+    idle_timeout: int | None = None
     max_retries: int | None = None
     time_windows: tuple[dict[str, Any], ...] = ()
 
@@ -57,6 +59,7 @@ class StandaloneCLIConfig:
     max_retries: int
     models: tuple[StandaloneModelConfig, ...]
     model: str = ""
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,7 @@ def _load_models(
         "max_concurrency",
         "enabled",
         "timeout",
+        "idle_timeout",
         "max_retries",
         "time_windows",
     }
@@ -240,6 +244,11 @@ def _load_models(
                     name=f"{name}.timeout",
                     minimum=1,
                 ),
+                idle_timeout=_optional_integer(
+                    item.get("idle_timeout"),
+                    name=f"{name}.idle_timeout",
+                    minimum=1,
+                ),
                 max_retries=_optional_integer(
                     item.get("max_retries"),
                     name=f"{name}.max_retries",
@@ -284,6 +293,7 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
             "executable",
             "port",
             "timeout",
+            "idle_timeout",
             "max_retries",
             "environment",
             "opencode_config",
@@ -388,7 +398,13 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         timeout=_integer(
             serve.get("timeout"),
             name="serve.timeout",
-            default=3600,
+            default=DEFAULT_SESSION_TIMEOUT_SECONDS,
+            minimum=1,
+        ),
+        idle_timeout=_integer(
+            serve.get("idle_timeout"),
+            name="serve.idle_timeout",
+            default=DEFAULT_IDLE_TIMEOUT_SECONDS,
             minimum=1,
         ),
         max_retries=_integer(

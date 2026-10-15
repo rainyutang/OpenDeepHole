@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from task_agent.output_format import with_local_timestamp
+from task_agent.timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
 from .scan_modes import component_scan_mode
 
 # Module-level globals injected by deephole_client/main.py before connection starts
@@ -1436,7 +1437,10 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                 "required_capability", "high"
             )
             validation_policy["timeout_seconds"] = model_policy.get(
-                "timeout_seconds", 3600
+                "timeout_seconds", DEFAULT_SESSION_TIMEOUT_SECONDS
+            )
+            validation_policy["idle_timeout_seconds"] = model_policy.get(
+                "idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS
             )
             validation_policy["model_max_retries"] = model_policy.get(
                 "max_retries", 2

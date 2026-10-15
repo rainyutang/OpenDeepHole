@@ -26,13 +26,13 @@ function text(node) {
 }
 
 test("model capacity follows edits, enabled rows, additions and deletions and saves only model limits", async () => {
-  const policy = { required_capability: "high", timeout_seconds: 3600, max_retries: 2 };
+  const policy = { required_capability: "high", timeout_seconds: 10800, idle_timeout_seconds: 1200, max_retries: 2 };
   const model = (id, max_concurrency, enabled = true) => ({
     id, model: `provider/${id}`, capability: "high", weight: 1, max_concurrency, enabled,
     timeout: null, max_retries: null, time_windows: [{ weekdays: [1], start: "09:00", end: "18:00" }],
   });
   const config = {
-    schema_version: 8,
+    schema_version: 9,
     base: { tool: "opencode", executable: "opencode", no_proxy: "", opencode_serve_port: null },
     model_pool: { models: [model("first", 4), model("second", 5), model("disabled", 10, false)] },
     threat_analysis: { enabled: true, model_policy: policy },
@@ -62,7 +62,7 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
     const enableBoxes = () => root.root.findAllByType("label").filter((label) => text(label) === "启用")
       .map((label) => label.findByType("input"));
     assert.equal(capacity(), 9);
-    for (const name of ["模型 ID", "模型名称", "权重", "模型可用并发", "超时覆盖（秒）", "重试次数覆盖", "开始时间", "结束时间"]) {
+    for (const name of ["模型 ID", "模型名称", "权重", "模型可用并发", "Session 超时覆盖（秒）", "无新内容超时覆盖（秒）", "重试次数覆盖", "开始时间", "结束时间"]) {
       assert.equal(fields(name).length, 3, name);
     }
     assert.equal(fields("模型能力", "select").length, 3);
@@ -87,6 +87,30 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
     assert.equal("opencode_concurrency" in saved, false);
     assert.equal(saved.model_pool.models[1].max_concurrency, 6);
     assert.equal(saved.model_pool.models[2].enabled, true);
+    await act(async () => { button("高级配置").props.onClick(); });
+    const stagePolicies = [
+      ["威胁分析", (cfg) => cfg.threat_analysis.model_policy],
+      ["漏洞挖掘", (cfg) => cfg.vulnerability_mining],
+      ["去误报", (cfg) => cfg.false_positive],
+      ["漏洞验证", (cfg) => cfg.vulnerability_validation.model_policy],
+    ];
+    for (const [index, [label, getPolicy]] of stagePolicies.entries()) {
+      const stageButton = root.root.findAllByType("button").find((item) => item.props["aria-expanded"] != null && text(item).startsWith(label));
+      if (!stageButton.props["aria-expanded"]) await act(async () => { stageButton.props.onClick(); });
+      assert.equal(fields("Session 超时（秒）")[0].props.value, 10800);
+      assert.equal(fields("单次对话无新内容超时（秒）")[0].props.value, 1200);
+      await act(async () => { fields("Session 超时（秒）")[0].props.onChange({ target: { value: String(8000 + index) } }); });
+      await act(async () => { fields("单次对话无新内容超时（秒）")[0].props.onChange({ target: { value: String(200 + index) } }); });
+      await act(async () => { button("保存配置").props.onClick(); });
+      assert.equal(saved.schema_version, 9);
+      assert.equal(getPolicy(saved).timeout_seconds, 8000 + index);
+      assert.equal(getPolicy(saved).idle_timeout_seconds, 200 + index);
+    }
+    saved = null;
+    await act(async () => { fields("单次对话无新内容超时（秒）")[0].props.onChange({ target: { value: "0" } }); });
+    await act(async () => { button("保存配置").props.onClick(); });
+    assert.equal(saved, null);
+    assert.match(text(root.toJSON()), /必须为正整数秒/);
   } finally {
     if (root) await act(async () => { root.unmount(); });
   }

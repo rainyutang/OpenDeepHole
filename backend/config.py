@@ -8,6 +8,7 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+from task_agent.timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
@@ -41,6 +42,7 @@ class OpenCodeModelConfig(BaseModel):
     max_concurrency: int = 1
     enabled: bool = True
     timeout: int | None = None
+    idle_timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[OpenCodeModelTimeWindow] = []
 
@@ -49,7 +51,8 @@ class OpenCodeConfig(BaseModel):
     tool: Literal["opencode"] = "opencode"
     executable: str = "opencode"  # OpenCode-compatible executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
-    timeout: int = 3600
+    timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2  # fresh-Session retries for timeout and retryable failures
     serve_port: int | None = Field(default=None, ge=1, le=65535)
     mock: bool = False  # When True, skip real opencode and return fake results
@@ -62,7 +65,8 @@ class OpenCodeConfig(BaseModel):
 class MemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_candidates: int = 200
 
 
@@ -81,7 +85,8 @@ class GitHistoryConfig(BaseModel):
 
 class ModelTaskPolicyConfig(BaseModel):
     required_capability: str = "high"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -99,7 +104,7 @@ class ThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     model_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
         required_capability="high",
-        timeout_seconds=7200,
+        timeout_seconds=DEFAULT_SESSION_TIMEOUT_SECONDS,
         max_retries=2,
     )
 

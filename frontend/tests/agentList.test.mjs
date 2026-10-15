@@ -138,9 +138,9 @@ test("download keeps legacy cards distinct and shows owner fallbacks and full ti
 
 test("configuration selector distinguishes same-name owners and loads the chosen Agent", async () => {
   const agents = [agent("first", "alice", { online: false }), agent("second", "bob", { online: false })];
-  const policy = { required_capability: "high", timeout_seconds: 3600, max_retries: 2 };
+  const policy = { required_capability: "high", timeout_seconds: 10800, idle_timeout_seconds: 1200, max_retries: 2 };
   const config = {
-    schema_version: 8,
+    schema_version: 9,
     base: { tool: "opencode", executable: "opencode", no_proxy: "", opencode_serve_port: null },
     model_pool: { models: [] }, threat_analysis: { enabled: true, model_policy: policy },
     vulnerability_mining: policy, false_positive: policy,

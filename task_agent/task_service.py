@@ -58,6 +58,7 @@ from .serve_client import (
 )
 from .token_usage import OpenCodeTokenUsage, attribute_token_usage, merge_token_usages
 from .token_categories import token_category
+from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +324,7 @@ class OpenCodeTaskSpec:
     directory: Path
     required_capability: str = "high"
     timeout_seconds: int | None = None
+    idle_timeout_seconds: int | None = None
     priority: int = 50
     output_schema: dict[str, Any] | None = None
     output_retry_count: int = 2
@@ -548,6 +550,9 @@ class OpenCodeTaskService:
         timeout = spec.timeout_seconds
         if timeout is not None and int(timeout) <= 0:
             raise ValueError("OpenCode timeout_seconds must be positive")
+        idle_timeout = spec.idle_timeout_seconds
+        if idle_timeout is not None and int(idle_timeout) <= 0:
+            raise ValueError("OpenCode idle_timeout_seconds must be positive")
         output_retry_count = int(spec.output_retry_count)
         if output_retry_count < 0:
             raise ValueError("OpenCode output_retry_count cannot be negative")
@@ -632,6 +637,7 @@ class OpenCodeTaskService:
             required_capability=normalize_requirement(spec.required_capability),
             priority=normalize_priority(spec.priority),
             timeout_seconds=None if timeout is None else int(timeout),
+            idle_timeout_seconds=None if idle_timeout is None else int(idle_timeout),
             output_retry_count=output_retry_count,
             output_retry_prompt=output_retry_prompt,
             file_write_allowlist=configured_write_roots,
@@ -1049,7 +1055,13 @@ class OpenCodeTaskService:
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
                     or lease.option.timeout
-                    or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", 3600))
+                    or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", DEFAULT_SESSION_TIMEOUT_SECONDS))
+                )
+                idle_timeout_seconds = (
+                    (_cfg_value(task_policy, "idle_timeout_seconds") if task_policy is not None else None)
+                    or spec.idle_timeout_seconds
+                    or lease.option.idle_timeout
+                    or int(_cfg_value(_task_cli_config(record.execution_context), "idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS))
                 )
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
@@ -1117,6 +1129,7 @@ class OpenCodeTaskService:
                                     prompt=message_prompt,
                                     model=model,
                                     timeout=timeout_seconds,
+                                    idle_timeout=idle_timeout_seconds,
                                     on_line=guard(context.on_output),
                                     on_session_id=guard(record_session),
                                     on_model_request_failure=guard(record_model_request_failure),
@@ -1723,6 +1736,7 @@ class OpenCodeTaskService:
                             lease.health_identity if lease is not None else ()
                         ),
                         timeout_seconds=timeout_seconds,
+                        idle_timeout_seconds=idle_timeout_seconds,
                         system_prompt=system_prompt,
                         validation_debug=validation_debug,
                         token_usage=task_token_usage,
@@ -1874,6 +1888,7 @@ class OpenCodeTaskService:
         original_source: OutputSource,
         original_model_identity: tuple[str, bool, str, str],
         timeout_seconds: int,
+        idle_timeout_seconds: int,
         system_prompt: str,
         validation_debug: bool,
         token_usage: OpenCodeTokenUsage | None,
@@ -2027,6 +2042,7 @@ class OpenCodeTaskService:
                 prompt=formatter_prompt,
                 model=formatter_model,
                 timeout=timeout_seconds,
+                idle_timeout=idle_timeout_seconds,
                 on_line=context.on_output,
                 on_session_id=record_formatter_session,
                 on_model_request_failure=record_formatter_failure,
@@ -2358,6 +2374,7 @@ class OpenCodeTaskService:
                         prompt=correction_prompt,
                         model=correction_model,
                         timeout=timeout_seconds,
+                        idle_timeout=idle_timeout_seconds,
                         on_line=context.on_output,
                         on_session_id=record_correction_session,
                         on_model_request_failure=record_correction_failure,
@@ -3608,7 +3625,22 @@ def _task_timeout_seconds(
         )
         if value > 0:
             return value
-    return int(_cfg_value(_task_cli_config(context), "timeout", 3600) or 3600)
+    return int(_cfg_value(_task_cli_config(context), "timeout", DEFAULT_SESSION_TIMEOUT_SECONDS) or DEFAULT_SESSION_TIMEOUT_SECONDS)
+
+
+def _task_idle_timeout_seconds(task_type: str, context: OpenCodeExecutionContext) -> int | None:
+    policy = _task_model_policy(context)
+    if policy is not None:
+        # Old validation snapshots retain their total timeout and acquire only
+        # the new default; do not borrow a subsequently edited Agent policy.
+        return int(_cfg_value(policy, "idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS) or DEFAULT_IDLE_TIMEOUT_SECONDS)
+    if task_type == "memory_api_discovery":
+        policy = getattr(get_config(), "memory_api_discovery", None)
+        value = _cfg_value(policy, "idle_timeout_seconds")
+        if value:
+            return int(value)
+    # Resolve the model override after acquiring its Lease.
+    return None
 
 
 async def _run_component_task(
@@ -3663,6 +3695,7 @@ async def _run_component_task(
                 directory=project_dir,
                 required_capability=required_capability,
                 timeout_seconds=_task_timeout_seconds(task_type, context),
+                idle_timeout_seconds=_task_idle_timeout_seconds(task_type, context),
                 priority=_task_priority(task_type),
                 output_schema=output_schema,
                 output_retry_count=invalid_json_retry_count,

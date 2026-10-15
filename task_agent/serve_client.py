@@ -32,7 +32,8 @@ from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
 )
-from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline, cancel_tasks_bounded, retire_task
+from .deadline import CLEANUP_TIMEOUT_SECONDS, OpenCodeTimeout, OperationDeadline, ResponseActivity, cancel_tasks_bounded, retire_task
+from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS
 from .output_format import format_task_output, task_output_stage
 from .token_usage import (
     OpenCodeTokenUsage,
@@ -4291,6 +4292,7 @@ class _ServeEventState:
         ignored_file_message_ids: tuple[str, ...] = (),
         log_stage: str = "opencode",
         source_mcp_name: str = "",
+        on_progress=None,
     ) -> None:
         self.tool = tool
         self.session_id = session_id
@@ -4299,6 +4301,11 @@ class _ServeEventState:
         self.ignored_file_message_ids = frozenset(ignored_file_message_ids)
         self.log_stage = task_output_stage(log_stage)
         self.source_mcp_name = str(source_mcp_name or "").strip()
+        self.on_progress = on_progress
+        self.progress_started_at_ms: float | None = None
+        self.ignored_progress_message_ids = set(ignored_file_message_ids)
+        self.progress_message_ids: set[str] = set()
+        self.tool_progress: dict[str, str] = {}
         self.emitted_text = False
         self.emitted_response_text = False
         self.seen_next_text_event = False
@@ -4329,6 +4336,24 @@ class _ServeEventState:
         self.final_snapshots_emitted: set[tuple[str, str]] = set()
         self.recovery_snapshots_emitted: set[tuple[str, str]] = set()
         self.session_terminal = False
+
+    def start_progress(self) -> None:
+        # Events received before POST and continued-session history are not
+        # evidence of progress in the new conversation.
+        self.ignored_progress_message_ids.update(self.message_roles)
+        self.progress_started_at_ms = int(time.time() * 1000)
+
+    def note_progress(self) -> None:
+        if self.on_progress is not None:
+            self.on_progress()
+
+    def note_message_content(self, message_id: str) -> None:
+        if message_id and message_id not in self.progress_message_ids:
+            # Different assistant messages may legitimately contain identical
+            # text. Do not mistake a new step for a replay of the previous one.
+            if self.progress_message_ids:
+                self.note_progress()
+            self.progress_message_ids.add(message_id)
 
     def emit(self, category: str, message: object) -> None:
         if self.on_line is None:
@@ -4384,6 +4409,15 @@ class _ServeEventState:
         role = str(info.get("role") or "")
         if message_id and role:
             self.message_roles[message_id] = role
+        created = (info.get("time") or {}).get("created") if isinstance(info.get("time"), dict) else None
+        if (
+            self.progress_started_at_ms is not None
+            and isinstance(created, (int, float))
+            and created < self.progress_started_at_ms
+        ):
+            self.ignored_progress_message_ids.add(message_id)
+        if message_id in self.ignored_progress_message_ids:
+            return
         if role == "assistant":
             for part_id, part_message_id in list(self.part_message_ids.items()):
                 if part_message_id == message_id:
@@ -4409,6 +4443,7 @@ class _ServeEventState:
         text = str(value or "")
         if not text:
             return
+        self.note_progress()
         if kind == "reasoning":
             self.observed_reasoning_text += text
             emitted = self.reasoning.append(text)
@@ -4424,6 +4459,8 @@ class _ServeEventState:
         if kind not in {"text", "reasoning"}:
             return
         message_id = self.part_message_ids.get(part_id, "")
+        if message_id in self.ignored_progress_message_ids:
+            return
         role = self.message_roles.get(message_id, "") if message_id else "assistant"
         if role == "user":
             return
@@ -4431,13 +4468,14 @@ class _ServeEventState:
             return
         value = self.part_text.get(part_id, "")
         emitted_value = self.part_emitted_text.get(part_id, "")
-        if kind == "text" and self.seen_next_text_event:
-            self.part_emitted_text[part_id] = value
-            return
-        if kind == "reasoning" and self.seen_next_reasoning_event:
-            self.part_emitted_text[part_id] = value
-            return
         if not value or value == emitted_value:
+            return
+        self.note_message_content(message_id)
+        if (kind == "text" and self.seen_next_text_event) or (kind == "reasoning" and self.seen_next_reasoning_event):
+            self.part_emitted_text[part_id] = value
+            observed = self.observed_reasoning_text if kind == "reasoning" else self.observed_response_text
+            if value not in observed and not observed.startswith(value):
+                self.note_progress()
             return
         if value.startswith(emitted_value):
             delta = value[len(emitted_value):]
@@ -4454,6 +4492,8 @@ class _ServeEventState:
             return
         part_id = str(part.get("id") or "")
         message_id = str(part.get("messageID") or "")
+        if message_id in self.ignored_progress_message_ids:
+            return
         if part_id:
             self.part_types[part_id] = kind
             self.part_message_ids[part_id] = message_id
@@ -4483,6 +4523,8 @@ class _ServeEventState:
             if part_id:
                 self.part_types[part_id] = kind
         message_id = str(props.get("messageID") or self.part_message_ids.get(part_id, ""))
+        if message_id in self.ignored_progress_message_ids:
+            return
         if part_id and message_id:
             self.part_message_ids[part_id] = message_id
         delta = str(props.get("delta") or "")
@@ -4530,6 +4572,7 @@ class _ServeEventState:
         if snapshot_key in self.final_snapshots_emitted:
             return
         self.final_snapshots_emitted.add(snapshot_key)
+        self.note_progress()
         emitter = self.final_reasoning if kind == "reasoning" else self.final_text
         emitted = emitter.append(final_text)
         emitted = emitter.flush() or emitted
@@ -4558,6 +4601,7 @@ class _ServeEventState:
         if snapshot_key in self.recovery_snapshots_emitted:
             return
         self.recovery_snapshots_emitted.add(snapshot_key)
+        self.note_progress()
         emitter = self.recovery_reasoning if kind == "reasoning" else self.recovery_text
         emitted = emitter.append(snapshot)
         emitted = emitter.flush() or emitted
@@ -4576,6 +4620,8 @@ class _ServeEventState:
             return
         self.record_message(info)
         message_id = str(info.get("id") or "")
+        if message_id in self.ignored_progress_message_ids:
+            return
         parts = message.get("parts")
         if not isinstance(parts, list):
             return
@@ -4594,6 +4640,8 @@ class _ServeEventState:
             self.handle_part(part)
         for kind, values in snapshots.items():
             if values:
+                if any(values):
+                    self.note_message_content(message_id)
                 self.reconcile_snapshot(kind, "".join(values))
 
     def ingest_file_write_snapshot(self, message: object) -> None:
@@ -4635,6 +4683,7 @@ class _ServeEventState:
         if call in self.tool_calls_emitted:
             return
         self.tool_calls_emitted.add(call)
+        self.note_progress()
         if _is_skill_tool(name):
             self.emit("skill", f"name={_skill_name(input_value)}")
         else:
@@ -4673,6 +4722,7 @@ class _ServeEventState:
         if key in self.tool_results_emitted:
             return
         self.tool_results_emitted.add(key)
+        self.note_progress()
         if normalized_status == "success":
             return
         error = summary or "error=unknown"
@@ -4690,10 +4740,27 @@ class _ServeEventState:
             )
 
     def handle_tool_part(self, part: dict[str, Any]) -> None:
+        if str(part.get("messageID") or "") in self.ignored_progress_message_ids:
+            return
         state = part.get("state")
         if not isinstance(state, dict):
             return
         status = str(state.get("status") or "")
+        call = str(part.get("callID") or part.get("id") or "")
+        # Exclude timestamps; repeated running snapshots and polling must not
+        # keep a stalled tool alive. Input/output changes and transitions count.
+        if call and status in {"pending", "running", "completed", "error"}:
+            signature = hashlib.sha256(json.dumps(
+                {
+                    **{key: state.get(key) for key in ("status", "input", "output", "error")},
+                    "stream_output": (state.get("metadata") or {}).get("output")
+                    if isinstance(state.get("metadata"), dict) else None,
+                },
+                sort_keys=True, default=str,
+            ).encode("utf-8")).hexdigest()
+            if self.tool_progress.get(call) != signature:
+                self.tool_progress[call] = signature
+                self.note_progress()
         common = {
             "call_id": part.get("callID"),
             "tool_name": part.get("tool"),
@@ -4790,6 +4857,8 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     if _event_session_id(props) != state.session_id:
         return
     if state.mark_event_seen(event):
+        return
+    if str(props.get("messageID") or "") in state.ignored_progress_message_ids:
         return
 
     if event_type == "message.updated":
@@ -5125,6 +5194,7 @@ class OpenCodeServeManager:
         self._event_lock = asyncio.Lock()
         self._event_states: dict[str, _ServeEventState] = {}
         self._event_directories: dict[str, str] = {}
+        self._event_child_states: dict[str, tuple[str, _ServeEventState]] = {}
         self._global_event_channel: _EventChannelRuntime | None = None
         self._legacy_event_channels: dict[str, _EventChannelRuntime] = {}
         self._global_event_unsupported = False
@@ -6351,6 +6421,7 @@ class OpenCodeServeManager:
         prompt: str,
         model: str,
         timeout: int,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
         on_line=None,
         on_session_id=None,
         on_model_request_failure=None,
@@ -6382,6 +6453,7 @@ class OpenCodeServeManager:
         required_bash_path_prepend: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
         deadline = OperationDeadline(timeout, cancel_event=cancel_event)
+        activity = ResponseActivity(idle_timeout)
         callbacks_open = True
         usage_open = True
         output_callback = on_line
@@ -6792,7 +6864,7 @@ class OpenCodeServeManager:
                     ignored_file_message_ids = (
                         response_baseline_message_id,
                     )
-            if on_line is not None or on_file_write is not None:
+            if idle_timeout or on_line is not None or on_file_write is not None:
                 event_state = _ServeEventState(
                     tool,
                     active_session_id,
@@ -6801,6 +6873,7 @@ class OpenCodeServeManager:
                     ignored_file_message_ids=ignored_file_message_ids,
                     log_stage=normalized_log_stage,
                     source_mcp_name=selected_source_mcp or "",
+                    on_progress=activity.touch,
                 )
                 if on_line is not None:
                     event_flush_task = asyncio.create_task(
@@ -6946,6 +7019,12 @@ class OpenCodeServeManager:
             if system_prompt:
                 payload["system"] = system_prompt
 
+            if event_state is not None:
+                event_state.start_progress()
+                for root_id, child_state in self._event_child_states.values():
+                    if root_id == active_session_id:
+                        child_state.start_progress()
+            activity.start()
             request = asyncio.create_task(
                 client.post(
                     f"/session/{active_session_id}/message",
@@ -6971,6 +7050,7 @@ class OpenCodeServeManager:
                     request=request,
                     timeout=deadline.remaining(),
                     cancel_event=cancel_event,
+                    activity=activity,
                 ), phase="message")
                 message_finished = True
             except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -6978,6 +7058,8 @@ class OpenCodeServeManager:
             except BaseException:
                 await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
                 raise
+            finally:
+                activity.stop()
             try:
                 response.raise_for_status()
             except BaseException:
@@ -7156,7 +7238,7 @@ class OpenCodeServeManager:
         except asyncio.TimeoutError as exc:
             session_outcome = "timeout"
             session_error = str(exc) or f"OpenCode call timed out during {deadline.phase}"
-            emit("task", f"TIMEOUT phase={deadline.phase} task={task_id} "
+            emit("task", f"TIMEOUT phase={deadline.phase} kind={getattr(exc, 'kind', 'session')} task={task_id} "
                  f"attempt={task_attempt} elapsed={time.monotonic() - deadline.started_at:.3f}s")
             if deadline.phase in {"session_create", "session_permissions", "scan_mcp"}:
                 self._mark_serve_restart_required("Session preparation timed out")
@@ -7172,6 +7254,7 @@ class OpenCodeServeManager:
             cleanup_expires = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
             cleanup_cancelled = False
             callbacks_open = False
+            activity.stop()
 
             async def cleanup(operation, phase, limit=None):
                 nonlocal cleanup_cancelled
@@ -7206,6 +7289,7 @@ class OpenCodeServeManager:
                     event_state.flush()
                     event_state.on_line = None
                     event_state.on_file_write = None
+                    event_state.on_progress = None
                 if event_registered:
                     await cleanup(self._unregister_event_state(active_session_id), "event_cleanup", 1.0)
                 for task in (snapshot_poll_task, event_flush_task):
@@ -7416,6 +7500,10 @@ class OpenCodeServeManager:
         async with self._event_lock:
             self._event_states.pop(session_id, None)
             self._event_directories.pop(session_id, None)
+            for child_id, (root_id, child_state) in list(self._event_child_states.items()):
+                if root_id == session_id:
+                    child_state.on_progress = None
+                    self._event_child_states.pop(child_id, None)
 
     def _event_channel_healthy(self, directory: Path) -> bool:
         if not self._global_event_unsupported:
@@ -7438,13 +7526,32 @@ class OpenCodeServeManager:
             return False
         if event_type in {"server.connected", "server.heartbeat"}:
             return True
+        if event_type in {"session.created", "session.updated"}:
+            info = props.get("info")
+            if isinstance(info, dict):
+                child_id = str(info.get("id") or "")
+                parent_id = str(info.get("parentID") or "")
+                root_id = self._event_child_states.get(parent_id, (parent_id, None))[0]
+                root = self._event_states.get(root_id)
+                if (
+                    root is not None and child_id and child_id != root_id
+                    and child_id not in self._event_states
+                    and child_id not in self._event_child_states
+                    and (not directory_key or self._event_directories.get(root_id) == directory_key)
+                ):
+                    child = _ServeEventState(root.tool, child_id, None, on_progress=root.on_progress)
+                    child.progress_started_at_ms = root.progress_started_at_ms
+                    self._event_child_states[child_id] = (root_id, child)
         session_id = _event_session_id(props)
         if not session_id:
             return True
         state = self._event_states.get(session_id)
+        root_id = session_id
+        if state is None and session_id in self._event_child_states:
+            root_id, state = self._event_child_states[session_id]
         if state is None:
             return True
-        if directory_key and self._event_directories.get(session_id) != directory_key:
+        if directory_key and self._event_directories.get(root_id) != directory_key:
             return True
         _handle_serve_event(payload, state)
         return True
@@ -7663,15 +7770,21 @@ class OpenCodeServeManager:
                 await asyncio.sleep(0.1)
                 continue
             try:
-                response = await client.get(
-                    f"/session/{session_id}/message",
-                    params=poll_params,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                message = _latest_assistant_message(response.json(), session_id)
-                if message is not None:
-                    state.ingest_message_snapshot(message)
+                sessions = [(session_id, state), *(
+                    (child_id, child_state)
+                    for child_id, (root_id, child_state) in self._event_child_states.items()
+                    if root_id == session_id
+                )]
+                for current_id, current_state in sessions:
+                    response = await client.get(
+                        f"/session/{current_id}/message",
+                        params=poll_params,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    message = _latest_assistant_message(response.json(), current_id)
+                    if message is not None:
+                        current_state.ingest_message_snapshot(message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -8123,6 +8236,7 @@ class OpenCodeServeManager:
         request: asyncio.Task[httpx.Response],
         timeout: int,
         cancel_event,
+        activity: ResponseActivity | None = None,
     ) -> httpx.Response:
         started = time.monotonic()
         while True:
@@ -8131,8 +8245,10 @@ class OpenCodeServeManager:
             if request.done():
                 return await request
             if time.monotonic() - started > timeout:
-                raise asyncio.TimeoutError()
-            await asyncio.sleep(0.2)
+                raise OpenCodeTimeout("session", "OpenCode session total timeout during message")
+            if activity is not None:
+                activity.check()
+            await asyncio.sleep(min(0.2, activity.remaining() if activity is not None else 0.2))
 
     @staticmethod
     async def _cancel_request_task(request: asyncio.Future) -> bool:
@@ -9070,6 +9186,7 @@ class OpenCodeServeManager:
             self._global_event_unsupported = False
             self._event_states.clear()
             self._event_directories.clear()
+            self._event_child_states.clear()
             self._degraded_event_channels.clear()
             self._event_failure_started_at = 0.0
             self._event_failure_attempts = 0

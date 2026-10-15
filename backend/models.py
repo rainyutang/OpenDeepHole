@@ -12,6 +12,12 @@ from pydantic.json_schema import SkipJsonSchema
 
 from backend.call_chain import normalize_call_chain_markdown
 
+from task_agent.timeouts import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_TIMEOUT_SECONDS,
+    upgrade_managed_timeouts,
+)
+
 
 STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
 STATIC_CANDIDATE_ENGINE_LABEL = "DeepHole基于代码风险点的漏洞挖掘引擎"
@@ -1109,6 +1115,7 @@ class AgentOpenCodeModelConfig(BaseModel):
     max_concurrency: int = 1
     enabled: bool = True
     timeout: int | None = None
+    idle_timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[AgentModelTimeWindow] = []
 
@@ -1117,7 +1124,8 @@ class AgentOpenCodeConfig(BaseModel):
     tool: Literal["opencode"] = "opencode"
     executable: str = "opencode"
     model: str = ""
-    timeout: int = 3600
+    timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2
     serve_port: int | None = None
     models: list[AgentOpenCodeModelConfig] = []
@@ -1139,7 +1147,8 @@ class AgentModelPoolConfig(BaseModel):
 
 class AgentModelTaskPolicy(BaseModel):
     required_capability: str = "high"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -1240,7 +1249,7 @@ class AgentVulnerabilityValidationConfig(BaseModel):
     validation_max_retries: int = 0
     model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
-        timeout_seconds=3600,
+        timeout_seconds=DEFAULT_SESSION_TIMEOUT_SECONDS,
         max_retries=2,
     )
 
@@ -1435,7 +1444,8 @@ def _upgrade_agent_v8_config(
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_candidates: int = 200
 
 
@@ -1451,7 +1461,7 @@ class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
-        timeout_seconds=7200,
+        timeout_seconds=DEFAULT_SESSION_TIMEOUT_SECONDS,
         max_retries=2,
     )
 
@@ -1463,7 +1473,7 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: Literal[8] = 8
+    schema_version: Literal[9] = 9
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1497,6 +1507,10 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
+        return upgrade_managed_timeouts(cls._upgrade_legacy_v8(value), source=value)
+
+    @classmethod
+    def _upgrade_legacy_v8(cls, value):
         """Accept older/transient Agent payloads and emit the v8 contract."""
         if not isinstance(value, dict):
             return value
@@ -1510,6 +1524,9 @@ class AgentRemoteConfig(BaseModel):
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
+        if schema_version >= 9:
+            value.pop("mining_engines", None)
+            return value
         if schema_version >= 8:
             migrated = value
             migrated.pop("mining_engines", None)
@@ -1661,6 +1678,7 @@ class AgentRemoteConfig(BaseModel):
             tool=self.base.tool,
             executable=self.base.executable,
             timeout=self.vulnerability_mining.timeout_seconds,
+            idle_timeout=self.vulnerability_mining.idle_timeout_seconds,
             max_retries=self.vulnerability_mining.max_retries,
             serve_port=self.base.opencode_serve_port,
             models=self.model_pool.models,

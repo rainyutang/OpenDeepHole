@@ -103,7 +103,7 @@ Agent 内部辅助任务继续使用各自既有策略，但不属于公共调�
 完整引擎名称作为主标签，并追加候选点审计、项目级审计、威胁审计或攻击模式审计作为
 子任务说明，其它任务名回退显示“漏洞挖掘”。
 
-任务策略页只配置 `low`、`high` 两档，v3 默认全部为 `high`。v2 及更早配置中的阶段级 `any`/`low` 会一次性迁移为 `high`，旧默认超时 `1200` 会先迁移为 `3600`；v7 升级到 v8 时，威胁分析策略中的 `3600` 秒再一次性迁移为新的默认值 `7200` 秒，其它阶段及其它自定义超时保持不变。升级到 v8 后仍可手工改回 `low` 或填写任意合法超时。模型行自身的能力标签和显式超时不会迁移。
+任务策略页只配置 `low`、`high` 两档，v3 默认全部为 `high`。v2 及更早配置中的阶段级 `any`/`low` 会一次性迁移为 `high`，旧默认超时 `1200` 会先迁移为 `3600`；v7 升级到 v8 时，威胁分析策略中的 `3600` 秒再一次性迁移为新的默认值 `7200` 秒，其它阶段及其它自定义超时保持不变。v8→v9 将威胁分析原默认 `7200` 秒、其它阶段原默认 `3600` 秒升级为 `10800` 秒，同时补充 `idle_timeout_seconds: 1200`。每步只迁移对应版本的旧默认，自定义值保留；v8 威胁分析已手工改回 `3600` 的值仍保留。v9 的显式值不再升级。模型行自身的能力标签和显式超时不会迁移。
 
 ## 独立组件配置
 
@@ -133,7 +133,8 @@ serve:
   executable: opencode
   port: 4096
   # 单次模型消息从开始执行到完成的默认超时，单位为秒，不包含排队时间。
-  timeout: 3600
+  timeout: 10800
+  idle_timeout: 1200
   # 超时、普通执行错误或 JSON 纠正耗尽后，创建全新 Session 的重试次数。
   max_retries: 2
   # 传给 Serve 子进程的环境变量。实际代理变量会被清除，只保留绕过列表。
@@ -181,7 +182,8 @@ model_pool:
       max_concurrency: 2
       enabled: true
       # 以下两项均为模型行覆盖；省略时继承 serve 设置。
-      timeout: 3600
+      timeout: 10800
+      idle_timeout: 1200
       max_retries: 2
       # 使用运行 Task Agent 的机器本地时间；多段时间窗取并集。
       time_windows:
@@ -221,7 +223,8 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.tool` | 默认且只能为 `opencode` | 固定的 OpenCode Serve 实现标识，不用于选择磁盘上的文件。 |
 | `serve.executable` | 默认 `opencode` | 实际启动 Serve 的可执行文件名或完整路径；可使用 `opencode`、`nga` 或其它兼容程序。配置哪个就启动哪个，不做名称回退。 |
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
-| `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
+| `serve.timeout` | 默认 `10800`，最小 `1` | 每次调用总超时（3 小时），单位为秒；排队等待模型 Lease 的时间不计入。 |
+| `serve.idle_timeout` | 默认 `1200`，最小 `1` | 消息发送后连续无新内容的超时（20 分钟），单位为秒。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
 | `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除。`NO_PROXY` 与 `no_proxy` 分别以逗号追加到父进程同名变量，不会覆盖原值。 |
 | `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；作为 standalone 最高优先级用户层与已发现配置合并，再由 Task Agent 写入受管权限并生成 `workspace_dir/opencode.json`。 |
@@ -270,6 +273,7 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 | `models[].max_concurrency` | 默认 `1`，最小 `1` | 该模型行允许同时持有的 Lease 数量。 |
 | `models[].enabled` | 默认 `true` | 是否将该模型加入可调度模型池。 |
 | `models[].timeout` | 默认继承 `serve.timeout`，最小 `1` | 该模型单次消息执行超时，单位为秒。 |
+| `models[].idle_timeout` | 默认继承 `serve.idle_timeout`，最小 `1` | 该模型连续无新内容超时，单位为秒；托管阶段策略优先。 |
 | `models[].max_retries` | 默认继承 `serve.max_retries`，最小 `0` | 该模型在超时或其它可重试失败后采用的新 Session 重试次数。 |
 | `models[].time_windows` | 默认 `[]` | 模型允许获得新 Lease 的本地时间窗口；空列表表示全天可用。 |
 
@@ -420,7 +424,9 @@ JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invali
 
 创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
 
-`timeout_seconds` 保持单次调用口径：取得模型 Lease 后，每次调用从 Serve 准备开始使用单调时钟截止时间，覆盖共享 Serve 等待、MCP 准备、Session 创建、消息等待、响应恢复和宿主校验。模型排队不计入，同 Session 的下一次纠正调用及新 Session 重试分别重新计时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
+阶段策略包含 `timeout_seconds`（默认 10800 秒）与 `idle_timeout_seconds`（默认 1200 秒）。独立运行分别使用 `serve.timeout` 与 `serve.idle_timeout`。
+
+`timeout_seconds` 保持单次调用口径：取得模型 Lease 后，每次调用从 Serve 准备开始使用单调时钟截止时间，覆盖共享 Serve 等待、MCP 准备、Session 创建、消息等待、响应恢复和宿主校验。模型排队不计入，同 Session 的下一次纠正调用及新 Session 重试分别重新计时。JSON 格式匹配、同 Session JSON 纠正及产物校验重试均获得独立的完整预算。无新内容计时仅覆盖消息等待；新文本、推理、工具调用/输出变化/结果刷新计时，心跳、busy/retry、重复快照和历史回复不刷新。关闭日志输出仍生效，已关联子 Session 的进展计入父调用。任一超时触发既有取消和重试，日志 `TIMEOUT kind=session|idle` 及错误原因区分两种超时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
 
 超时会输出 `TIMEOUT phase=... task=... attempt=... elapsed=...`。后续 Session 中止、请求/事件回收、MCP 释放及 HTTP 关闭共用最多 10 秒清理预算；取消不合作的操作不会无限阻塞模型 Lease 释放。Session 中止未确认或请求未退出时，标记共享 Serve 在空闲边界恢复，不强制终止其它扫描的活动 Session。关闭旧调用的结果和文件事件回调，迟到回复不能更新新尝试。Session 树 Token 补采最多等待 2 秒，保留已取得的统计并使用现有 `complete=false` 标记不完整；补采失败不替换原始失败原因。
 

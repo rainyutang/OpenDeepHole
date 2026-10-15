@@ -785,6 +785,7 @@ export interface AgentOpenCodeModelConfig {
   max_concurrency: number;
   enabled: boolean;
   timeout?: number | null;
+  idle_timeout?: number | null;
   max_retries?: number | null;
   time_windows?: AgentModelTimeWindow[];
 }
@@ -803,6 +804,7 @@ export interface AgentModelPoolConfig {
 export interface AgentModelTaskPolicy {
   required_capability: "low" | "high";
   timeout_seconds: number;
+  idle_timeout_seconds: number;
   max_retries: number;
 }
 
@@ -934,7 +936,7 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 8;
+  schema_version: 9;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;

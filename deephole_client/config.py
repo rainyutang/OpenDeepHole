@@ -12,6 +12,12 @@ from typing import Optional
 
 import yaml
 
+from task_agent.timeouts import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_SESSION_TIMEOUT_SECONDS,
+    upgrade_managed_timeouts,
+)
+
 _CANONICAL_AI_TOOL = "opencode"
 _LEGACY_AI_TOOL_EXECUTABLES = {"nga", "opencode"}
 _NO_PROXY_ENV_NAMES = ("NO_PROXY", "no_proxy")
@@ -63,6 +69,7 @@ class OpenCodeModelConfig:
     max_concurrency: int = 1
     enabled: bool = True
     timeout: int | None = None
+    idle_timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[dict[str, object]] = field(default_factory=list)
 
@@ -72,7 +79,8 @@ class OpenCodeConfig:
     tool: str = "opencode"
     executable: str = "opencode"  # OpenCode-compatible executable name or full path
     model: str = ""
-    timeout: int = 3600
+    timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2          # fresh-Session retries for timeout and retryable failures
     serve_port: int | None = None
     models: list[OpenCodeModelConfig] = field(default_factory=list)
@@ -85,7 +93,8 @@ class OpenCodeConfig:
 class MemoryApiDiscoveryConfig:
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_candidates: int = 200
 
 
@@ -102,7 +111,8 @@ class GitHistoryConfig:
 @dataclass
 class ModelTaskPolicyConfig:
     required_capability: str = "high"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = DEFAULT_SESSION_TIMEOUT_SECONDS
+    idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     max_retries: int = 2
 
 
@@ -111,7 +121,7 @@ class ThreatAnalysisConfig:
     enabled: bool = True
     model_policy: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
         required_capability="high",
-        timeout_seconds=7200,
+        timeout_seconds=DEFAULT_SESSION_TIMEOUT_SECONDS,
         max_retries=2,
     ))
 
@@ -365,6 +375,9 @@ def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
     elif capability in {"any", "low"}:
         target.required_capability = "low"
     target.timeout_seconds = _bounded_int(raw.get("timeout_seconds"), target.timeout_seconds, 1, 86400)
+    target.idle_timeout_seconds = _bounded_int(
+        raw.get("idle_timeout_seconds"), target.idle_timeout_seconds, 1, 86400,
+    )
     target.max_retries = _bounded_int(raw.get("max_retries"), target.max_retries, 0, 20)
 
 
@@ -459,6 +472,10 @@ def _upgrade_managed_v8(
 
 
 def _upgrade_managed_remote(remote: dict) -> dict:
+    return upgrade_managed_timeouts(_upgrade_managed_remote_v8(remote), source=remote)
+
+
+def _upgrade_managed_remote_v8(remote: dict) -> dict:
     """Upgrade managed payloads to the Agent v8 contract."""
     remote = copy.deepcopy(remote)
     remote.pop("opencode_config", None)
@@ -466,6 +483,9 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
+    if schema_version >= 9:
+        remote.pop("mining_engines", None)
+        return remote
     if schema_version >= 8:
         migrated = remote
         migrated.pop("mining_engines", None)
@@ -808,7 +828,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 8,
+        "schema_version": 9,
         "base": {
             "tool": "opencode",
             "executable": config.opencode.executable,
@@ -868,6 +888,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
+    raw = _upgrade_managed_remote(raw)
     oc_fields = {f.name for f in dataclasses.fields(OpenCodeConfig)}
     model_fields = {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
     memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
@@ -975,7 +996,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v8 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v9 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

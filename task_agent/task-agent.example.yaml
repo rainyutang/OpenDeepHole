@@ -11,7 +11,9 @@ serve:
   # 实际启动文件，可填写 opencode、nga 或完整路径。
   executable: opencode
   port: 4096
-  timeout: 3600
+  # 每次调用的总超时，以及连续无新内容超时，单位均为秒。
+  timeout: 10800
+  idle_timeout: 1200
   max_retries: 2
   # Serve 不继承 HTTP/HTTPS/ALL 代理变量；NO_PROXY/no_proxy 分别追加到父进程同名变量。
   # environment:

@@ -623,6 +623,8 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的并发数必须大于 0")
         if model.timeout is not None and model.timeout < 1:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的超时必须大于 0")
+        if model.idle_timeout is not None and model.idle_timeout < 1:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的无新内容超时必须大于 0")
         if model.max_retries is not None and model.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的重试次数不能小于 0")
         for window in model.time_windows:
@@ -670,6 +672,8 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"{label}的模型能力无效")
         if policy.timeout_seconds < 1:
             raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")
+        if policy.idle_timeout_seconds < 1:
+            raise HTTPException(status_code=422, detail=f"{label}的无新内容超时必须大于 0")
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
     # Dynamic method fields are validated and snapshotted by scan creation.

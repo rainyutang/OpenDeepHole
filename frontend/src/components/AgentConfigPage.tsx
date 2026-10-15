@@ -45,15 +45,15 @@ const policy = (
   required_capability: AgentModelTaskPolicy["required_capability"] = "high",
   max_retries = 2,
 ): AgentModelTaskPolicy => ({
-  required_capability, timeout_seconds: 3600, max_retries,
+  required_capability, timeout_seconds: 10800, idle_timeout_seconds: 1200, max_retries,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 8,
+  schema_version: 9,
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { models: [] },
   threat_analysis: {
     enabled: true,
-    model_policy: { ...policy("high", 2), timeout_seconds: 7200 },
+    model_policy: policy("high", 2),
   },
   vulnerability_mining: policy("high"),
   false_positive: policy("high"),
@@ -87,7 +87,11 @@ function configuredWeekdays(window: AgentModelTimeWindow): number[] {
   return Array.isArray(window.weekdays) ? window.weekdays : allWeekdays;
 }
 
-function validateModelTimeWindows(config: AgentRemoteConfig): string {
+function validateAgentConfig(config: AgentRemoteConfig): string {
+  const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
+  const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds]);
+  timeouts.push(...config.model_pool.models.flatMap((model) => [model.timeout, model.idle_timeout].filter((value): value is number => value != null)));
+  if (timeouts.some((value) => !Number.isInteger(value) || value < 1)) return "Session 超时和无新内容超时必须为正整数秒";
   for (const model of config.model_pool.models) {
     for (const window of model.time_windows || []) {
       if (configuredWeekdays(window).length === 0) return `模型 ${model.id || "未命名"} 的每个使用时间段至少要选择一天`;
@@ -99,12 +103,14 @@ function validateModelTimeWindows(config: AgentRemoteConfig): string {
 }
 
 function PolicyEditor({ value, onChange }: { value: AgentModelTaskPolicy; onChange: (value: AgentModelTaskPolicy) => void }) {
-  return <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+  return <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
     <Field label="需要的模型能力"><select className={input} value={value.required_capability} onChange={(e) => onChange({ ...value, required_capability: e.target.value as AgentModelTaskPolicy["required_capability"] })}>
       <option value="low">低能力</option><option value="high">高能力</option>
     </select></Field>
-    <Field label="模型调用超时（秒）"><input className={input} type="number" min={1} value={value.timeout_seconds} onChange={(e) => onChange({ ...value, timeout_seconds: Number(e.target.value) })} /></Field>
+    <Field label="Session 超时（秒）"><input className={input} type="number" min={1} value={value.timeout_seconds} onChange={(e) => onChange({ ...value, timeout_seconds: Number(e.target.value) })} /></Field>
+    <Field label="单次对话无新内容超时（秒）"><input className={input} type="number" min={1} value={value.idle_timeout_seconds} onChange={(e) => onChange({ ...value, idle_timeout_seconds: Number(e.target.value) })} /></Field>
     <Field label="模型调用重试次数"><input className={input} type="number" min={0} value={value.max_retries} onChange={(e) => onChange({ ...value, max_retries: Number(e.target.value) })} /></Field>
+    <p className="text-xs text-slate-400 md:col-span-2">每次调用独立计时，JSON 纠正和产物校验重试重新计时。新文本、推理及工具进展刷新无新内容计时。</p>
   </div>;
 }
 
@@ -258,8 +264,8 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   };
   const save = async () => {
     if (!agentKey) return;
-    const timeWindowError = validateModelTimeWindows(config);
-    if (timeWindowError) { setMessage(timeWindowError); return; }
+    const configError = validateAgentConfig(config);
+    if (configError) { setMessage(configError); return; }
     setSaving(true); setMessage("");
     try {
       await updateAgentConfig(agentKey, config);
@@ -339,7 +345,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       added.push({
         id, model, capability: "high", weight: 1,
         max_concurrency: 1, enabled: true,
-        timeout: null, max_retries: null, time_windows: [],
+        timeout: null, idle_timeout: null, max_retries: null, time_windows: [],
       });
     }
     setCfg({ ...config, model_pool: { ...config.model_pool, models: [...config.model_pool.models, ...added] } });
@@ -507,7 +513,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
 function ModelEditor({ config, setCfg, online, onImport, pool }: { config: AgentRemoteConfig; setCfg: (value: AgentRemoteConfig) => void; online: boolean; onImport: () => void; pool: AgentOpenCodePoolStatus | null }) {
   const models = config.model_pool.models;
   const update = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.map((item, current) => current === index ? { ...item, ...patch } : item) } });
-  const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, timeout: null, max_retries: null, time_windows: [] }] } });
+  const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, timeout: null, idle_timeout: null, max_retries: null, time_windows: [] }] } });
   const addWindow = (modelIndex: number) => update(modelIndex, {
     time_windows: [...(models[modelIndex].time_windows || []), { weekdays: [...allWeekdays], start: "09:00", end: "18:00" }],
   });
@@ -547,7 +553,8 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
       <div className="mt-3 grid gap-3 md:grid-cols-4">
         <Field label="权重"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} onChange={(e) => update(index, { weight: Number(e.target.value) })} /></Field>
         <Field label="模型可用并发"><input className={input} type="number" min={1} value={model.max_concurrency} onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} /></Field>
-        <Field label="超时覆盖（秒）"><input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
+        <Field label="Session 超时覆盖（秒）"><input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
+        <Field label="无新内容超时覆盖（秒）"><input className={input} type="number" min={1} value={model.idle_timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { idle_timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
         <Field label="重试次数覆盖"><input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} /></Field>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs">

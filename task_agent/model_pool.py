@@ -102,6 +102,7 @@ class ModelOption:
     tool: str = ""
     executable: str = ""
     timeout: int | None = None
+    idle_timeout: int | None = None
     max_retries: int | None = None
     time_windows: tuple[ModelTimeWindow, ...] = ()
 
@@ -672,6 +673,11 @@ def model_options(cli_config: Any) -> list[ModelOption]:
                 timeout=(
                     _safe_int(_cfg_value(raw, "timeout", None), 0, 1)
                     if _cfg_value(raw, "timeout", None) not in (None, "")
+                    else None
+                ),
+                idle_timeout=(
+                    _safe_int(_cfg_value(raw, "idle_timeout", None), 0, 1)
+                    if _cfg_value(raw, "idle_timeout", None) not in (None, "")
                     else None
                 ),
                 max_retries=(

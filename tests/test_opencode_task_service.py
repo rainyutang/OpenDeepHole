@@ -675,6 +675,7 @@ def test_validation_model_task_uses_scan_policy_snapshot(tmp_path: Path) -> None
     snapshot = {
         "required_capability": "low",
         "timeout_seconds": 17,
+        "idle_timeout_seconds": 11,
         "max_retries": 3,
     }
     assert _task_model_policy(OpenCodeExecutionContext(
@@ -727,6 +728,7 @@ def test_validation_model_task_uses_scan_policy_snapshot(tmp_path: Path) -> None
 
         spec = service.run_task.await_args.args[0]
         assert spec.timeout_seconds == 17
+        assert spec.idle_timeout_seconds == 11
 
     asyncio.run(run())
 
@@ -1316,6 +1318,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
         runtime_config.vulnerability_mining = SimpleNamespace(
             required_capability="high",
             timeout_seconds=77,
+            idle_timeout_seconds=23,
             max_retries=1,
         )
         manager = SimpleNamespace(run_prompt=run_prompt)
@@ -1338,6 +1341,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
                     required_capability="low",
                     timeout_seconds=12,
                     attempt=7,
+                    idle_timeout_seconds=13,
                     output_retry_count=0,
                     writable_paths=(writable_root,),
                 ))
@@ -1345,6 +1349,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
         assert result.status == "success"
         assert len(calls) == 2
         assert [call["timeout"] for call in calls] == [77, 77]
+        assert [call["idle_timeout"] for call in calls] == [23, 23]
         assert [call["permissions"] for call in calls] == [
             _writable_path_permissions((
                 (tmp_path / "work").resolve(),
@@ -1944,6 +1949,8 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
                     task_name="correct json",
                     prompt="initial prompt",
                     directory=tmp_path,
+                    timeout_seconds=77,
+                    idle_timeout_seconds=23,
                     output_schema=SCHEMA,
                     output_retry_count=2,
                     attempt=0,
@@ -1952,6 +1959,8 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.structured == {"answer": 9}
         assert result.session_id == "ses_same"
+        assert [call["timeout"] for call in calls] == [77] * 4
+        assert [call["idle_timeout"] for call in calls] == [23] * 4
         assert result.token_usage["total_tokens"] == 48
         assert result.token_usage["by_category"] == [{
             "category": "fp_review", "label": "去误报", "complete": True,
@@ -3225,7 +3234,8 @@ def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(t
 
 
 @pytest.mark.parametrize("recover", [True, False])
-def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_path, monkeypatch, recover):
+@pytest.mark.parametrize("timeout_kind", ["session", "idle"])
+def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_path, monkeypatch, recover, timeout_kind):
     import httpx
     import task_agent.serve_client as serve
 
@@ -3266,7 +3276,8 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
         manager._acquire_session = acquire
         config = _config()
         config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
-            required_capability="high", timeout_seconds=0.1, max_retries=1,
+            required_capability="high", timeout_seconds=0.5 if timeout_kind == "idle" else 0.1,
+            idle_timeout_seconds=0.03 if timeout_kind == "idle" else 1200, max_retries=1,
         ))
         service = OpenCodeTaskService()
         service._runtime_for_task = AsyncMock(return_value=(
@@ -3417,6 +3428,33 @@ def test_serve_startup_timeout_is_not_a_model_timeout_or_fresh_session_retry(
         assert len(final_updates["session_events"]) == 1
         assert final_updates["session_events"][0]["failure_kind"] == "serve_startup"
         assert final_updates["session_events"][0]["session_id"] == ""
+
+    asyncio.run(run())
+
+
+def test_unclassified_public_task_uses_model_idle_override(tmp_path):
+    async def run():
+        captured = {}
+        async def prompt(**kwargs):
+            captured.update(kwargs)
+            await kwargs["on_session_id"]("ses-idle-override")
+            return OpenCodePromptResult(session_id="ses-idle-override", message_id="msg", lines=["ok"], text="ok")
+
+        async def acquire(*args, **kwargs):
+            lease = _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
+            return dataclasses.replace(lease, option=dataclasses.replace(lease.option, idle_timeout=7))
+
+        config = _config()
+        config.opencode.idle_timeout = 15
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        patches = _service_patches(SimpleNamespace(run_prompt=prompt), runtime_config=config)
+        with patches[0], patches[1] as select, patches[2], patches[3], patches[4], patches[5]:
+            select.side_effect = acquire
+            with _task_context(tmp_path), patch("task_agent.task_service._get_opencode_task_service", return_value=service):
+                result = await run_opencode_task(task_name="model idle override", task_type="git_history", prompt="analyze", required_capability="high")
+        assert result.status == "success"
+        assert captured["idle_timeout"] == 7
 
     asyncio.run(run())
 

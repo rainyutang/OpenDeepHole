@@ -14,6 +14,43 @@ _POLL_SECONDS = 0.1
 _retired_tasks: set[asyncio.Future] = set()
 
 
+class OpenCodeTimeout(asyncio.TimeoutError):
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+class ResponseActivity:
+    """A resettable idle clock, active only while a message is in flight."""
+
+    def __init__(self, timeout: float) -> None:
+        self.timeout = float(timeout)
+        if self.timeout <= 0:
+            raise ValueError("OpenCode idle_timeout must be positive")
+        self.last_progress_at: float | None = None
+
+    def start(self) -> None:
+        self.last_progress_at = time.monotonic()
+
+    def touch(self) -> None:
+        if self.last_progress_at is not None:
+            self.last_progress_at = time.monotonic()
+
+    def stop(self) -> None:
+        self.last_progress_at = None
+
+    def remaining(self) -> float:
+        if self.last_progress_at is None:
+            return self.timeout
+        return max(0.0, self.last_progress_at + self.timeout - time.monotonic())
+
+    def check(self) -> None:
+        if self.remaining() <= 0:
+            raise OpenCodeTimeout(
+                "idle", f"OpenCode conversation idle timeout: no new content for {self.timeout:g}s",
+            )
+
+
 def retire_task(task: asyncio.Future) -> None:
     """Keep a cancelled operation alive and consume any eventual exception."""
     _retired_tasks.add(task)
@@ -73,7 +110,7 @@ class OperationDeadline:
                     raise asyncio.CancelledError()
                 remaining = self.remaining()
                 if remaining <= 0:
-                    raise asyncio.TimeoutError(f"OpenCode call timed out during {phase}")
+                    raise OpenCodeTimeout("session", f"OpenCode call timed out during {phase} (session total timeout)")
                 if task.done():
                     return task.result()
                 await asyncio.wait({task}, timeout=min(_POLL_SECONDS, remaining))
