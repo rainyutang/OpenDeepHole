@@ -30,11 +30,12 @@ def source(tmp_path, *, name="demo", body="v1", owner="checker:demo"):
 def test_complete_builtin_catalog_and_idempotent_initialization(tmp_path):
     sources = builtin_skill_sources()
     names = {s.name for s in sources}
-    assert len(names) == len(sources) == 28
+    assert len(names) == len(sources) == 30
     assert {
         "fp-check", "prove-bug", "prove-fp", "final-judge", "npd", "oob-audit",
         "resleak", "value-asset-map", "high-risk-module-map", "high-risk-module-merge",
         "attack-tree-by-asset", "multi-version-vulnerability-audit", "deephole-skill-creator",
+        "command-injection-audit",
     } <= names
     workspace = tmp_path / "Agent With Spaces"
     assert install_skills(workspace, sources, bundled=True)
