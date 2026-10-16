@@ -3,21 +3,23 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { getScanFpReviewResult, getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
 import { hasFpReviewRecord } from "./fpReview";
 import { mergeIndexedVulnerabilities } from "./scanRuntime";
-import type { FpReviewJob, FpReviewResult, IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, Vulnerability } from "./types";
+import type { FpReviewJob, FpReviewResult, IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, ThreatPatternAuditTask, Vulnerability } from "./types";
 
 export interface ListFocusRequest<K> { key: K; revision: number }
 export type AuditFocus = (
   | { kind: "issue" | "static_candidate" | "fp_review"; key: number }
-  | { kind: "threat_audit"; key: string }
+  | { kind: "threat_audit" | "threat_pattern_audit"; key: string }
 ) & { revision: number };
 export type AuditTarget =
   | { kind: "issue"; vulnerability: IndexedVulnerability }
   | { kind: "fp_review"; vulnerability: IndexedVulnerability; result: FpReviewResult }
   | { kind: "threat_audit"; task: ThreatAuditTask }
+  | { kind: "threat_pattern_audit"; task: ThreatPatternAuditTask }
   | { kind: "static_candidate"; candidate: ScanCandidate };
 export interface AuditNavigationRequest { kind: "issue" | "source" | "fp_review"; index: number }
 
-export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "static_candidate" | null {
+export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "threat_pattern_audit" | "static_candidate" | null {
+  if ([vuln.analysis_source, vuln.engine_id].includes("threat_pattern_audit")) return "threat_pattern_audit";
   if ([vuln.analysis_source, vuln.engine_id, vuln.vuln_type].includes("threat_audit")) return "threat_audit";
   return (vuln.analysis_source || "static_candidate") === "static_candidate" ? "static_candidate" : null;
 }
@@ -54,6 +56,10 @@ export async function resolveAuditNavigation(
     if (!row) throw new Error("该问题记录已不存在，无法打开报告");
     return { kind: "issue", vulnerability: { ...row.vulnerability, vuln_index: row.index } };
   }
+  if (known && auditSourceKind(known) === "threat_pattern_audit" && known.source_task_id) {
+    const task = scan.threat_pattern_audit_tasks?.find((item) => item.task_id === known.source_task_id);
+    if (task) return { kind: "threat_pattern_audit", task };
+  }
   if (known && auditSourceKind(known) === "threat_audit" && known.source_task_id) {
     const task = scan.threat_audit_tasks?.find((item) => item.task_id === known.source_task_id);
     if (task) return { kind: "threat_audit", task };
@@ -64,6 +70,7 @@ export async function resolveAuditNavigation(
   }
   const source = await getScanVulnerabilityAuditSource(scan.scan_id, index, signal);
   if (source.status === "resolved") {
+    if (source.kind === "threat_pattern_audit" && source.pattern_task) return { kind: "threat_pattern_audit", task: source.pattern_task };
     if (source.kind === "threat_audit" && source.threat_task) return { kind: "threat_audit", task: source.threat_task };
     if (source.kind === "static_candidate" && source.candidate) return { kind: "static_candidate", candidate: source.candidate };
   }
@@ -78,6 +85,7 @@ export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanSta
   // A live update can arrive while the targeted read is in flight. Keep it.
   if ((target.kind === "issue" || target.kind === "fp_review") && scan.vulnerabilities.some((item) => item.vuln_index === target.vulnerability.vuln_index)) return scan;
   if (target.kind === "static_candidate" && scan.candidates.some((item) => item.idx === target.candidate.idx)) return scan;
+  if (target.kind === "threat_pattern_audit" && scan.threat_pattern_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
   if (target.kind === "threat_audit" && scan.threat_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
   if (target.kind === "issue" || target.kind === "fp_review") return {
     ...scan,
@@ -89,6 +97,11 @@ export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanSta
     ...scan,
     candidates: [...scan.candidates.filter((item) => item.idx !== target.candidate.idx), target.candidate]
       .sort((a, b) => a.idx - b.idx),
+  };
+  if (target.kind === "threat_pattern_audit") return {
+    ...scan,
+    threat_pattern_audit_tasks: [...(scan.threat_pattern_audit_tasks ?? []), target.task]
+      .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "") || a.task_id.localeCompare(b.task_id)),
   };
   return {
     ...scan,
@@ -161,7 +174,7 @@ export function useAuditNavigation(
         ? { kind: target.kind, key: target.vulnerability.vuln_index, revision: nextRevision }
         : target.kind === "static_candidate"
           ? { kind: "static_candidate", key: target.candidate.idx, revision: nextRevision }
-          : { kind: "threat_audit", key: target.task.task_id, revision: nextRevision });
+          : { kind: target.kind, key: target.task.task_id, revision: nextRevision });
       onNavigate(target.kind);
     } catch (failure) {
       if (!pending.signal.aborted) setError(failure instanceof Error ? failure.message : "定位失败，请重试");

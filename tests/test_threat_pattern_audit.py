@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from backend.api.scan import _resolve_scan_mining_engines
 from backend.models import MiningEngineRequest
+from backend.models import ThreatPatternAuditTask
 from task_agent import OpenCodeResult
 
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit import (
@@ -80,6 +81,92 @@ async def _write_task_result(work_dir: Path, task: dict, value: list) -> Path:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
     assert await task["post_session_validator"]() is None
     return path
+
+
+class TaskReporter:
+    def __init__(self):
+        self.tasks = {}
+        self.updates = []
+
+    async def get_threat_pattern_audit_tasks(self, scan_id):
+        return list(self.tasks.values())
+
+    async def push_threat_pattern_audit_task(self, scan_id, task):
+        self.tasks[task.task_id] = task.model_copy(deep=True)
+        self.updates.append(task.model_copy(deep=True))
+        return task
+
+
+@pytest.mark.parametrize("outcome", ["finding", "empty", "failure", "timeout", "cancelled"])
+def test_task_lifecycle_and_cached_resume(tmp_path, monkeypatch, outcome):
+    tree, modules = _artifacts(tmp_path)
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    cancel = threading.Event()
+    calls = []
+
+    async def invoke(**values):
+        calls.append(values["task_name"])
+        await values["lease_state_callback"]("queued")
+        await values["lease_state_callback"]("running")
+        if outcome in {"finding", "empty"}:
+            await _write_task_result(work, values, [_finding()] if outcome == "finding" else [])
+            return OpenCodeResult(status="success", text="", session_id="s", structured=None,
+                                  model="test/model", output_source={"model": "test/model"})
+        if outcome == "cancelled":
+            cancel.set()
+        return OpenCodeResult(status=outcome, text="specific failure reason", session_id="s", structured=None, model="test/model")
+
+    async def report(values):
+        return [(values[0], {"index": 207})]
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    kwargs = dict(engine_id="threat_pattern_audit", scan_id="tracked-scan", project_path=tmp_path,
+                  code_scan_path=tmp_path, work_dir=work, reporter=reporter, cancel_event=cancel,
+                  config=SimpleNamespace(opencode_concurrency=1), report_vulnerabilities=report,
+                  threat_analysis_result={"result": True, "attack_tree_path": str(tree), "high_risk_modules_path": str(modules)})
+    result = asyncio.run(engine.run(**kwargs))
+    final = "completed" if outcome in {"finding", "empty"} else "failed" if outcome == "failure" else outcome
+    assert [item.status for item in reporter.updates] == ["pending", "queued", "running", final]
+    stored = list(reporter.tasks.values())[0]
+    assert stored.module_name == "认证模块" and stored.pattern_name == "会话伪造"
+    assert [item.path for item in stored.code_paths] == ["src/auth", "src/shared"]
+    assert stored.started_at and stored.finished_at
+    assert stored.result_vuln_indexes == ([207] if outcome == "finding" else [])
+    if outcome in {"failure", "timeout"}:
+        assert "specific failure reason" in stored.failure_reason and result["status"] == "error"
+    if outcome in {"finding", "empty"}:
+        old_created = stored.created_at
+        reporter.updates.clear()
+        asyncio.run(engine.run(is_resume=True, **kwargs))
+        assert len(calls) == 1  # Resume revalidates the cached artifact without a new Session.
+        assert [item.status for item in reporter.updates] == ["pending", "completed"]
+        assert reporter.tasks[stored.task_id].created_at == old_created
+        assert reporter.tasks[stored.task_id].result_vuln_indexes == stored.result_vuln_indexes
+
+
+def test_cancel_cleans_unstarted_tasks_and_resume_supersedes_removed_targets(tmp_path, monkeypatch):
+    tree, modules = _artifacts(tmp_path)
+    data = json.loads(tree.read_text())
+    data["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({"pattern_id": "OTHER", "pattern_name": "另一个模式"})
+    tree.write_text(json.dumps(data))
+    reporter = TaskReporter()
+    reporter.tasks["obsolete"] = ThreatPatternAuditTask(task_id="obsolete", status="failed")
+    cancel = threading.Event()
+
+    async def invoke(**values):
+        await values["lease_state_callback"]("running")
+        cancel.set()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(engine.run(engine_id="threat_pattern_audit", scan_id="cancel", project_path=tmp_path,
+            code_scan_path=tmp_path, work_dir=tmp_path / "work", reporter=reporter, cancel_event=cancel,
+            config=SimpleNamespace(opencode_concurrency=1), is_resume=True,
+            threat_analysis_result={"result": True, "attack_tree_path": str(tree), "high_risk_modules_path": str(modules)}))
+    assert reporter.tasks["obsolete"].status == "superseded"
+    assert [task.status for key, task in reporter.tasks.items() if key != "obsolete"] == ["cancelled", "cancelled"]
 
 
 def test_prompt_is_concentrated_and_schema_carries_field_guidance() -> None:
@@ -186,6 +273,12 @@ def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, r
     events: list[dict] = []
 
     class Reporter:
+        async def get_threat_pattern_audit_tasks(self, scan_id):
+            return []
+
+        async def push_threat_pattern_audit_task(self, scan_id, task):
+            return task
+
         async def get_vulnerability_dedup_context(self, scan_id: str):
             raise AssertionError(
                 "threat_pattern_audit must not read Reporter findings"

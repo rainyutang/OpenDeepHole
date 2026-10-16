@@ -125,6 +125,19 @@ test("new execution counters may drop after a pool-only update announces the rev
   assert.equal(merged.progress, 0.8);
 });
 
+test("pattern task refresh retains later pages and rejects older task snapshots", () => {
+  const running = runtime.normalizePatternTask({ task_id: "p", status: "running", updated_at: "2026-10-16T01:02:00Z" });
+  const completed = { ...running, status: "completed", updated_at: "2026-10-16T01:03:00Z" };
+  const otherPage = { ...completed, task_id: "later-page" };
+  const current = { scan_id: "s", status: "complete", threat_pattern_audit_tasks: [completed, otherPage] };
+  const merged = runtime.mergeScanSnapshot(current, { ...current, threat_pattern_audit_tasks: [running] });
+  assert.equal(merged.threat_pattern_audit_tasks.find((task) => task.task_id === "p").status, "completed");
+  assert.equal(merged.threat_pattern_audit_tasks.length, 2);
+  const resumed = { ...completed, status: "queued", updated_at: "2026-10-16T01:04:00Z" };
+  assert.equal(runtime.mergePatternTasks([completed], [resumed])[0].status, "queued");
+  assert.deepEqual(runtime.normalizeScanStatus({ scan_id: "old", status: "complete" }).threat_pattern_audit_tasks, []);
+});
+
 test("normalizes legacy arrays without materializing invalid entries", () => {
   const normalized = runtime.normalizeIndexedVulnerabilities([
     null,

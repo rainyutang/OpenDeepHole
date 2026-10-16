@@ -31,6 +31,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatPatternAuditTask,
     ThreatAuditTaskResult,
     ThreatAnalysisRunStatus,
     UserInDB,
@@ -154,6 +155,18 @@ class ScanStoreBase(ABC):
         vulnerability_idx: int,
     ) -> bool:
         """Idempotently link one finding to an already stored threat-audit task."""
+        raise NotImplementedError
+
+    def upsert_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask) -> ThreatPatternAuditTask:
+        raise NotImplementedError
+
+    def list_threat_pattern_audit_tasks(self, scan_id: str, **kwargs) -> list[ThreatPatternAuditTask]:
+        raise NotImplementedError
+
+    def link_threat_pattern_audit_task_vulnerability(self, scan_id: str, task_id: str, vulnerability_idx: int) -> bool:
+        raise NotImplementedError
+
+    def get_threat_pattern_audit_task_results(self, scan_id: str, task_ids: list[str]) -> list[ThreatAuditTaskResult]:
         raise NotImplementedError
 
     @abstractmethod

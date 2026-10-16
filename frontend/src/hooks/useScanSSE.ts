@@ -9,6 +9,7 @@ import {
   normalizeScanCandidate,
   normalizeScanEvent,
   normalizeThreatTask,
+  normalizePatternTask,
   normalizeValidation,
   normalizeVulnerability,
 } from "../scanRuntime";
@@ -26,6 +27,7 @@ import type {
   ThreatAnalysis,
   ThreatAnalysisRunStatus,
   ThreatAuditTask,
+  ThreatPatternAuditTask,
   Vulnerability,
   VulnerabilityValidation,
 } from "../types";
@@ -185,6 +187,7 @@ export interface ScanSSEHandlers {
   onThreatCoverageRefresh?: () => void;
   onThreatAnalysisRun?: (data: ThreatAnalysisRunEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
+  onThreatPatternAuditTask?: (data: { task: ThreatPatternAuditTask }) => void;
   onMiningEngineRun?: (data: MiningEngineRunEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
 }
@@ -339,6 +342,13 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
       return isString(value.snapshot_id) && isString(value.status);
     case "threat_analysis_run":
       return isRecord(value.run) && isString(value.run.status);
+    case "threat_pattern_audit_task":
+      return isRecord(value.task)
+        && isString(value.task.task_id)
+        && isString(value.task.status)
+        && isString(value.task.module_name)
+        && Array.isArray(value.task.code_paths)
+        && value.task.code_paths.every((path) => isRecord(path) && isString(path.path));
     case "threat_audit_task":
       return isRecord(value.task)
         && isString(value.task.task_id)
@@ -600,6 +610,9 @@ export function useScanSSE(
         handlersRef.current.onThreatCoverageRefresh?.();
       }
     });
+    handle<{ task: ThreatPatternAuditTask }>("threat_pattern_audit_task", (d) => handlersRef.current.onThreatPatternAuditTask?.({
+      task: normalizePatternTask(d.task),
+    }));
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.({
       task: normalizeThreatTask(d.task),
     }));

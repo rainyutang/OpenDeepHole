@@ -16,6 +16,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ThreatAuditTask,
+    ThreatPatternAuditTask,
     Vulnerability,
 )
 from deephole_client.report_outbox import OPENCODE_TASK_REPORT_PATH, ReportOutbox
@@ -357,6 +358,35 @@ def test_failed_authoritative_report_stays_pending_until_success(tmp_path: Path)
         assert fake.posts == 2
         await reporter.close()
 
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("kind,model", [("threat-audit", ThreatAuditTask), ("threat-pattern-audit", ThreatPatternAuditTask)])
+def test_audit_task_completion_survives_delivery_failure(tmp_path, kind, model):
+    async def exercise():
+        reporter = Reporter("http://server", outbox_path=tmp_path / "audit-outbox.sqlite3")
+        task = model(task_id="task-1", scan_id="scan-1", status="completed", result_vuln_indexes=[207])
+        push = getattr(reporter, "push_" + kind.replace("-", "_") + "_task")
+        load = getattr(reporter, "get_" + kind.replace("-", "_") + "_tasks")
+        try:
+            with patch.object(reporter._client, "post", AsyncMock(side_effect=httpx.ConnectError("offline"))) as offline:
+                assert await push("scan-1", task) is None
+            assert reporter._outbox.pending_count() == 1
+            assert reporter._outbox.pending_dedupe_keys("http://server") == [f"scan:scan-1:{kind}-task:task-1"]
+            assert offline.call_args.args[0].endswith(f"/api/agent/scan/scan-1/{kind}-task")
+            assert offline.call_args.kwargs["json"]["result_vuln_indexes"] == [207]
+            response = httpx.Response(200, request=httpx.Request("POST", "http://server"),
+                                      json={"ok": True, "task": task.model_dump()})
+            with patch.object(reporter._client, "post", AsyncMock(return_value=response)):
+                stored = await push("scan-1", task)
+            assert isinstance(stored, model) and stored.result_vuln_indexes == [207]
+            assert reporter._outbox.pending_count() == 0
+            response = httpx.Response(200, request=httpx.Request("GET", "http://server"), json=[task.model_dump()])
+            with patch.object(reporter._client, "get", AsyncMock(return_value=response)) as get:
+                assert (await load("scan-1"))[0].task_id == task.task_id
+                assert get.call_args.args[0].endswith(f"/{kind}-tasks")
+        finally:
+            await reporter.close()
     asyncio.run(exercise())
 
 
@@ -1017,7 +1047,8 @@ def test_task_report_endpoint_acknowledges_replay_without_duplicate_history(
     store.close()
 
 
-def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["threat_audit", "threat_pattern_audit"])
+def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path, kind: str) -> None:
     from backend.api import agent as agent_api
     from backend.store.sqlite import SqliteScanStore
 
@@ -1026,6 +1057,8 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path) -
         return function(*args, **kwargs)
 
     store = SqliteScanStore(tmp_path / "server.sqlite3")
+    upsert_task = getattr(agent_api, f"agent_upsert_{kind}_task")
+    task_model = ThreatPatternAuditTask if kind == "threat_pattern_audit" else ThreatAuditTask
     store.save_scan(
         ScanStatus(
             scan_id="scan-1",
@@ -1042,12 +1075,12 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path) -
         file="src/before.c",
         line=1,
         function="before",
-        vuln_type="threat_audit",
+        vuln_type=kind,
         severity="high",
         description="reported before its task",
         confirmed=False,
-        analysis_source="threat_audit",
-        engine_id="threat_audit",
+        analysis_source=kind,
+        engine_id=kind,
         source_task_id="task-after",
     )
     before_index = store.add_vulnerability("scan-1", before_task)
@@ -1065,24 +1098,28 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path) -
             ),
             patch("backend.sse.publish"),
         ):
-            await agent_api.agent_upsert_threat_audit_task(
+            await upsert_task(
                 "scan-1",
-                ThreatAuditTask(
+                task_model(
                     task_id="task-after",
                     status="completed",
                     surface_node_id="surface-after",
                     method_node_id="method-after",
                     code_path="src/before.c",
+                    module_name="before",
+                    pattern_id="pattern-before",
                 ).model_dump(),
             )
-            await agent_api.agent_upsert_threat_audit_task(
+            await upsert_task(
                 "scan-1",
-                ThreatAuditTask(
+                task_model(
                     task_id="task-before",
                     status="completed",
                     surface_node_id="surface-before",
                     method_node_id="method-before",
                     code_path="src/after.c",
+                    module_name="after",
+                    pattern_id="pattern-after",
                 ).model_dump(),
             )
             response = await agent_api.agent_report_vulnerability(
@@ -1091,22 +1128,22 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path) -
                     file="src/after.c",
                     line=2,
                     function="after",
-                    vuln_type="threat_audit",
+                    vuln_type=kind,
                     severity="high",
                     description="reported after its task",
                     confirmed=False,
-                    analysis_source="threat_audit",
-                    engine_id="threat_audit",
+                    analysis_source=kind,
+                    engine_id=kind,
                     source_task_id="task-before",
                 ),
             )
         return int(response["index"])
 
     after_index = asyncio.run(exercise())
-    tasks = {task.task_id: task for task in store.list_threat_audit_tasks("scan-1")}
+    tasks = {task.task_id: task for task in getattr(store, f"list_{kind}_tasks")("scan-1")}
     assert tasks["task-after"].result_vuln_indexes == [before_index]
     assert tasks["task-before"].result_vuln_indexes == [after_index]
-    assert store.link_threat_audit_task_vulnerability(
+    assert getattr(store, f"link_{kind}_task_vulnerability")(
         "scan-1",
         "task-before",
         after_index,

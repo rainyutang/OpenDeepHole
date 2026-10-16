@@ -367,6 +367,30 @@ export interface ThreatAuditTask {
   updated_at?: string;
 }
 
+export interface ThreatPatternAuditTask {
+  task_id: string;
+  scan_id?: string;
+  status: string;
+  module_name: string;
+  pattern_id: string;
+  pattern_name: string;
+  code_paths?: ThreatCodePath[];
+  description?: string;
+  result_vuln_indexes?: number[];
+  failure_reason?: string;
+  output_source?: OutputSource;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at?: string;
+}
+
+export interface ThreatPatternAuditTaskPage {
+  items: ThreatPatternAuditTask[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 export interface ThreatAuditFindingSummary {
   vuln_index: number;
   vuln_type: string;
@@ -396,7 +420,8 @@ export interface CandidateAuditTaskResult {
 export interface VulnerabilityAuditSource {
   vuln_index: number;
   status: "resolved" | "missing" | "ambiguous" | "unsupported";
-  kind: "threat_audit" | "static_candidate" | null;
+  kind: "threat_audit" | "threat_pattern_audit" | "static_candidate" | null;
+  pattern_task: ThreatPatternAuditTask | null;
   threat_task: ThreatAuditTask | null;
   candidate: ScanCandidate | null;
 }
@@ -568,6 +593,7 @@ export interface ScanStatus {
   skill_reports: SkillReport[];
   threat_analysis?: ThreatAnalysis | null;
   threat_audit_tasks?: ThreatAuditTask[];
+  threat_pattern_audit_tasks?: ThreatPatternAuditTask[];
   validations?: VulnerabilityValidation[];
   events: ScanEvent[];
   current_candidate: Candidate | null;
@@ -621,6 +647,16 @@ export interface ScanDetailCounts {
   threat_audit_failed?: number;
   threat_audit_cancelled?: number;
   threat_audit_superseded?: number;
+  threat_pattern_audit_tasks?: number;
+  threat_pattern_audit_current?: number;
+  threat_pattern_audit_pending?: number;
+  threat_pattern_audit_queued?: number;
+  threat_pattern_audit_running?: number;
+  threat_pattern_audit_completed?: number;
+  threat_pattern_audit_failed?: number;
+  threat_pattern_audit_cancelled?: number;
+  threat_pattern_audit_superseded?: number;
+
   validations: number;
   skill_reports: number;
 }
@@ -630,6 +666,7 @@ export interface ScanDetailPages {
   vulnerabilities_next_cursor: number | null;
   events_next_cursor: number | null;
   threat_tasks_next_cursor: string | null;
+  pattern_tasks_next_cursor?: string | null;
   validations_next_cursor: number | null;
 }
 

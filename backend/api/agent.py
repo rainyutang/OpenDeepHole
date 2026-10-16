@@ -95,6 +95,7 @@ from backend.models import (
     SkillReport,
     THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
+    ThreatPatternAuditTask,
     ThreatAnalysisRunStatus,
     User,
     Vulnerability,
@@ -2059,7 +2060,7 @@ async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
         # within the same execution while refreshing lifecycle and counters.
         for field in (
             "candidates", "vulnerabilities", "skill_reports", "threat_analysis",
-            "threat_audit_tasks", "validations", "events",
+            "threat_audit_tasks", "threat_pattern_audit_tasks", "validations", "events",
         ):
             setattr(scan, field, getattr(cached, field))
     if not _is_infrastructure_interruption(scan.status, scan.error_message):
@@ -4329,16 +4330,17 @@ async def agent_report_vulnerability(
             "vulnerability": vuln.model_dump(),
         })
     source_task_id = str(vuln.source_task_id or "").strip()
-    if source_task_id and str(vuln.analysis_source or "") == "threat_audit":
+    if source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit"}:
+        task_kind = str(vuln.analysis_source)
         linked = await run_store_call(
             store,
-            "link_threat_audit_task_vulnerability",
+            f"link_{task_kind}_task_vulnerability",
             scan_id,
             source_task_id,
             vuln_index,
         )
         if linked and scan is not None:
-            for stored_task in scan.threat_audit_tasks:
+            for stored_task in getattr(scan, f"{task_kind}_tasks"):
                 if stored_task.task_id != source_task_id:
                     continue
                 if vuln_index not in stored_task.result_vuln_indexes:
@@ -4346,7 +4348,7 @@ async def agent_report_vulnerability(
                         *stored_task.result_vuln_indexes,
                         vuln_index,
                     ])
-                    publish(scan_id, "threat_audit_task", {
+                    publish(scan_id, f"{task_kind}_task", {
                         "task": stored_task.model_dump(mode="json"),
                     })
                 break
@@ -5046,6 +5048,52 @@ async def agent_list_threat_audit_tasks(scan_id: str) -> list[ThreatAuditTask]:
     """Return threat-analysis-derived audit tasks for scan resume."""
     store = get_scan_store()
     return await run_store_call(store, "list_threat_audit_tasks", scan_id)
+
+
+@router.post("/scan/{scan_id}/threat-pattern-audit-task")
+async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> dict:
+    """Agent creates or updates one module/pattern audit task."""
+    try:
+        task = ThreatPatternAuditTask(**body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid threat audit task: {exc}") from exc
+
+    store = get_scan_store()
+    if task.status == "completed" and not task.result_vuln_indexes:
+        result_indexes = await run_store_call(
+            store,
+            "get_vulnerability_indexes_by_source_task",
+            scan_id,
+            task.task_id,
+        )
+        if result_indexes:
+            task = task.model_copy(update={
+                "result_vuln_indexes": result_indexes,
+            })
+    task = await run_store_call(
+        store,
+        "upsert_threat_pattern_audit_task",
+        scan_id,
+        task,
+    )
+
+    scan = await _ensure_running_scan(scan_id)
+    if scan is not None:
+        tasks = [item for item in scan.threat_pattern_audit_tasks if item.task_id != task.task_id]
+        tasks.append(task)
+        tasks.sort(key=lambda item: (item.created_at, item.task_id))
+        scan.threat_pattern_audit_tasks = tasks
+
+    from backend.sse import publish
+    publish(scan_id, "threat_pattern_audit_task", {"task": task.model_dump()})
+    return {"ok": True, "task": task.model_dump()}
+
+
+@router.get("/scan/{scan_id}/threat-pattern-audit-tasks", response_model=list[ThreatPatternAuditTask])
+async def agent_list_threat_pattern_audit_tasks(scan_id: str) -> list[ThreatPatternAuditTask]:
+    """Return module/pattern audit tasks for scan resume."""
+    store = get_scan_store()
+    return await run_store_call(store, "list_threat_pattern_audit_tasks", scan_id)
 
 
 @router.get(

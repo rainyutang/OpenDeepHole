@@ -115,6 +115,12 @@ async def threat_tasks(scan_id: str, user: SharedUser, cursor: str | None = None
     return await scan_api.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, user)
 
 
+@shared.get("/threat-pattern-audit-tasks")
+async def threat_pattern_tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
+                       limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, user)
+
+
 @shared.get("/validations")
 async def validations(scan_id: str, user: SharedUser, after: int = Query(-1, ge=-1),
                       limit: int = Query(50, ge=1, le=100)):
@@ -156,6 +162,11 @@ async def audit_source(scan_id: str, idx: int, user: SharedUser):
 @shared.get("/threat-audit-results")
 async def threat_results(scan_id: str, user: SharedUser, task_ids: list[str] = Query(..., min_length=1, max_length=100)):
     return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, user)
+
+
+@shared.get("/threat-pattern-audit-results")
+async def threat_pattern_results(scan_id: str, user: SharedUser, task_ids: list[str] = Query(..., min_length=1, max_length=100)):
+    return await scan_api.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, user)
 
 
 @shared.get("/threat-analysis")

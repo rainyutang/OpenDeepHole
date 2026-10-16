@@ -115,6 +115,7 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
                      "threat_analysis": ("threat-analysis", ""),
                      "file_inventory": ("file-inventory", ""),
                      "threat_audit_task": ("threat-audit-tasks", "task"),
+                     "threat_pattern_audit_task": ("threat-pattern-audit-tasks", "task"),
                      "scan_candidates": ("candidates", "")}
         if event_type in resources:
             resource, field = resources[event_type]

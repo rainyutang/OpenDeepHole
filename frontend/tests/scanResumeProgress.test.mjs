@@ -86,7 +86,7 @@ function installApi(initial = overview()) {
     else if (config.url.endsWith("/resume")) { state.overview = overview(80, 2); data = { scan_id: "s" }; }
     else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
     else if (config.url.endsWith("/git_history")) data = [];
-    else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|validations|results|tasks)$/.test(config.url)) {
+    else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|threat-pattern-audit-tasks|validations|results|tasks)$/.test(config.url)) {
       data = { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
     } else assert.fail("Unexpected request: " + config.url);
     return { config, data, status: 200, statusText: "OK", headers: {} };
@@ -172,6 +172,54 @@ test("batched SSE never mixes old completion fields into a new execution", async
     ["scan_status", { execution_revision: 2, status: "auditing", processed_candidates: 80, total_candidates: 100 }],
   );
   assertProgress(root, 80);
+});
+
+test("attack-pattern engine shows live tasks and navigates to the linked report and back", async () => {
+  const engine = { engine_id: "threat_pattern_audit", enabled: true,
+    engine_label: "DeepHole基于攻击模式的漏洞挖掘引擎" };
+  installApi({ ...overview(0, 2), mining_engines: [engine],
+    mining_engine_runs: [{ ...engine, status: "running", total_candidates: 1 }],
+    detail_counts: undefined });
+  const fallback = client.api.defaults.adapter;
+  let task = { task_id: "threat-pattern-audit-1", scan_id: "s", module_name: "认证模块",
+    pattern_id: "AUTH-1", pattern_name: "会话伪造", status: "pending",
+    code_paths: [{ path: "src/auth" }], updated_at: "2026-10-16T00:00:00Z" };
+  const finding = { file: "src/auth/session.c", line: 17, function: "restore", vuln_type: "auth",
+    severity: "high", description: "身份未绑定", user_verdict: "confirmed", confirmed: true,
+    engine_id: engine.engine_id, analysis_source: engine.engine_id, source_task_id: task.task_id,
+    vulnerability_report: "# 攻击模式审计报告 207" };
+  client.api.defaults.adapter = async (config) => {
+    let data;
+    if (config.url.endsWith("/threat-pattern-audit-tasks")) data = { items: [task], next_cursor: null };
+    else if (config.url.endsWith("/threat-pattern-audit-results")) data = [{ task_id: task.task_id,
+      findings: task.status === "completed" ? [{ ...finding, vuln_index: 207, verdict: "confirmed", verdict_source: "human" }] : [],
+      confirmed_issue_count: task.status === "completed" ? 1 : 0, association_complete: true }];
+    else if (config.url.endsWith("/vulnerabilities") && config.params?.after === 206) {
+      data = { items: [{ index: 207, vulnerability: finding }], next_cursor: null };
+    } else return fallback(config);
+    return { config, data, status: 200, statusText: "OK", headers: {} };
+  };
+  const root = await mount();
+  const click = async (label, exact = true) => {
+    const button = root.root.findAllByType("button").find((node) => exact ? text(node) === label : text(node).includes(label));
+    assert.ok(button, "Missing button: " + label);
+    await act(async () => button.props.onClick());
+  };
+  await click(engine.engine_label, false);
+  assert.match(text(root.toJSON()), /高风险模块认证模块/);
+  assert.doesNotMatch(text(root.toJSON()), /该引擎输出的问题/);
+  task = { ...task, status: "running", updated_at: "2026-10-16T00:00:01Z" };
+  await notify(["threat_pattern_audit_task", { task }]);
+  assert.match(text(root.toJSON()), /运行中.*会话伪造/);
+  task = { ...task, status: "completed", result_vuln_indexes: [207], updated_at: "2026-10-16T00:00:02Z" };
+  await notify(["threat_pattern_audit_task", { task }]);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  await click("查看问题报告");
+  assert.match(text(root.toJSON()), /当前定位：结果 #207/);
+  assert.match(text(root.toJSON()), /攻击模式审计报告 207/);
+  await click("查看攻击模式审计任务");
+  assert.match(text(root.toJSON()), /高风险模块认证模块/);
+  assert.match(text(root.toJSON()), /threat-pattern-audit-1/);
 });
 
 test("partial static failures survive SSE completion and a fresh overview", async () => {

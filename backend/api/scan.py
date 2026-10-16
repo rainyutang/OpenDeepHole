@@ -73,6 +73,7 @@ from backend.models import (
     MULTI_VERSION_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
+    ThreatPatternAuditTaskPage,
     ThreatAuditTaskResult,
     ThreatAnalysisMethodCatalog,
     ThreatAnalysisMethodSelection,
@@ -2324,6 +2325,7 @@ async def get_scan_overview_v2(
         "skill_reports": [],
         "threat_analysis": None,
         "threat_audit_tasks": [],
+        "threat_pattern_audit_tasks": [],
         "validations": [],
         "events": [],
         "detail_counts": counts,
@@ -2491,6 +2493,59 @@ async def get_scan_threat_audit_tasks_v2(
         last = items[-1]
         next_cursor = encode_cursor(last.created_at or "", last.task_id)
     return ThreatAuditTaskPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=next_cursor,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-pattern-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_scan_threat_pattern_audit_results_v2(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[ThreatAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_threat_pattern_audit_task_results", scan_id, task_ids,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-pattern-audit-tasks",
+    response_model=ThreatPatternAuditTaskPage,
+)
+async def get_scan_threat_pattern_audit_tasks_v2(
+    scan_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    cursor: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+) -> ThreatPatternAuditTaskPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    after: tuple[str, str] | None = None
+    if cursor:
+        try:
+            after = decode_cursor(cursor, size=2)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid task cursor") from exc
+    tasks = await run_store_call(
+        get_scan_store(),
+        "list_threat_pattern_audit_tasks",
+        scan_id,
+        after_created_at=after[0] if after is not None else None,
+        after_task_id=after[1] if after is not None else None,
+        limit=limit + 1,
+    )
+    has_more = len(tasks) > limit
+    items = tasks[:limit]
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(last.created_at or "", last.task_id)
+    return ThreatPatternAuditTaskPage(
         items=items,
         has_more=has_more,
         next_cursor=next_cursor,

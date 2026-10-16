@@ -124,6 +124,7 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
     if (config.url.endsWith("/vulnerabilities")) return response(config,
       paginate(vulnerabilities.map((vulnerability) => ({ index: vulnerability.vuln_index, vulnerability })), (item) => item.index));
     if (config.url.endsWith("/validations")) return response(config, paginate(validations, (item) => item.vuln_index));
+    if (config.url.endsWith("/threat-pattern-audit-tasks")) return response(config, { items: [], next_cursor: null, has_more: false });
     if (/\/(events|event-history|candidates|threat-audit-tasks)$/.test(config.url)) return response(config,
       { items: [], next_cursor: config.url.endsWith("threat-audit-tasks") ? "task-cursor" : 900, has_more: true });
     if (config.url.endsWith("/index-status")) return response(config, { status: "skipped" });

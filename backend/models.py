@@ -622,6 +622,25 @@ class ThreatAuditTask(BaseModel):
     updated_at: str = ""
 
 
+class ThreatPatternAuditTask(BaseModel):
+    """One persisted high-risk-module / attack-pattern audit."""
+    task_id: str
+    scan_id: str = ""
+    status: str = "pending"
+    module_name: str = ""
+    pattern_id: str = ""
+    pattern_name: str = ""
+    code_paths: list[ThreatCodePath] = Field(default_factory=list)
+    description: str = ""
+    result_vuln_indexes: list[int] = Field(default_factory=list)
+    failure_reason: str = ""
+    output_source: OutputSource = Field(default_factory=OutputSource)
+    created_at: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str = ""
+
+
 class ThreatAuditFindingSummary(BaseModel):
     """A linked audit finding with its current effective conclusion."""
     vuln_index: int
@@ -652,8 +671,9 @@ class CandidateAuditTaskResult(BaseModel):
 class VulnerabilityAuditSource(BaseModel):
     vuln_index: int = Field(ge=0)
     status: Literal["resolved", "missing", "ambiguous", "unsupported"]
-    kind: Literal["threat_audit", "static_candidate"] | None = None
+    kind: Literal["threat_audit", "threat_pattern_audit", "static_candidate"] | None = None
     threat_task: ThreatAuditTask | None = None
+    pattern_task: ThreatPatternAuditTask | None = None
     candidate: ScanCandidate | None = None
 
 
@@ -856,6 +876,7 @@ class ScanStatus(BaseModel):
     skill_reports: list[SkillReport] = []
     threat_analysis: dict[str, Any] | None = None
     threat_audit_tasks: list[ThreatAuditTask] = []
+    threat_pattern_audit_tasks: list[ThreatPatternAuditTask] = Field(default_factory=list)
     validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
@@ -900,6 +921,15 @@ class ScanDetailCounts(BaseModel):
     threat_audit_failed: int = 0
     threat_audit_cancelled: int = 0
     threat_audit_superseded: int = 0
+    threat_pattern_audit_tasks: int = 0
+    threat_pattern_audit_current: int = 0
+    threat_pattern_audit_pending: int = 0
+    threat_pattern_audit_queued: int = 0
+    threat_pattern_audit_running: int = 0
+    threat_pattern_audit_completed: int = 0
+    threat_pattern_audit_failed: int = 0
+    threat_pattern_audit_cancelled: int = 0
+    threat_pattern_audit_superseded: int = 0
     validations: int = 0
     skill_reports: int = 0
 
@@ -934,6 +964,12 @@ class ScanEventPage(BaseModel):
 
 class ThreatAuditTaskPage(BaseModel):
     items: list[ThreatAuditTask] = []
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class ThreatPatternAuditTaskPage(BaseModel):
+    items: list[ThreatPatternAuditTask] = Field(default_factory=list)
     next_cursor: str | None = None
     has_more: bool = False
 

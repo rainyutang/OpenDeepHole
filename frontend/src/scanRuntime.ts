@@ -13,6 +13,7 @@ import type {
   ScanItemStatus,
   ScanStatus,
   ThreatAuditTask,
+  ThreatPatternAuditTask,
   Vulnerability,
   VulnerabilityValidation,
 } from "./types";
@@ -178,6 +179,23 @@ export function findIndexedVulnerability(
   vulnIndex: number,
 ): IndexedVulnerability | undefined {
   return vulnerabilities.find((vulnerability) => vulnerability.vuln_index === vulnIndex);
+}
+
+export function normalizePatternTask(value: unknown): ThreatPatternAuditTask {
+  const raw = isRecord(value) ? value : {};
+  return { ...raw, task_id: text(raw.task_id), status: text(raw.status),
+    module_name: text(raw.module_name), pattern_id: text(raw.pattern_id), pattern_name: text(raw.pattern_name) };
+}
+
+export function mergePatternTasks(previous: ThreatPatternAuditTask[], incoming: ThreatPatternAuditTask[]): ThreatPatternAuditTask[] {
+  const tasks = new Map(previous.map((task) => [task.task_id, task]));
+  for (const task of incoming) {
+    const current = tasks.get(task.task_id);
+    if (!current?.updated_at || !task.updated_at || Date.parse(task.updated_at) >= Date.parse(current.updated_at)) {
+      tasks.set(task.task_id, task);
+    }
+  }
+  return [...tasks.values()].sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "") || a.task_id.localeCompare(b.task_id));
 }
 
 export function normalizeThreatTask(value: unknown): ThreatAuditTask {
@@ -406,6 +424,7 @@ export function mergeScanSnapshot(
     }),
     // Overview snapshots omit artifacts; null does not delete a loaded result.
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
+    threat_pattern_audit_tasks: mergePatternTasks(previous.threat_pattern_audit_tasks ?? [], incoming.threat_pattern_audit_tasks ?? []),
   };
 }
 
@@ -420,6 +439,7 @@ export function mergeScanOverview(
     vulnerabilities: previous.vulnerabilities,
     skill_reports: previous.skill_reports,
     threat_audit_tasks: previous.threat_audit_tasks,
+    threat_pattern_audit_tasks: previous.threat_pattern_audit_tasks,
     validations: previous.validations,
     events: previous.events,
     detail_pages: previous.detail_pages,
@@ -495,6 +515,8 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
       : [],
     vulnerabilities: normalizeIndexedVulnerabilities(value.vulnerabilities),
     skill_reports: recordArray(value.skill_reports) as unknown as ScanStatus["skill_reports"],
+    threat_pattern_audit_tasks: Array.isArray(value.threat_pattern_audit_tasks)
+      ? value.threat_pattern_audit_tasks.map(normalizePatternTask) : [],
     threat_audit_tasks: Array.isArray(value.threat_audit_tasks)
       ? value.threat_audit_tasks.map(normalizeThreatTask)
       : [],

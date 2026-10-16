@@ -85,7 +85,7 @@ function installApi(status = "complete", intercept = () => undefined, { autoFpRe
     };
     if (config.url.endsWith("/vulnerabilities")) return response(config, page(vulnerabilities.map((vulnerability) => ({ index: vulnerability.vuln_index, vulnerability })), (v) => v.index));
     if (config.url.endsWith("/fp-review/results")) return response(config, { ...page(results, (r) => r.vuln_index), vulnerabilities });
-    if (/\/(candidates|event-history|events|threat-audit-tasks|validations)$/.test(config.url)) return response(config, { items: [], next_cursor: null, has_more: false });
+    if (/\/(candidates|event-history|events|threat-audit-tasks|threat-pattern-audit-tasks|validations)$/.test(config.url)) return response(config, { items: [], next_cursor: null, has_more: false });
     if (config.url.endsWith("/index-status")) return response(config, { status: "skipped" });
     if (config.url.endsWith("/git_history")) return response(config, []);
     if (config.url.endsWith("/threat-analysis")) return response(config, null);

@@ -122,7 +122,7 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
         else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
         else if (config.url.endsWith("/git_history")) data = [];
         else if (/\/(stop|resume)$/.test(config.url)) data = {};
-        else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|validations|results)$/.test(config.url)) data = { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
+        else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|threat-pattern-audit-tasks|validations|results)$/.test(config.url)) data = { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
         else assert.fail("Unexpected request: " + config.url);
       }
     }

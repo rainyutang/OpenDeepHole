@@ -42,6 +42,11 @@ function candidate(index = 0, overrides = {}) {
 function task(id = "t", overrides = {}) {
   return runtime.normalizeThreatTask({ task_id: id, scan_id: "s", status: "completed", method_name: `任务 ${id}`, ...overrides });
 }
+function patternTask(id = "p", overrides = {}) {
+  return runtime.normalizePatternTask({ task_id: id, scan_id: "s", status: "completed",
+    module_name: "认证模块", pattern_id: `pattern-${id}`, pattern_name: `模式 ${id}`,
+    code_paths: [{ path: "src/auth" }], ...overrides });
+}
 function scan(overrides = {}) {
   return runtime.normalizeScanStatus({
     scan_id: "s", project_id: "p", status: "complete", scan_items: [], created_at: "2026-09-07T00:00:00Z",
@@ -478,6 +483,94 @@ test("reverse threat navigation selects a task beyond the first page", async () 
   const heading = root.root.findAllByType("span").find((item) => textContent(item) === "任务 task-44" && item.props.className?.includes("font-semibold"));
   assert.ok(heading, "requested threat task detail should be selected");
 });
+
+test("pattern audit reuses task details, isolates engines and focuses a linked task on page three", async () => {
+  const tasks = Array.from({ length: 45 }, (_, i) => patternTask(`pattern-${i}`));
+  const value = scan({ threat_pattern_audit_tasks: tasks, threat_audit_tasks: [task("legacy")],
+    mining_engine_runs: [{ engine_id: "threat_pattern_audit", status: "success", total_candidates: 45 }],
+    detail_counts: { threat_audit_current: 999, threat_pattern_audit_current: 45, threat_pattern_audit_completed: 45 } });
+  let verdict = "confirmed";
+  const requests = [];
+  client.api.defaults.adapter = async (config) => {
+    requests.push(config);
+    if (config.url.endsWith("/tasks")) return response(config, { items: [], next_cursor: null });
+    assert.ok(config.url.endsWith("/threat-pattern-audit-results"));
+    return response(config, config.params.getAll("task_ids").map((id) => ({ task_id: id,
+      findings: id === "pattern-44" ? [summary(207, verdict)] : [], association_complete: true,
+      confirmed_issue_count: id === "pattern-44" && verdict === "confirmed" ? 1 : 0 })));
+  };
+  const opened = [];
+  const props = { scan: value, patternMode: true, events: [], fpReview: null, resultRevision: 0,
+    focusRequest: { key: "pattern-44", revision: 1 }, onOpenIssue: (index) => opened.push(index) };
+  const root = await mount(ThreatAuditPanel, props);
+  assert.match(text(root), /基于攻击模式/);
+  assert.match(text(root), /第 3\/3 页 · 共 45 条/);
+  assert.match(text(root), /高风险模块认证模块/);
+  assert.match(text(root), /src\/auth/);
+  assert.doesNotMatch(text(root), /999|任务 legacy|价值资产|叶子节点/);
+  await act(async () => button(root, "查看问题报告").props.onClick());
+  assert.deepEqual(opened, [207]);
+  assert.ok(requests.filter((c) => c.url.endsWith("-results")).every((c) => c.params.getAll("task_ids").length <= 21));
+  verdict = "false_positive";
+  await act(async () => root.update(createElement(ThreatAuditPanel, { ...props, resultRevision: 1 })));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.match(text(root), /非问题/);
+  assert.doesNotMatch(text(root), /发现问题|查看问题报告/);
+});
+
+test("pattern source navigation uses exact task IDs and preserves separate page cursors", async () => {
+  const target = patternTask("target");
+  const value = scan({ vulnerabilities: [vuln(207, { analysis_source: "threat_pattern_audit", source_task_id: "target" })],
+    threat_pattern_audit_tasks: [target], threat_audit_tasks: [task("target")],
+    detail_pages: { pattern_tasks_next_cursor: "pattern-cursor", threat_tasks_next_cursor: "threat-cursor" } });
+  client.api.defaults.adapter = () => { throw new Error("Cached source must not request"); };
+  const resolved = await navigation.resolveAuditNavigation(value, { kind: "source", index: 207 }, new AbortController().signal);
+  assert.equal(resolved.kind, "threat_pattern_audit");
+  assert.equal(resolved.task, value.threat_pattern_audit_tasks[0]);
+  const merged = navigation.mergeAuditTarget(value, { kind: "threat_pattern_audit", task: patternTask("later") });
+  assert.equal(merged.threat_pattern_audit_tasks.length, 2);
+  assert.equal(merged.threat_audit_tasks.length, 1);
+  assert.deepEqual(merged.detail_pages, value.detail_pages);
+  client.api.defaults.adapter = async (config) => response(config, { vuln_index: 207, status: "resolved",
+    kind: "threat_pattern_audit", pattern_task: target, threat_task: null, candidate: null });
+  assert.equal((await navigation.resolveAuditNavigation(scan(), { kind: "source", index: 207 }, new AbortController().signal)).task.task_id, "target");
+  client.api.defaults.adapter = async (config) => response(config, { vuln_index: 207, status: "missing",
+    kind: "threat_pattern_audit", pattern_task: null, threat_task: null, candidate: null });
+  await assert.rejects(navigation.resolveAuditNavigation(scan(), { kind: "source", index: 207 }, new AbortController().signal), /缺少来源信息/);
+});
+
+test("pattern audit distinguishes missing historical records from a real zero-task run", async () => {
+  client.api.defaults.adapter = async (config) => response(config, []);
+  const props = { patternMode: true, events: [], fpReview: null, resultRevision: 0, onOpenIssue() {} };
+  let value = scan({ mining_engine_runs: [{ engine_id: "threat_pattern_audit", status: "success", total_candidates: 10 }] });
+  const root = await mount(ThreatAuditPanel, { ...props, scan: value });
+  assert.match(text(root), /未保存审计任务记录/);
+  assert.doesNotMatch(text(root), /没有生成需要审计/);
+  value = scan({ mining_engine_runs: [{ engine_id: "threat_pattern_audit", status: "success", total_candidates: 0 }] });
+  await act(async () => root.update(createElement(ThreatAuditPanel, { ...props, scan: value })));
+  assert.match(text(root), /没有生成需要审计的任务/);
+});
+
+for (const kind of ["integration", "shared"]) {
+  test(`pattern clients forward ${kind} credentials and reject a foreign source`, async () => {
+    client.setPublicScanAccess({ scanId: "s", token: "access", kind });
+    const prefix = kind === "shared" ? "/api/shared/scans/s" : "/api/public/scans/s";
+    const calls = [];
+    client.api.defaults.adapter = async (config) => {
+      calls.push(config);
+      assert.ok(config.url.startsWith(prefix));
+      assert.equal(config.params instanceof URLSearchParams ? config.params.get("token") : config.params.token, "access");
+      if (config.url.endsWith("-results")) return response(config, [{ task_id: "p", findings: [], confirmed_issue_count: 0, association_complete: true }]);
+      if (config.url.endsWith("-tasks")) return response(config, { items: [patternTask()], next_cursor: null, has_more: false });
+      return response(config, { vuln_index: 207, status: "resolved", kind: "threat_pattern_audit",
+        pattern_task: patternTask("p", { scan_id: "foreign" }), threat_task: null, candidate: null });
+    };
+    await client.getScanThreatPatternAuditResults("s", ["p", "p"]);
+    assert.deepEqual(calls[0].params.getAll("task_ids"), ["p"]);
+    assert.equal((await client.getScanPatternTasksPage("s")).items[0].module_name, "认证模块");
+    await assert.rejects(client.getScanVulnerabilityAuditSource("s", 207), /响应无效/);
+  });
+}
 
 test("navigation ignores late clicks, cancels on scan change and supports retry", async () => {
   let current;

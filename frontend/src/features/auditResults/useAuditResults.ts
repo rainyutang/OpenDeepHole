@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getScanCandidateAuditResults, getScanThreatAuditResults } from "../../api/client";
+import { getScanCandidateAuditResults, getScanThreatAuditResults, getScanThreatPatternAuditResults } from "../../api/client";
 import type { CandidateAuditTaskResult, FpReviewJob, ScanStatus, ThreatAuditTaskResult } from "../../types";
 
 interface ResultState<K, R> {
@@ -124,9 +124,9 @@ async function getCandidateAuditResultBatches(scanId: string, indexes: number[],
   }
 }
 
-export function useThreatAuditResults(scan: ScanStatus, taskIds: string[], fpReview: FpReviewJob | null, revision: number) {
-  return useAuditResults(scan.scan_id, taskIds, getScanThreatAuditResults, threatId,
-    [scan.threat_audit_tasks, scan.vulnerabilities, fpReview?.results, revision]);
+export function useThreatAuditResults(scan: ScanStatus, taskIds: string[], fpReview: FpReviewJob | null, revision: number, patternMode = false) {
+  return useAuditResults(scan.scan_id, taskIds, patternMode ? getScanThreatPatternAuditResults : getScanThreatAuditResults, threatId,
+    [patternMode ? scan.threat_pattern_audit_tasks : scan.threat_audit_tasks, scan.vulnerabilities, fpReview?.results, revision]);
 }
 
 export function useCandidateAuditResults(scan: ScanStatus, indexes: number[], fpReview: FpReviewJob | null, revision: number) {

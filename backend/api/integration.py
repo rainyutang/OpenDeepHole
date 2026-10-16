@@ -99,6 +99,12 @@ async def get_public_threat_tasks(scan_id: str, token: str = Query(...), cursor:
     return await scan_api.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
 
 
+@router.get("/api/public/scans/{scan_id}/threat-pattern-audit-tasks")
+async def get_public_threat_pattern_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
+                                 limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
+
+
 @router.get("/api/public/scans/{scan_id}/validations")
 async def get_public_validations(scan_id: str, token: str = Query(...), after: int = -1,
                                 limit: int = Query(50, ge=1, le=100)):
@@ -649,6 +655,18 @@ async def get_public_threat_audit_results(
     current_user: User = Depends(_public_user_dependency),
 ) -> list[ThreatAuditTaskResult]:
     return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/threat-pattern-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_public_threat_pattern_audit_results(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[ThreatAuditTaskResult]:
+    return await scan_api.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict | None)

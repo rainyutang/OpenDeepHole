@@ -109,6 +109,7 @@ RESOURCE_TABLES = {
     "vulnerabilities": ("vulnerabilities", "''"),
     "events": ("events", "''"),
     "threat_audit_tasks": ("threat_audit_tasks", "status"),
+    "threat_pattern_audit_tasks": ("threat_pattern_audit_tasks", "status"),
     "vulnerability_validations": ("validations", "''"),
     "skill_reports": ("skill_reports", "''"),
     "fp_review_jobs": ("fp_review_jobs", "status"),
@@ -249,6 +250,9 @@ class ScanSummariesMixin:
             "threat_audit_completed", "threat_audit_failed", "threat_audit_cancelled", "threat_audit_superseded",
             "validations", "skill_reports", "fp_review_active",
         )}
+        counts.update({"threat_pattern_audit_" + key: 0 for key in (
+            "tasks", "current", "pending", "queued", "running", "completed", "failed", "cancelled", "superseded",
+        )})
         for row in rows:
             resource, bucket, n = row["resource"], row["bucket"], int(row["item_count"])
             if resource in counts:
@@ -257,12 +261,13 @@ class ScanSummariesMixin:
                 key = "candidate_audit_" + bucket
                 if key in counts:
                     counts[key] += n
-            elif resource == "threat_audit_tasks":
+            elif resource in {"threat_audit_tasks", "threat_pattern_audit_tasks"}:
+                prefix = resource.removesuffix("tasks")
                 if bucket != "superseded":
-                    counts["threat_audit_current"] += n
+                    counts[prefix + "current"] += n
                 bucket = "running" if bucket in {"running", "analyzing", "auditing"} else "failed" if bucket in {"failed", "failure", "error", "timeout", "no_result"} else bucket
-                if "threat_audit_" + bucket in counts:
-                    counts["threat_audit_" + bucket] += n
+                if prefix + bucket in counts:
+                    counts[prefix + bucket] += n
             elif resource == "fp_review_jobs" and bucket in {"pending", "running"}:
                 counts["fp_review_active"] += n
         return counts

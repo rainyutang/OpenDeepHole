@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource } from "../types";
+import type { ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
@@ -9,6 +9,7 @@ import {
   normalizeScanEvent,
   normalizeScanStatus,
   normalizeThreatTask,
+  normalizePatternTask,
   normalizeValidation,
   normalizeVulnerability,
 } from "../scanRuntime";
@@ -368,13 +369,14 @@ export async function createScan(body: {
 }
 
 export async function getScanStatus(scanId: string): Promise<ScanStatus> {
-  const [overview, candidates, vulnerabilities, events, threatTasks, validations] = await Promise.all([
+  const [overview, candidates, vulnerabilities, events, threatTasks, validations, patternTasks] = await Promise.all([
     getScanOverview(scanId),
     getScanCandidatesPage(scanId),
     getScanVulnerabilitiesPage(scanId),
     getScanEventsPage(scanId),
     getScanThreatTasksPage(scanId),
     getScanValidationsPage(scanId),
+    getScanPatternTasksPage(scanId),
   ]);
   const indexedVulnerabilities = mergeIndexedVulnerabilities([], vulnerabilities.items);
   const normalized = normalizeScanStatus({
@@ -387,12 +389,14 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
     vulnerabilities: indexedVulnerabilities,
     events: events.items,
     threat_audit_tasks: threatTasks.items,
+    threat_pattern_audit_tasks: patternTasks.items,
     validations: validations.items,
     detail_pages: {
       candidates_next_cursor: candidates.next_cursor,
       vulnerabilities_next_cursor: vulnerabilities.next_cursor,
       events_next_cursor: events.next_cursor,
       threat_tasks_next_cursor: threatTasks.next_cursor,
+      pattern_tasks_next_cursor: patternTasks.next_cursor,
       validations_next_cursor: validations.next_cursor,
     },
   });
@@ -487,9 +491,18 @@ export async function getScanEventsPage(
   };
 }
 
-export async function getScanThreatAuditResults(
+export async function getScanThreatAuditResults(scanId: string, taskIds: string[], signal?: AbortSignal) {
+  return getAuditTaskResults(scanId, taskIds, "threat-audit", signal);
+}
+
+export async function getScanThreatPatternAuditResults(scanId: string, taskIds: string[], signal?: AbortSignal) {
+  return getAuditTaskResults(scanId, taskIds, "threat-pattern-audit", signal);
+}
+
+async function getAuditTaskResults(
   scanId: string,
   taskIds: string[],
+  kind: "threat-audit" | "threat-pattern-audit",
   signal?: AbortSignal,
 ): Promise<ThreatAuditTaskResult[]> {
   const ids = [...new Set(taskIds)];
@@ -501,8 +514,8 @@ export async function getScanThreatAuditResults(
   if (publicAccess) params.set("token", publicParams()!.token);
   const { data } = await api.get<ThreatAuditTaskResult[]>(
     publicAccess
-      ? publicScanPath("/threat-audit-results")
-      : `/api/v2/scans/${scanId}/threat-audit-results`,
+      ? publicScanPath(`/${kind}-results`)
+      : `/api/v2/scans/${scanId}/${kind}-results`,
     { params, signal },
   );
   if (!Array.isArray(data) || data.length !== ids.length || data.some((item) => (
@@ -566,10 +579,12 @@ export async function getScanVulnerabilityAuditSource(
   );
   if (!isRecord(data) || data.vuln_index !== index
     || !["resolved", "missing", "ambiguous", "unsupported"].includes(data.status)
-    || ![null, "threat_audit", "static_candidate"].includes(data.kind)
+    || ![null, "threat_audit", "threat_pattern_audit", "static_candidate"].includes(data.kind)
     || (data.status === "resolved" && (
       (data.kind === "threat_audit" && (!isRecord(data.threat_task)
         || !data.threat_task.task_id || data.threat_task.scan_id !== scanId))
+      || (data.kind === "threat_pattern_audit" && (!isRecord(data.pattern_task)
+        || !data.pattern_task.task_id || data.pattern_task.scan_id !== scanId))
       || (data.kind === "static_candidate" && (!isRecord(data.candidate)
         || !Number.isInteger(data.candidate.idx) || data.candidate.idx < 0))
       || data.kind === null
@@ -579,6 +594,7 @@ export async function getScanVulnerabilityAuditSource(
   return {
     ...data,
     threat_task: data.threat_task ? normalizeThreatTask(data.threat_task) : null,
+    pattern_task: data.pattern_task ? normalizePatternTask(data.pattern_task) : null,
     candidate: data.candidate ? normalizeScanCandidate(data.candidate, data.candidate.idx) : null,
   };
 }
@@ -595,6 +611,23 @@ export async function getScanThreatTasksPage(
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("威胁审计任务分页响应无效");
   return {
     items: data.items.map(normalizeThreatTask),
+    next_cursor: typeof data.next_cursor === "string" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
+}
+
+export async function getScanPatternTasksPage(
+  scanId: string,
+  cursor?: string | null,
+  signal?: AbortSignal,
+): Promise<ThreatPatternAuditTaskPage> {
+  const { data } = await api.get<unknown>(scanV2Path(scanId, "/threat-pattern-audit-tasks"), {
+    params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(cursor ? { cursor } : {}) },
+    signal,
+  });
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("攻击模式审计任务分页响应无效");
+  return {
+    items: data.items.map(normalizePatternTask),
     next_cursor: typeof data.next_cursor === "string" ? data.next_cursor : null,
     has_more: data.has_more === true,
   };

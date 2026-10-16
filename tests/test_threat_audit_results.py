@@ -61,6 +61,7 @@ def review(store, index, verdict="tp", *, scan_id="s", created="2026-09-07T01:00
         vuln_index=index, verdict=verdict, severity="high", reason=reason,
         vulnerability_report=report, created_at=created,
     ))
+    store.update_fp_review_job(review_id, status="complete", processed=1)
 
 
 def result(store, task_id="t", scan_id="s"):

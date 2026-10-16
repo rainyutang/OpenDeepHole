@@ -33,6 +33,7 @@ from backend.models import (
     ScanEvent,
     ThreatAnalysisRunStatus,
     ThreatAuditTask,
+    ThreatPatternAuditTask,
     Vulnerability,
     VulnerabilityValidation,
 )
@@ -1574,12 +1575,24 @@ class Reporter:
             return None
 
     async def push_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask | None:
+        return await self._push_audit_task(scan_id, task, "threat-audit")
+
+    async def push_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask) -> ThreatPatternAuditTask | None:
+        return await self._push_audit_task(scan_id, task, "threat-pattern-audit")
+
+    async def get_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
+        return await self._get_audit_tasks(scan_id, "threat-audit", ThreatAuditTask)
+
+    async def get_threat_pattern_audit_tasks(self, scan_id: str) -> list[ThreatPatternAuditTask]:
+        return await self._get_audit_tasks(scan_id, "threat-pattern-audit", ThreatPatternAuditTask)
+
+    async def _push_audit_task(self, scan_id: str, task, kind: str):
         """Create or update one threat-analysis-derived audit task."""
         if self.dry_run:
             print(
                 "  [THREAT_AUDIT] "
-                f"{task.status} {task.surface_name or task.surface_node_id} / "
-                f"{task.method_name or task.method_node_id}"
+                f"{task.status} {getattr(task, 'module_name', '') or getattr(task, 'surface_name', '')} / "
+                f"{getattr(task, 'pattern_name', '') or getattr(task, 'method_name', '')}"
             )
             return task
         task.output_source = self._with_agent_source(task.output_source)
@@ -1593,8 +1606,8 @@ class Reporter:
         }:
             response = await self._queue_post(
                 stream_key=f"scan:{scan_id}",
-                dedupe_key=f"scan:{scan_id}:threat-audit-task:{task.task_id}",
-                path=f"/api/agent/scan/{scan_id}/threat-audit-task",
+                dedupe_key=f"scan:{scan_id}:{kind}-task:{task.task_id}",
+                path=f"/api/agent/scan/{scan_id}/{kind}-task",
                 payload=task.model_dump(),
                 timeout=10.0,
             )
@@ -1602,10 +1615,10 @@ class Reporter:
                 return None
             data = response.json()
             value = data.get("task") if isinstance(data, dict) else None
-            return ThreatAuditTask(**value) if isinstance(value, dict) else None
+            return type(task)(**value) if isinstance(value, dict) else None
         try:
             resp = await self._client.post(
-                f"{self.server_url}/api/agent/scan/{scan_id}/threat-audit-task",
+                f"{self.server_url}/api/agent/scan/{scan_id}/{kind}-task",
                 json=task.model_dump(),
                 timeout=10.0,
             )
@@ -1613,7 +1626,7 @@ class Reporter:
             data = resp.json()
             payload = data.get("task") if isinstance(data, dict) else None
             if isinstance(payload, dict):
-                return ThreatAuditTask(**payload)
+                return type(task)(**payload)
         except Exception as e:
             # Cancellation uploads are best-effort cleanup after the scan has
             # already entered a terminal state.  Their failure is expected
@@ -1637,13 +1650,13 @@ class Reporter:
             )
         return None
 
-    async def get_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
+    async def _get_audit_tasks(self, scan_id: str, kind: str, model):
         """Fetch threat-analysis-derived audit tasks for scan resume."""
         if self.dry_run:
             return []
         try:
             resp = await self._client.get(
-                f"{self.server_url}/api/agent/scan/{scan_id}/threat-audit-tasks",
+                f"{self.server_url}/api/agent/scan/{scan_id}/{kind}-tasks",
                 timeout=10.0,
             )
             if resp.status_code == 404:
@@ -1651,7 +1664,7 @@ class Reporter:
             resp.raise_for_status()
             data = resp.json()
             if isinstance(data, list):
-                return [ThreatAuditTask(**item) for item in data if isinstance(item, dict)]
+                return [model(**item) for item in data if isinstance(item, dict)]
         except Exception:
             return []
         return []

@@ -85,6 +85,7 @@ from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixi
 from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
 from .file_inventories import FILE_INVENTORY_SCHEMA, ScanFileInventoriesMixin
 from .model_usage import MODEL_USAGE_SCHEMA, ScanModelUsageMixin
+from .pattern_audit import PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 
@@ -990,6 +991,7 @@ _SCHEMA += SHARE_SCHEMA
 _SCHEMA += TOKEN_CATEGORY_SCHEMA
 _SCHEMA += FILE_INVENTORY_SCHEMA
 _SCHEMA += MODEL_USAGE_SCHEMA
+_SCHEMA += PATTERN_AUDIT_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1011,7 +1013,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -2082,6 +2084,7 @@ class SqliteScanStore(ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCa
             skill_reports=self.list_skill_reports(row["scan_id"]) if include_details else [],
             threat_analysis=self.get_threat_analysis(row["scan_id"]) if include_details else None,
             threat_audit_tasks=self.list_threat_audit_tasks(row["scan_id"]) if include_details else [],
+            threat_pattern_audit_tasks=self.list_threat_pattern_audit_tasks(row["scan_id"]) if include_details else [],
             validations=self.list_vulnerability_validations(row["scan_id"]) if include_details else [],
             events=self.get_events(row["scan_id"]) if include_details else [],
             current_candidate=current,
@@ -3910,14 +3913,11 @@ class SqliteScanStore(ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCa
                         if task_id in task_indexes:
                             task_indexes[task_id].append(int(row["idx"]))
                     for task_id, indexes in task_indexes.items():
-                        self._conn.execute(
-                            """\
-                            UPDATE threat_audit_tasks
-                            SET result_vuln_indexes = ?
-                            WHERE scan_id = ? AND task_id = ?
-                            """,
-                            (json.dumps(indexes, ensure_ascii=False), scan_id, task_id),
-                        )
+                        for table in ("threat_audit_tasks", "threat_pattern_audit_tasks"):
+                            self._conn.execute(
+                                f"UPDATE {table} SET result_vuln_indexes = ? WHERE scan_id = ? AND task_id = ?",
+                                (json.dumps(indexes, ensure_ascii=False), scan_id, task_id),
+                            )
 
                 self._conn.commit()
                 return reconciled
@@ -4518,6 +4518,8 @@ class SqliteScanStore(ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCa
                         result.threat_task = tasks[0]
                     else:
                         result.status = "missing"
+            elif result.kind == "threat_pattern_audit":
+                result.status, result.pattern_task = self.resolve_threat_pattern_audit_source(scan_id, finding)
             elif result.kind == "static_candidate":
                 # audit_index is the stable candidate identity; never match by location.
                 column = "idx" if finding["audit_index"] is not None else "vulnerability_idx"

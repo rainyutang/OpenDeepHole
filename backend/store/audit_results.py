@@ -59,6 +59,8 @@ def summarize_findings(conn, scan_id: str, findings) -> dict[int, ThreatAuditFin
 
 
 def audit_source_kind(finding) -> str | None:
+    if any(finding[key] == "threat_pattern_audit" for key in ("analysis_source", "engine_id")):
+        return "threat_pattern_audit"
     if any(finding[key] == "threat_audit" for key in ("analysis_source", "engine_id", "vuln_type")):
         return "threat_audit"
     if (finding["analysis_source"] or "static_candidate") == "static_candidate":
