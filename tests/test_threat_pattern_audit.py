@@ -44,7 +44,7 @@ def _finding() -> dict:
     }
 
 
-def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
+def _artifacts(tmp_path: Path, *, pattern: dict | None = None) -> tuple[Path, Path]:
     attack_tree_path = tmp_path / "attack-trees.json"
     modules_path = tmp_path / "high-risk-modules.json"
     attack_tree_path.write_text(
@@ -55,7 +55,7 @@ def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
                     "related_high_risk_modules": [{
                         "module_name": "认证模块",
                     }],
-                    "attack_patterns": [{
+                    "attack_patterns": [pattern if pattern is not None else {
                         "pattern_id": "SYS-AUTH-02",
                         "pattern_name": "会话伪造",
                         "association_description": "攻击者伪造或重用会话标识冒充可信身份。",
@@ -73,6 +73,82 @@ def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return attack_tree_path, modules_path
+
+
+@pytest.fixture(params=[
+    "lightweight", "legacy", "primary_precedence", "multiple_ids",
+    "fallback_after_empty", "fallback_after_corrupt", "fallback_after_missing",
+    "unknown_pattern", "id_mismatch", "name_mismatch", "empty_description",
+    "invalid_description", "missing_catalogs", "unreadable_catalog",
+    "invalid_json", "invalid_utf8", "invalid_root",
+])
+def catalog_description_case(request, tmp_path, monkeypatch) -> tuple[dict, str]:
+    case = request.param
+    references = Path(__file__).resolve().parents[1] / "deephole_client/threat_analysis/methods"
+    source = references / (
+        "deephole_threat_analysis/skills/attack-trees/attack-tree-by-asset/references/attack_mode.json"
+        if case == "legacy"
+        else "codex_goal_threat_analysis/references/attack_mode.json"
+    )
+    mode = json.loads(source.read_text(encoding="utf-8"))[0]
+    expected_description = mode["攻击模式描述"]
+    pattern = {
+        "pattern_id": "、".join(mode["攻击模式编号"]),
+        "pattern_name": mode["攻击模式名称"],
+        **{key: f"AI generated {key}" for key in (
+            "pattern_description", "攻击模式描述", "description", "association_description",
+        )},
+    }
+    if case in {"lightweight", "legacy"}:
+        return pattern, expected_description
+
+    primary = tmp_path / "primary-attack-mode.json"
+    fallback = tmp_path / "fallback-attack-mode.json"
+    primary.write_text(json.dumps([mode], ensure_ascii=False), encoding="utf-8")
+    fallback.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(engine, "ATTACK_MODE_PATHS", (primary, fallback))
+
+    if case == "primary_precedence":
+        fallback.write_text(json.dumps([
+            {**mode, "攻击模式描述": "旧库中的备用描述。"},
+        ], ensure_ascii=False), encoding="utf-8")
+    elif case == "multiple_ids":
+        mode["攻击模式编号"] = ["TEST-A", "TEST-B"]
+        primary.write_text(json.dumps([mode], ensure_ascii=False), encoding="utf-8")
+        pattern["pattern_id"] = "TEST-A、TEST-B"
+    elif case.startswith("fallback_after_"):
+        fallback.write_text(json.dumps([mode], ensure_ascii=False), encoding="utf-8")
+        if case == "fallback_after_missing":
+            primary.unlink()
+        elif case == "fallback_after_corrupt":
+            primary.write_text("not JSON", encoding="utf-8")
+        else:
+            mode["攻击模式描述"] = ""
+            primary.write_text(json.dumps([mode], ensure_ascii=False), encoding="utf-8")
+    else:
+        expected_description = ""
+        if case == "unknown_pattern":
+            pattern.update(pattern_id="UNKNOWN", pattern_name="未知攻击模式")
+        elif case == "id_mismatch":
+            pattern["pattern_id"] = "UNKNOWN"
+        elif case == "name_mismatch":
+            pattern["pattern_name"] = "改写后的攻击模式名称"
+        elif case in {"empty_description", "invalid_description"}:
+            mode["攻击模式描述"] = " \t\n" if case == "empty_description" else ["非字符串描述"]
+            primary.write_text(json.dumps([mode], ensure_ascii=False), encoding="utf-8")
+        elif case == "missing_catalogs":
+            primary.unlink()
+            fallback.unlink()
+        elif case == "unreadable_catalog":
+            primary.unlink()
+            primary.mkdir()
+        elif case == "invalid_json":
+            primary.write_text("not JSON", encoding="utf-8")
+        elif case == "invalid_utf8":
+            primary.write_bytes(b"\xff")
+        elif case == "invalid_root":
+            primary.write_text(json.dumps(mode, ensure_ascii=False), encoding="utf-8")
+    return pattern, expected_description
 
 
 async def _write_task_result(work_dir: Path, task: dict, value: list) -> Path:
@@ -169,12 +245,15 @@ def test_cancel_cleans_unstarted_tasks_and_resume_supersedes_removed_targets(tmp
     assert [task.status for key, task in reporter.tasks.items() if key != "obsolete"] == ["cancelled", "cancelled"]
 
 
-def test_prompt_is_concentrated_and_schema_carries_field_guidance() -> None:
+@pytest.mark.parametrize("pattern_description", [
+    "攻击者伪造会话标识冒充可信身份。", "", " \t\n",
+])
+def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_description: str) -> None:
     prompt = build_threat_pattern_prompt(
         module_name="认证模块",
         code_paths="src/auth、src/shared",
         pattern_name="会话伪造",
-        pattern_description="攻击者伪造会话标识冒充可信身份。",
+        pattern_description=pattern_description,
         previous_findings_path="/work/previous-findings.json",
         schema_path="/work/threat-pattern-result.schema.json",
         result_path="/work/result.json",
@@ -184,7 +263,12 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance() -> None:
     assert (
         "分析模块「认证模块」（代码路径：src/auth、src/shared）" in prompt
     )
-    assert "即：攻击者伪造会话标识冒充可信身份。" in prompt
+    expected_suffix = f"，即：{pattern_description}" if pattern_description.strip() else "。"
+    assert prompt.splitlines()[0] == (
+        "分析模块「认证模块」（代码路径：src/auth、src/shared），"
+        f"判断代码中是否存在「会话伪造」攻击模式威胁{expected_suffix}"
+    )
+    assert "在该模块尝试找到1个相关攻击威胁的安全问题。" in prompt
     assert "无法找到合格问题时输出 `[]` 并停止" in prompt
     assert "/work/previous-findings.json" in prompt
     assert "JSON Schema 文件：/work/threat-pattern-result.schema.json" in prompt
@@ -249,7 +333,7 @@ def test_targets_are_deduplicated_by_module_and_pattern(tmp_path: Path) -> None:
         "code_paths": ["src/auth", "src/shared"],
         "pattern_id": "SYS-AUTH-02",
         "pattern_name": "会话伪造",
-        "pattern_description": "攻击者伪造或重用会话标识冒充可信身份。",
+        "pattern_description": "",
     }]
 
 
@@ -398,12 +482,14 @@ def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, r
     assert shlex_command_fragment(sys.executable) in captured["prompt"]
 
 
-def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
+def test_engine_treats_empty_result_as_completed(tmp_path: Path, catalog_description_case) -> None:
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    pattern, expected_description = catalog_description_case
+    attack_tree_path, modules_path = _artifacts(tmp_path, pattern=pattern)
     captured: dict = {}
+    reporter = TaskReporter()
 
     async def fake_run_opencode_task(**kwargs):
         captured.update(kwargs)
@@ -429,6 +515,7 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
         "project_path": project_path,
         "code_scan_path": project_path,
         "work_dir": work_dir,
+        "reporter": reporter,
         "config": SimpleNamespace(
             opencode_concurrency=1,
             vulnerability_mining=SimpleNamespace(required_capability="high"),
@@ -450,6 +537,20 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
         result = asyncio.run(engine.run(**kwargs))
 
     assert result["status"] == "success"
+    assert result["total_candidates"] == result["processed_candidates"] == 1
+    assert len(reporter.tasks) == 1
+    task = next(iter(reporter.tasks.values()))
+    assert task.status == "completed"
+    assert task.description == expected_description
+    prompt = captured["prompt"]
+    assert f"「{pattern['pattern_name']}」攻击模式威胁" in prompt
+    if expected_description:
+        assert prompt.splitlines()[0].endswith(f"，即：{expected_description}")
+    else:
+        assert prompt.splitlines()[0].endswith("攻击模式威胁。")
+        assert "，即：" not in prompt
+    assert "AI generated" not in prompt
+    assert "威胁分析仅提供了攻击模式名称" not in prompt
     assert json.loads(
         next((work_dir / "task-results").glob("*.json")).read_text(
             encoding="utf-8"

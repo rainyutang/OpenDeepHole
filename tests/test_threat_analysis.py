@@ -778,7 +778,8 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair(
     assert "- 认证模块 : src/auth，决定管理权限" in prompt
     assert prompt.count("  - 管理接口 : ") == 1
     assert prompt.count("  - 认证模块 : ") == 1
-    assert "- 目标资产：管理权限，系统管理和配置能力" in prompt
+    assert "- 目标资产：" not in prompt
+    assert "系统管理和配置能力" not in prompt
     assert "HTTPS 管理接口" not in prompt
     assert "攻击者可接管系统" not in prompt
     assert "管理接口 --调用--> 认证模块" not in prompt
