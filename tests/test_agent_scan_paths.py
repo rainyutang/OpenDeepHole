@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
+from deephole_client.codegraph import prepare_scan_codegraph
 from deephole_client.config import AgentConfig
 from deephole_client.reporter import Reporter
 from deephole_client.codex_runtime import (
@@ -2479,6 +2480,18 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_custom_scan_graph_is_prepared_and_enters_task_context(
         self,
     ) -> None:
+        await self._check_custom_scan_graph_task_context(local_graph=False)
+
+    async def test_custom_scan_new_codegraph_database_keeps_mcp_enabled(
+        self,
+    ) -> None:
+        await self._check_custom_scan_graph_task_context(local_graph=True)
+
+    async def _check_custom_scan_graph_task_context(
+        self,
+        *,
+        local_graph: bool,
+    ) -> None:
         reporter = _reporter()
         config = AgentConfig()
         config.threat_analysis.enabled = False
@@ -2499,6 +2512,18 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             project = root / "project"
             project.mkdir()
+            if local_graph:
+                database = project / ".codegraph-wx" / "codegraph.db"
+                database.parent.mkdir()
+                database.touch()
+                executable = root / "codegraph"
+                executable.touch()
+                graph_config["transport"] = "local"
+                graph_config["local"] = {
+                    "executable": str(executable),
+                    "args": ["serve", "--mcp"],
+                    "environment": {},
+                }
             index_path = root / "index.db"
             index_path.touch()
             task_context = MagicMock(return_value=nullcontext())
@@ -2512,8 +2537,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "deephole_client.codegraph.prepare_scan_codegraph",
-                    new=AsyncMock(return_value=True),
+                    new=AsyncMock(wraps=prepare_scan_codegraph),
                 ) as prepare,
+                patch(
+                    "deephole_client.codegraph.asyncio.create_subprocess_exec",
+                    new=AsyncMock(side_effect=AssertionError(
+                        "Prepared graph must not run initialization",
+                    )),
+                ) as initialize,
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
                     new=AsyncMock(return_value={
@@ -2559,6 +2590,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         prepare.assert_awaited_once()
+        initialize.assert_not_awaited()
         self.codex_access.assert_awaited_once_with(
             project_path=project.resolve(),
             scan_dir=(
