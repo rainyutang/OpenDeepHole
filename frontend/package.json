@@ -22,6 +22,7 @@
     "test:issue-loading": "node tests/issueLoading.test.mjs",
     "test:threat-analysis-loading": "node tests/threatAnalysisLoading.test.mjs",
     "test:threat-coverage": "node tests/threatCoverage.test.mjs",
+    "benchmark:threat-coverage": "node scripts/benchmarkThreatCoverage.mjs",
     "test:threat-module-paths": "node tests/threatModulePaths.test.mjs",
     "preview": "vite preview"
   },

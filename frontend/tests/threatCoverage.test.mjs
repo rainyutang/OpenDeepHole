@@ -6,7 +6,7 @@ import { createServer } from "vite";
 
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
-const { buildCoverageTree, layoutTreemap, layoutCoverageTree, hitCoverageTile } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
+const { buildCoverageTree, createCoverageMatcher, layoutTreemap, layoutCoverageTree, hitCoverageTile } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
 const { ThreatCoveragePanel } = await server.ssrLoadModule("/src/features/threatAnalysis/ThreatCoveragePanel.tsx");
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { getThreatCoverage } = await server.ssrLoadModule("/src/features/threatAnalysis/api.ts");
@@ -107,9 +107,9 @@ function component(scanId = "s", revision = 0) { return createElement(ThreatCove
 async function mount(scanId = "s") {
   let root;
   const host = { clientWidth: 960, clientHeight: 360 };
-  const fills = [], scales = [];
+  const fills = [], scales = [], alphas = [];
   const context = {
-    fillRect: (...args) => fills.push(args), scale: (...args) => scales.push(args),
+    fillRect: (...args) => { fills.push(args); alphas.push(context.globalAlpha); }, scale: (...args) => scales.push(args),
     save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, fillText() {},
   };
   const bitmap = { getContext: () => context };
@@ -125,6 +125,7 @@ async function mount(scanId = "s") {
   root.bitmap = bitmap;
   root.fills = fills;
   root.scales = scales;
+  root.alphas = alphas;
   roots.push(root);
   return root;
 }
@@ -139,6 +140,62 @@ test("directory inheritance and overlapping paths count each file once without l
   assert.equal(byPath.get("auth").directModules.size, 1);
   assert.equal(byPath.get("authentication.c").kind, "file");
   assert.equal(buildCoverageTree(fixture(false)).root.covered, 0);
+});
+
+test("nested scopes preserve local-first order without mutating ancestors, siblings, or direct annotations", () => {
+  const data = fixture();
+  data.inventory.entries.push({ path: "auth/empty", kind: "directory" });
+  data.modules.unshift({ id: "global", name: "全局", paths: ["."], mapped_paths: ["."] });
+  data.modules.push({ id: "empty", name: "空目录", paths: ["auth/empty"], mapped_paths: ["auth/empty"] });
+  data.targets.unshift({ ...data.targets[0], id: "global", mapped_paths: ["."] });
+  data.targets.push({ ...data.targets[0], id: "empty", mapped_paths: ["auth/empty"] });
+  const before = structuredClone(data);
+  const { root, byPath } = buildCoverageTree(data);
+  assert.deepEqual([root.files, root.highRisk, root.covered, root.riskOnly], [4, 4, 4, 0]);
+  assert.deepEqual([...root.targetIds], ["global", "t1", "t2", "empty"]);
+  assert.deepEqual([...byPath.get("auth").targetIds], ["t1", "global", "t2", "empty"]);
+  assert.deepEqual([...byPath.get("auth/a.c").targetIds], ["t1", "t2", "global"]);
+  assert.deepEqual([...byPath.get("auth/b.c").targetIds], ["t1", "global"]);
+  assert.deepEqual([...byPath.get("auth/empty").targetIds], ["empty", "t1", "global"]);
+  assert.equal(byPath.get("auth/empty").files, 0);
+  assert.deepEqual([...byPath.get("authentication.c").targetIds], ["global"]);
+  assert.deepEqual([...byPath.get("authentication.c").moduleIds], ["other", "global"]);
+  assert.deepEqual([...byPath.get("README").moduleIds], ["global"]);
+  assert.deepEqual([...byPath.get("auth").directModules], ["auth"]);
+  assert.deepEqual([...root.directModules], ["global"]);
+  assert.deepEqual([...root.moduleIds], ["global", "auth", "empty", "other"]);
+  assert.deepEqual(data, before);
+});
+
+test("thousands of files share all 500 overlapping targets without per-file copies or truncation", () => {
+  const data = fixture(false);
+  data.inventory.entries = [{ path: ".", kind: "directory" },
+    ...Array.from({ length: 5000 }, (_, i) => ({ path: `file-${i}.c`, kind: "file" }))];
+  data.modules = Array.from({ length: 10 }, (_, i) => ({ id: `m${i}`, mapped_paths: ["."] }));
+  data.targets = Array.from({ length: 500 }, (_, i) => ({ id: `t${i}`, mapped_paths: ["."] }));
+  const { root, byPath } = buildCoverageTree(data);
+  assert.deepEqual([root.files, root.highRisk, root.covered, root.riskOnly], [5000, 5000, 5000, 0]);
+  assert.deepEqual([...root.targetIds], data.targets.map(({ id }) => id));
+  assert.equal(new Set([...byPath.values()].map((item) => item.targetIds)).size, 1);
+  assert.equal(new Set([...byPath.values()].map((item) => item.moduleIds)).size, 1);
+  assert.equal(byPath.get("file-4999.c").directModules.size, 0);
+});
+
+test("filter intersections run once per shared scope, including misses, and reset with each filter", () => {
+  class CountedSet extends Set {
+    lookups = 0;
+    has(id) { this.lookups++; return super.has(id); }
+  }
+  const scope = new CountedSet(Array.from({ length: 500 }, (_, i) => `t${i}`));
+  for (const [selected, expected] of [[new Set(["t499"]), true], [new Set(["absent"]), false]]) {
+    const matches = createCoverageMatcher(selected);
+    const before = scope.lookups;
+    for (let i = 0; i < 5000; i++) assert.equal(matches(scope), expected);
+    assert.equal(scope.lookups - before, 1);
+  }
+  assert.equal(createCoverageMatcher(new Set())(scope), false);
+  assert.equal(createCoverageMatcher(null)(scope), true);
+  assert.equal(createCoverageMatcher(new Set(["t499"]))(new Set(["t0"])), false);
 });
 
 test("all directory items fit the viewport without grouped leftovers, at wide and narrow sizes", () => {
@@ -237,6 +294,43 @@ test("dense maps draw every cell at device resolution and preserve hit testing a
   await act(async () => root.root.findByType("canvas").props.onKeyDown({ key: "End", preventDefault() {} }));
   assert.match(text(section(root, "路径覆盖详情")), new RegExp(tiles.at(-1).node.path));
 });
+
+for (const count of [4, 1500]) {
+  test(`pattern and module filters refresh across shared scopes and data updates (${count} files)`, async () => {
+    let data = fixture();
+    data.inventory.entries = [{ path: ".", kind: "directory" },
+      ...Array.from({ length: count }, (_, i) => ({ path: `file-${i}.c`, kind: "file" }))];
+    data.modules[0].mapped_paths = ["."];
+    data.modules[1].mapped_paths = ["file-0.c"];
+    data.targets[0].mapped_paths = ["."];
+    data.targets[1].mapped_paths = ["file-0.c"];
+    installApi(() => data);
+    const root = await mount();
+    const activeCells = () => count > 1200
+      ? root.alphas.slice(-count * 3).filter((alpha) => alpha === 1).length / 3
+      : root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile ") && !node.props.className.includes("is-dimmed")).length;
+    const select = async (value) => act(async () => root.root.findByType("select").props.onChange({ target: { value } }));
+    const search = async (value) => act(async () => root.root.findByType("input").props.onChange({ target: { value } }));
+    await select("P1");
+    assert.equal(activeCells(), count);
+    await select("P2");
+    assert.equal(activeCells(), 1);
+    await select("");
+    assert.equal(activeCells(), count);
+    await search("认证模块");
+    assert.equal(section(root, "路径搜索结果").findAllByType("button").length, Math.min(count, 100));
+    await search("单文件模块");
+    assert.equal(section(root, "路径搜索结果").findAllByType("button").length, 1);
+    assert.match(text(section(root, "路径搜索结果")), /file-0\.c/);
+    await select("P2");
+    data = structuredClone(data);
+    data.modules[1].mapped_paths = ["."];
+    data.targets[1].mapped_paths = ["."];
+    await act(async () => root.update(component("s", 1)));
+    assert.equal(activeCells(), count);
+    assert.equal(section(root, "路径搜索结果").findAllByType("button").length, Math.min(count, 100));
+  });
+}
 
 test("inventory renders before analysis, annotation refresh preserves selected directory and uses union rates", async () => {
   let data = fixture(false);

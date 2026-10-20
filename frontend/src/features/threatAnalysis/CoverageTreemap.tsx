@@ -1,13 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import type { CoverageNode, CoverageTarget, CoverageTreeTile } from "./coverage";
-import { coverageBackground, hitCoverageTile, layoutCoverageTree } from "./coverage";
+import { coverageBackground, createCoverageMatcher, hitCoverageTile, layoutCoverageTree } from "./coverage";
 
 const DOM_TILE_LIMIT = 1200;
-
-function matchesPattern(node: CoverageNode, highlighted: Set<string> | null) {
-  return !highlighted || [...node.targetIds].some((id) => highlighted.has(id));
-}
 
 function tileLabel(tile: CoverageTreeTile) {
   return tile.nested ? tile.width >= 64 && tile.height >= 40 : tile.width >= 40 && tile.height >= 16;
@@ -47,6 +43,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
 
   const tiles = useMemo(() => layoutCoverageTree(parent, size.width, size.height), [parent, size.width, size.height]);
   const byPath = useMemo(() => new Map(tiles.map((tile) => [tile.node.path, tile])), [tiles]);
+  const matchesPattern = useMemo(() => createCoverageMatcher(highlighted), [highlighted]);
   const dense = tiles.length > DOM_TILE_LIMIT;
   const active = byPath.get(selected);
   const hover = hovered ? byPath.get(hovered) : undefined;
@@ -70,7 +67,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
       for (const tile of tiles) {
         const { node, x, y, width, height } = tile;
         const gap = Math.min(width, height) >= 8 ? .5 : 0;
-        context.globalAlpha = matchesPattern(node, highlighted) ? 1 : .22;
+        context.globalAlpha = matchesPattern(node.targetIds) ? 1 : .22;
         context.fillStyle = neutral;
         context.fillRect(x + gap, y + gap, width - 2 * gap, height - 2 * gap);
         if (!tile.nested && node.files && (node.covered || node.riskOnly)) {
@@ -97,7 +94,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
     const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(draw);
     observer?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
     return () => observer?.disconnect();
-  }, [dense, tiles, size, highlighted]);
+  }, [dense, tiles, size, matchesPattern]);
 
   const pick = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -134,7 +131,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
       const { node, x, y, width, height, nested } = tile;
       const firstPattern = targets.get(node.targetIds.values().next().value ?? "")?.pattern_name;
       return <button key={node.path} type="button"
-        className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${matchesPattern(node, highlighted) ? "" : "is-dimmed"}`}
+        className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${matchesPattern(node.targetIds) ? "" : "is-dimmed"}`}
         style={{ left: x, top: y, width, height, background: nested ? "var(--coverage-neutral)" : coverageBackground(node), borderWidth: Math.min(width, height) >= 8 ? .5 : 0 }}
         aria-label={`${node.name}，${node.files} 个文件，${node.highRisk} 个高风险文件，${node.covered} 个文件关联攻击模式`}
         aria-pressed={selected === node.path} title={tileTitle(node, targets)}

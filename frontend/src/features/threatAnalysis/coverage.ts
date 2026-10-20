@@ -40,9 +40,9 @@ export interface CoverageNode {
   name: string;
   kind: "file" | "directory";
   children: CoverageNode[];
-  directModules: Set<string>;
-  moduleIds: Set<string>;
-  targetIds: Set<string>;
+  directModules: ReadonlySet<string>;
+  moduleIds: ReadonlySet<string>;
+  targetIds: ReadonlySet<string>;
   files: number;
   highRisk: number;
   riskOnly: number;
@@ -64,57 +64,122 @@ export function scanRelativePaths(item: CoverageModule | CoverageTarget): string
   return item.scan_relative_paths ?? item.mapped_paths;
 }
 
+const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
+
 function node(path: string, kind: CoverageNode["kind"]): CoverageNode {
   return {
     path, name: path === "." ? "扫描范围" : path.split("/").pop() ?? path,
-    kind, children: [], directModules: new Set(), moduleIds: new Set(), targetIds: new Set(),
+    kind, children: [], directModules: EMPTY_IDS, moduleIds: EMPTY_IDS, targetIds: EMPTY_IDS,
     files: 0, highRisk: 0, riskOnly: 0, covered: 0,
   };
 }
-function union(target: Set<string>, source: Set<string>) { source.forEach((id) => target.add(id)); }
-function sumChildren(parent: CoverageNode) {
-  parent.children.forEach((child) => {
-    for (const key of ["files", "highRisk", "riskOnly", "covered"] as const) parent[key] += child[key];
-    union(parent.moduleIds, child.moduleIds);
-    union(parent.targetIds, child.targetIds);
-  });
+
+function collectScopes(items: Array<{ id: string; mapped_paths: string[] }>): ReadonlyMap<string, ReadonlySet<string>> {
+  const scopes = new Map<string, Set<string>>();
+  for (const item of items) {
+    for (const path of item.mapped_paths) {
+      let scope = scopes.get(path);
+      if (!scope) scopes.set(path, scope = new Set());
+      scope.add(item.id);
+    }
+  }
+  return scopes;
 }
 
-/** Expand directory scopes once per file, then aggregate up the original tree. */
+/** Keep insertion order and share the first scope until an addition needs a copy.
+ * A directory may contain thousands of children with the exact same scope. */
+function mergeScopes(scopes: Iterable<ReadonlySet<string>>): ReadonlySet<string> {
+  let result = EMPTY_IDS;
+  let combined: Set<string> | undefined;
+  const seen = new Set<ReadonlySet<string>>();
+  for (const scope of scopes) {
+    if (!scope.size || seen.has(scope)) continue;
+    seen.add(scope);
+    if (!result.size) {
+      result = scope;
+      continue;
+    }
+    for (const id of scope) {
+      if (result.has(id)) continue;
+      if (!combined) result = combined = new Set(result);
+      combined.add(id);
+    }
+  }
+  return result;
+}
+
+function inheritScope(local: ReadonlySet<string>, inherited: ReadonlySet<string>): ReadonlySet<string> {
+  if (!local.size) return inherited;
+  if (!inherited.size || local === inherited) return local;
+  // Local annotations precede inherited ones, including the tooltip's first ID.
+  return mergeScopes([local, inherited]);
+}
+
+function* descendantScopes(parent: CoverageNode, key: "moduleIds" | "targetIds") {
+  yield parent[key];
+  for (const child of parent.children) yield child[key];
+}
+
+/** Share directory scopes with descendants, then aggregate up the original tree. */
 export function buildCoverageTree(data: ThreatCoverage) {
   const root = node(".", "directory");
   const byPath = new Map<string, CoverageNode>([[".", root]]);
   for (const entry of data.inventory?.entries ?? []) {
     if (entry.path !== ".") byPath.set(entry.path, node(entry.path, entry.kind));
   }
+  const moduleScopes = collectScopes(data.modules);
+  const targetScopes = collectScopes(data.targets);
   for (const item of byPath.values()) {
+    item.directModules = item.moduleIds = moduleScopes.get(item.path) ?? EMPTY_IDS;
+    item.targetIds = targetScopes.get(item.path) ?? EMPTY_IDS;
     if (item === root) continue;
     const slash = item.path.lastIndexOf("/");
     byPath.get(slash < 0 ? "." : item.path.slice(0, slash))?.children.push(item);
   }
-  data.modules.forEach((module) => module.mapped_paths.forEach((path) => {
-    byPath.get(path)?.directModules.add(module.id);
-    byPath.get(path)?.moduleIds.add(module.id);
-  }));
-  data.targets.forEach((target) => target.mapped_paths.forEach((path) => byPath.get(path)?.targetIds.add(target.id)));
-  function visit(item: CoverageNode, inheritedModules: Set<string>, inheritedTargets: Set<string>) {
-    union(item.moduleIds, inheritedModules);
-    union(item.targetIds, inheritedTargets);
+  function visit(item: CoverageNode, inheritedModules: ReadonlySet<string>, inheritedTargets: ReadonlySet<string>) {
+    const modules = item.moduleIds = inheritScope(item.moduleIds, inheritedModules);
+    const targets = item.targetIds = inheritScope(item.targetIds, inheritedTargets);
     if (item.kind === "file") {
       item.files = 1;
       item.highRisk = Number(item.moduleIds.size > 0);
       item.covered = Number(item.targetIds.size > 0);
       item.riskOnly = Number(item.highRisk > 0 && item.covered === 0);
     } else {
-      // Aggregate descendants only after inheritance; otherwise a preceding
-      // sibling's annotations would leak into later siblings.
-      item.children.forEach((child) => visit(child, item.moduleIds, item.targetIds));
-      sumChildren(item);
+      // Pass only this directory's scope to children. Aggregating descendants
+      // must neither mutate shared scopes nor leak annotations into siblings.
+      for (const child of item.children) {
+        visit(child, modules, targets);
+        item.files += child.files;
+        item.highRisk += child.highRisk;
+        item.riskOnly += child.riskOnly;
+        item.covered += child.covered;
+      }
+      item.moduleIds = mergeScopes(descendantScopes(item, "moduleIds"));
+      item.targetIds = mergeScopes(descendantScopes(item, "targetIds"));
       item.children.sort((a, b) => b.files - a.files || a.path.localeCompare(b.path));
     }
   }
-  visit(root, new Set(), new Set());
+  visit(root, EMPTY_IDS, EMPTY_IDS);
   return { root, byPath };
+}
+
+/** One matcher per filter snapshot; shared scopes need only one intersection.
+ * Weak keys let replaced coverage trees be collected without retaining a cache. */
+export function createCoverageMatcher(selected: ReadonlySet<string> | null): (scope: ReadonlySet<string>) => boolean {
+  if (selected === null) return () => true;
+  if (!selected.size) return () => false;
+  const matches = new WeakMap<ReadonlySet<string>, boolean>();
+  return (scope) => {
+    const cached = matches.get(scope);
+    if (cached !== undefined) return cached;
+    const [smaller, larger] = scope.size < selected.size ? [scope, selected] : [selected, scope];
+    let matched = false;
+    for (const id of smaller) {
+      if (larger.has(id)) { matched = true; break; }
+    }
+    matches.set(scope, matched);
+    return matched;
+  };
 }
 
 export interface CoverageTile { node: CoverageNode; x: number; y: number; width: number; height: number }

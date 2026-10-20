@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CoverageNode, ThreatCoverage } from "./coverage";
-import { buildCoverageTree, coveragePercent, scanRelativePaths } from "./coverage";
+import { buildCoverageTree, coveragePercent, createCoverageMatcher, scanRelativePaths } from "./coverage";
 import { CoverageTreemap } from "./CoverageTreemap";
 import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatCoveragePanel.css";
@@ -79,9 +79,10 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
     const text = query.trim().toLowerCase();
     if (!text || !tree || !data) return [];
     const moduleIds = new Set(data.modules.filter((module) => module.name.toLowerCase().includes(text)).map((module) => module.id));
+    const matchesModule = createCoverageMatcher(moduleIds);
     const matches = [];
     for (const item of tree.byPath.values()) {
-      if (item.path !== "." && (item.path.toLowerCase().includes(text) || [...item.moduleIds].some((id) => moduleIds.has(id)))) matches.push(item);
+      if (item.path !== "." && (item.path.toLowerCase().includes(text) || matchesModule(item.moduleIds))) matches.push(item);
       if (matches.length === 100) break;
     }
     return matches;
