@@ -19,6 +19,7 @@
 - 攻击模式关联来自 `attack_tree_path.content`。模块 × 模式组合遵循现有 `threat_pattern_audit._build_targets` 的相关模块、节点回退及去重规则；产物缺少模块路径时沿用扫描根目录回退，并在关联详情中明确说明。
 - 高风险模块表格和覆盖详情显示相对于本次扫描目录的 POSIX 路径，根目录显示为 `.`，两处共用覆盖接口的路径投影。内部产物及审计继续使用项目相对路径；历史项目相对、扫描相对及绝对路径统一映射到文件清单。
 - 优先保留按原有基准解析后实际存在的路径；仅在完整清单能够唯一证明时，去除重复的完整扫描目录前缀，真实的同名嵌套目录保持不变。支持 Windows 盘符和 UNC 路径；不做通配符、文件名或路径后缀猜测。越界、缺失或有歧义的路径在「范围说明与未映射路径」中列出，不扩大覆盖范围。历史产物只读，不回写或重跑模型。
+- 普通分析（包括轻量分析失败后的回退）可能输出相对于项目父目录的路径。统计侧在现有匹配及重复前缀修复均无命中、且无歧义时，才根据项目与扫描路径计算完整前缀并尝试修复。例如项目为 `/xxx/hert_crsp`、扫描目录为 `/xxx/hert_crsp/sec` 时，`hert_crsp/sec/sec_r_xxx` 及适配器叠加后的 `sec/hert_crsp/sec/sec_r_xxx`，可映射为 `sec_r_xxx`。新增修复要求完整清单中存在唯一匹配，不改变已有轻量分析的匹配优先级，也不修改分析流程、产物适配或审计输入；清单缺失或不完整时不开启该修复。
 - 高风险覆盖率 = 高风险范围内去重文件数 / 全集文件数。攻击模式关联覆盖率 = 至少关联一个攻击模式的去重文件数 / 全集文件数。模式高亮只改变显示，不改变分母。
 - 分析未完成、没有文件或清单不完整时，覆盖率显示 `—`。合法空分析结果在完整非空清单上显示 `0.0%`。
 
@@ -100,5 +101,7 @@ Node 24.14.0 的本机结果如下，时间及内存均取 3 次的最大值：
 需同步更新后端、前端和扫描客户端并重启客户端。SQLite/PostgreSQL 启动自动建表，无需手工迁移或模型配置变更。旧客户端未采集清单时仍能正常完成现有扫描。
 
 2026-10-20 的集合共享与匹配缓存优化只需更新前端资源，不增加接口、数据库迁移或 Agent 变更。
+
+2026-10-21 的项目父目录相对路径兼容仅需更新后端。已有完整文件清单的历史扫描刷新页面即可重新统计，无需更新 Agent、重跑威胁分析或迁移数据。
 
 验证命令：`PYTHONPATH=. python3 -m pytest -q tests/test_threat_module_paths.py tests/test_threat_coverage_resume.py tests/test_threat_coverage.py`；PostgreSQL 可用 `python3 scripts/run_postgres_tests.py -q tests/test_threat_module_paths.py tests/test_threat_coverage_resume.py tests/test_threat_coverage.py tests/test_scan_resume_postgres.py`。前端在 `frontend/` 执行 `npm run test:threat-module-paths`、`npm run test:threat-coverage`、`npm run test:threat-analysis-loading` 和 `npm run build`。

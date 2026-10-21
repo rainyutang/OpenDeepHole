@@ -19,14 +19,17 @@ class ModulePathResolver:
     """Use explicit path provenance first, and evidence for legacy repairs.
 
     ``match`` returns the recorded spelling of a scan-relative path, or None.
-    Duplicate prefixes may only be repaired against complete evidence (the
+    Prefixes may only be repaired against complete evidence (the
     Agent's filesystem or a complete inventory), never by suffix/basename.
+    Coverage may opt into project-parent prefixes after the existing rules;
+    artifact adaptation keeps its original behavior by default.
     """
 
     def __init__(
         self, project: str, scan_root: str, *,
         match: Callable[[str], str | None] | None = None,
         allow_repair: bool = False,
+        allow_project_parent_prefix: bool = False,
     ) -> None:
         root = scan_root.replace("\\", "/")
         self.windows = bool(ntpath.splitdrive(root)[0])
@@ -40,6 +43,10 @@ class ModulePathResolver:
             value for value in (self.project_prefix, self.root.lstrip("/"))
             if value and value != "."
         ))
+        self.project_parent_prefix = (
+            self._relative_to(self.root, self.paths.dirname(self.project))
+            if allow_project_parent_prefix and project and self.project_prefix is not None else None
+        )
 
     def canonical(self, value: str) -> str:
         # Inventory names on POSIX may contain literal backslashes. Do not
@@ -101,24 +108,32 @@ class ModulePathResolver:
                     return ModulePathResolution(matched, True)
 
         if self.match and self.allow_repair:
-            pending = [candidate for candidate in candidates if candidate is not None]
-            seen = set(pending)
-            repaired: dict[str, str] = {}
-            while pending:
-                candidate = pending.pop()
-                for prefix in self.prefixes:
-                    shorter = self._strip_prefix(candidate, prefix)
-                    if shorter is None or shorter in seen:
-                        continue
-                    seen.add(shorter)
-                    pending.append(shorter)
-                    matched = None if self.paths.isabs(shorter) else self.match(shorter)
-                    if matched is not None:
-                        repaired[self.canonical(matched)] = matched
-            if len(repaired) == 1:
-                return ModulePathResolution(next(iter(repaired.values())), True)
-            if repaired:
-                return ModulePathResolution()  # Ambiguous: never invent scope.
+            prefix_groups = [self.prefixes]
+            if (self.project_parent_prefix and self.project_parent_prefix != "."
+                    and self.project_parent_prefix not in self.prefixes):
+                prefix_groups.append((*self.prefixes, self.project_parent_prefix))
+            # Keep existing repairs, including ambiguous results, ahead of the
+            # coverage-only fallback. Combining prefix groups from the start
+            # could change already correct lightweight analysis mappings.
+            for prefixes in prefix_groups:
+                pending = [candidate for candidate in candidates if candidate is not None]
+                seen = set(pending)
+                repaired: dict[str, str] = {}
+                while pending:
+                    candidate = pending.pop()
+                    for prefix in prefixes:
+                        shorter = self._strip_prefix(candidate, prefix)
+                        if shorter is None or shorter in seen:
+                            continue
+                        seen.add(shorter)
+                        pending.append(shorter)
+                        matched = None if self.paths.isabs(shorter) else self.match(shorter)
+                        if matched is not None:
+                            repaired[self.canonical(matched)] = matched
+                if len(repaired) == 1:
+                    return ModulePathResolution(next(iter(repaired.values())), True)
+                if repaired:
+                    return ModulePathResolution()  # Ambiguous: never invent scope.
 
         # Without evidence, retain the existing project-relative spelling of
         # already adapted native paths. This prevents an extra prefix on resume.

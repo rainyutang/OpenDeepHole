@@ -93,9 +93,11 @@ def build_threat_coverage(inventory: dict | None, analysis: dict | None, *, scan
     root = str((inventory or {}).get("scan_root") or scope.get("code_scan_path") or fallback_scope.get("code_scan_path") or "")
     project = str((inventory or {}).get("project_path") or scope.get("project_path") or fallback_scope.get("project_path") or "")
     entries = (inventory or {}).get("entries") or []
+    inventory_complete = (inventory or {}).get("status") == "complete"
     resolver = ModulePathResolver(
         project, root, match=lambda path: known.get(resolver.canonical(path)),
-        allow_repair=(inventory or {}).get("status") == "complete",
+        allow_repair=inventory_complete,
+        allow_project_parent_prefix=inventory_complete,
     )
     known = {resolver.canonical(entry["path"]): entry["path"] for entry in entries}
     unmapped = []
