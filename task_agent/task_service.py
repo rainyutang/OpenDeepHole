@@ -50,6 +50,7 @@ from .output_format import format_task_output, task_output_stage
 from .serve_client import (
     OpenCodeCommandFailure,
     OpenCodeFileWrite,
+    OpenCodeModelNotFoundError,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
     OpenCodeServeStartupError,
@@ -1358,6 +1359,8 @@ class OpenCodeTaskService:
                                             failure_kind=(
                                                 "timeout"
                                                 if isinstance(retry_error, asyncio.TimeoutError)
+                                                else "model_not_found"
+                                                if isinstance(retry_error, OpenCodeModelNotFoundError)
                                                 else "execution_error"
                                             ),
                                             failure_reason=(
@@ -1629,7 +1632,9 @@ class OpenCodeTaskService:
                 retry_reason = str(exc) or type(exc).__name__
                 attempt_event_outcome = "failure"
                 attempt_failure_kind = (
-                    "timeout"
+                    "model_not_found"
+                    if isinstance(exc, OpenCodeModelNotFoundError)
+                    else "timeout"
                     if model_request_failure == "timeout"
                     else "quota"
                     if model_request_failure == "quota"
@@ -2182,7 +2187,9 @@ class OpenCodeTaskService:
                 formatter_quota_retry_after_seconds = exc.retry_after_seconds
             if formatter_lease is not None:
                 formatter_failure_kind = (
-                    "timeout"
+                    "model_not_found"
+                    if isinstance(exc, OpenCodeModelNotFoundError)
+                    else "timeout"
                     if isinstance(exc, asyncio.TimeoutError)
                     else "quota"
                     if isinstance(exc, OpenCodeProviderQuotaError)
@@ -2536,7 +2543,9 @@ class OpenCodeTaskService:
             )
             correction_error = str(exc) or type(exc).__name__
             correction_failure_kind = (
-                "timeout"
+                "model_not_found"
+                if isinstance(exc, OpenCodeModelNotFoundError)
+                else "timeout"
                 if isinstance(exc, asyncio.TimeoutError)
                 else "quota"
                 if isinstance(exc, OpenCodeProviderQuotaError)

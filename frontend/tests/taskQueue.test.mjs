@@ -280,6 +280,37 @@ test("changing scans renews cursor recovery and ignores an old scan's pending er
 });
 
 for (const access of ["authenticated", "public", "shared"]) {
+  test(`missing model reminder is retained in task history after reload (${access})`, async () => {
+    if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
+    const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;
+    const reason = "配置的模型不存在：provider/missing-model。请在 Agent 的“模型配置”中重新导入或选择有效模型，保存后重试。";
+    const history = ["full", "kind-only"].map((id) => task(id, "2026-10-21T04:00:00Z", {
+      outcome: "failure", model: "provider/missing-model", serve_session_id: `ses_${id}`,
+      failure_kind: "model_not_found", failure_reason: id === "full" ? reason : "",
+      session_events: [{ sequence: 1, phase: "business", session_id: `ses_${id}`,
+        session_attempt: 1, outcome: "failure", failure_kind: "model_not_found",
+        failure_reason: id === "full" ? reason : "" }],
+    }));
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.startsWith(prefix));
+      if (access !== "authenticated") assert.equal(config.params.token, "token");
+      if (config.url === `${prefix}/tasks`) return response(config, { items: history, next_cursor: null });
+      const detail = history.find((item) => config.url === `${prefix}/tasks/${item.task_id}`);
+      assert.ok(detail);
+      return response(config, { ...detail, prompt: "原始任务" });
+    };
+    for (let reload = 0; reload < 2; reload += 1) {
+      const root = await mount(pool({ completed_task_count: 2, total_tasks: 2 }));
+      for (const row of rows(root)) await act(async () => row.props.onClick());
+      const rendered = text(root.toJSON());
+      assert.ok(rendered.includes(reason));
+      assert.ok((rendered.match(/配置的模型不存在/g) || []).length >= 2);
+      assert.doesNotMatch(rendered, /model_not_found/);
+      await act(async () => root.unmount());
+      roots.splice(roots.indexOf(root), 1);
+    }
+  });
+
   test(`live queue reads prompts after SSE strips bodies and retains them on refresh (${access})`, async () => {
     if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
     const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;

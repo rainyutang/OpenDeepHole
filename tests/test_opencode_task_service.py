@@ -30,6 +30,7 @@ from task_agent.model_pool import (
 from task_agent.serve_client import (
     OpenCodeCommandFailure,
     OpenCodeFileWrite,
+    OpenCodeModelNotFoundError,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
     OpenCodeServeStartupError,
@@ -3042,6 +3043,88 @@ def test_exhausted_post_session_validation_uses_existing_fresh_retry(
             ("validation_retry", "failure", "ses_first"),
             ("business", "success", "ses_fresh"),
         ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["business", "json_format", "json_retry", "validation_retry"])
+def test_missing_model_reminder_survives_task_phases_and_retry_history(tmp_path: Path, phase: str) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls, output = [], []
+        missing = OpenCodeModelNotFoundError("provider/model-low")
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = kwargs["session_id"] or f"ses_model_{index}"
+            callback = kwargs["on_session_id"](session_id)
+            if hasattr(callback, "__await__"):
+                await callback
+            if (
+                phase == "business"
+                or phase in {"json_format", "validation_retry"} and index == 1
+                or phase == "json_retry" and index == 2
+            ):
+                await _notify_model_request_failure(kwargs, "failure")
+                raise missing
+            text = "done"
+            if phase in {"json_format", "json_retry"}:
+                text = (
+                    "not json" if index == 0
+                    else "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__" if index == 1
+                    else '{"answer": 31}'
+                )
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg_{index}",
+                lines=[text], text=text, model="provider/model-low",
+            )
+
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path), "provider/model-low", _source(),
+        ))
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt))
+        with (
+            patches[0], patches[1] as acquire, patches[2] as release,
+            patches[3], patches[4], patches[5],
+            _task_context(tmp_path, task_metadata={"standalone_console": True}, on_output=output.append),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name=f"missing model {phase}", prompt="audit", directory=tmp_path,
+                attempt=1 if phase == "business" else 0,
+                output_schema=SCHEMA if phase in {"json_format", "json_retry"} else None,
+                output_retry_count=1,
+                post_session_validator=(lambda: "result missing") if phase == "validation_retry" else None,
+                post_session_validation_retry_count=1 if phase == "validation_retry" else 0,
+            ))
+            await service._records[result.task_id].worker
+
+        terminal = [call.kwargs for call in release.await_args_list if call.kwargs["record_completion"]]
+        assert len(terminal) == 1
+        context = terminal[0]["context_updates"]
+        events = context["session_events"]
+        matching = [event for event in events if event["phase"] == phase and event["outcome"] == "failure"]
+        assert matching
+        assert all(event["failure_kind"] == "model_not_found" for event in matching)
+        assert all(event["failure_reason"] == str(missing) for event in matching)
+        assert all(event["session_id"] for event in matching)
+        assert any(call.kwargs["health_outcome"] == "failure" for call in release.await_args_list)
+        if phase == "json_format":
+            assert result.status == "success"
+            assert result.structured == {"answer": 31}
+            assert calls[-1]["session_id"] == "ses_model_0"
+        else:
+            assert result.status == "failure"
+            assert result.error == str(missing)
+            assert context["failure_kind"] == "model_not_found"
+            assert context["failure_reason"] == str(missing)
+            assert any(str(missing) in line for line in output)
+        if phase == "business":
+            assert len(calls) == 2
+            assert [event["session_attempt"] for event in matching] == [1, 2]
+            assert acquire.await_args_list[1].kwargs["avoid_model_identities"] == {
+                ("provider/model-low", False, "opencode", "opencode"),
+            }
 
     asyncio.run(run())
 

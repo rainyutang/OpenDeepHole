@@ -623,6 +623,17 @@ class OpenCodeProviderQuotaError(RuntimeError):
         )
 
 
+class OpenCodeModelNotFoundError(RuntimeError):
+    """OpenCode explicitly rejected a configured provider/model identifier."""
+
+    def __init__(self, model: str = "") -> None:
+        self.model = model
+        super().__init__(
+            f"配置的模型不存在：{model or 'OpenCode 默认模型'}。"
+            "请在 Agent 的“模型配置”中重新导入或选择有效模型，保存后重试。"
+        )
+
+
 @dataclass(frozen=True)
 class OpenCodeFileWrite:
     """One file successfully written by a completed OpenCode tool call."""
@@ -3993,6 +4004,75 @@ def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
     return None
 
 
+def _provider_model_not_found_error(
+    value: object, *, model: str = "", config_content: str = "",
+) -> OpenCodeModelNotFoundError | None:
+    """Read explicit model errors, never infer them from an HTTP status alone."""
+    queue = [(value, 0)]
+    seen: set[int] = set()
+    explicit_error = False
+
+    def reminder(identifier: str) -> OpenCodeModelNotFoundError:
+        # Only identifiers enter the reminder. Provider responses can also
+        # carry credentials, request bodies and suggestions; omit those.
+        safe_model = _one_line_preview(
+            _redact_serve_startup_text(identifier, config_content), 256,
+        )
+        return OpenCodeModelNotFoundError(safe_model)
+
+    for _ in range(64):
+        if not queue:
+            break
+        current, depth = queue.pop(0)
+        if depth > 7:
+            continue
+        if isinstance(current, (dict, list)):
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+        missing_model: str | None = None
+        if isinstance(current, dict):
+            if (
+                current.get("name") in ("ProviderModelNotFoundError", "ModelNotFoundError")
+                or current.get("_tag") in ("ProviderModelNotFoundError", "ModelNotFoundError")
+                or current.get("code") == "model_not_found"
+            ):
+                explicit_error = True
+                data = current.get("data")
+                fields = data if isinstance(data, dict) else current
+                provider_id = fields.get("providerID")
+                model_id = fields.get("modelID")
+                missing_model = (
+                    f"{provider_id}/{model_id}"
+                    if isinstance(provider_id, str) and isinstance(model_id, str)
+                    and provider_id and model_id else None
+                )
+            for key in ("error", "data", "cause", "message", "error_msg", "details"):
+                if key in current:
+                    queue.append((current[key], depth + 1))
+        elif isinstance(current, list):
+            queue.extend((item, depth + 1) for item in current[:20])
+        elif isinstance(current, str):
+            message = current[:20_000].strip()
+            match = re.match(
+                r"(?:(?:ProviderModelNotFoundError|ModelNotFoundError|Error):\s*)?"
+                r"Model not found:\s*([^\s]+)",
+                message,
+            )
+            if match:
+                identifier = match.group(1).removesuffix(".")
+                if "/" in identifier:
+                    missing_model = identifier
+            if missing_model is None and message.startswith(("{", "[")):
+                try:
+                    queue.append((json.loads(message), depth + 1))
+                except ValueError:
+                    pass
+        if missing_model is not None:
+            return reminder(missing_model)
+    return reminder(model) if explicit_error else None
+
+
 def _assistant_message_error(value: object) -> object | None:
     """Return an OpenCode assistant error carried by a successful HTTP response."""
     if not isinstance(value, dict):
@@ -4296,6 +4376,8 @@ class _ServeEventState:
         source_mcp_name: str = "",
         on_progress=None,
         on_tool_input=None,
+        model: str = "",
+        config_content: str = "",
     ) -> None:
         self.tool = tool
         self.session_id = session_id
@@ -4306,6 +4388,9 @@ class _ServeEventState:
         self.source_mcp_name = str(source_mcp_name or "").strip()
         self.on_progress = on_progress
         self.on_tool_input = on_tool_input
+        self.model = model
+        self.config_content = config_content
+        self.model_not_found_error: OpenCodeModelNotFoundError | None = None
         self.progress_started_at_ms: float | None = None
         self.progress_closed = False
         self.ignored_progress_message_ids = set(ignored_file_message_ids)
@@ -4352,6 +4437,7 @@ class _ServeEventState:
         self.progress_closed = False
         self.ignored_progress_message_ids.update(self.message_roles)
         self.progress_started_at_ms = int(time.time() * 1000)
+        self.model_not_found_error = None
 
     def close_progress(self) -> None:
         self.finish_tool_inputs()
@@ -4890,7 +4976,12 @@ class _ServeEventState:
         self.session_terminal = True
         self.finished_tool_input_messages.update(self.message_roles)
         self.finish_tool_inputs()
-        summary = _error_summary(error) or "unknown"
+        model_error = _provider_model_not_found_error(
+            error, model=self.model, config_content=self.config_content,
+        )
+        if model_error is not None and self.progress_started_at_ms is not None and not self.progress_closed:
+            self.model_not_found_error = model_error
+        summary = str(model_error) if model_error is not None else _error_summary(error) or "unknown"
         if summary in self.session_errors_emitted:
             return
         self.session_errors_emitted.add(summary)
@@ -6590,6 +6681,15 @@ class OpenCodeServeManager:
                     exc,
                 )
 
+        def raise_model_not_found(error: OpenCodeModelNotFoundError) -> None:
+            logger.warning(
+                "OpenCode model configuration error task=%s session=%s: %s",
+                task_id, active_session_id, error,
+            )
+            if event_state is None or str(error) not in event_state.session_errors_emitted:
+                emit("session", f"ERROR error={error}")
+            raise error from None
+
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
@@ -6955,6 +7055,8 @@ class OpenCodeServeManager:
                     source_mcp_name=selected_source_mcp or "",
                     on_progress=activity.touch,
                     on_tool_input=activity.set_tool_input_pending,
+                    model=model,
+                    config_content=key.config_content,
                 )
                 if on_line is not None:
                     event_flush_task = asyncio.create_task(
@@ -7143,6 +7245,34 @@ class OpenCodeServeManager:
                 activity.stop()
             try:
                 response.raise_for_status()
+            except httpx.HTTPStatusError:
+                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
+                try:
+                    error_body = response.json()
+                except ValueError:
+                    error_body = response.content[:20_000].decode("utf-8", errors="replace")
+                model_error = _provider_model_not_found_error(
+                    error_body, model=model, config_content=key.config_content,
+                )
+                if model_error is None and event_state is not None:
+                    # v1.19 can return a generic HTTP 500 while the specific
+                    # ModelNotFoundError arrives on the Session event channel.
+                    # Keep that channel open briefly, within the call deadline.
+                    drain_until = time.monotonic() + min(
+                        _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS, deadline.remaining(),
+                    )
+                    while event_state.model_not_found_error is None and time.monotonic() < drain_until:
+                        try:
+                            await deadline.wait(
+                                asyncio.sleep(min(0.01, max(0.0, drain_until - time.monotonic()))),
+                                phase="response_error",
+                            )
+                        except asyncio.TimeoutError:
+                            break  # Preserve the HTTP failure when the diagnostic budget expires.
+                    model_error = event_state.model_not_found_error
+                if model_error is not None:
+                    raise_model_not_found(model_error)
+                raise
             except BaseException:
                 await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
                 raise
@@ -7232,6 +7362,12 @@ class OpenCodeServeManager:
                     state=event_state,
                 ), phase="file_write_replay")
             assistant_error = _assistant_message_error(response_data)
+            model_error = _provider_model_not_found_error(
+                assistant_error, model=model, config_content=key.config_content,
+            ) or (event_state.model_not_found_error if event_state is not None else None)
+            if model_error is not None:
+                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
+                raise_model_not_found(model_error)
             if assistant_error is not None:
                 error_name = (
                     str(assistant_error.get("name") or "")
@@ -7625,6 +7761,7 @@ class OpenCodeServeManager:
                     child = _ServeEventState(
                         root.tool, child_id, None, on_progress=root.on_progress,
                         on_tool_input=root.on_tool_input,
+                        config_content=root.config_content,
                     )
                     child.progress_started_at_ms = root.progress_started_at_ms
                     self._event_child_states[child_id] = (root_id, child)

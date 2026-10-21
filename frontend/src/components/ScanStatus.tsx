@@ -5472,6 +5472,7 @@ function scanQueueFailureKindLabel(kind: string): string {
   if (kind === "quality_error") return "任务质量校验失败";
   if (kind === "post_session_validation_failed") return "产物校验失败";
   if (kind === "provider_error") return "Provider 请求失败";
+  if (kind === "model_not_found") return "配置的模型不存在";
   if (kind === "cancelled") return "任务已停止";
   return "执行失败";
 }
