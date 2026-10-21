@@ -6512,9 +6512,16 @@ function FpReviewDetail({
                 <span>{stage.label}</span>
                 {stage.verdict && <StatusPill label={stage.verdict.label} tone={stage.verdict.tone} />}
               </div>
-              {stage.markdown.trim() && (
-                <div className="px-4 py-2">
-                  <MarkdownContent content={stage.markdown} />
+              {stage.sections.length > 0 && (
+                <div className="divide-y divide-slate-800/60">
+                  {stage.sections.map((section, sectionIndex) => (
+                    <div key={sectionIndex} className="px-4 py-3">
+                      {section.label && (
+                        <h5 className="mb-1 text-xs font-semibold text-slate-400">{section.label}</h5>
+                      )}
+                      <MarkdownContent content={section.markdown} />
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

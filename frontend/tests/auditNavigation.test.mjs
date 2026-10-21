@@ -699,15 +699,17 @@ test("review details merge live stage reports and show verdict badges without du
   const stageSection = section("阶段输出");
   const reports = stageSection.findAllByType("div").filter((item) => item.parent === stageSection);
   assert.deepEqual(reports.map((item) => textContent(item.children[0])), [
-    "确认漏洞false_positive", "证明误报LIKELY_FALSE_POSITIVE", "最终裁定true_positive",
+    "正方子Agent非问题", "反方子Agent", "最终裁决是问题",
   ]);
-  for (const [verdict, tone] of [["false_positive", "green"], ["LIKELY_FALSE_POSITIVE", "amber"], ["true_positive", "red"]]) {
+  for (const [verdict, tone] of [["非问题", "green"], ["是问题", "red"]]) {
     const badges = stageSection.findAllByType("span").filter((item) => textContent(item) === verdict);
     assert.equal(badges.length, 1);
     assert.match(badges[0].props.className, new RegExp(`border-${tone}-`));
   }
   assert.match(textContent(reports[0]), /本轮正方报告/);
   assert.match(textContent(reports[1]), /上一轮反方报告/);
+  assert.match(textContent(reports[1]), /倾向认为非问题，尚未确认/);
+  assert.doesNotMatch(textContent(stageSection), /false_positive|true_positive|LIKELY_FALSE_POSITIVE/);
 
   const complete = reviewJob(vulnerabilities, { results: [{ ...result, verdict: "fp", reason: "本轮最终误报结论",
     pending_stage_outputs: {}, stage_outputs: { prove_bug: "Verdict: false_positive\n\n本轮正方报告" } }] });
@@ -734,8 +736,34 @@ test("review details keep conclusion and stage placeholders while waiting for th
     stage_outputs: { prove_bug: "Verdict: INSUFFICIENT_EVIDENCE\n\n首份阶段报告" } };
   await act(async () => root.update(createElement(FpReviewPanel, { ...props, fpReview: { ...runningJob, results: [partial] } })));
   assert.match(text(root), /复核中，等待结论/);
-  assert.match(text(root), /确认漏洞INSUFFICIENT_EVIDENCE.*首份阶段报告/s);
+  assert.match(text(root), /正方子Agent.*证据不足，尚未确定是否为问题.*首份阶段报告/s);
+  assert.doesNotMatch(text(root), /INSUFFICIENT_EVIDENCE|NOT_PROVEN/);
+  const stageSection = root.root.findAllByType("h4").find((item) => textContent(item) === "阶段输出").parent;
+  assert.deepEqual(stageSection.findAllByType("span").map(textContent), ["正方子Agent"]);
   assert.doesNotMatch(text(root), /等待阶段输出|当前复核/);
+});
+
+test("review details render Chinese field sections and retain code evidence without template wrappers", async () => {
+  const vulnerabilities = [vuln(0)];
+  const result = { vuln_index: 0, verdict: "tp", reason: "最终结论", stage_outputs: {
+    prove_bug: "[PROVE-BUG-RESULT]\n# Prove Bug\nVerdict: REAL_BUG\nTrigger Path: decode -> copy\nEvidence:\n\n```c\nmemcpy(dst, src, length);\n```",
+    prove_fp: "[PROVE-FP-RESULT]\n# Prove False Positive\n## Verdict\nFALSE_POSITIVE\n## Original Claim Review\n缺少上游校验信息。\nGuard Evidence: src/input.c:20",
+    final_judge: "[FINAL-JUDGE-RESULT]\n# Final Judge\n## Final Verdict\ntrue_positive\nDecision Summary: 存在遗漏路径。\nWhy Prove-FP Is Accepted Or Rejected: 反方证据未覆盖该路径。",
+  } };
+  const root = await mount(FpReviewPanel, reviewProps(vulnerabilities, {
+    fpReview: reviewJob(vulnerabilities, { results: [result] }),
+  }));
+  const stageSection = root.root.findAllByType("h4").find((item) => textContent(item) === "阶段输出").parent;
+  assert.deepEqual(stageSection.findAllByType("h5").map(textContent), [
+    "触发路径", "关键证据", "原始主张核对", "校验证据", "裁决摘要", "反方证据评价",
+  ]);
+  assert.deepEqual(stageSection.findAllByType("span").filter((item) => /border-(red|green)-/.test(item.props.className ?? "")).map(textContent), [
+    "是问题", "非问题", "是问题",
+  ]);
+  assert.match(textContent(stageSection), /decode -> copy/);
+  assert.match(textContent(stageSection), /src\/input.c:20/);
+  assert.equal(textContent(stageSection.findByType("pre")), "memcpy(dst, src, length);\n");
+  assert.doesNotMatch(textContent(stageSection), /PROVE-BUG-RESULT|PROVE-FP-RESULT|FINAL-JUDGE-RESULT|Verdict|Prove Bug|Prove False Positive|Final Judge/);
 });
 
 for (const count of [0, 20, 21, 105]) {
