@@ -484,8 +484,59 @@ test("reverse threat navigation selects a task beyond the first page", async () 
   assert.ok(heading, "requested threat task detail should be selected");
 });
 
+for (const patternMode of [true, false]) {
+  test(`${patternMode ? "pattern" : "threat"} audit retains its Session ID after completion and reload`, async () => {
+    const taskId = patternMode ? "threat-pattern-audit-session" : "threat-audit-session";
+    const taskField = patternMode ? "threat_pattern_audit_tasks" : "threat_audit_tasks";
+    const makeTask = patternMode ? patternTask : task;
+    const poolTask = { task_id: "session-task", task_name: taskId, task_type: "vulnerability_mining" };
+    const emptyPool = { scope_id: "s", models: [], queued_tasks: [], completed_tasks: [] };
+    const completedScan = (opencode_pool = emptyPool, output_source = { serve_session_id: " ses_current \t" }) => scan({
+      [taskField]: [makeTask(taskId, { output_source })], opencode_pool,
+    });
+    const sessionId = (root) => {
+      const label = root.root.findAllByType("dt").find((item) => textContent(item) === "OpenCode Session ID");
+      assert.ok(label, "Missing OpenCode Session ID field");
+      return textContent(label.parent.findByType("dd"));
+    };
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.endsWith(patternMode ? "/threat-pattern-audit-results" : "/threat-audit-results"));
+      return response(config, [{ task_id: taskId, findings: [], confirmed_issue_count: 0, association_complete: true }]);
+    };
+    const props = { patternMode, events: [], fpReview: null, resultRevision: 0,
+      focusRequest: { key: taskId, revision: 1 }, onOpenIssue() {} };
+    const runningScan = scan({
+      [taskField]: [makeTask(taskId, { status: "running", output_source: { serve_session_id: "ses_previous" } })],
+      opencode_pool: { ...emptyPool,
+        models: [{ id: "model", active_tasks: [{ ...poolTask, serve_session_id: " ses_current " }] }],
+      },
+    });
+    const root = await mount(ThreatAuditPanel, { ...props, scan: runningScan });
+    assert.equal(sessionId(root), "ses_current", "the current runtime takes precedence over saved metadata");
+    await act(async () => root.update(createElement(ThreatAuditPanel, { ...props, scan: completedScan() })));
+    assert.equal(sessionId(root), "ses_current", "completion must retain the ID after the queue entry disappears");
+    assert.match(text(root), /未关联到问题结果/);
+
+    const reloaded = await mount(ThreatAuditPanel, { ...props, scan: completedScan() });
+    assert.equal(sessionId(reloaded), "ses_current", "a fresh detail view must use the persisted ID");
+    for (const serve_session_id of [undefined, "", " \t"]) {
+      const value = completedScan({ ...emptyPool, completed_tasks: [{ ...poolTask, outcome: "success", serve_session_id }] });
+      await act(async () => reloaded.update(createElement(ThreatAuditPanel, { ...props, scan: value })));
+      assert.equal(sessionId(reloaded), "ses_current", "empty queue metadata must not hide the persisted ID");
+    }
+    for (const output_source of [null, {}, { serve_session_id: "" }, { serve_session_id: " \t" }]) {
+      await act(async () => reloaded.update(createElement(ThreatAuditPanel, {
+        ...props, scan: completedScan(emptyPool, output_source),
+      })));
+      assert.equal(sessionId(reloaded), "尚无记录", "genuinely missing IDs keep the existing placeholder");
+    }
+  });
+}
+
 test("pattern audit reuses task details, isolates engines and focuses a linked task on page three", async () => {
-  const tasks = Array.from({ length: 45 }, (_, i) => patternTask(`pattern-${i}`));
+  const tasks = Array.from({ length: 45 }, (_, i) => patternTask(`pattern-${i}`, {
+    output_source: { serve_session_id: `ses_pattern_${i}` },
+  }));
   const value = scan({ threat_pattern_audit_tasks: tasks, threat_audit_tasks: [task("legacy")],
     mining_engine_runs: [{ engine_id: "threat_pattern_audit", status: "success", total_candidates: 45 }],
     detail_counts: { threat_audit_current: 999, threat_pattern_audit_current: 45, threat_pattern_audit_completed: 45 } });
@@ -507,6 +558,7 @@ test("pattern audit reuses task details, isolates engines and focuses a linked t
   assert.match(text(root), /第 3\/3 页 · 共 45 条/);
   assert.match(text(root), /高风险模块认证模块/);
   assert.match(text(root), /src\/auth/);
+  assert.match(text(root), /OpenCode Session IDses_pattern_44/);
   assert.doesNotMatch(text(root), /999|任务 legacy|价值资产|叶子节点/);
   await act(async () => button(root, "查看问题报告").props.onClick());
   assert.deepEqual(opened, [207]);

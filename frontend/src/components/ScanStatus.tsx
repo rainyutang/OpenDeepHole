@@ -4235,7 +4235,8 @@ function ThreatAuditTaskDetail({
   onRetryResult: () => void;
   onOpenIssue: (index: number) => void;
 }) {
-  const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
+  const sessionId = (runtime ? scanQueueTaskSessionId(runtime.task) : "")
+    || scanQueueTaskSessionId({ serve_session_id: task.output_source?.serve_session_id });
   const tokenUsage = runtime ? taskTokenUsage(runtime.task) : null;
   const source = formatOutputSource(task.output_source);
   const codePaths = task.code_paths ?? [];
