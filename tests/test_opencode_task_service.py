@@ -3352,7 +3352,7 @@ def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(t
 
 
 @pytest.mark.parametrize("recover", [True, False])
-@pytest.mark.parametrize("timeout_kind", ["session", "idle"])
+@pytest.mark.parametrize("timeout_kind", ["session", "idle", "pending_total"])
 def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_path, monkeypatch, recover, timeout_kind):
     import httpx
     import task_agent.serve_client as serve
@@ -3363,7 +3363,14 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
         manager = serve.OpenCodeServeManager()
         manager._port = 4096
         manager.ensure_managed_mcp = AsyncMock()
-        manager._register_event_state = AsyncMock()
+        states = []
+
+        async def register(session_id, directory, state):
+            manager._event_states[session_id] = state
+            states.append(state)
+
+        manager._register_event_state = register
+        manager._event_channel_healthy = lambda _: True
 
         async def acquire(*args, **kwargs):
             manager._active_sessions += 1
@@ -3377,6 +3384,16 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
                 return httpx.Response(200, json={"id": session})
             if path.endswith("/message"):
                 if "ses_1" in path or not recover:
+                    if timeout_kind == "pending_total" and request.method == "POST":
+                        session_id = path.split("/")[2]
+                        manager._dispatch_event({"type": "message.part.updated", "properties": {
+                            "sessionID": session_id,
+                            "part": {
+                                "id": "tool-part", "messageID": "msg-tool", "type": "tool",
+                                "tool": "write", "callID": "call-write",
+                                "state": {"status": "pending", "input": {}, "raw": ""},
+                            },
+                        }})
                     await asyncio.Future()
                 if request.method == "POST":
                     return httpx.Response(200, json={
@@ -3395,7 +3412,7 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
         config = _config()
         config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
             required_capability="high", timeout_seconds=0.5 if timeout_kind == "idle" else 0.1,
-            idle_timeout_seconds=0.03 if timeout_kind == "idle" else 1200, max_retries=1,
+            idle_timeout_seconds=0.03 if timeout_kind in {"idle", "pending_total"} else 1200, max_retries=1,
         ))
         service = OpenCodeTaskService()
         service._runtime_for_task = AsyncMock(return_value=(
@@ -3413,6 +3430,9 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
         assert result.session_id == "ses_2"
         assert result.status == ("success" if recover else "timeout")
         assert manager._active_sessions == 0
+        assert all(not state.pending_tool_inputs and state.progress_closed for state in states)
+        if timeout_kind == "pending_total":
+            assert any("kind=session" in line for line in output)
         assert release.await_count == 2
         assert [call.kwargs["record_completion"] for call in release.await_args_list] == [False, True]
         assert release.await_args_list[0].kwargs["health_outcome"] == "timeout"

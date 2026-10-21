@@ -4219,7 +4219,7 @@ def _completed_file_writes(
     return writes
 
 
-def _event_session_id(props: dict[str, Any]) -> str:
+def _event_session_id(props: dict[str, Any], *, event_type: str = "") -> str:
     session_id = props.get("sessionID")
     if isinstance(session_id, str) and session_id:
         return session_id
@@ -4229,6 +4229,8 @@ def _event_session_id(props: dict[str, Any]) -> str:
             nested_session_id = nested.get("sessionID")
             if isinstance(nested_session_id, str) and nested_session_id:
                 return nested_session_id
+    if event_type == "session.deleted" and isinstance(props.get("info"), dict):
+        return str(props["info"].get("id") or "")
     return ""
 
 
@@ -4293,6 +4295,7 @@ class _ServeEventState:
         log_stage: str = "opencode",
         source_mcp_name: str = "",
         on_progress=None,
+        on_tool_input=None,
     ) -> None:
         self.tool = tool
         self.session_id = session_id
@@ -4302,10 +4305,15 @@ class _ServeEventState:
         self.log_stage = task_output_stage(log_stage)
         self.source_mcp_name = str(source_mcp_name or "").strip()
         self.on_progress = on_progress
+        self.on_tool_input = on_tool_input
         self.progress_started_at_ms: float | None = None
+        self.progress_closed = False
         self.ignored_progress_message_ids = set(ignored_file_message_ids)
         self.progress_message_ids: set[str] = set()
         self.tool_progress: dict[str, str] = {}
+        self.pending_tool_inputs: set[tuple[str, str]] = set()
+        self.finished_tool_inputs: set[tuple[str, str]] = set()
+        self.finished_tool_input_messages: set[str] = set()
         self.emitted_text = False
         self.emitted_response_text = False
         self.seen_next_text_event = False
@@ -4340,8 +4348,50 @@ class _ServeEventState:
     def start_progress(self) -> None:
         # Events received before POST and continued-session history are not
         # evidence of progress in the new conversation.
+        self.finish_tool_inputs()
+        self.progress_closed = False
         self.ignored_progress_message_ids.update(self.message_roles)
         self.progress_started_at_ms = int(time.time() * 1000)
+
+    def close_progress(self) -> None:
+        self.finish_tool_inputs()
+        self.progress_closed = True
+        self.on_progress = None
+        self.on_tool_input = None
+
+    def _finish_tool_input(self, key: tuple[str, str]) -> None:
+        self.finished_tool_inputs.add(key)
+        if key in self.pending_tool_inputs:
+            self.pending_tool_inputs.remove(key)
+            if self.on_tool_input is not None:
+                self.on_tool_input((self.session_id, *key), False)
+
+    def finish_tool_inputs(
+        self, *, message_id: str | None = None, call_id: str | None = None,
+    ) -> None:
+        for key in list(self.pending_tool_inputs):
+            if (message_id is None or key[0] == message_id) and (call_id is None or key[1] == call_id):
+                self._finish_tool_input(key)
+
+    def _track_tool_input(self, message_id: str, call_id: str, status: str) -> bool:
+        key = (message_id, call_id)
+        if status != "pending":
+            if message_id and call_id:
+                self._finish_tool_input(key)
+            return True
+        # Running/terminal states are monotonic for a particular tool call.
+        # A late pending snapshot must not disable idle detection again.
+        if key in self.finished_tool_inputs or message_id in self.finished_tool_input_messages:
+            return False
+        if (
+            message_id and call_id and self.progress_started_at_ms is not None
+            and not self.progress_closed and self.on_tool_input is not None
+            and self.message_roles.get(message_id) != "user"
+            and key not in self.pending_tool_inputs
+        ):
+            self.pending_tool_inputs.add(key)
+            self.on_tool_input((self.session_id, *key), True)
+        return True
 
     def note_progress(self) -> None:
         if self.on_progress is not None:
@@ -4417,7 +4467,11 @@ class _ServeEventState:
         ):
             self.ignored_progress_message_ids.add(message_id)
         if message_id in self.ignored_progress_message_ids:
+            self.finish_tool_inputs(message_id=message_id)
             return
+        if role == "user":
+            self.finished_tool_input_messages.add(message_id)
+            self.finish_tool_inputs(message_id=message_id)
         if role == "assistant":
             for part_id, part_message_id in list(self.part_message_ids.items()):
                 if part_message_id == message_id:
@@ -4427,6 +4481,8 @@ class _ServeEventState:
             message_time = info.get("time")
             if isinstance(message_time, dict) and message_time.get("completed") is not None:
                 self.session_terminal = True
+                self.finished_tool_input_messages.add(message_id)
+                self.finish_tool_inputs(message_id=message_id)
 
     def mark_event_seen(self, event: object) -> bool:
         if not isinstance(event, dict):
@@ -4612,7 +4668,9 @@ class _ServeEventState:
             self.emitted_response_text = emitted or self.emitted_response_text
         self.emitted_text = emitted or self.emitted_text
 
-    def ingest_message_snapshot(self, message: object) -> None:
+    def ingest_message_snapshot(
+        self, message: object, *, reconcile_pending: set[tuple[str, str]] | None = None,
+    ) -> None:
         if not isinstance(message, dict):
             return
         info = message.get("info")
@@ -4626,6 +4684,7 @@ class _ServeEventState:
         if not isinstance(parts, list):
             return
         snapshots = {"text": [], "reasoning": []}
+        tool_inputs: set[tuple[str, str]] = set()
         for part in parts:
             if not isinstance(part, dict):
                 continue
@@ -4637,7 +4696,15 @@ class _ServeEventState:
                 continue
             if message_id and not part.get("messageID"):
                 part = {**part, "messageID": message_id}
+            if part_type == "tool":
+                call_id = str(part.get("callID") or part.get("id") or "")
+                tool_inputs.add((message_id, call_id))
             self.handle_part(part)
+        # Only reconcile calls known before the request. New SSE calls may
+        # have arrived while this snapshot was in flight.
+        for key in reconcile_pending or ():
+            if key[0] == message_id and key not in tool_inputs:
+                self._finish_tool_input(key)
         for kind, values in snapshots.items():
             if values:
                 if any(values):
@@ -4740,13 +4807,17 @@ class _ServeEventState:
             )
 
     def handle_tool_part(self, part: dict[str, Any]) -> None:
-        if str(part.get("messageID") or "") in self.ignored_progress_message_ids:
+        message_id = str(part.get("messageID") or "")
+        if message_id in self.ignored_progress_message_ids:
             return
         state = part.get("state")
         if not isinstance(state, dict):
             return
         status = str(state.get("status") or "")
         call = str(part.get("callID") or part.get("id") or "")
+        if status in {"pending", "running", "completed", "error"}:
+            if not self._track_tool_input(message_id, call, status):
+                return
         # Exclude timestamps; repeated running snapshots and polling must not
         # keep a stalled tool alive. Input/output changes and transitions count.
         if call and status in {"pending", "running", "completed", "error"}:
@@ -4795,6 +4866,8 @@ class _ServeEventState:
             status = {}
         if status_type in {"idle", "error"}:
             self.session_terminal = True
+            self.finished_tool_input_messages.update(self.message_roles)
+            self.finish_tool_inputs()
         if not status_type or signature == self.last_session_status:
             return
         self.last_session_status = signature
@@ -4815,6 +4888,8 @@ class _ServeEventState:
 
     def emit_session_error(self, error: object) -> None:
         self.session_terminal = True
+        self.finished_tool_input_messages.update(self.message_roles)
+        self.finish_tool_inputs()
         summary = _error_summary(error) or "unknown"
         if summary in self.session_errors_emitted:
             return
@@ -4854,7 +4929,7 @@ def _event_properties(event: object) -> tuple[str, dict[str, Any]]:
 
 def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     event_type, props = _event_properties(event)
-    if _event_session_id(props) != state.session_id:
+    if _event_session_id(props, event_type=event_type) != state.session_id:
         return
     if state.mark_event_seen(event):
         return
@@ -4882,18 +4957,21 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.reconcile_text("reasoning", props.get("text") or "")
         state.flush()
     elif event_type == "session.next.tool.called":
+        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
         state.emit_tool_call(
             call_id=props.get("callID"),
             tool_name=props.get("tool"),
             input_value=props.get("input") or {},
         )
     elif event_type == "session.next.tool.success":
+        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
         state.emit_tool_result(
             call_id=props.get("callID"),
             status="success",
             summary=_tool_content_summary(props.get("content")),
         )
     elif event_type == "session.next.tool.failed":
+        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
         state.emit_tool_result(
             call_id=props.get("callID"),
             status="failed",
@@ -4905,6 +4983,8 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.emit_session_status("idle")
     elif event_type == "session.error":
         state.emit_session_error(props.get("error"))
+    elif event_type == "session.deleted":
+        state.close_progress()
     elif event_type == "session.next.retried":
         state.emit_session_status({
             "type": "retry",
@@ -6874,6 +6954,7 @@ class OpenCodeServeManager:
                     log_stage=normalized_log_stage,
                     source_mcp_name=selected_source_mcp or "",
                     on_progress=activity.touch,
+                    on_tool_input=activity.set_tool_input_pending,
                 )
                 if on_line is not None:
                     event_flush_task = asyncio.create_task(
@@ -7289,7 +7370,7 @@ class OpenCodeServeManager:
                     event_state.flush()
                     event_state.on_line = None
                     event_state.on_file_write = None
-                    event_state.on_progress = None
+                    event_state.close_progress()
                 if event_registered:
                     await cleanup(self._unregister_event_state(active_session_id), "event_cleanup", 1.0)
                 for task in (snapshot_poll_task, event_flush_task):
@@ -7498,11 +7579,13 @@ class OpenCodeServeManager:
 
     async def _unregister_event_state(self, session_id: str) -> None:
         async with self._event_lock:
-            self._event_states.pop(session_id, None)
+            state = self._event_states.pop(session_id, None)
+            if state is not None:
+                state.close_progress()
             self._event_directories.pop(session_id, None)
             for child_id, (root_id, child_state) in list(self._event_child_states.items()):
                 if root_id == session_id:
-                    child_state.on_progress = None
+                    child_state.close_progress()
                     self._event_child_states.pop(child_id, None)
 
     def _event_channel_healthy(self, directory: Path) -> bool:
@@ -7539,10 +7622,13 @@ class OpenCodeServeManager:
                     and child_id not in self._event_child_states
                     and (not directory_key or self._event_directories.get(root_id) == directory_key)
                 ):
-                    child = _ServeEventState(root.tool, child_id, None, on_progress=root.on_progress)
+                    child = _ServeEventState(
+                        root.tool, child_id, None, on_progress=root.on_progress,
+                        on_tool_input=root.on_tool_input,
+                    )
                     child.progress_started_at_ms = root.progress_started_at_ms
                     self._event_child_states[child_id] = (root_id, child)
-        session_id = _event_session_id(props)
+        session_id = _event_session_id(props, event_type=event_type)
         if not session_id:
             return True
         state = self._event_states.get(session_id)
@@ -7554,6 +7640,10 @@ class OpenCodeServeManager:
         if directory_key and self._event_directories.get(root_id) != directory_key:
             return True
         _handle_serve_event(payload, state)
+        if event_type == "session.deleted" and session_id == root_id:
+            for child_root_id, child_state in self._event_child_states.values():
+                if child_root_id == root_id:
+                    child_state.close_progress()
         return True
 
     def _emit_event_diagnostic(self, line: str) -> None:
@@ -7765,26 +7855,32 @@ class OpenCodeServeManager:
     ) -> None:
         poll_params = dict(params)
         poll_params["limit"] = "2"
-        while True:
-            if self._event_channel_healthy(directory):
-                await asyncio.sleep(0.1)
-                continue
+
+        async def poll_message(
+            current_id: str, current_state: _ServeEventState,
+            message_id: str = "", pending: set[tuple[str, str]] | None = None,
+        ) -> None:
             try:
-                sessions = [(session_id, state), *(
-                    (child_id, child_state)
-                    for child_id, (root_id, child_state) in self._event_child_states.items()
-                    if root_id == session_id
-                )]
-                for current_id, current_state in sessions:
-                    response = await client.get(
-                        f"/session/{current_id}/message",
-                        params=poll_params,
-                        headers=headers,
-                    )
-                    response.raise_for_status()
-                    message = _latest_assistant_message(response.json(), current_id)
-                    if message is not None:
-                        current_state.ingest_message_snapshot(message)
+                suffix = f"/{quote(message_id, safe='')}" if message_id else ""
+                response = await client.get(
+                    f"/session/{current_id}/message{suffix}",
+                    params=params if message_id else poll_params,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if message_id:
+                    info = data.get("info") if isinstance(data, dict) else None
+                    if (
+                        not isinstance(info, dict) or info.get("id") != message_id
+                        or info.get("sessionID") != current_id
+                    ):
+                        return
+                    message = data
+                else:
+                    message = _latest_assistant_message(data, current_id)
+                if message is not None and not current_state.progress_closed:
+                    current_state.ingest_message_snapshot(message, reconcile_pending=pending)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -7794,6 +7890,28 @@ class OpenCodeServeManager:
                         f"status=poll_unavailable fallback=final_response "
                         f"error={_one_line_preview(exc)}"
                     )
+
+        while True:
+            sessions = [(session_id, state), *(
+                (child_id, child_state)
+                for child_id, (root_id, child_state) in self._event_child_states.items()
+                if root_id == session_id
+            )]
+            healthy = self._event_channel_healthy(directory)
+            if healthy and not any(current.pending_tool_inputs for _, current in sessions):
+                await asyncio.sleep(0.1)
+                continue
+            for current_id, current_state in sessions:
+                pending_by_message: dict[str, set[tuple[str, str]]] = {}
+                for key in current_state.pending_tool_inputs:
+                    pending_by_message.setdefault(key[0], set()).add(key)
+                if not healthy:
+                    await poll_message(current_id, current_state)
+                # Even a healthy SSE connection can lose a transition out of
+                # pending. Poll the exact message, not just the latest one.
+                for message_id, pending in pending_by_message.items():
+                    if pending & current_state.pending_tool_inputs:
+                        await poll_message(current_id, current_state, message_id, pending)
             await asyncio.sleep(_SERVE_EVENT_POLL_INTERVAL_SECONDS)
 
     async def _list_tool_ids(
@@ -9184,6 +9302,10 @@ class OpenCodeServeManager:
             self._global_event_channel = None
             self._legacy_event_channels.clear()
             self._global_event_unsupported = False
+            for state in self._event_states.values():
+                state.close_progress()
+            for _, state in self._event_child_states.values():
+                state.close_progress()
             self._event_states.clear()
             self._event_directories.clear()
             self._event_child_states.clear()

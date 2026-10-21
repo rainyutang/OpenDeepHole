@@ -226,7 +226,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.executable` | 默认 `opencode` | 实际启动 Serve 的可执行文件名或完整路径；可使用 `opencode`、`nga` 或其它兼容程序。配置哪个就启动哪个，不做名称回退。 |
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
 | `serve.timeout` | 默认 `10800`，最小 `1` | 每次调用总超时（3 小时），单位为秒；排队等待模型 Lease 的时间不计入。 |
-| `serve.idle_timeout` | 默认 `1200`，最小 `1` | 消息发送后连续无新内容的超时（20 分钟），单位为秒。 |
+| `serve.idle_timeout` | 默认 `1200`，最小 `1` | 消息发送后连续无新内容的超时（20 分钟），单位为秒；工具参数生成的 `pending` 阶段暂停此检测，仍受总时限约束。 |
 | `serve.json_correction_timeout_seconds` | 默认 `1800`，最小 `1` | 新 Session 格式修复及同 Session JSON 纠正的独立总超时。 |
 | `serve.validation_retry_timeout_seconds` | 默认 `1800`，最小 `1` | 产物或必需命令校验失败后的模型修复调用总超时。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
@@ -234,6 +234,8 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；作为 standalone 最高优先级用户层与已发现配置合并，再由 Task Agent 写入受管权限并生成 `workspace_dir/opencode.json`。 |
 
 旧 standalone 文件若只配置了不同于 10800 秒的自定义 `serve.timeout`，缺失的两个纠正重试字段继承该值；显式填写新字段后分别生效。
+
+当前调用及关联子 Session 中存在 `pending` 工具时，参数生成仅受调用总时限约束；最后一个工具进入 `running` 或结束后，重新开始完整的 `idle_timeout` 计时。此策略适用于 `write`、`edit`、`apply_patch` 等所有工具，避免上游不报告参数流增量时误判长参数生成停滞；该阶段真正卡住也会等到总时限。主动取消始终有效。Agent 在存在待生成参数时每秒查询对应消息以校对状态，消息结束、Session 终止及调用清理均会解除暂停；历史和迟到状态不会重新暂停已进入执行阶段的调用。
 
 `serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash` 和 `skill` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。
 

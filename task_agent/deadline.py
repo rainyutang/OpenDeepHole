@@ -28,8 +28,10 @@ class ResponseActivity:
         if self.timeout <= 0:
             raise ValueError("OpenCode idle_timeout must be positive")
         self.last_progress_at: float | None = None
+        self._pending_tool_inputs: set[tuple[str, str, str]] = set()
 
     def start(self) -> None:
+        self._pending_tool_inputs.clear()
         self.last_progress_at = time.monotonic()
 
     def touch(self) -> None:
@@ -38,9 +40,21 @@ class ResponseActivity:
 
     def stop(self) -> None:
         self.last_progress_at = None
+        self._pending_tool_inputs.clear()
+
+    def set_tool_input_pending(self, key: tuple[str, str, str], pending: bool) -> None:
+        """Use the call's total deadline while tool arguments are not observable."""
+        if self.last_progress_at is None:
+            return
+        if pending:
+            self._pending_tool_inputs.add(key)
+        elif key in self._pending_tool_inputs:
+            self._pending_tool_inputs.remove(key)
+            if not self._pending_tool_inputs:
+                self.touch()
 
     def remaining(self) -> float:
-        if self.last_progress_at is None:
+        if self.last_progress_at is None or self._pending_tool_inputs:
             return self.timeout
         return max(0.0, self.last_progress_at + self.timeout - time.monotonic())
 
