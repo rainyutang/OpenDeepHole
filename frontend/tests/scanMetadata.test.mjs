@@ -144,58 +144,59 @@ async function setFilter(root, label, value) {
 }
 const rows = (root) => root.root.findByType("tbody").findAllByType("tr");
 
-test("editing an older loaded row preserves pagination and moves matching active filters", async () => {
-  const first = summary("first"), older = summary("older"), requests = [];
-  mockApi((config) => {
-    if (config.url === "/api/announcements") return [];
-    if (config.url === "/api/v2/scans") {
-      requests.push(config.params);
-      return config.params.cursor ? { items: [older], next_cursor: "even-older", has_more: true }
-        : { items: [first], next_cursor: "older", has_more: true };
-    }
-    if (config.url === "/api/scan/older/metadata") return { scan_id: "older", scan_name: "Renamed older", product: "Renamed product", metadata_revision: 1 };
-    assert.fail(`Unexpected request: ${config.url}`);
+for (const role of ["user", "admin"]) {
+  test(`${role} history shows renamed older rows and retains filters and pagination without edit controls`, async () => {
+    const first = summary("first"), older = summary("older", {
+      scan_name: "Renamed older", product: "Renamed product", metadata_revision: 1,
+    }), requests = [];
+    mockApi((config) => {
+      assert.equal(config.method, "get", "history only requests read APIs");
+      if (config.url === "/api/announcements") return [];
+      if (config.url === "/api/v2/scans") {
+        requests.push(config.params);
+        return config.params.cursor ? { items: [older], next_cursor: "even-older", has_more: true }
+          : { items: [first], next_cursor: "older", has_more: true };
+      }
+      assert.fail(`Unexpected request: ${config.url}`);
+    });
+    const root = await mount(ScanHistory, { ...historyProps, user: { ...historyProps.user, role } });
+    assert.equal(buttons(root, "编辑名称").length, 0);
+    await click(button(root, "加载更多"));
+    assert.equal(rows(root).length, 2);
+    assert.equal(buttons(root, "编辑名称").length, 0);
+    await setFilter(root, "产品", "Renamed product");
+    await setFilter(root, "扫描名称", "Renamed older");
+    assert.equal(rows(root).length, 1);
+    assert.match(content(rows(root)[0]), /Renamed product.*Renamed older/);
+    assert.match(content(root.root.findByType("thead")), /Renamed product.*Renamed older/);
+    assert.equal(requests.length, 2);
+    await setFilter(root, "产品", "全部");
+    await setFilter(root, "扫描名称", "全部");
+    assert.equal(rows(root).length, 2);
+    await click(button(root, "加载更多"));
+    assert.equal(requests.at(-1).cursor, "even-older");
   });
-  const root = await mount(ScanHistory, historyProps);
-  await click(button(root, "加载更多"));
-  assert.equal(rows(root).length, 2);
-  await setFilter(root, "产品", "Product older");
-  await setFilter(root, "扫描名称", "Scan older");
-  await click(button(root, "编辑名称"));
-  await change(root, "产品名", "Renamed product");
-  await change(root, "扫描名称", "Renamed older");
-  await submit(root);
-  assert.equal(rows(root).length, 1);
-  assert.match(content(rows(root)[0]), /Renamed product.*Renamed older/);
-  assert.match(content(root.root.findByType("thead")), /Renamed product.*Renamed older/);
-  assert.equal(requests.length, 2, "rename does not reload or discard older pages");
-  await setFilter(root, "产品", "全部");
-  await setFilter(root, "扫描名称", "全部");
-  assert.equal(rows(root).length, 2);
-  await click(button(root, "加载更多"));
-  assert.equal(requests.at(-1).cursor, "even-older");
-});
+}
 
-test("late history polling cannot roll back a rename while newer task status still arrives", async () => {
+test("overlapping history refreshes retain newer labels while accepting task status", async () => {
   const pending = deferred();
   let listRequests = 0;
   mockApi((config) => {
     if (config.url === "/api/announcements") return [];
     if (config.url === "/api/v2/scans") {
       listRequests += 1;
-      return listRequests === 1 ? { items: [summary("s", { status: "auditing" })], next_cursor: null }
-        : pending.promise;
+      if (listRequests === 1) return { items: [summary("s", { status: "auditing" })], next_cursor: null };
+      if (listRequests === 2) return pending.promise;
+      return { items: [summary("s", { scan_name: "Renamed scan", product: "Renamed product", metadata_revision: 1, status: "auditing" })], next_cursor: null };
     }
-    if (config.url === "/api/scan/s/metadata") return { ...originalMetadata, scan_name: "Renamed scan", product: "Renamed product", metadata_revision: 1 };
     assert.fail(`Unexpected request: ${config.url}`);
   });
   const root = await mount(ScanHistory, historyProps);
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
   assert.equal(listRequests, 2);
-  await click(button(root, "编辑名称"));
-  await change(root, "扫描名称", "Renamed scan");
-  await change(root, "产品名", "Renamed product");
-  await submit(root);
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  assert.equal(listRequests, 3);
+  assert.match(content(rows(root)[0]), /Renamed product.*Renamed scan.*审计中/);
   await act(async () => pending.resolve({ items: [summary("s", { status: "complete" })], next_cursor: null }));
   assert.match(content(rows(root)[0]), /Renamed product.*Renamed scan.*已完成/);
 });

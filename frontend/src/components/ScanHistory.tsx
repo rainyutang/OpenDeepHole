@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
-import type { ScanMetadata, ScanSummary, ScanItemStatus, User } from "../types";
+import type { ScanSummary, ScanItemStatus, User } from "../types";
 import { mergeScanMetadata } from "../scanRuntime";
 import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
 import ScanShareButton from "./ScanShareButton";
-import EditScanMetadataDialog from "./EditScanMetadataDialog";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -253,7 +252,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  const [editingScan, setEditingScan] = useState<ScanSummary | null>(null);
   const [productFilter, setProductFilter] = useState(ALL_FILTER);
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
@@ -445,17 +443,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
     }
   };
 
-  const handleMetadataSaved = (metadata: ScanMetadata) => {
-    const effective = mergeScanMetadata(scans.find((item) => item.scan_id === metadata.scan_id), metadata);
-    setScans((previous) => previous.map((item) => item.scan_id === metadata.scan_id
-      ? mergeScanMetadata(item, { ...item, ...metadata }) : item));
-    if (!editingScan) return;
-    setProductFilter((current) => current === productFilterValue(editingScan)
-      ? productFilterValue(effective) : current);
-    setProjectFilter((current) => current === projectName(editingScan)
-      ? effective.scan_name : current);
-  };
-
   const formatTime = (iso: string) => {
     try {
       return new Date(iso).toLocaleString();
@@ -508,13 +495,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
-      {editingScan && (
-        <EditScanMetadataDialog
-          scan={{ ...editingScan, scan_name: projectName(editingScan) }}
-          onSaved={handleMetadataSaved}
-          onClose={() => setEditingScan(null)}
-        />
-      )}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
           <div
@@ -755,13 +735,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                             查看
                           </button>
                           <ScanShareButton scanId={scan.scan_id} compact />
-                          <button
-                            type="button"
-                            onClick={() => setEditingScan(scan)}
-                            className="rounded px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-700"
-                          >
-                            编辑名称
-                          </button>
                           {running && (
                             <button
                               onClick={() => handleStop(scan.scan_id)}
