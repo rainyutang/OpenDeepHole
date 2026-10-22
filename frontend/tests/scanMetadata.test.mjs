@@ -264,8 +264,9 @@ test("a coalesced overview started before save preserves renamed labels and acce
   installDetailApi("auditing", (config) => holdOverview && config.url.endsWith("/scans/s/overview") ? pending.promise : undefined);
   const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
   await openInformation(root);
+  const requestedFrom = await client.getScanOverview("s");
   holdOverview = true;
-  const request = client.getScanOverview("s");
+  const request = client.getScanOverviewRequest("s", requestedFrom).promise;
   await flush();
   await act(async () => streams[0].onopen());
   await click(button(root, "编辑名称"));

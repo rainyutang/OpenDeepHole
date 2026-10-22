@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanOverview, getScanDetailItem, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
+import { scanSSEUrl, getScanOverviewRequest, getScanDetailItem, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
 import { isScanDetailResource, refreshScanResource, SCAN_DETAIL_RESOURCES } from "../scanResourceRefresh";
 import type { ScanDetailResource } from "../scanResourceRefresh";
 import {
@@ -211,14 +211,14 @@ async function refreshFullState(
   { getScan, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
   isCurrent: () => boolean,
 ) {
-  const requestedFrom = getScan();
   try {
-    const data = await getScanOverview(scanId);
+    const request = getScanOverviewRequest(scanId, getScan());
+    const data = await request.promise;
     if (!isCurrent() || data.scan_id !== scanId) return;
     setScan((previous) => {
       if (!isCurrent()) return previous;
       if (!previous || previous.scan_id !== scanId) return data;
-      return mergeScanOverview(previous, data, requestedFrom);
+      return mergeScanOverview(previous, data, request.requestedFrom);
     });
   } catch {
     // transient — SSE will keep pushing

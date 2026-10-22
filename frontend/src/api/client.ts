@@ -368,9 +368,29 @@ export async function createScan(body: {
   return data;
 }
 
-export async function getScanStatus(scanId: string): Promise<ScanStatus> {
+export interface ScanSnapshotRequest {
+  promise: Promise<ScanStatus>;
+  requestedFrom: ScanStatus | null;
+}
+
+export function getScanStatus(scanId: string): Promise<ScanStatus> {
+  return getScanStatusRequest(scanId).promise;
+}
+
+export function getScanStatusRequest(
+  scanId: string,
+  requestedFrom: ScanStatus | null = null,
+): ScanSnapshotRequest {
+  const overviewRequest = getScanOverviewRequest(scanId, requestedFrom);
+  return {
+    promise: hydrateScanStatus(scanId, overviewRequest.promise),
+    requestedFrom: overviewRequest.requestedFrom,
+  };
+}
+
+async function hydrateScanStatus(scanId: string, overviewPromise: Promise<ScanStatus>): Promise<ScanStatus> {
   const [overview, candidates, vulnerabilities, events, threatTasks, validations, patternTasks] = await Promise.all([
-    getScanOverview(scanId),
+    overviewPromise,
     getScanCandidatesPage(scanId),
     getScanVulnerabilitiesPage(scanId),
     getScanEventsPage(scanId),
@@ -406,15 +426,25 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   return normalized;
 }
 
-const overviewRequests = new Map<string, Promise<ScanStatus>>();
+const overviewRequests = new Map<string, ScanSnapshotRequest>();
 
 export function getScanOverview(scanId: string): Promise<ScanStatus> {
-  const key = scanV2Path(scanId, "/overview") + JSON.stringify(isPublicScan(scanId) ? publicParams() : {});
+  return getScanOverviewRequest(scanId).promise;
+}
+
+/** Every consumer of a shared GET must merge from its original state snapshot. */
+export function getScanOverviewRequest(
+  scanId: string,
+  requestedFrom: ScanStatus | null = null,
+): ScanSnapshotRequest {
+  const path = scanV2Path(scanId, "/overview");
+  const params = isPublicScan(scanId) ? publicParams() : undefined;
+  const key = path + JSON.stringify(params ?? {});
   const pending = overviewRequests.get(key);
   if (pending) return pending;
-  const request = (async () => {
+  const promise = (async () => {
     try {
-      const { data } = await api.get<unknown>(scanV2Path(scanId, "/overview"), { params: isPublicScan(scanId) ? publicParams() : undefined });
+      const { data } = await api.get<unknown>(path, { params });
       const normalized = normalizeScanStatus(data);
       if (!normalized || normalized.scan_id !== scanId) throw new Error("扫描概览响应无效");
       return normalized;
@@ -422,6 +452,7 @@ export function getScanOverview(scanId: string): Promise<ScanStatus> {
       overviewRequests.delete(key);
     }
   })();
+  const request = { promise, requestedFrom };
   overviewRequests.set(key, request);
   return request;
 }

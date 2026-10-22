@@ -158,6 +158,15 @@ test("new execution counters may drop after a pool-only update announces the rev
   assert.equal(merged.progress, 0.8);
 });
 
+test("a fresh same-execution snapshot can authoritatively lower progress", () => {
+  const current = { scan_id: "s", execution_revision: 2, status: "auditing", progress: 0.81,
+    processed_candidates: 81, total_candidates: 100, opencode_pool: null };
+  const incoming = { ...current, progress: 0.8, processed_candidates: 80 };
+  const merged = runtime.mergeScanSnapshot(current, incoming, current);
+  assert.equal(merged.processed_candidates, 80);
+  assert.equal(merged.progress, 0.8);
+});
+
 test("pattern task refresh retains later pages and rejects older task snapshots", () => {
   const running = runtime.normalizePatternTask({ task_id: "p", status: "running", updated_at: "2026-10-16T01:02:00Z" });
   const completed = { ...running, status: "completed", updated_at: "2026-10-16T01:03:00Z" };

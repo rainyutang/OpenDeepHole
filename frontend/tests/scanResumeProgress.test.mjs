@@ -7,6 +7,7 @@ import { createServer } from "vite";
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
+const runtime = await server.ssrLoadModule("/src/scanRuntime.ts");
 const { default: ScanStatus } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const originalAdapter = client.api.defaults.adapter;
@@ -70,19 +71,22 @@ function overview(completed = 100, revision = 1) {
     agent_online: true, can_continue: complete, continuable_task_count: 20,
     mining_engines: [{ engine_id: "static_candidate", engine_label: "static", enabled: true }],
     mining_engine_runs: [{ engine_id: "static_candidate", engine_label: "static", status: complete ? "success" : "running" }],
-    detail_counts: { candidates: 100, candidate_audit_success: Math.min(completed, 80),
-      candidate_audit_failed: complete ? 20 : 0, candidate_audit_pending: 100 - completed },
+    detail_counts: { candidates: 100, candidate_audit_success: complete ? Math.max(0, completed - 20) : completed,
+      candidate_audit_failed: complete ? Math.min(20, completed) : 0, candidate_audit_pending: 100 - completed },
     opencode_pool: null,
   };
 }
 function installApi(initial = overview()) {
-  const state = { overview: initial, intercept: null };
+  const state = { overview: initial, intercept: null, overviewRequestCount: 0 };
   client.api.defaults.adapter = async (config) => {
     let data;
     if (config.url === "/api/mining-engines") data = { engines: [] };
     else if (config.url.includes("checkers")) data = [];
     else if (config.url.endsWith("/fp-review/overview")) data = { review_id: "r", scan_id: "s", status: "complete", total: 0, processed: 0, results: [] };
-    else if (config.url.endsWith("/overview")) data = state.intercept ? await state.intercept() : structuredClone(state.overview);
+    else if (config.url.endsWith("/overview")) {
+      state.overviewRequestCount += 1;
+      data = state.intercept ? await state.intercept() : structuredClone(state.overview);
+    }
     else if (config.url.endsWith("/resume")) { state.overview = overview(80, 2); data = { scan_id: "s" }; }
     else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
     else if (config.url.endsWith("/git_history")) data = [];
@@ -123,6 +127,7 @@ test("completed scan resumes and both flow views advance despite pool and old ex
   assert.ok(resume);
   await act(async () => resume.props.onClick());
   assertProgress(root, 80);
+  state.overview = overview(81, 2);
   await notify(["scan_status", { execution_revision: 2, status: "auditing", processed_candidates: 81, total_candidates: 100 }]);
   assertProgress(root, 81);
   await notify(
@@ -150,6 +155,119 @@ test("late overview from the current execution cannot roll back a newer SSE coun
   state.overview = overview(82, 2);
   await poll(30_000);
   assertProgress(root, 82);
+});
+
+test("coalesced overview consumers keep the physical request baseline after newer SSE progress", async () => {
+  const state = installApi(overview(80, 2));
+  const root = await mount();
+  const initialRequests = state.overviewRequestCount;
+  let resolve;
+  state.intercept = () => new Promise((done) => { resolve = done; });
+  await poll(10_000);
+  state.overview = overview(81, 2);
+  await notify(["scan_status", { execution_revision: 2, processed_candidates: 81, total_candidates: 100 }]);
+  assertProgress(root, 81);
+  await act(async () => streams.at(-1).onopen());
+  assert.equal(state.overviewRequestCount, initialRequests + 1, "reconnect joins the pending summary GET");
+  await act(async () => resolve(overview(80, 2)));
+  assertProgress(root, 81);
+  state.intercept = null;
+  state.overview = overview(82, 2);
+  await poll(30_000);
+  assert.equal(state.overviewRequestCount, initialRequests + 2, "settled requests leave the cache for the next GET");
+  assertProgress(root, 82);
+});
+
+test("overview descriptors share the first snapshot and release their cache after success", async () => {
+  const state = installApi(overview(80, 2));
+  const firstSnapshot = runtime.normalizeScanStatus(overview(80, 2));
+  const laterSnapshot = runtime.normalizeScanStatus(overview(81, 2));
+  let resolve;
+  state.intercept = () => new Promise((done) => { resolve = done; });
+  const first = client.getScanOverviewRequest("s", firstSnapshot);
+  const joined = client.getScanOverviewRequest("s", laterSnapshot);
+  assert.equal(joined, first);
+  assert.equal(joined.requestedFrom, firstSnapshot);
+  assert.equal(client.getScanOverview("s"), first.promise);
+  await act(async () => {});
+  assert.equal(state.overviewRequestCount, 1);
+  await act(async () => resolve(overview(80, 2)));
+  await first.promise;
+  state.intercept = null;
+  state.overview = overview(82, 2);
+  const fresh = client.getScanOverviewRequest("s", laterSnapshot);
+  assert.notEqual(fresh, first);
+  assert.equal(fresh.requestedFrom, laterSnapshot);
+  assert.equal((await fresh.promise).processed_candidates, 82);
+  assert.equal(state.overviewRequestCount, 2);
+});
+
+test("unknown overview origins remain explicit when a later caller joins", async () => {
+  const state = installApi(overview(80, 2));
+  const current = runtime.normalizeScanStatus(overview(81, 2));
+  let resolve;
+  state.intercept = () => new Promise((done) => { resolve = done; });
+  const legacy = client.getScanOverview("s");
+  const joined = client.getScanOverviewRequest("s", current);
+  assert.equal(joined.promise, legacy);
+  assert.equal(joined.requestedFrom, null);
+  await act(async () => {});
+  await act(async () => resolve(overview(80, 2)));
+  const incoming = await joined.promise;
+  const protectedScan = runtime.mergeScanOverview(current, incoming, joined.requestedFrom);
+  assert.equal(protectedScan.processed_candidates, 81);
+  assert.equal(state.overviewRequestCount, 1);
+});
+
+test("full hydration keeps the baseline of an earlier coalesced overview request", async () => {
+  const state = installApi(overview(80, 2));
+  const firstSnapshot = runtime.normalizeScanStatus(overview(80, 2));
+  const current = runtime.normalizeScanStatus(overview(81, 2));
+  let resolve;
+  state.intercept = () => new Promise((done) => { resolve = done; });
+  const first = client.getScanOverviewRequest("s", firstSnapshot);
+  const hydration = client.getScanStatusRequest("s", current);
+  assert.equal(hydration.requestedFrom, first.requestedFrom);
+  await act(async () => {});
+  assert.equal(state.overviewRequestCount, 1);
+  await act(async () => resolve(overview(80, 2)));
+  const hydrated = await hydration.promise;
+  const merged = runtime.mergeScanSnapshot(current, hydrated, hydration.requestedFrom);
+  assert.equal(merged.processed_candidates, 81);
+  assert.deepEqual(hydrated.candidates, []);
+});
+
+test("a rejected overview leaves the cache so the next refresh can retry", async () => {
+  const state = installApi(overview(80, 2));
+  const snapshot = runtime.normalizeScanStatus(overview(80, 2));
+  state.intercept = () => { throw new Error("temporary network failure"); };
+  const failed = client.getScanOverviewRequest("s", snapshot);
+  assert.equal(client.getScanOverviewRequest("s", snapshot), failed);
+  await assert.rejects(failed.promise, /temporary network failure/);
+  state.intercept = null;
+  const retry = client.getScanOverviewRequest("s", snapshot);
+  assert.notEqual(retry, failed);
+  assert.equal((await retry.promise).processed_candidates, 80);
+  assert.equal(state.overviewRequestCount, 2);
+});
+
+test("fresh authoritative overviews can lower progress within the same execution", async () => {
+  const state = installApi(overview(81, 2));
+  const root = await mount();
+  assertProgress(root, 81);
+  state.overview = overview(80, 2);
+  await poll(10_000);
+  assertProgress(root, 80);
+});
+
+test("a pool-only new revision permits the resumed overview to reset old counters", async () => {
+  const state = installApi();
+  const root = await mount();
+  assertProgress(root, 100);
+  await notify(["scan_status", { execution_revision: 2, opencode_pool: { execution_revision: 2, global_running: 1 } }]);
+  state.overview = overview(80, 2);
+  await poll(30_000);
+  assertProgress(root, 80);
 });
 
 test("overview polling advances both views when SSE is lost and details are not loaded", async () => {

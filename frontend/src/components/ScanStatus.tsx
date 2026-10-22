@@ -5,7 +5,7 @@ import { isInvalidTaskCursorError } from "../api/client";
 import { compareTaskHistory, shouldMergeTaskHistory, taskHistorySortTime } from "../taskOrder";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanPatternTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatusRequest, getScanOverviewRequest, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanPatternTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import {
   getThreatAnalysisResultCounts,
   isThreatAnalysisResultReady,
@@ -891,10 +891,11 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     if (!current?.detail_counts || summaryRefreshInFlightRef.current) return;
     summaryRefreshInFlightRef.current = true;
     try {
-      const overview = await getScanOverview(scanId);
+      const request = getScanOverviewRequest(scanId, current);
+      const overview = await request.promise;
       setScan((previous) => {
         if (!previous || previous.scan_id !== overview.scan_id) return previous;
-        return mergeScanOverview(previous, overview, current);
+        return mergeScanOverview(previous, overview, request.requestedFrom);
       });
     } catch {
       // SSE and the running-scan fallback poll will try again.
@@ -1014,8 +1015,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setFpReviewHydrated(false);
     setIndexStatus(null);
     setGitHistory([]);
-    const requestedFrom = scanRef.current;
-    getScanStatus(scanId)
+    const request = getScanStatusRequest(scanId, scanRef.current);
+    request.promise
       .then((data) => {
         if (cancelled || data.scan_id !== scanId) return;
         setScan((previous) => {
@@ -1034,7 +1035,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             { allowClear: pendingPool === null },
           );
           return {
-            ...mergeScanSnapshot(previous, data, requestedFrom),
+            ...mergeScanSnapshot(previous, data, request.requestedFrom),
             opencode_pool: opencodePool,
           };
         });
@@ -1694,9 +1695,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       if (result.agent_stop_state === "pending") {
         alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
       }
-      const requestedFrom = scanRef.current;
-      const next = await getScanOverview(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, requestedFrom) : previous);
+      const request = getScanOverviewRequest(scanId, scanRef.current);
+      const next = await request.promise;
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, request.requestedFrom) : previous);
       refreshDetails();
     } catch {
       // The next poll can still reconcile an Agent-side stop.
@@ -1709,9 +1710,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setContinuing(true);
     try {
       await resumeScan(scanId);
-      const requestedFrom = scanRef.current;
-      const next = await getScanOverview(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, requestedFrom) : previous);
+      const request = getScanOverviewRequest(scanId, scanRef.current);
+      const next = await request.promise;
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, request.requestedFrom) : previous);
       refreshDetails();
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
