@@ -1108,9 +1108,10 @@ export function isMissingOptionalResult(error: unknown, details: readonly string
     && details.includes(error.response.data?.detail);
 }
 
-export async function getFpReviewOverview(scanId: string): Promise<FpReviewJob | null> {
+export async function getFpReviewOverview(scanId: string, signal?: AbortSignal): Promise<FpReviewJob | null> {
   const { data } = await api.get(scanV2Path(scanId, "/fp-review/overview"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), allow_missing: true },
+    signal,
   }).catch((error) => {
     if (isMissingOptionalResult(error, ["No FP review found", "No FP review found for this scan"])) return { data: null };
     throw error;

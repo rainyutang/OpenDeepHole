@@ -7,7 +7,7 @@ import { createServer } from "vite";
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
-const { default: ScanStatus, FpReviewPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
+const { default: ScanStatus, FpReviewPanel, ThreatAuditPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const originalAdapter = client.api.defaults.adapter;
@@ -67,6 +67,37 @@ async function mount(scanId = "s") {
   return root;
 }
 async function openIssues(root) { await act(async () => button(root, "疑似问题").props.onClick()); }
+function selectedIssue(root) {
+  return root.root.findAll((node) => typeof node.type === "function" && node.type.name === "VulnDetail")[0];
+}
+async function selectLastIssue(root) {
+  await openIssues(root);
+  const engine = root.root.findAllByType("select").find((node) => text(node.parent).startsWith("引擎"));
+  await act(async () => engine.props.onChange({ target: { value: "static_candidate" } }));
+  for (let page = 0; page < 2; page += 1) await act(async () => button(root, "下一页").props.onClick());
+  const item = root.root.findAll((node) => typeof node.type === "function"
+    && node.type.name === "VulnListItem" && node.props.vuln.vuln_index === 312)[0];
+  assert.ok(item);
+  await act(async () => item.props.onClick());
+  return selectedIssue(root);
+}
+function assertReadingPreserved(root, detail) {
+  assert.equal(issueProps(root).vulnerabilities.length, 105);
+  assert.equal(issueProps(root).fpReview.results.length, 105);
+  assert.equal(issueProps(root).validations.length, 105);
+  assert.equal(selectedIssue(root), detail, "The report should stay mounted");
+  assert.equal(detail.props.index, 312);
+  assert.match(text(root.toJSON()), /第 3\/3 页/);
+  const engine = root.root.findAllByType("select").find((node) => text(node.parent).startsWith("引擎"));
+  assert.equal(engine.props.value, "static_candidate");
+  assert.doesNotMatch(text(root.toJSON()), /正在加载全部问题|暂无去误报最终裁定为问题/);
+}
+async function notify(type, data = {}) {
+  await act(async () => {
+    streams.at(-1).emit(type, data);
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+}
 async function openReviews(root) {
   const target = root.root.findAllByType("button").find((node) => text(node).startsWith("adversarial"));
   assert.ok(target, "Missing review navigation button");
@@ -110,6 +141,7 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
     if (config.url.endsWith("/overview")) return response(config, {
       scan_id: scanId, status: "complete", scan_items: [], vulnerabilities: [], candidates: [], events: [],
       detail_counts: { human_confirmed_issue_count: 1, vulnerabilities: vulnerabilities.length },
+      ...value.overview,
     });
     const afterIndex = config.params?.after ?? -1;
     const paginate = (items, index) => {
@@ -330,3 +362,299 @@ test("a review starting during pagination retains the cursor and ignores the pre
   assert.equal(job.results.length, 105);
   assert.equal(job.next_cursor, null);
 });
+
+for (const kind of ["authenticated", "integration", "shared"]) {
+  test(`task notifications keep the selected report and never reload issue pages (${kind})`, async () => {
+    if (kind !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "public-token", kind });
+    const calls = installApi();
+    const root = await mount();
+    const detail = await selectLastIssue(root);
+    const before = calls.length;
+    for (let round = 0; round < 3; round += 1) {
+      await act(async () => {
+        streams[0].emit("resource_changed", { resource: "threat-audit-tasks", index: null });
+        streams[0].emit("resource_changed", { resource: "threat-pattern-audit-tasks", index: null });
+        streams[0].emit("scan_status", { status: "auditing", total_candidates: 200, processed_candidates: round + 1 });
+        await new Promise((resolve) => setTimeout(resolve, 220));
+      });
+      assertReadingPreserved(root, detail);
+    }
+    const refreshed = calls.slice(before);
+    assert.equal(refreshed.filter((c) => /\/(vulnerabilities|validations|fp-review\/results)$/.test(c.url)).length, 0);
+    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-audit-tasks")).length, 3);
+    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-pattern-audit-tasks")).length, 3);
+  });
+}
+
+for (const eventType of ["resync_required", "scan_vulnerabilities_changed"]) {
+  test(`slow ${eventType} keeps every displayed row until the staged pages are ready`, async () => {
+    const pending = deferred();
+    let blockPages = false;
+    installApi([fixture()], async (config) => {
+      if (blockPages && config.params?.after >= 147) await pending.promise;
+    });
+    const root = await mount();
+    const detail = await selectLastIssue(root);
+    blockPages = true;
+    await notify(eventType, { count: 105 });
+    assertReadingPreserved(root, detail);
+    blockPages = false;
+    await act(async () => pending.resolve());
+    assertReadingPreserved(root, detail);
+  });
+}
+
+for (const failure of ["network", "stalled cursor"]) {
+  test(`a failed background refresh retains the report and can retry (${failure})`, async () => {
+    let fail = false;
+    const calls = installApi([fixture()], async (config) => {
+      if (fail && config.url.endsWith("/fp-review/results") && config.params.after === 297) {
+        if (failure === "network") throw new Error("offline");
+        return { items: [], vulnerabilities: [], next_cursor: 297, has_more: true };
+      }
+    });
+    const root = await mount();
+    const detail = await selectLastIssue(root);
+    fail = true;
+    await notify("resync_required");
+    assertReadingPreserved(root, detail);
+    assert.match(text(root.toJSON()), /详情更新失败，已保留当前内容/);
+    const requests = calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+    assert.equal(calls.length, requests, "Failure must not start an unbounded reload loop");
+    fail = false;
+    await act(async () => {
+      button(root, "重试刷新详情").props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+    assertReadingPreserved(root, detail);
+    assert.doesNotMatch(text(root.toJSON()), /详情更新失败/);
+  });
+}
+
+test("a mixed task and indexed finding notification updates only the requested records", async () => {
+  const value = fixture();
+  const calls = installApi([value], async (config) => {
+    if (config.url.endsWith("/details/vulnerabilities/312")) return { ...value.vulnerabilities.at(-1), description: "实时更新的问题" };
+  });
+  const root = await mount();
+  const detail = await selectLastIssue(root);
+  const before = calls.length;
+  await act(async () => {
+    streams[0].emit("resource_changed", { resource: "threat-audit-tasks", index: null });
+    streams[0].emit("resource_changed", { resource: "vulnerabilities", index: 312 });
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  assertReadingPreserved(root, detail);
+  assert.equal(detail.props.vuln.description, "实时更新的问题");
+  assert.equal(calls.slice(before).filter((c) => /\/(vulnerabilities|validations|fp-review\/results)$/.test(c.url)).length, 0);
+});
+
+test("a resync retains live finding, review and manual feedback changes received during pagination", async () => {
+  const pending = deferred();
+  let block = false;
+  const value = fixture();
+  installApi([value], async (config) => {
+    if (block && config.params?.after === 147) {
+      const items = config.url.endsWith("/vulnerabilities")
+        ? value.vulnerabilities.slice(50, 100).map((v) => ({ index: v.vuln_index, vulnerability: structuredClone(v) }))
+        : config.url.endsWith("/validations") ? structuredClone(value.validations.slice(50, 100))
+          : structuredClone(value.results.slice(50, 100));
+      await pending.promise;
+      return { items, vulnerabilities: [], next_cursor: 297, has_more: true };
+    }
+  });
+  const root = await mount();
+  await selectLastIssue(root);
+  block = true;
+  await notify("resync_required");
+  await act(async () => {
+    streams[0].emit("scan_vulnerability", { index: 150, vulnerability: { ...value.vulnerabilities[50], ai_analysis: "", description: "最新问题" } });
+    streams[0].emit("fp_review_result", { review_id: "review-s", vuln_index: 150, verdict: "tp", severity: "high", reason: "最新复核" });
+    streams[0].emit("vulnerability_validation", { validation: { vuln_index: 150, status: "verified" } });
+    issueProps(root).vulnerabilities.find((v) => v.vuln_index === 153).user_verdict = "confirmed";
+  });
+  block = false;
+  await act(async () => pending.resolve());
+  const props = issueProps(root);
+  assert.equal(props.vulnerabilities.find((v) => v.vuln_index === 150).description, "最新问题");
+  assert.equal(props.vulnerabilities.find((v) => v.vuln_index === 153).user_verdict, "confirmed");
+  assert.equal(props.fpReview.results.find((v) => v.vuln_index === 150).reason, "最新复核");
+  assert.equal(props.validations.find((v) => v.vuln_index === 150).status, "verified");
+  assert.equal(selectedIssue(root).props.index, 312);
+});
+
+test("an authoritative refresh really removes deleted findings while retaining other selections", async () => {
+  const value = fixture();
+  installApi([value]);
+  const root = await mount();
+  const detail = await selectLastIssue(root);
+  value.vulnerabilities = value.vulnerabilities.filter((v) => v.vuln_index !== 150);
+  await notify("scan_vulnerabilities_changed", { count: 104 });
+  assert.equal(issueProps(root).vulnerabilities.length, 104);
+  assert.ok(!issueProps(root).vulnerabilities.some((v) => v.vuln_index === 150));
+  assert.equal(selectedIssue(root), detail);
+  value.vulnerabilities = value.vulnerabilities.filter((v) => v.vuln_index !== 312);
+  await notify("scan_vulnerabilities_changed", { count: 103 });
+  assert.equal(issueProps(root).vulnerabilities.length, 103);
+  assert.equal(selectedIssue(root).props.index, 153);
+});
+
+test("switching scans aborts a background refresh and ignores its late responses", async () => {
+  const pending = deferred();
+  const signals = [];
+  let block = false;
+  installApi([fixture(), fixture(1, "other")], async (config) => {
+    if (block && config.url.includes("/s/") && config.params?.after === 147) {
+      signals.push(config.signal);
+      await pending.promise;
+    }
+  });
+  const root = await mount();
+  await selectLastIssue(root);
+  block = true;
+  await notify("resync_required");
+  assert.equal(signals.length, 3);
+  await act(async () => root.update(component("other")));
+  assert.ok(signals.every((signal) => signal.aborted));
+  block = false;
+  await act(async () => pending.resolve());
+  assert.equal(issueProps(root).vulnerabilities[0].file, "other/issue-0.c");
+  assert.equal(issueProps(root).fpReview.scan_id, "other");
+  assert.doesNotMatch(text(root.toJSON()), /详情更新失败/);
+});
+
+test("task updates do not cancel or restart an unrelated slow review page", async () => {
+  const pending = deferred();
+  let signal;
+  const calls = installApi([fixture()], async (config) => {
+    if (config.url.endsWith("/fp-review/results") && config.params.after === 147) {
+      signal = config.signal;
+      await pending.promise;
+    }
+  });
+  const root = await mount();
+  await openIssues(root);
+  assert.ok(signal);
+  for (let round = 0; round < 2; round += 1) {
+    await notify("resource_changed", { resource: "threat-audit-tasks" });
+    assert.equal(signal.aborted, false);
+  }
+  assert.equal(calls.filter((c) => c.url.endsWith("/fp-review/results") && c.params.after === 147).length, 1);
+  await act(async () => pending.resolve());
+  assert.equal(issueProps(root).fpReview.results.length, 105);
+});
+
+test("a failed refresh of a partially loaded list stops the loading indicator and remains retryable", async () => {
+  let fail = true;
+  let refreshing = false;
+  installApi([fixture()], async (config) => {
+    if (fail && config.url.endsWith("/fp-review/results")
+      && (config.params.after === 297 || (refreshing && config.params.after === 147))) throw new Error("offline");
+  });
+  const root = await mount();
+  await openIssues(root);
+  const detail = selectedIssue(root);
+  assert.equal(issueProps(root).fpReview.results.length, 100);
+  refreshing = true;
+  await notify("resync_required");
+  assert.equal(issueProps(root).fpReview.results.length, 100);
+  assert.equal(selectedIssue(root), detail);
+  assert.match(text(root.toJSON()), /详情更新失败/);
+  assert.doesNotMatch(text(root.toJSON()), /正在加载全部问题/);
+  fail = false;
+  await act(async () => {
+    button(root, "重试刷新详情").props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  assert.equal(issueProps(root).fpReview.results.length, 105);
+  assert.equal(selectedIssue(root), detail);
+  assert.doesNotMatch(text(root.toJSON()), /详情更新失败|正在加载全部问题/);
+});
+
+test("a newer list invalidation discards a stale staged replacement without flashing it", async () => {
+  const pending = deferred();
+  const value = fixture();
+  let block = false;
+  let captured = false;
+  installApi([value], async (config) => {
+    if (block && !captured && config.url.endsWith("/vulnerabilities") && config.params?.after == null) {
+      captured = true;
+      const items = value.vulnerabilities.slice(0, 50).map((v) => ({ index: v.vuln_index, vulnerability: structuredClone(v) }));
+      await pending.promise;
+      return { items, next_cursor: null, has_more: false };
+    }
+  });
+  const root = await mount();
+  const detail = await selectLastIssue(root);
+  block = true;
+  await notify("scan_vulnerabilities_changed", { count: 50 });
+  assert.equal(captured, true);
+  value.vulnerabilities.at(-1).description = "下一次权威快照";
+  await notify("scan_vulnerabilities_changed", { count: 105 });
+  await act(async () => pending.resolve());
+  assertReadingPreserved(root, detail);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 220)); });
+  assertReadingPreserved(root, detail);
+  assert.equal(detail.props.vuln.description, "下一次权威快照");
+});
+
+test("an obsolete ordinary page cannot resurrect findings removed by a background refresh", async () => {
+  const pending = deferred();
+  const value = fixture();
+  let captured = false;
+  const calls = installApi([value], async (config) => {
+    if (!captured && config.url.endsWith("/vulnerabilities") && config.params?.after === 147) {
+      captured = true;
+      const items = value.vulnerabilities.slice(50, 100).map((v) => ({ index: v.vuln_index, vulnerability: structuredClone(v) }));
+      await pending.promise;
+      return { items, next_cursor: 297, has_more: true };
+    }
+  });
+  const root = await mount();
+  await openIssues(root);
+  assert.equal(captured, true);
+  value.vulnerabilities = value.vulnerabilities.slice(0, 50);
+  await notify("scan_vulnerabilities_changed", { count: 50 });
+  await act(async () => pending.resolve());
+  assert.equal(issueProps(root).vulnerabilities.length, 50);
+  assert.ok(issueProps(root).vulnerabilities.every((v) => v.vuln_index < 150));
+  assert.ok(!calls.some((c) => c.url.endsWith("/vulnerabilities") && c.params?.after === 297));
+});
+
+for (const [resource, field, engine, label] of [
+  ["threat-audit-tasks", "threat_audit_tasks", "threat_audit", "基于攻击威胁"],
+  ["threat-pattern-audit-tasks", "threat_pattern_audit_tasks", "threat_pattern_audit", "基于攻击模式"],
+]) {
+  test(`${resource} refreshes later loaded pages and retains the remaining cursor`, async () => {
+    const value = fixture();
+    value.overview = { mining_engines: [{ engine_id: engine, engine_label: label, enabled: true }] };
+    const tasks = Array.from({ length: 125 }, (_, index) => ({
+      task_id: `task-${String(index).padStart(3, "0")}`, scan_id: "s", status: "running", created_at: "2026-10-22T00:00:00Z",
+      code_path: "src/main.c", module_name: "parser", pattern_id: "pattern", pattern_name: "parse",
+    }));
+    const calls = installApi([value], async (config) => {
+      if (config.url.endsWith(`/${resource}`)) {
+        const offset = Number(config.params?.cursor ?? 0);
+        return { items: structuredClone(tasks.slice(offset, offset + 50)), next_cursor: offset + 50 < tasks.length ? String(offset + 50) : null, has_more: offset + 50 < tasks.length };
+      }
+      if (/\/threat(-pattern)?-audit-results$/.test(config.url)) return [];
+    });
+    const root = await mount();
+    const navigation = root.root.findAllByType("button").find((node) => text(node).includes(label));
+    assert.ok(navigation);
+    await act(async () => navigation.props.onClick());
+    await act(async () => button(root, "加载更多审计任务").props.onClick());
+    const taskScan = () => root.root.findByType(ThreatAuditPanel).props.scan;
+    assert.equal(taskScan()[field].length, 100);
+    const before = calls.length;
+    tasks[80].status = "completed";
+    await notify("resource_changed", { resource });
+    assert.equal(taskScan()[field].length, 100);
+    assert.equal(taskScan()[field][80].status, "completed");
+    const pages = calls.slice(before).filter((c) => c.url.endsWith(`/${resource}`));
+    assert.deepEqual(pages.map((c) => c.params.cursor ?? null), [null, "50"]);
+    await act(async () => button(root, "加载更多审计任务").props.onClick());
+    assert.equal(taskScan()[field].length, 125);
+  });
+}

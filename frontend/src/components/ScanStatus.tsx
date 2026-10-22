@@ -24,6 +24,7 @@ import type { CandidateAuditTaskResult } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
+import type { ScanDetailResource } from "../scanResourceRefresh";
 import { getFpReviewStageDisplays, hasFpReviewRecord, isEffectiveFpReviewResult } from "../fpReview";
 import {
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
@@ -86,6 +87,10 @@ const THREAT_AUDIT_PAGE_SIZE = 20;
 
 type MainTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues";
 type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_tasks" | "pattern_tasks" | "validations";
+const DETAIL_REFRESH_RESOURCE: Record<DetailResource, ScanDetailResource> = {
+  candidates: "candidates", vulnerabilities: "vulnerabilities", events: "events", validations: "validations",
+  threat_tasks: "threat-audit-tasks", pattern_tasks: "threat-pattern-audit-tasks",
+};
 const ISSUE_DETAIL_RESOURCES: DetailResource[] = ["vulnerabilities", "validations"];
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
@@ -732,7 +737,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   const scanRef = useRef<ScanStatusType | null>(null);
   const detailLoadingRef = useRef<Set<DetailResource>>(new Set());
   const detailAbortControllerRef = useRef(new AbortController());
-  const vulnerabilityListGenerationRef = useRef(0);
+  const detailGenerationRef = useRef(new Map<DetailResource, number>());
+  const refreshingResourcesRef = useRef(new Set<ScanDetailResource>());
+  const [refreshingResources, setRefreshingResources] = useState(new Set<ScanDetailResource>());
   const summaryRefreshTimerRef = useRef<number | null>(null);
   const summaryRefreshInFlightRef = useRef(false);
   const pendingInitialOpenCodePoolRef = useRef<OpenCodePoolStatus | null | undefined>(
@@ -778,6 +785,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
 
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const fpReviewRef = useRef(fpReview);
+  fpReviewRef.current = fpReview;
   const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget, fpReview, setFpReview);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [coverageRevision, setCoverageRevision] = useState(0);
@@ -821,7 +830,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   useEffect(() => {
     detailAbortControllerRef.current.abort();
     detailAbortControllerRef.current = new AbortController();
-    vulnerabilityListGenerationRef.current += 1;
+    detailGenerationRef.current.clear();
+    refreshingResourcesRef.current.clear();
+    setRefreshingResources(new Set());
     setThreatAnalysisResultTab("valueAssets");
     setSidebarOpen(false);
     setScanInfoOpen(false);
@@ -900,7 +911,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   }, [refreshOverviewSummary]);
 
   const loadDetailResource = useCallback(async (resource: DetailResource) => {
-    if (detailLoadingRef.current.has(resource)) return;
+    if (detailLoadingRef.current.has(resource) || refreshingResourcesRef.current.has(DETAIL_REFRESH_RESOURCE[resource])) return;
     const current = scanRef.current;
     const cursor = current ? detailCursor(current, resource) : null;
     if (cursor == null) return;
@@ -914,13 +925,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       return next;
     });
     const signal = detailAbortControllerRef.current.signal;
-    const vulnerabilityGeneration = resource === "vulnerabilities"
-      ? vulnerabilityListGenerationRef.current
-      : null;
-    const isCurrentGeneration = () => !signal.aborted && (
-      vulnerabilityGeneration == null
-      || vulnerabilityGeneration === vulnerabilityListGenerationRef.current
-    );
+    const generation = detailGenerationRef.current.get(resource);
+    const isCurrentGeneration = () => !signal.aborted && generation === detailGenerationRef.current.get(resource);
     let failed = false;
     try {
       if (cursor != null && !signal.aborted && isCurrentGeneration()) {
@@ -1056,6 +1062,23 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
 
   // SSE event handlers — update state incrementally
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
+    onDetailRefreshState: (resources, refreshing) => {
+      if (!resources.length) return;
+      for (const resource of resources) {
+        if (refreshing) refreshingResourcesRef.current.add(resource);
+        else refreshingResourcesRef.current.delete(resource);
+      }
+      if (refreshing) {
+        for (const resource of Object.keys(DETAIL_REFRESH_RESOURCE) as DetailResource[]) {
+          if (!resources.includes(DETAIL_REFRESH_RESOURCE[resource])) continue;
+          detailGenerationRef.current.set(resource, (detailGenerationRef.current.get(resource) ?? 0) + 1);
+          detailLoadingRef.current.delete(resource);
+        }
+        setDetailLoadingResources(new Set(detailLoadingRef.current));
+        setDetailFailedResources((previous) => new Set([...previous].filter((resource) => !resources.includes(DETAIL_REFRESH_RESOURCE[resource]))));
+      }
+      setRefreshingResources(new Set(refreshingResourcesRef.current));
+    },
     onStateRefresh: () => setThreatResultRevision((value) => value + 1),
     onScanStatus: (data) => {
       setScan((prev) => {
@@ -1261,49 +1284,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       scheduleOverviewSummaryRefresh();
     },
     onScanVulnerabilitiesChanged: (data) => {
-      const generation = vulnerabilityListGenerationRef.current + 1;
-      vulnerabilityListGenerationRef.current = generation;
-      detailLoadingRef.current.delete("vulnerabilities");
-      setDetailLoadingResources(new Set(detailLoadingRef.current));
-      setDetailFailedResources((previous) => {
-        if (!previous.has("vulnerabilities")) return previous;
-        const next = new Set(previous);
-        next.delete("vulnerabilities");
-        return next;
-      });
-      const signal = detailAbortControllerRef.current.signal;
-      getScanVulnerabilitiesPage(scanId, null, signal)
-        .then((page) => {
-          if (
-            signal.aborted
-            || generation !== vulnerabilityListGenerationRef.current
-          ) return;
-          setScan((prev) => prev ? {
-            ...prev,
-            vulnerabilities: mergeIndexedVulnerabilities([], page.items),
-            detail_counts: prev.detail_counts ? {
-              ...prev.detail_counts,
-              vulnerabilities: data.count,
-            } : prev.detail_counts,
-            detail_pages: {
-              candidates_next_cursor: prev.detail_pages?.candidates_next_cursor ?? null,
-              vulnerabilities_next_cursor: page.next_cursor,
-              events_next_cursor: prev.detail_pages?.events_next_cursor ?? null,
-              threat_tasks_next_cursor: prev.detail_pages?.threat_tasks_next_cursor ?? null,
-                pattern_tasks_next_cursor: prev.detail_pages?.pattern_tasks_next_cursor ?? null,
-              validations_next_cursor: prev.detail_pages?.validations_next_cursor ?? null,
-            },
-          } : prev);
-        })
-        .catch((error) => {
-          if (
-            !signal.aborted
-            && generation === vulnerabilityListGenerationRef.current
-          ) {
-            console.warn("刷新权威漏洞列表失败", error);
-            setDetailFailedResources((previous) => new Set(previous).add("vulnerabilities"));
-          }
-        });
+      setScan((previous) => previous?.detail_counts ? {
+        ...previous, detail_counts: { ...previous.detail_counts, vulnerabilities: data.count },
+      } : previous);
       scheduleOverviewSummaryRefresh(0);
     },
     onVulnerabilityValidation: (data) => {
@@ -1526,12 +1509,13 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
 
   const sseStateSetters = useMemo<SSEStateSetters>(() => ({
     getScan: () => scanRef.current,
+    getFpReview: () => fpReviewRef.current,
     setScan,
     setFpReview,
     setIndexStatus,
   }), []);
 
-  useScanSSE(scanId, sseHandlers, sseStateSetters);
+  const { failedResources: refreshFailures, refreshDetails } = useScanSSE(scanId, sseHandlers, sseStateSetters);
 
   const requiredDetailResources = useMemo(() => {
     const resources = detailResourcesForTab(activeTab, activeEngineId);
@@ -1562,17 +1546,22 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     const resources: DetailResource[] = activeTab === "issues" ? ISSUE_DETAIL_RESOURCES : ["vulnerabilities"];
     for (const resource of resources) {
       if (detailCursor(scan, resource) != null
+        && !refreshingResources.has(DETAIL_REFRESH_RESOURCE[resource])
+        && !refreshFailures.has(DETAIL_REFRESH_RESOURCE[resource])
         && !detailLoadingResources.has(resource)
         && !detailFailedResources.has(resource)) {
         void loadDetailResource(resource);
       }
     }
-  }, [activeTab, scanId, scan?.scan_id, scan?.detail_pages, detailLoadingResources, detailFailedResources, loadDetailResource]);
+  }, [activeTab, scanId, scan?.scan_id, scan?.detail_pages, detailLoadingResources, detailFailedResources, refreshingResources, refreshFailures, loadDetailResource]);
 
+  const fpReviewRefreshing = refreshingResources.has("fp-review");
+  const fpReviewRefreshFailed = refreshFailures.has("fp-review");
   useEffect(() => {
     setFpReviewPageFailed(false);
     const cursor = fpReview?.next_cursor;
-    if ((activeTab !== "issues" && activeTab !== "fp_review") || fpReview?.scan_id !== scanId || cursor == null) {
+    if ((activeTab !== "issues" && activeTab !== "fp_review") || fpReview?.scan_id !== scanId || cursor == null
+      || fpReviewRefreshing || fpReviewRefreshFailed) {
       setFpReviewPageLoading(false);
       return;
     }
@@ -1580,7 +1569,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setFpReviewPageLoading(true);
     getFpReviewResultsPage(scanId, cursor, 50, controller.signal)
       .then((page) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || refreshingResourcesRef.current.has("fp-review")) return;
         if (page.next_cursor != null && page.next_cursor <= cursor) {
           throw new Error("复核结果游标未前进");
         }
@@ -1606,7 +1595,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         if (!controller.signal.aborted) setFpReviewPageLoading(false);
       });
     return () => controller.abort();
-  }, [activeTab, scanId, fpReview?.scan_id, fpReview?.review_id, fpReview?.execution_revision, fpReview?.next_cursor, fpReviewPageRetry]);
+  }, [activeTab, scanId, fpReview?.scan_id, fpReview?.review_id, fpReview?.execution_revision, fpReview?.next_cursor, fpReviewPageRetry, fpReviewRefreshing, fpReviewRefreshFailed]);
 
   useEffect(() => {
     if (!isRunning || !scan?.detail_counts) return;
@@ -1683,8 +1672,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     setFpReviewStopping(true);
     try {
       await stopFpReview(scanId);
-      const job = await getFpReview(scanId);
-      if (job) setFpReview(job);
+      refreshDetails(["fp-review"]);
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
@@ -1703,8 +1691,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
       }
       const requestedFrom = scanRef.current;
-      const next = await getScanStatus(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next, requestedFrom) : previous);
+      const next = await getScanOverview(scanId);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, requestedFrom) : previous);
+      refreshDetails();
     } catch {
       // The next poll can still reconcile an Agent-side stop.
     } finally {
@@ -1717,8 +1706,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     try {
       await resumeScan(scanId);
       const requestedFrom = scanRef.current;
-      const next = await getScanStatus(scanId);
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next, requestedFrom) : previous);
+      const next = await getScanOverview(scanId);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, requestedFrom) : previous);
+      refreshDetails();
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
@@ -1957,8 +1947,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     : activeTab === "fp_review" ? ["vulnerabilities"] : [];
   const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource))
     || (showsFpResults && (!fpReviewHydrated || fpReviewPageLoading
-      || (!fpReviewPageFailed && fpReview?.next_cursor != null)
-      || automaticListResources.some((resource) => detailCursor(scan, resource) != null && !detailFailedResources.has(resource))));
+      || (!fpReviewPageFailed && !fpReviewRefreshFailed && fpReview?.next_cursor != null)
+      || automaticListResources.some((resource) => detailCursor(scan, resource) != null
+        && !detailFailedResources.has(resource) && !refreshFailures.has(DETAIL_REFRESH_RESOURCE[resource]))));
   const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource))
     || (showsFpResults && fpReviewPageFailed);
   const manualDetailResources = requiredDetailResources.filter((resource) => detailCursor(scan, resource) != null
@@ -2214,6 +2205,12 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         >
         <>
         <StaticAnalysisFailures scan={scan} />
+        {refreshFailures.size > 0 && (
+          <div role="status" className="fixed bottom-4 right-4 z-30 rounded-lg border border-amber-500/30 bg-slate-900 px-4 py-3 text-sm text-amber-100 shadow-lg">
+            详情更新失败，已保留当前内容。
+            <button type="button" className="ml-3 underline" onClick={() => refreshDetails([...refreshFailures])}>重试刷新详情</button>
+          </div>
+        )}
         {(auditNavigation.loading || auditNavigation.error) && (
           <div role={auditNavigation.error ? "alert" : "status"} className="mb-4 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-slate-200">
             {auditNavigation.loading ? "正在定位目标记录…" : auditNavigation.error}

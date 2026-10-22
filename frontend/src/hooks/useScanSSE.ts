@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
+import { scanSSEUrl, getScanOverview, getScanDetailItem, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
+import { isScanDetailResource, refreshScanResource, SCAN_DETAIL_RESOURCES } from "../scanResourceRefresh";
+import type { ScanDetailResource } from "../scanResourceRefresh";
 import {
   isRecord,
   isOlderScanExecution,
   scanExecutionRevision,
   mergeScanOverview,
-  mergeScanSnapshot,
   normalizeScanCandidate,
   normalizeScanEvent,
   normalizeThreatTask,
@@ -165,6 +166,7 @@ interface MiningEngineRunEvent {
 /* ------------------------------------------------------------------ */
 
 export interface ScanSSEHandlers {
+  onDetailRefreshState?: (resources: readonly ScanDetailResource[], refreshing: boolean) => void;
   onStateRefresh?: () => void;
   onScanStatus?: (data: ScanStatusEvent) => void;
   onOpenCodeTaskReport?: (data: OpenCodeTaskReportEvent) => void;
@@ -198,6 +200,7 @@ export interface ScanSSEHandlers {
 
 export interface SSEStateSetters {
   getScan: () => ScanStatus | null;
+  getFpReview: () => FpReviewJob | null;
   setScan: React.Dispatch<React.SetStateAction<ScanStatus | null>>;
   setFpReview: React.Dispatch<React.SetStateAction<FpReviewJob | null>>;
   setIndexStatus: React.Dispatch<React.SetStateAction<IndexStatus | null>>;
@@ -371,8 +374,13 @@ export function useScanSSE(
   scanId: string,
   handlers: ScanSSEHandlers,
   stateSetters: SSEStateSetters,
-): { connected: boolean } {
+): { connected: boolean; failedResources: ReadonlySet<ScanDetailResource>; refreshDetails: (resources?: readonly ScanDetailResource[]) => void } {
   const [connected, setConnected] = useState(false);
+  const [failedResources, setFailedResources] = useState<Set<ScanDetailResource>>(new Set());
+  const requestDetailsRef = useRef<(resources: readonly ScanDetailResource[]) => void>(() => {});
+  const refreshDetails = useCallback((resources: readonly ScanDetailResource[] = SCAN_DETAIL_RESOURCES) => {
+    requestDetailsRef.current(resources);
+  }, []);
   // Use a ref so the EventSource listeners always see the latest handlers
   // without re-creating the connection on every render.
   const handlersRef = useRef(handlers);
@@ -502,6 +510,9 @@ export function useScanSSE(
 
     let resourceTimer: number | null = null;
     const pendingResources = new Map<string, { resource: string; index?: number }>();
+    const resourceVersions = new Map<ScanDetailResource, number>();
+    const resourceController = new AbortController();
+    setFailedResources(new Set());
     let fullRefresh = false;
     let resourceRunning = false;
     const reloadResources = async () => {
@@ -512,6 +523,10 @@ export function useScanSSE(
       fullRefresh = false;
       const notices = [...pendingResources.values()];
       pendingResources.clear();
+      const collections = reloadAll ? [...SCAN_DETAIL_RESOURCES] : Array.from(new Set(
+        notices.filter((notice) => typeof notice.index !== "number").map((notice) => notice.resource).filter(isScanDetailResource),
+      ));
+      const versions = new Map(collections.map((resource) => [resource, resourceVersions.get(resource)]));
       // Artifact invalidations also apply when another notice requires a full
       // scan refresh. The overview itself intentionally has no artifact body.
       if (reloadAll || notices.some((notice) => notice.resource === "threat-analysis")) {
@@ -520,44 +535,94 @@ export function useScanSSE(
       if (reloadAll || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
         handlersRef.current.onThreatCoverageRefresh?.();
       }
+      handlersRef.current.onDetailRefreshState?.(collections, true);
       try {
-        if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && !["threat-analysis", "file-inventory"].includes(notice.resource))) {
-          const requestedFrom = stateSettersRef.current.getScan();
-          const data = await getScanStatus(scanId);
-          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, data, requestedFrom) : previous);
-          const job = await getFpReview(scanId).catch(() => null);
-          if (!disposed && job) stateSettersRef.current.setFpReview(job);
-        } else {
-          for (const notice of notices) {
+        const source = stateSettersRef.current.getScan();
+        const review = stateSettersRef.current.getFpReview();
+        if (source?.scan_id === scanId && collections.length) {
+          const results = await Promise.allSettled(collections.map((resource) => (
+            refreshScanResource(resource, source, review, resourceController.signal)
+          )));
+          if (disposed) return;
+          const failed = new Set(collections.filter((_, index) => results[index].status === "rejected"));
+          const stale = new Set(collections.filter((resource) => versions.get(resource) !== resourceVersions.get(resource)
+            || scanExecutionRevision(source) !== scanExecutionRevision(stateSettersRef.current.getScan())));
+          // Findings, reviews and validations form one visible issue snapshot.
+          // A busy or failing task collection must not restart that snapshot.
+          const issueResources = collections.filter((resource) => ["vulnerabilities", "validations", "fp-review"].includes(resource));
+          if (issueResources.some((resource) => stale.has(resource))) issueResources.forEach((resource) => stale.add(resource));
+          if (issueResources.some((resource) => failed.has(resource))) issueResources.forEach((resource) => failed.add(resource));
+          for (const resource of stale) pendingResources.set(`${resource}:collection`, { resource });
+          const updates = results.flatMap((result, index) => result.status === "fulfilled"
+            && !stale.has(collections[index]) && !failed.has(collections[index]) ? [result.value] : []);
+          if (updates.length) {
+            stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId
+              ? updates.reduce((current, update) => update.scan?.(current) ?? current, previous) : previous);
+            stateSettersRef.current.setFpReview((previous) => updates.reduce((current, update) => update.review?.(current) ?? current, previous));
+          }
+          setFailedResources((previous) => new Set([
+            ...[...previous].filter((resource) => !collections.includes(resource)), ...failed,
+          ]));
+        }
+        for (const notice of notices) {
+          if (disposed) break;
+          if (typeof notice.index !== "number" || !["candidates", "vulnerabilities", "validations", "fp-review"].includes(notice.resource)) continue;
+          try {
+            const item = await getScanDetailItem(scanId, notice.resource, notice.index, notice.resource !== "validations", resourceController.signal);
             if (disposed) break;
-            if (["threat-analysis", "file-inventory"].includes(notice.resource)) continue;
-            const item = await getScanDetailItem(scanId, notice.resource, notice.index!, notice.resource !== "validations");
-            if (disposed) break;
-            if (notice.resource === "candidates") handlersRef.current.onScanCandidateAudit?.({ candidate: normalizeScanCandidate(item, notice.index!) });
-            if (notice.resource === "vulnerabilities") handlersRef.current.onScanVulnerability?.({ index: notice.index!, vulnerability: normalizeVulnerability(item) });
+            if (notice.resource === "candidates") handlersRef.current.onScanCandidateAudit?.({ candidate: normalizeScanCandidate(item, notice.index) });
+            if (notice.resource === "vulnerabilities") handlersRef.current.onScanVulnerability?.({ index: notice.index, vulnerability: normalizeVulnerability(item) });
             if (notice.resource === "validations") handlersRef.current.onVulnerabilityValidation?.({ validation: normalizeValidation(item) });
-            if (notice.resource === "fp-review") stateSettersRef.current.setFpReview((previous) => previous ? { ...previous, results: [...previous.results.filter((result) => result.vuln_index !== notice.index), item] } : previous);
+            if (notice.resource === "fp-review") {
+              if (!stateSettersRef.current.getFpReview()) requestCollections(["fp-review"]);
+              else stateSettersRef.current.setFpReview((previous) => previous ? { ...previous, results: [...previous.results.filter((result) => result.vuln_index !== notice.index), item] } : previous);
+            }
+          } catch {
+            // A deleted detail or transient read failure invalidates only its collection.
+            if (!disposed && isScanDetailResource(notice.resource)) requestCollections([notice.resource]);
           }
         }
       } catch {
-        fullRefresh = true;
+        if (!disposed) setFailedResources((previous) => new Set([...previous, ...collections]));
       } finally {
         resourceRunning = false;
-        refreshState();
-        if (!disposed && (fullRefresh || pendingResources.size)) resourceTimer = window.setTimeout(reloadResources, 1000);
+        if (!disposed) {
+          handlersRef.current.onDetailRefreshState?.(collections, false);
+          refreshState();
+          if (fullRefresh || pendingResources.size) scheduleResources();
+        }
       }
     };
-    const scheduleResources = () => { if (resourceTimer == null) resourceTimer = window.setTimeout(reloadResources, 150); };
+    const scheduleResources = () => { if (!resourceRunning && resourceTimer == null) resourceTimer = window.setTimeout(reloadResources, 150); };
+    const requestCollections = (resources: readonly ScanDetailResource[]) => {
+      for (const resource of resources) {
+        resourceVersions.set(resource, (resourceVersions.get(resource) ?? 0) + 1);
+        pendingResources.set(`${resource}:collection`, { resource });
+      }
+      scheduleResources();
+    };
+    requestDetailsRef.current = requestCollections;
+    const requestFullRefresh = () => {
+      fullRefresh = true;
+      requestCollections(SCAN_DETAIL_RESOURCES);
+    };
     es.addEventListener("resource_changed", ((event: MessageEvent) => {
       try {
         const notice = JSON.parse(event.data);
-        pendingResources.set(`${notice.resource}:${notice.index}`, notice);
-        if (pendingResources.size > 100) { pendingResources.clear(); fullRefresh = true; }
+        if (!isRecord(notice) || typeof notice.resource !== "string") throw new Error("Invalid resource notice");
+        if (typeof notice.index !== "number" && isScanDetailResource(notice.resource)) {
+          requestCollections([notice.resource]);
+          return;
+        }
+        pendingResources.set(`${notice.resource}:${notice.index}`, {
+          resource: notice.resource, index: typeof notice.index === "number" ? notice.index : undefined,
+        });
+        if (pendingResources.size > 100) { pendingResources.clear(); requestFullRefresh(); }
         scheduleResources();
-      } catch { fullRefresh = true; scheduleResources(); }
+      } catch { requestFullRefresh(); }
     }) as EventListener);
-    es.addEventListener("resync_required", () => { fullRefresh = true; scheduleResources(); });
-    const onVisible = () => { if (!document.hidden) { fullRefresh = true; scheduleResources(); refreshState(); } };
+    es.addEventListener("resync_required", requestFullRefresh);
+    const onVisible = () => { if (!document.hidden) { requestFullRefresh(); refreshState(); } };
     document.addEventListener("visibilitychange", onVisible);
 
     // Register typed event listeners
@@ -576,9 +641,10 @@ export function useScanSSE(
       index: d.index,
       vulnerability: normalizeVulnerability(d.vulnerability),
     }));
-    handle<ScanVulnerabilitiesChangedEvent>("scan_vulnerabilities_changed", (d) => (
-      handlersRef.current.onScanVulnerabilitiesChanged?.(d)
-    ));
+    handle<ScanVulnerabilitiesChangedEvent>("scan_vulnerabilities_changed", (d) => {
+      requestCollections(["vulnerabilities"]);
+      handlersRef.current.onScanVulnerabilitiesChanged?.(d);
+    });
     handle<ScanEventPayload>("scan_event", (d) => {
       const event = normalizeScanEvent(d.event);
       if (event) queueScanEvent(event);
@@ -638,6 +704,8 @@ export function useScanSSE(
 
     return () => {
       disposed = true;
+      resourceController.abort();
+      requestDetailsRef.current = () => {};
       document.removeEventListener("visibilitychange", onVisible);
       if (resourceTimer != null) window.clearTimeout(resourceTimer);
       es.close();
@@ -650,5 +718,5 @@ export function useScanSSE(
     };
   }, [scanId, refreshState]);
 
-  return { connected };
+  return { connected, failedResources, refreshDetails };
 }
