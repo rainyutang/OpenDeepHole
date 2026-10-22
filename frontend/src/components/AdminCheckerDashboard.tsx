@@ -124,27 +124,11 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
               showOwner={user.role === "admin"}
             />
 
-            <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-3 mb-6">
-              <MetricTile label="SKILL" value={data.summary.checker_count} />
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
               <MetricTile label="扫描次数" value={data.summary.scan_count} />
-              <MetricTile label="静态发现" value={data.summary.static_issue_count} />
-              <MetricTile label="LLM 确认" value={data.summary.llm_issue_count} />
-              <MetricTile label="复核确认" value={data.summary.fp_review_issue_count} />
-              <MetricTile label="有效问题" value={data.summary.total_issue_count} />
+              <MetricTile label="疑似问题" value={data.summary.suspected_issue_count} />
               <MetricTile label="人工确认" value={data.summary.human_confirmed_count} />
               <MetricTile label="已提单" value={data.summary.ticket_submitted_count} />
-              <MetricTile
-                label="人工准确率"
-                value={formatAccuracy(data.summary.accuracy)}
-                sub={`${data.summary.human_confirmed_count}/${data.summary.accuracy_basis_count}`}
-                tone="emerald"
-              />
-              <MetricTile
-                label="提单准确率"
-                value={formatAccuracy(data.summary.ticket_accuracy)}
-                sub={`${data.summary.ticket_submitted_count}/${data.summary.accuracy_basis_count}`}
-                tone="blue"
-              />
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-[24rem_1fr] gap-5">

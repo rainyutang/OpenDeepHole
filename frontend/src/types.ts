@@ -1182,6 +1182,7 @@ export interface CheckerDashboardSummary {
   llm_issue_count: number;
   fp_review_issue_count: number;
   fp_review_false_positive_count: number;
+  suspected_issue_count: number;
   total_issue_count: number;
   human_confirmed_count: number;
   ticket_submitted_count: number;

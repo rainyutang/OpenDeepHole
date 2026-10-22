@@ -45,14 +45,34 @@ class DashboardStoreMixin:
 
     def get_checker_dashboard_aggregates(self, *, user_id=None, product=None):
         cte, params = self._dashboard_cte(user_id, product)
-        rows = self._conn.execute(cte + "SELECT checker, COUNT(*) AS scan_count, COUNT(DISTINCT COALESCE(NULLIF(scan_name, ''), project_id)) AS project_count, "
+        checker_sql = ("SELECT 0 AS is_summary, checker, COUNT(*) AS scan_count, COUNT(DISTINCT COALESCE(NULLIF(scan_name, ''), project_id)) AS project_count, "
             + ", ".join(f"SUM({key}) AS {key}" for key in (*METRICS, "ticket_submitted_count"))
-            + " FROM per_scan GROUP BY checker", params).fetchall()
-        where, count_params = self._dashboard_scope(user_id, product)
-        counts = self._conn.execute("SELECT COUNT(*) AS scan_count, COUNT(DISTINCT COALESCE(NULLIF(s.scan_name, ''), s.project_id)) AS project_count FROM scans s WHERE " + where, count_params).fetchone()
+            + " FROM per_scan GROUP BY checker")
+        # Top-level counts include every finding source, even scans with no
+        # selected checker. Aggregate issues and tickets separately so neither
+        # is multiplied by the number of checker groups in a scan. Both result
+        # sets share the same persisted totals and legacy fallback in one query.
+        summary_sql = ("SELECT 1 AS is_summary, NULL AS checker, scan_counts.*, issue_counts.*, ticket_counts.* FROM ("
+            "SELECT COUNT(*) AS scan_count, COUNT(DISTINCT COALESCE(NULLIF(scan_name, ''), project_id)) AS project_count FROM visible"
+            ") scan_counts CROSS JOIN (SELECT "
+            + ", ".join(f"COALESCE(SUM({key}), 0) AS {key}" for key in METRICS)
+            + " FROM totals) issue_counts CROSS JOIN ("
+            "SELECT COALESCE(SUM(ticket_submitted_count), 0) AS ticket_submitted_count FROM tickets"
+            ") ticket_counts")
+        rows = self._conn.execute(cte + checker_sql + " UNION ALL " + summary_sql, params).fetchall()
+        checkers = []
+        summary = {}
+        for row in rows:
+            item = dict(row)
+            if item.pop("is_summary"):
+                item.pop("checker")
+                summary = item
+            else:
+                checkers.append(item)
+        counts = {key: summary.pop(key) for key in ("scan_count", "project_count")}
         where, product_params = self._dashboard_scope(user_id)
         products = self._conn.execute("SELECT DISTINCT COALESCE(s.product, '') AS product FROM scans s WHERE " + where + " ORDER BY product", product_params).fetchall()
-        return {"checkers": [dict(row) for row in rows], "counts": dict(counts), "products": [row["product"] for row in products]}
+        return {"checkers": checkers, "counts": counts, "totals": summary, "products": [row["product"] for row in products]}
 
     def list_checker_scans_page(self, checker: str, *, user_id=None, product=None, before_created_at=None, before_scan_id=None, limit=50):
         cte, params = self._dashboard_cte(user_id, product)

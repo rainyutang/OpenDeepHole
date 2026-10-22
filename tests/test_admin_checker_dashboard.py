@@ -218,6 +218,7 @@ class AdminCheckerDashboardTests(unittest.TestCase):
         self.assertEqual(response.summary.static_issue_count, 4)
         self.assertEqual(response.summary.llm_issue_count, 3)
         self.assertEqual(response.summary.fp_review_issue_count, 1)
+        self.assertEqual(response.summary.suspected_issue_count, 1)
         self.assertEqual(response.summary.fp_review_false_positive_count, 1)
         self.assertEqual(response.summary.total_issue_count, 2)
         self.assertEqual(response.summary.human_confirmed_count, 2)

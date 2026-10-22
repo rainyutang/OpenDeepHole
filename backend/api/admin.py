@@ -32,6 +32,27 @@ from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 UNCONFIGURED_PRODUCT = "__unconfigured__"
+_SUMMARY_METRICS = (
+    "static_issue_count", "llm_issue_count", "fp_review_issue_count",
+    "fp_review_false_positive_count", "human_confirmed_count",
+    "ticket_submitted_count", "accuracy_basis_count",
+)
+
+
+def _dashboard_summary(
+    *, scan_count: int, project_count: int, checker_count: int, totals: dict[str, int],
+) -> CheckerDashboardSummary:
+    """Keep both dashboard APIs on the same all-source counting rules."""
+    return CheckerDashboardSummary(
+        scan_count=scan_count,
+        project_count=project_count,
+        checker_count=checker_count,
+        **{key: totals[key] for key in _SUMMARY_METRICS},
+        suspected_issue_count=totals["fp_review_issue_count"],
+        total_issue_count=totals["llm_issue_count"] - totals["fp_review_false_positive_count"],
+        accuracy=accuracy(totals["human_confirmed_count"], totals["accuracy_basis_count"]),
+        ticket_accuracy=accuracy(totals["ticket_submitted_count"], totals["accuracy_basis_count"]),
+    )
 
 
 def _build_checker_dashboard_v2(store, product=None, user_id=None):
@@ -46,8 +67,6 @@ def _build_checker_dashboard_v2(store, product=None, user_id=None):
             description=previous.description if previous else "", user_created=previous.user_created if previous else False,
             accuracy=accuracy(row["human_confirmed_count"], row["accuracy_basis_count"]), ticket_accuracy=accuracy(row["ticket_submitted_count"], row["accuracy_basis_count"]))
     builtin = [item for item in checkers.values() if not item.user_created]
-    keys = ("static_issue_count", "llm_issue_count", "fp_review_issue_count", "fp_review_false_positive_count", "human_confirmed_count", "ticket_submitted_count", "accuracy_basis_count")
-    totals = {key: sum(getattr(item, key) for item in builtin) for key in keys}
     token_data = store.dashboard_token_aggregates(user_id=user_id)
     token_rows = {}
     for row in token_data["usage"]:
@@ -63,9 +82,7 @@ def _build_checker_dashboard_v2(store, product=None, user_id=None):
         tracked += row["tracked_scan_count"]
         agents.append(CheckerDashboardAgentTokenUsage(agent_key=row["agent_key"], agent_name=row["agent_name"], machine_name=row["machine_name"], ip=row["ip"],
             owner_user_id=row["user_id"], owner_username=row["username"], scan_count=row["scan_count"], tracked_scan_count=row["tracked_scan_count"], usage=usage))
-    return CheckerDashboardResponse(summary=CheckerDashboardSummary(**data["counts"], **totals, checker_count=len(builtin),
-        total_issue_count=totals["llm_issue_count"] - totals["fp_review_false_positive_count"],
-        accuracy=accuracy(totals["human_confirmed_count"], totals["accuracy_basis_count"]), ticket_accuracy=accuracy(totals["ticket_submitted_count"], totals["accuracy_basis_count"])),
+    return CheckerDashboardResponse(summary=_dashboard_summary(**data["counts"], totals=data["totals"], checker_count=len(builtin)),
         checkers=sorted(checkers.values(), key=lambda item: (item.user_created, item.scan_count == 0, item.checker)),
         products=[value for value in data["products"] if value], has_unconfigured_product="" in data["products"],
         token_usage=CheckerDashboardTokenUsage(scan_count=scan_count, tracked_scan_count=tracked, usage=total_usage.response(coverage_complete=scan_count == tracked),
@@ -320,6 +337,7 @@ def _build_checker_dashboard(
     product_filter = (product or "").strip()
     all_projects: set[str] = set()
     filtered_scan_count = 0
+    totals = {key: 0 for key in _SUMMARY_METRICS}
 
     for summary, scan, meta in loaded_scans:
         if product_filter == UNCONFIGURED_PRODUCT:
@@ -338,6 +356,13 @@ def _build_checker_dashboard(
             store.list_fp_review_results_by_scan(scan.scan_id)
         )
         feedback_entries = store.list_feedback_by_scan(scan.scan_id)
+        metrics = calculate_issue_metrics(scan.vulnerabilities, fp_results)
+        for key in _SUMMARY_METRICS:
+            if key != "ticket_submitted_count":
+                totals[key] += getattr(metrics, key)
+        totals["ticket_submitted_count"] += sum(
+            1 for entry in feedback_entries if entry.ticket_submitted
+        )
 
         for checker in meta.scan_items:
             if checker not in stats:
@@ -407,15 +432,6 @@ def _build_checker_dashboard(
     checkers.sort(key=lambda item: (item.user_created, item.scan_count == 0, item.checker))
 
     builtin_checkers = [item for item in checkers if not item.user_created]
-    static_issue_count = sum(item.static_issue_count for item in builtin_checkers)
-    llm_issue_count = sum(item.llm_issue_count for item in builtin_checkers)
-    fp_review_issue_count = sum(item.fp_review_issue_count for item in builtin_checkers)
-    fp_review_false_positive_count = sum(
-        item.fp_review_false_positive_count for item in builtin_checkers
-    )
-    human_confirmed_count = sum(item.human_confirmed_count for item in builtin_checkers)
-    ticket_submitted_count = sum(item.ticket_submitted_count for item in builtin_checkers)
-    accuracy_basis_count = sum(item.accuracy_basis_count for item in builtin_checkers)
 
     token_agents = [item.response() for item in agent_token_usage.values()]
     token_agents.sort(
@@ -427,20 +443,11 @@ def _build_checker_dashboard(
     )
 
     return CheckerDashboardResponse(
-        summary=CheckerDashboardSummary(
+        summary=_dashboard_summary(
             checker_count=len(builtin_checkers),
             scan_count=filtered_scan_count,
             project_count=len(all_projects),
-            static_issue_count=static_issue_count,
-            llm_issue_count=llm_issue_count,
-            fp_review_issue_count=fp_review_issue_count,
-            fp_review_false_positive_count=fp_review_false_positive_count,
-            total_issue_count=llm_issue_count - fp_review_false_positive_count,
-            human_confirmed_count=human_confirmed_count,
-            ticket_submitted_count=ticket_submitted_count,
-            accuracy_basis_count=accuracy_basis_count,
-            accuracy=accuracy(human_confirmed_count, accuracy_basis_count),
-            ticket_accuracy=accuracy(ticket_submitted_count, accuracy_basis_count),
+            totals=totals,
         ),
         checkers=checkers,
         products=sorted(products),

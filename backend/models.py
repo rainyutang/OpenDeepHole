@@ -1975,6 +1975,7 @@ class CheckerDashboardSummary(BaseModel):
     llm_issue_count: int = 0
     fp_review_issue_count: int = 0
     fp_review_false_positive_count: int = 0
+    suspected_issue_count: int = 0  # Effective TP across all sources, regardless of human verdict.
     total_issue_count: int = 0
     human_confirmed_count: int = 0
     ticket_submitted_count: int = 0
