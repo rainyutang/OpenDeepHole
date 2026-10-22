@@ -845,6 +845,8 @@ class ScanStatus(BaseModel):
     scan_id: str
     execution_revision: int = 0
     project_id: str = ""
+    scan_name: str = ""
+    metadata_revision: int = 0
     project_path: str = ""
     code_scan_path: str = ""
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
@@ -1808,6 +1810,33 @@ class UpdateScanValidationTargetRequest(BaseModel):
     validation_environment: str = ""
 
 
+class UpdateScanMetadataRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scan_name: str | None = None
+    product: str | None = None
+
+    @field_validator("scan_name", "product", mode="before")
+    @classmethod
+    def _normalize_name(cls, value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("名称必须是非空字符串")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _require_metadata(self) -> "UpdateScanMetadataRequest":
+        if not self.model_fields_set:
+            raise ValueError("至少提供产品名或扫描名称")
+        return self
+
+
+class ScanMetadataResponse(BaseModel):
+    scan_id: str
+    scan_name: str
+    product: str
+    metadata_revision: int
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
@@ -1827,10 +1856,12 @@ class ScanMeta(BaseModel):
     code_scan_path: str = ""
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_name: str = ""
+    metadata_revision: int = 0
     auto_fp_review: bool = True
     fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
     fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
+    execution_product: str | None = Field(default=None, exclude=True)
     validation_environment: str = ""
     knowledge_base_enabled: bool = False
     vulnerability_validation_enabled: bool = False
@@ -1856,6 +1887,11 @@ class ScanMeta(BaseModel):
         repr=False,
     )
 
+    @property
+    def runtime_product(self) -> str:
+        """Keep the execution product independent of editable display labels."""
+        return self.product if self.execution_product is None else self.execution_product
+
 
 class ScanSummary(BaseModel):
     """扫描列表的摘要信息。"""
@@ -1864,6 +1900,7 @@ class ScanSummary(BaseModel):
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     scan_name: str = ""
+    metadata_revision: int = 0
     product: str = ""
     validation_environment: str = ""
     knowledge_base_enabled: bool = False

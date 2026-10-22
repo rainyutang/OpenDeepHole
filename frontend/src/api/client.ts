@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource } from "../types";
+import type { ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource, ScanMetadata, ScanMetadataUpdate } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
@@ -947,6 +947,12 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
 
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
+}
+
+export async function updateScanMetadata(scanId: string, body: ScanMetadataUpdate): Promise<ScanMetadata> {
+  if (isPublicScan(scanId)) throw new Error("当前访问方式不支持编辑扫描名称");
+  const { data } = await api.patch<ScanMetadata>(`/api/scan/${scanId}/metadata`, body);
+  return data;
 }
 
 export async function createScanShare(scanId: string): Promise<string> {

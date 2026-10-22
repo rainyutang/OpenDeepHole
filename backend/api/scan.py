@@ -59,6 +59,7 @@ from backend.models import (
     ScanCandidatePage,
     ScanEventPage,
     ScanMeta,
+    ScanMetadataResponse,
     ScanConfigMemoryResponse,
     ScanKnowledgeBaseRequest,
     ScanOverview,
@@ -80,6 +81,7 @@ from backend.models import (
     ThreatAnalysisRunStatus,
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
+    UpdateScanMetadataRequest,
     User,
     Vulnerability,
     VulnerabilityPage,
@@ -783,6 +785,16 @@ async def _check_scan_owner(scan_id: str, user: User) -> None:
     if meta is not None and meta.user_id == user.user_id:
         return
     raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _apply_scan_metadata(
+    scan: ScanStatus,
+    metadata: ScanMeta | ScanMetadataResponse,
+) -> None:
+    if metadata.metadata_revision >= scan.metadata_revision:
+        scan.scan_name = metadata.scan_name
+        scan.product = metadata.product
+        scan.metadata_revision = metadata.metadata_revision
 
 
 def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
@@ -1693,6 +1705,7 @@ async def create_agent_scan(
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
+        scan_name=scan_name,
         project_path=project_path,
         code_scan_path=code_scan_path,
         multi_versions=multi_versions,
@@ -1774,6 +1787,7 @@ async def create_agent_scan(
                 f"{(generated_name_seed + name_attempt) & 0xFFFF:04x}"
             )
             scan.project_id = scan_name
+            scan.scan_name = scan_name
             meta.scan_name = scan_name
         try:
             await run_store_call(store, "save_scan", scan, meta)
@@ -2113,6 +2127,9 @@ async def get_scan_status(
     meta = None
     if not distributed and scan_id in _running_scans:
         scan = _running_scans[scan_id]
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="Scan not found")
     else:
         result = await run_store_call(store, "load_scan", scan_id)
         if result is None:
@@ -2155,6 +2172,8 @@ async def get_scan_status(
     )
     _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
+    if meta is not None:
+        _apply_scan_metadata(scan, meta)
     return scan
 
 
@@ -2318,6 +2337,7 @@ async def get_scan_overview_v2(
     )
     _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
+    _apply_scan_metadata(scan, meta)
     payload = scan.model_dump(mode="python")
     payload.update({
         "candidates": [],
@@ -2578,6 +2598,40 @@ async def get_scan_validations_v2(
         has_more=has_more,
         next_cursor=items[-1].vuln_index if has_more and items else None,
     )
+
+
+@router.patch(
+    "/api/scan/{scan_id}/metadata",
+    response_model=ScanMetadataResponse,
+)
+async def update_scan_metadata(
+    scan_id: str,
+    body: UpdateScanMetadataRequest,
+    current_user: User = Depends(get_current_user),
+) -> ScanMetadataResponse:
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    await _check_scan_owner(scan_id, current_user)
+    try:
+        metadata = await run_store_call(
+            store,
+            "update_scan_metadata",
+            scan_id,
+            **body.model_dump(exclude_unset=True),
+        )
+    except DuplicateScanNameError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"扫描名称「{body.scan_name}」已存在，请修改后重试",
+        ) from exc
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    cached = _running_scans.get(scan_id)
+    if cached is not None:
+        _apply_scan_metadata(cached, metadata)
+    publish_scan_event(scan_id, "resource_changed", {"resource": "metadata"})
+    return metadata
 
 
 @router.put("/api/scan/{scan_id}/validation-target")
@@ -3045,7 +3099,7 @@ async def _continue_scan(
         "threat_analysis_enabled": meta.threat_analysis_enabled,
         "threat_analysis_method": meta.threat_analysis_method,
         "scan_name": meta.scan_name,
-        "product": meta.product,
+        "product": meta.runtime_product,
         "validation_environment": meta.validation_environment,
         "vulnerability_validation": (
             meta.vulnerability_validation.model_dump(mode="json")
@@ -3864,7 +3918,7 @@ async def _trigger_vulnerability_validation(
         )
     if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
         raise HTTPException(status_code=400, detail="Only AI-confirmed vulnerabilities can be validated")
-    product = str(meta.product or "").strip()
+    product = str(meta.runtime_product or "").strip()
     validation_config = meta.vulnerability_validation
     if not product or validation_config is None or not validation_config.enabled:
         raise HTTPException(

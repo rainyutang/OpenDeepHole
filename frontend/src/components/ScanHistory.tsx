@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
-import type { ScanSummary, ScanItemStatus, User } from "../types";
+import type { ScanMetadata, ScanSummary, ScanItemStatus, User } from "../types";
+import { mergeScanMetadata } from "../scanRuntime";
 import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
 import ScanShareButton from "./ScanShareButton";
+import EditScanMetadataDialog from "./EditScanMetadataDialog";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -73,11 +75,11 @@ function isNewerAnnouncementVersion(candidate: string, baseline: string) {
   return candidate > baseline;
 }
 
-function projectName(scan: ScanSummary) {
+function projectName(scan: Pick<ScanSummary, "scan_name" | "project_id" | "scan_id">) {
   return scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
 }
 
-function productFilterValue(scan: ScanSummary) {
+function productFilterValue(scan: Pick<ScanSummary, "product">) {
   return scan.product || UNCONFIGURED_PRODUCT_FILTER;
 }
 
@@ -251,6 +253,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [editingScan, setEditingScan] = useState<ScanSummary | null>(null);
   const [productFilter, setProductFilter] = useState(ALL_FILTER);
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
@@ -325,10 +328,12 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
     try {
       const data = await getScansPage(50);
       setScans((previous) => {
-        if (initial || !loadedOlderPagesRef.current) return data.items;
+        const previousById = new Map(previous.map((item) => [item.scan_id, item]));
+        const refreshed = data.items.map((item) => mergeScanMetadata(previousById.get(item.scan_id), item));
+        if (initial || !loadedOlderPagesRef.current) return refreshed;
         const refreshedIds = new Set(data.items.map((item) => item.scan_id));
         return [
-          ...data.items,
+          ...refreshed,
           ...previous.filter((item) => !refreshedIds.has(item.scan_id)),
         ];
       });
@@ -440,6 +445,17 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
     }
   };
 
+  const handleMetadataSaved = (metadata: ScanMetadata) => {
+    const effective = mergeScanMetadata(scans.find((item) => item.scan_id === metadata.scan_id), metadata);
+    setScans((previous) => previous.map((item) => item.scan_id === metadata.scan_id
+      ? mergeScanMetadata(item, { ...item, ...metadata }) : item));
+    if (!editingScan) return;
+    setProductFilter((current) => current === productFilterValue(editingScan)
+      ? productFilterValue(effective) : current);
+    setProjectFilter((current) => current === projectName(editingScan)
+      ? effective.scan_name : current);
+  };
+
   const formatTime = (iso: string) => {
     try {
       return new Date(iso).toLocaleString();
@@ -492,6 +508,13 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+      {editingScan && (
+        <EditScanMetadataDialog
+          scan={{ ...editingScan, scan_name: projectName(editingScan) }}
+          onSaved={handleMetadataSaved}
+          onClose={() => setEditingScan(null)}
+        />
+      )}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
           <div
@@ -732,6 +755,13 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                             查看
                           </button>
                           <ScanShareButton scanId={scan.scan_id} compact />
+                          <button
+                            type="button"
+                            onClick={() => setEditingScan(scan)}
+                            className="rounded px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-700"
+                          >
+                            编辑名称
+                          </button>
                           {running && (
                             <button
                               onClick={() => handleStop(scan.scan_id)}

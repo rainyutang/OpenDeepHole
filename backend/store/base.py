@@ -26,6 +26,7 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
+    ScanMetadataResponse,
     ScanCandidate,
     ScanStatus,
     ScanSummary,
@@ -79,6 +80,16 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         """Load only a scan's metadata (no vulnerabilities/reports/events)."""
+
+    def update_scan_metadata(
+        self,
+        scan_id: str,
+        *,
+        scan_name: str | None = None,
+        product: str | None = None,
+    ) -> ScanMetadataResponse | None:
+        """Atomically rename display labels and preserve execution configuration."""
+        raise NotImplementedError
 
     @abstractmethod
     def update_scan_validation_target(

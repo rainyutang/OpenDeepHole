@@ -47,6 +47,7 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
+    ScanMetadataResponse,
     ScanCandidate,
     ScanStatus,
     ScanSummary,
@@ -88,6 +89,11 @@ from .model_usage import MODEL_USAGE_SCHEMA, ScanModelUsageMixin
 from .pattern_audit import PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
+STORAGE_COLUMNS["scans"] = {
+    **STORAGE_COLUMNS.get("scans", {}),
+    "execution_product": "TEXT",
+    "metadata_revision": "INTEGER NOT NULL DEFAULT 0",
+}
 
 
 # Kept only to satisfy the legacy SQLite column without retaining behavioral
@@ -2011,6 +2017,8 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
             scan_id=row["scan_id"],
             execution_revision=int(row["execution_revision"] or 0),
             project_id=row["project_id"],
+            scan_name=row["scan_name"] or "",
+            metadata_revision=int(row["metadata_revision"] or 0),
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=(
                 row["code_scan_path"]
@@ -2152,7 +2160,9 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
                 MultiVersionTarget,
             ),
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
+            metadata_revision=int(row["metadata_revision"] or 0),
             product=row["product"] if row["product"] is not None else "",
+            execution_product=row["execution_product"],
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
@@ -2209,8 +2219,9 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
                      public_access_token, opencode_pool,
                      code_graph_mcp_json, knowledge_base_mcp_json,
                      vulnerability_validation_json, mining_engines_json,
-                     mining_engine_runs_json, multi_versions_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mining_engine_runs_json, multi_versions_json,
+                     execution_product, metadata_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2231,7 +2242,8 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
                     agent_key = excluded.agent_key,
                     project_path = excluded.project_path,
                     code_scan_path = excluded.code_scan_path,
-                    scan_name = excluded.scan_name,
+                    scan_name = CASE WHEN scans.metadata_revision > excluded.metadata_revision
+                        THEN scans.scan_name ELSE excluded.scan_name END,
                     scan_mode = excluded.scan_mode,
                     threat_analysis_enabled = excluded.threat_analysis_enabled,
                     threat_analysis_method = excluded.threat_analysis_method,
@@ -2240,7 +2252,11 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
                     auto_fp_review = excluded.auto_fp_review,
                     fp_review_method = excluded.fp_review_method,
                     fp_review_method_selection_json = excluded.fp_review_method_selection_json,
-                    product = excluded.product,
+                    product = CASE WHEN scans.metadata_revision > excluded.metadata_revision
+                        THEN scans.product ELSE excluded.product END,
+                    execution_product = COALESCE(scans.execution_product, excluded.execution_product),
+                    metadata_revision = CASE WHEN scans.metadata_revision > excluded.metadata_revision
+                        THEN scans.metadata_revision ELSE excluded.metadata_revision END,
                     validation_environment = excluded.validation_environment,
                     knowledge_base_enabled = excluded.knowledge_base_enabled,
                     vulnerability_validation_enabled = excluded.vulnerability_validation_enabled,
@@ -2346,6 +2362,8 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
                         ],
                         ensure_ascii=False,
                     ),
+                    meta.runtime_product,
+                    meta.metadata_revision,
                 ),
             )
                 self._store_pool_locked(scan.scan_id, scan.opencode_pool or OpenCodePoolStatus())
@@ -2453,7 +2471,7 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
     def load_scan_runtime(self, scan_id: str):
         with self._lock:
             row = self._conn.execute(
-                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
             ).fetchone()
             return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
 
@@ -2476,7 +2494,7 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,execution_agent_session_id,execution_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)
@@ -2488,6 +2506,7 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
+            metadata_revision=int(row["metadata_revision"] or 0),
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
@@ -2529,7 +2548,7 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
         )
 
     def _scan_summary_columns(self) -> str:
-        columns = 's.agent_name, s.created_at, s.knowledge_base_enabled, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
+        columns = 's.agent_name, s.created_at, s.knowledge_base_enabled, s.metadata_revision, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
         for column, legacy_key in (("total_task_count", "total_tasks"), ("completed_task_count", "completed_task_count")):
             legacy = (
                 f"COALESCE((NULLIF(s.opencode_pool, '')::jsonb ->> '{legacy_key}')::BIGINT, 0)"
@@ -2608,6 +2627,38 @@ class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInven
             )
             rows = cur.fetchall()
         return [self._row_to_scan_summary(row) for row in rows]
+
+    def update_scan_metadata(
+        self,
+        scan_id: str,
+        *,
+        scan_name: str | None = None,
+        product: str | None = None,
+    ) -> ScanMetadataResponse | None:
+        if scan_name is None and product is None:
+            raise ValueError("At least one scan label is required")
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    """\
+                    UPDATE scans
+                    SET execution_product = COALESCE(execution_product, product, ''),
+                        scan_name = COALESCE(?, scan_name),
+                        product = COALESCE(?, product, ''),
+                        metadata_revision = metadata_revision + 1
+                    WHERE scan_id = ? AND NOT EXISTS (
+                        SELECT 1 FROM scan_deletions d WHERE d.scan_id = scans.scan_id
+                    )
+                    RETURNING scan_id, scan_name, product, metadata_revision
+                    """,
+                    (scan_name, product, scan_id),
+                ).fetchone()
+                self._conn.commit()
+                return ScanMetadataResponse(**dict(row)) if row is not None else None
+        except Exception as exc:
+            if _is_duplicate_scan_name_error(exc):
+                raise DuplicateScanNameError(scan_name) from exc
+            raise
 
     def update_scan_validation_target(
         self,

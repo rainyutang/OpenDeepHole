@@ -2001,7 +2001,7 @@ async def _resume_final_callback_downstream(
         if (
             validation_config is None
             or not validation_config.enabled
-            or not meta.product
+            or not meta.runtime_product
         ):
             continue
         existing_validation_indexes = {

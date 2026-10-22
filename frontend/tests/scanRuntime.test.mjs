@@ -116,6 +116,39 @@ test("late overview cannot undo progress received while it was in flight", () =>
   assert.equal(next.progress, 0.82);
 });
 
+test("older metadata does not replace renamed labels or block current progress", () => {
+  const current = { scan_id: "s", execution_revision: 2, status: "auditing", progress: 0.8,
+    processed_candidates: 80, total_candidates: 100, opencode_pool: null,
+    scan_name: "Renamed scan", product: "Renamed product", metadata_revision: 3 };
+  const incoming = { ...current, status: "complete", processed_candidates: 100,
+    scan_name: "Original scan", product: "Original product", metadata_revision: 2 };
+  const merged = runtime.mergeScanOverview(current, incoming, current);
+  assert.equal(merged.scan_name, current.scan_name);
+  assert.equal(merged.product, current.product);
+  assert.equal(merged.metadata_revision, 3);
+  assert.equal(merged.status, "complete");
+  assert.equal(merged.processed_candidates, 100);
+});
+
+test("newer metadata is accepted even when its runtime snapshot belongs to an older execution", () => {
+  const current = { scan_id: "s", execution_revision: 2, status: "auditing", progress: 0.8,
+    processed_candidates: 80, total_candidates: 100, opencode_pool: null,
+    scan_name: "Original scan", product: "Original product", metadata_revision: 0 };
+  const incoming = { ...current, execution_revision: 1, status: "cancelled", processed_candidates: 20,
+    scan_name: "Renamed scan", product: "Renamed product", metadata_revision: 1 };
+  const merged = runtime.mergeScanSnapshot(current, incoming);
+  assert.equal(merged.scan_name, "Renamed scan");
+  assert.equal(merged.product, "Renamed product");
+  assert.equal(merged.execution_revision, 2);
+  assert.equal(merged.processed_candidates, 80);
+});
+
+test("legacy scan snapshots normalize display names and metadata revisions", () => {
+  const normalized = runtime.normalizeScanStatus({ scan_id: "old", status: "complete", project_id: "Original" });
+  assert.equal(normalized.scan_name, "Original");
+  assert.equal(normalized.metadata_revision, 0);
+});
+
 test("new execution counters may drop after a pool-only update announces the revision", () => {
   const current = { scan_id: "s", execution_revision: 2, status: "complete", progress: 1,
     processed_candidates: 100, total_candidates: 100, opencode_pool: null };

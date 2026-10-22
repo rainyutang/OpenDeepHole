@@ -561,6 +561,8 @@ export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
 export interface ScanStatus {
   scan_id: string;
   execution_revision?: number;
+  scan_name: string;
+  metadata_revision: number;
   project_id: string;
   project_path: string;
   code_scan_path: string;
@@ -750,6 +752,7 @@ export interface ScanSummary {
   scan_mode?: string;
   threat_analysis_enabled: boolean;
   scan_name: string;
+  metadata_revision: number;
   product: string;
   validation_environment: string;
   knowledge_base_enabled: boolean;
@@ -776,6 +779,18 @@ export interface ScanSummary {
   username?: string;
   agent_name?: string;
   agent_online?: boolean;
+}
+
+export interface ScanMetadata {
+  scan_id: string;
+  scan_name: string;
+  product: string;
+  metadata_revision: number;
+}
+
+export interface ScanMetadataUpdate {
+  scan_name?: string;
+  product?: string;
 }
 
 export interface ScanSummaryPage {

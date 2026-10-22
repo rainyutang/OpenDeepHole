@@ -20,7 +20,7 @@ import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditR
 import { useCandidateAuditResults } from "../features/auditResults/useAuditResults";
 import { useAuditNavigation, useListFocus } from "../auditNavigation";
 import type { AuditTarget, ListFocusRequest } from "../auditNavigation";
-import type { CandidateAuditTaskResult } from "../types";
+import type { CandidateAuditTaskResult, ScanMetadata } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -40,6 +40,7 @@ import {
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 import ScanShareButton from "./ScanShareButton";
+import EditScanMetadataDialog from "./EditScanMetadataDialog";
 import { isSharedScan } from "../api/client";
 import { ThemeToggle } from "./ThemeToggle";
 import {
@@ -47,6 +48,7 @@ import {
   isOlderScanExecution,
   scanExecutionRevision,
   mergeScanOverview,
+  mergeScanMetadata,
   mergeIndexedVulnerabilities,
   mergePatternTasks,
   mergeScanSnapshot,
@@ -723,6 +725,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   const [threatAnalysisResultTab, setThreatAnalysisResultTab] = useState<ThreatAnalysisResultTab>("valueAssets");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [scanInfoOpen, setScanInfoOpen] = useState(false);
+  const [editingScan, setEditingScan] = useState<Pick<ScanMetadata, "scan_id" | "scan_name" | "product"> | null>(null);
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -1006,6 +1009,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     pendingInitialOpenCodePoolRef.current = undefined;
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
+    setEditingScan(null);
     setFpReview(null);
     setFpReviewHydrated(false);
     setIndexStatus(null);
@@ -1997,7 +2001,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 lg:flex">
       <ScanDetailSidebar
         mobileOpen={sidebarOpen}
-        scanLabel={scan.product || scan.project_id || scan.scan_id}
+        scanLabel={scan.product || scan.scan_name || scan.project_id || scan.scan_id}
         flow={flowModel}
         activeTab={activeTab}
         issueCount={issueCount}
@@ -2419,6 +2423,19 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         <ScanInformationPanel
           scan={scan}
           onClose={() => setScanInfoOpen(false)}
+          onEdit={!sharedView && !isPublicScan(scanId) ? () => setEditingScan({
+            scan_id: scan.scan_id,
+            scan_name: scan.scan_name || scan.project_id,
+            product: scan.product,
+          }) : undefined}
+        />
+      )}
+      {editingScan && (
+        <EditScanMetadataDialog
+          scan={editingScan}
+          onSaved={(metadata) => setScan((previous) => previous?.scan_id === metadata.scan_id
+            ? mergeScanMetadata(previous, { ...previous, ...metadata }) : previous)}
+          onClose={() => setEditingScan(null)}
         />
       )}
 
@@ -3578,9 +3595,11 @@ function scanModeLabel(mode?: string): string {
 function ScanInformationPanel({
   scan,
   onClose,
+  onEdit,
 }: {
   scan: ScanStatusType;
   onClose: () => void;
+  onEdit?: () => void;
 }) {
   const engines = effectiveMiningEngines(scan);
   const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
@@ -3603,7 +3622,7 @@ function ScanInformationPanel({
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200">扫描信息</h3>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              本页展示创建扫描时固化的基本信息和流程配置，不随当前 Agent 配置变化。
+              {onEdit ? "产品名和扫描名称可编辑；" : "本页展示最新的产品名和扫描名称；"}流程配置保留创建扫描时的快照，不随当前 Agent 配置变化。
             </p>
           </div>
           <button
@@ -3620,8 +3639,13 @@ function ScanInformationPanel({
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
           <ScanInformationSection title="基本信息">
+            {onEdit && (
+              <div className="mb-3 flex justify-end">
+                <button type="button" onClick={onEdit} className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800">编辑名称</button>
+              </div>
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
-              <ScanInformationField label="扫描名称" value={scan.project_id || "未记录"} />
+              <ScanInformationField label="扫描名称" value={scan.scan_name || scan.project_id || "未记录"} />
               <ScanInformationField label="扫描 ID" value={scan.scan_id} mono />
               <ScanInformationField label="创建时间" value={formatDateTime(scan.created_at)} />
               <ScanInformationField label="Agent" value={scan.agent_name || "未记录"} />
@@ -4483,7 +4507,7 @@ function ScanOverview({
             <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">当前扫描</div>
             <h2 className="mt-1 text-xl font-semibold text-white">{currentStage}</h2>
             <p className="mt-1 text-sm text-slate-400">
-              {scan.product || scan.project_id || scan.scan_id}
+              {scan.product || scan.scan_name || scan.project_id || scan.scan_id}
               {scan.validation_method_label && (
                 <span className="ml-3 border-l border-slate-700 pl-3">
                   验证方法：<span className="text-slate-300">{scan.validation_method_label}</span>

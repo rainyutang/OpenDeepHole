@@ -390,6 +390,28 @@ const progressFields = [
   "static_total_files", "static_scanned_files", "static_analysis_done",
 ] as const;
 
+interface ScanMetadataState {
+  scan_id: string;
+  scan_name?: string;
+  product?: string;
+  metadata_revision?: number;
+}
+
+/** Labels have their own revision and must not gate newer runtime progress. */
+export function mergeScanMetadata<T extends ScanMetadataState>(
+  previous: ScanMetadataState | null | undefined,
+  incoming: T,
+): T {
+  if (previous?.scan_id !== incoming.scan_id
+    || (incoming.metadata_revision ?? 0) >= (previous.metadata_revision ?? 0)) return incoming;
+  return {
+    ...incoming,
+    scan_name: previous.scan_name,
+    product: previous.product,
+    metadata_revision: previous.metadata_revision,
+  };
+}
+
 /** Merge a GET without letting a response started before a live update undo it. */
 export function mergeScanSnapshot(
   previous: ScanStatus | null,
@@ -397,7 +419,7 @@ export function mergeScanSnapshot(
   requestedFrom?: ScanStatus | null,
 ): ScanStatus {
   if (previous?.scan_id !== incoming.scan_id) return incoming;
-  if (isOlderScanExecution(previous, incoming)) return previous;
+  if (isOlderScanExecution(previous, incoming)) return mergeScanMetadata(incoming, previous);
   const newerExecution = (scanExecutionRevision(incoming) ?? 0) > (scanExecutionRevision(previous) ?? 0);
   const updatedDuringRequest = requestedFrom !== undefined && !newerExecution && (
     requestedFrom?.scan_id !== previous.scan_id
@@ -405,7 +427,7 @@ export function mergeScanSnapshot(
     || progressFields.some((key) => previous[key] !== requestedFrom?.[key])
   );
   const runtime = updatedDuringRequest ? previous : incoming;
-  return {
+  return mergeScanMetadata(previous, {
     ...incoming,
     ...Object.fromEntries(progressFields.map((key) => [key, runtime[key]])),
     execution_revision: scanExecutionRevision(runtime) ?? scanExecutionRevision(previous),
@@ -425,7 +447,7 @@ export function mergeScanSnapshot(
     // Overview snapshots omit artifacts; null does not delete a loaded result.
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
     threat_pattern_audit_tasks: mergePatternTasks(previous.threat_pattern_audit_tasks ?? [], incoming.threat_pattern_audit_tasks ?? []),
-  };
+  });
 }
 
 export function mergeScanOverview(
@@ -471,6 +493,8 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     ...value,
     scan_id: value.scan_id,
     execution_revision: nullableFiniteNumber(value.execution_revision) ?? undefined,
+    scan_name: text(value.scan_name) || text(value.project_id),
+    metadata_revision: Math.max(0, nullableFiniteNumber(value.metadata_revision) ?? 0),
     project_id: text(value.project_id),
     project_path: text(value.project_path),
     code_scan_path: text(value.code_scan_path),
