@@ -33,6 +33,7 @@ result = await run_opencode_task(
     prompt=prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,
+    json_repair_output_prompt="answer 保留原始结论及已有 Markdown 格式。",
     invalid_json_retry_count=2,
     invalid_json_retry_prompt=retry_prompt,
     file_write_allowlist=None,
@@ -62,6 +63,7 @@ result = await run_opencode_task(
 | `prompt` | `str` | 必填 | 发送给模型的任务提示词，不能是空字符串或只包含空白。组件会原样发送该字符串，不会因 `output_schema` 自动追加或改写内容。 |
 | `required_capability` | `Literal["low", "high"]` | 必填 | 模型池所需的能力等级，只接受 `low` 或 `high`。 |
 | `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会先解析模型最终文本，必要时再检查本次消息由内置文件工具写入的文件，并将匹配值写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
+| `json_repair_output_prompt` | `str` 或 `None` | `None` | 独立 JSON 修复 Session 的补充输出要求，例如保留报告字段内的 Markdown、换行和代码围栏。`None`、空串或纯空白不追加；非空字符串原样追加，非字符串报类型错误。不会修改原始任务或同 Session 纠正提示词。 |
 | `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时的恢复开关与原 Session 纠正上限，必须大于或等于 `0`。大于 `0` 时先新建一次低能力格式匹配任务，再最多在原 Session 追加该次数的纠正消息；`0` 同时关闭这两层恢复。该参数不控制 fresh Session 重试次数。 |
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 本次 Session 额外允许写入并默认保留的文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径自身及所有后代会获得 `read`、`external_directory` 和 `edit` 权限。不允许通配符或文件系统根目录。 |
@@ -135,6 +137,8 @@ Task Agent 任务及其 Session，不会停止由其它扫描共享的 Serve 或
 `work_dir` 始终是隐式白名单；显式白名单及其后代也默认保留。本轮由受管文件工具确认新建、但位于有效白名单之外的文件会在任意位置删除，包括执行失败、取消或进入后续恢复时。若某个本轮新建文件被实际采用为符合 `output_schema` 的结构化结果，它会在解析后强制删除，即使位于白名单中；其它合法但未采用的文件仍按普通白名单处理。已有文件即使被修改或被采用为结果也不会删除或恢复。未传 Schema 时不解析文件 JSON，但仍跟踪和清理非白名单新文件；自定义 MCP 的未知文件副作用不纳入该机制。
 
 若文本和文件仍不符合 Schema，且 `invalid_json_retry_count > 0`，组件先把最后写入的非空文件内容（没有时使用最终文本）交给一个全新、禁用全部工具的格式匹配 Session。该任务以 `required_capability="low"` 调度并优先选择满足要求的最低能力候选，因此允许使用配置为低能力的模型；候选始终来自当前已启用且处于生效时间窗的模型。提示词要求只修复格式、不得增删或改写业务内容；原文缺少必需语义、映射有歧义或与 Schema 完全无关时，必须返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不能强制生成。格式匹配成功时只采用其 `structured`，公开结果继续保留原业务 Session、原文本和原模型。格式匹配失败后，组件才在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息；仍失败则进入既有 fresh Session 业务重试。
+
+`json_repair_output_prompt` 只在独立格式匹配 Session 中使用：非空文本追加在 Schema 和原始结果之前，说明 JSON 字段的内容表达格式；JSON 外层仍只返回一个 JSON 值，字段内可以保留要求的 Markdown。该要求不允许补写缺失事实。组件不会将原始任务、系统提示词或 `invalid_json_retry_prompt` 自动传入格式匹配 Session，也不会据此修改任何业务提示词。未设置时修复提示词保持原文；未启用 `output_schema` 或关闭 JSON 恢复时，此参数不触发任何额外调用。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型只有 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；未知值会在提交前被拒绝。Agent 自身使用的辅助任务类型属于内部实现，不作为公共调用指导的一部分。
 

@@ -23,6 +23,12 @@ VALUE_ASSET_CATEGORIES: tuple[tuple[str, str, str], ...] = (
     ("service", "服务资产", "服务"),
 )
 
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "返回价值资产 JSON 数组，使用 Schema 中的中文字段名。"
+    "资产名、资产类别、资产描述、攻击损失和判断为价值资产的原因均保留为字符串；"
+    "中文描述、原始资产类别及各资产项保持原样，不合并或补写资产。"
+)
+
 
 class ValueAssetStage:
     task_type = "value_asset_map"
@@ -52,6 +58,7 @@ class ValueAssetStage:
             "input_files": [str(path) for path in input_files],
             "output_path": str(self.layout.value_assets_raw_dir / f"{task_id}.json"),
             "output_schema": VALUE_ASSETS_SCHEMA,
+            "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
             "metadata": {"stage": "value_assets"},
             "priority": 20,
         }
@@ -78,6 +85,7 @@ class ValueAssetStage:
                     "input_files": [str(path) for path in input_files],
                     "output_path": str(self.layout.value_assets_raw_dir / f"{task_id}.json"),
                     "output_schema": VALUE_ASSETS_SCHEMA,
+                    "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                     "metadata": {
                         "stage": "value_assets",
                         "phase": "category_map",

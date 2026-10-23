@@ -228,6 +228,12 @@ def _normalize_required_bash_success_markers(
     return tuple(normalized)
 
 
+def _normalize_json_repair_output_prompt(value: str | None) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise TypeError("OpenCode json_repair_output_prompt must be a string or None")
+    return value if value is not None and value.strip() else None
+
+
 async def run_opencode_task(
     *,
     task_name: str,
@@ -235,6 +241,7 @@ async def run_opencode_task(
     prompt: str,
     required_capability: Literal["low", "high"],
     output_schema: dict[str, Any] | None = None,
+    json_repair_output_prompt: str | None = None,
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
@@ -262,6 +269,7 @@ async def run_opencode_task(
         prompt=prompt,
         required_capability=required_capability,
         output_schema=output_schema,
+        json_repair_output_prompt=json_repair_output_prompt,
         invalid_json_retry_count=invalid_json_retry_count,
         invalid_json_retry_prompt=invalid_json_retry_prompt,
         file_write_allowlist=file_write_allowlist,
@@ -307,6 +315,7 @@ async def _run_opencode_task_local(
     prompt: str,
     required_capability: Literal["low", "high"],
     output_schema: dict[str, Any] | None = None,
+    json_repair_output_prompt: str | None = None,
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: _PathValues | None = None,
@@ -340,6 +349,9 @@ async def _run_opencode_task_local(
         raise ValueError("OpenCode required_capability must be 'low' or 'high'")
     if output_schema is not None and not isinstance(output_schema, dict):
         raise TypeError("OpenCode output_schema must be a dict or None")
+    json_repair_output_prompt = _normalize_json_repair_output_prompt(
+        json_repair_output_prompt
+    )
     retry_count = int(invalid_json_retry_count)
     if retry_count < 0:
         raise ValueError("OpenCode invalid_json_retry_count cannot be negative")
@@ -413,6 +425,7 @@ async def _run_opencode_task_local(
             prompt=normalized_prompt,
             required_capability=capability,
             output_schema=output_schema,
+            json_repair_output_prompt=json_repair_output_prompt,
             invalid_json_retry_count=retry_count,
             invalid_json_retry_prompt=invalid_json_retry_prompt,
             file_write_allowlist=normalized_file_write_allowlist,

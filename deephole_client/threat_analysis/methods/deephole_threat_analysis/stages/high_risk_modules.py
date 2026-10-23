@@ -43,6 +43,13 @@ HIGH_RISK_MAP_CATEGORIES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "返回高风险模块 JSON 数组，使用 Schema 中的中文字段名。"
+    "保留模块名称、代码目录、面临威胁和判断原因；代码目录保持原有字符串或数组形式。"
+    "各项“是否涉及”和“是否外部暴露面”保留原始“是”或“否”字符串，"
+    "不要改成布尔值，不合并或补写模块。"
+)
+
 
 class HighRiskModuleStage:
     map_task_type = "high_risk_module_map"
@@ -78,6 +85,7 @@ class HighRiskModuleStage:
                         "input_files": [str(path) for path in input_files],
                         "output_path": str(self.layout.high_risk_raw_dir / f"{task_id}.json"),
                         "output_schema": HIGH_RISK_MODULES_SCHEMA,
+                        "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                         "metadata": {
                             "stage": "high_risk_modules",
                             "phase": "map",
@@ -103,6 +111,7 @@ class HighRiskModuleStage:
                         "input_files": [str(path) for path in input_files],
                         "output_path": str(self.layout.high_risk_raw_dir / f"{task_id}.json"),
                         "output_schema": HIGH_RISK_MODULES_SCHEMA,
+                        "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                         "metadata": {
                             "stage": "high_risk_modules",
                             "phase": "map",
@@ -130,6 +139,7 @@ class HighRiskModuleStage:
             "input_files": [str(path) for path in candidate_files],
             "output_path": str(self.layout.high_risk_final_dir / f"{task_id}.json"),
             "output_schema": HIGH_RISK_MODULES_SCHEMA,
+            "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
             "metadata": {"stage": "high_risk_modules", "phase": "merge"},
             "priority": 30,
         }

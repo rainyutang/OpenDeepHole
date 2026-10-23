@@ -35,6 +35,12 @@ logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
 
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "返回包含 results 数组的 JSON 对象；逐项保留 candidate_id、is_memory_api、"
+    "role、pair_with、confidence、reason，不增删候选项。"
+    "candidate_id 和函数名保持原样，pair_with 的空字符串保持为空，reason 保留简短原因。"
+)
+
 _MEMORY_API_BATCH_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -478,6 +484,7 @@ async def _run_memory_api_batch(
             prompt=prompt,
             required_capability="high",
             output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,
+            json_repair_output_prompt=_JSON_REPAIR_OUTPUT_PROMPT,
         )
     if result.status == "timeout":
         raise asyncio.TimeoutError(result.text)

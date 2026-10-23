@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from deephole_client.fp_review.prompts import (
+    FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT,
     build_skill_prompt,
     completed_stage_reports,
     original_vulnerability_report,
@@ -396,6 +397,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
                 prompt=prompt,
                 required_capability=capability,
                 output_schema=schema,
+                json_repair_output_prompt=FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT,
                 invalid_json_retry_count=retry_count,
                 invalid_json_retry_prompt=_retry_instruction(schema),
                 config_path=kwargs.get("task_agent_config"),

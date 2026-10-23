@@ -29,6 +29,7 @@ result = await run_opencode_task(
     prompt=prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,
+    json_repair_output_prompt="报告字段保留 Markdown 字符串、代码围栏和换行。",
     invalid_json_retry_count=2,
     invalid_json_retry_prompt=retry_prompt,
     file_write_allowlist=None,
@@ -57,6 +58,7 @@ result = await run_opencode_task(
 | `prompt` | `str` | 必填 | 本次原样发送给模型的提示词；服务不会根据 Schema 追加或改写内容 |
 | `required_capability` | `"low" \| "high"` | 必填 | 调用方声明的能力；嵌入 Agent 时，已分类阶段由 Web 阶段策略覆盖 |
 | `output_schema` | `dict \| None` | `None` | 最终文本或本次消息所写文件中的 JSON 必须匹配的 JSON Schema；只用于本地解析和校验 |
+| `json_repair_output_prompt` | `str \| None` | `None` | 仅追加到独立 JSON 修复 Session 的输出要求；不修改原始任务或同 Session 纠正提示词。`None`、空串和纯空白不追加，非空文本原样保留，非字符串报类型错误 |
 | `invalid_json_retry_count` | `int` | `2` | JSON 非法时在原 Session 追加纠正提示的次数 |
 | `invalid_json_retry_prompt` | `str \| None` | `None` | 自定义 JSON 纠正提示词；非空字符串会原样重复发送，`None` 使用内置中文默认值 |
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放写权限并默认保留的文件或目录；相对路径以 `project_dir` 为基准，绝对路径可位于项目外 |
@@ -415,6 +417,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 3. 格式匹配提示只允许修复 JSON 语法、围栏、引号、转义、逗号及无歧义且不改变语义的组织/字段映射，禁止新增、删除、推断、补全、概括、翻译或改写业务事实。原文缺少 Schema 必需语义、映射有歧义或与 JSON/Schema 完全无关时，模型必须只返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不得强制套用 Schema。
 4. 格式匹配输出通过 Schema 后，只把该 JSON 作为 `structured`；公开结果仍返回原业务 `session_id`、原 `text`、原 `model` 和原输出来源。格式匹配失败、返回固定非法值或请求异常时，服务重新取得符合原业务能力要求的已启用模型 Lease，并在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息。
 5. 原 Session 纠正仍失败后，才按 `serve.max_retries` 重新排队并创建 fresh 业务 Session。格式不合规与固定非法值属于健康中性失败；格式匹配或纠正请求本身发生 Provider/Auth/API 失败或超时时，仍按真实请求结果更新对应模型健康状态。
+
+调用方可以通过 `json_repair_output_prompt` 单独提供字段含义和输出格式要求，例如报告字段使用 Markdown 字符串、保留代码围栏、换行、源码行号及报告注释。非空内容只追加到独立格式匹配提示词的 Schema 和原始结果之前，不传递完整原始任务，也不自动复用 `invalid_json_retry_prompt`；默认或空白内容保持原有修复提示词不变。补充要求明确区分 JSON 外层包装与字段内 Markdown，仍禁止补写原始结果中不存在的事实。业务调用的首次提示词、系统提示词及原 Session 纠正提示词均不受此参数影响。普通威胁分析的价值资产、高风险模块和攻击树任务通过任务字典中的同名字段交给 `TaskAgentSubmitter` 透传；轻量威胁分析等 `output_schema=None` 的文件产物任务不启用该修复过程，继续使用已有宿主校验。
 
 独立格式匹配和原 Session 纠正会通过模型池上下文的 `task_phase` 标记当前恢复阶段，但任务队列及完成历史中的 `prompt`、`prompt_length` 始终保留调用方首次提交的业务 Prompt 及其长度，不会替换为内部格式匹配/纠正提示或阶段占位符。
 

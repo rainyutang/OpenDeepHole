@@ -713,6 +713,8 @@ def test_static_group_audit_honors_configured_concurrency(tmp_path: Path) -> Non
 
         async def run_task(**kwargs):
             nonlocal active, maximum_active
+            assert "Markdown" in kwargs["json_repair_output_prompt"]
+            assert kwargs["json_repair_output_prompt"] not in kwargs["prompt"]
             task_names.append(kwargs["task_name"])
             prompts.append(kwargs["prompt"])
             active += 1
@@ -916,11 +918,13 @@ def test_threat_audit_delegates_baseline_to_threat_pattern_then_matches_versions
             if kwargs["task_name"].startswith(
                 "multi-version-threat-difference-"
             ):
+                assert "Markdown" in kwargs["json_repair_output_prompt"]
                 return SimpleNamespace(
                     status="success",
                     structured=[],
                     output_source={},
                 )
+            assert "affected_versions" in kwargs["json_repair_output_prompt"]
             return SimpleNamespace(
                 status="success",
                 structured={

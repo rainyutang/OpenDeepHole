@@ -23,6 +23,12 @@ from task_agent.output_format import with_local_timestamp
 
 EmitFn = Callable[[str, str], Awaitable[None]]
 
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "返回包含 results 数组的 JSON 对象；每个结果保留 file、line、function、"
+    "vuln_type、description、rationale。文件路径、行号、函数和漏洞类型保持原样，"
+    "description、rationale 保留原有说明；原始 results 为空时仍返回空数组。"
+)
+
 
 def _result_payloads(data: Any) -> list[dict]:
     if isinstance(data, dict) and isinstance(data.get("results"), list):
@@ -156,6 +162,7 @@ async def hunt_variants(
                     prompt=prompt,
                     required_capability="high",
                     output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
+                    json_repair_output_prompt=_JSON_REPAIR_OUTPUT_PROMPT,
                 )
             if result.status == "timeout":
                 raise asyncio.TimeoutError(result.text)

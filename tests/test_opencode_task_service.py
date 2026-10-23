@@ -43,6 +43,7 @@ from task_agent.task_service import (
     OpenCodeTaskService,
     OpenCodeTaskSpec,
     _SessionRuntime,
+    _json_format_prompt,
     _permission_path_patterns,
     _runtime_with_permissions,
     _runtime_with_skill_paths,
@@ -474,6 +475,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "prompt",
         "required_capability",
         "output_schema",
+        "json_repair_output_prompt",
         "invalid_json_retry_count",
         "invalid_json_retry_prompt",
         "file_write_allowlist",
@@ -541,6 +543,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 prompt="return json",
                 required_capability="high",
                 output_schema=SCHEMA,
+                json_repair_output_prompt=" \n报告字段保留 Markdown。\n ",
                 invalid_json_retry_count=4,
                 invalid_json_retry_prompt="  custom retry prompt  ",
                 file_write_allowlist=[
@@ -579,6 +582,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         spec = service.run_task.await_args.args[0]
         assert spec.directory == tmp_path.resolve()
         assert spec.required_capability == "high"
+        assert spec.json_repair_output_prompt == " \n报告字段保留 Markdown。\n "
         assert spec.output_retry_count == 4
         assert spec.output_retry_prompt == "  custom retry prompt  "
         assert spec.file_write_allowlist == (
@@ -931,6 +935,45 @@ def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
                 )
 
     asyncio.run(run())
+
+
+def test_json_repair_output_prompt_rejects_non_strings(tmp_path: Path) -> None:
+    async def run() -> None:
+        with pytest.raises(TypeError, match="json_repair_output_prompt.*string"):
+            await run_opencode_task(
+                task_name="invalid repair requirements",
+                task_type="vulnerability_mining",
+                prompt="original task",
+                required_capability="low",
+                json_repair_output_prompt=123,  # type: ignore[arg-type]
+            )
+
+    asyncio.run(run())
+    with pytest.raises(TypeError, match="json_repair_output_prompt.*string"):
+        OpenCodeTaskService._normalize_spec(OpenCodeTaskSpec(
+            task_name="invalid internal repair requirements",
+            prompt="original task",
+            directory=tmp_path,
+            json_repair_output_prompt=123,  # type: ignore[arg-type]
+        ))
+
+
+@pytest.mark.parametrize("value", [None, "", " \n\t "])
+def test_empty_json_repair_output_prompt_preserves_default(
+    tmp_path: Path, value: str | None,
+) -> None:
+    spec = OpenCodeTaskService._normalize_spec(OpenCodeTaskSpec(
+        task_name="optional repair requirements",
+        prompt=" \noriginal task\n ",
+        directory=tmp_path,
+        json_repair_output_prompt=value,
+    ))
+
+    assert spec.prompt == " \noriginal task\n "
+    assert spec.json_repair_output_prompt is None
+    assert _json_format_prompt(SCHEMA, "raw result", json_repair_output_prompt=value) == (
+        _json_format_prompt(SCHEMA, "raw result")
+    )
 
 
 def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None:
@@ -1867,6 +1910,99 @@ def test_invalid_written_json_is_formatter_source_and_retained_in_work_dir(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("source_kind", ["text", "file"])
+def test_json_formatter_receives_only_explicit_output_requirements(
+    tmp_path: Path, source_kind: str,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "report.md"
+        original_prompt = " \n原始任务的私有上下文：读取源码并审计。\n "
+        output_prompt = " \nJSON_REPAIR_ONLY：report 使用中文 Markdown，保留表格与代码围栏。\n "
+        correction_prompt = "SAME_SESSION_ONLY：请重新输出原始任务结果。"
+        markdown = (
+            "## 问题\n"
+            '路径 `src\\reader.c` 未校验 "length"。\n\n'
+            "| 字段 | 状态 |\n| --- | --- |\n| length | 缺少检查 |\n\n"
+            "```c\n12 | memcpy(dst, src, length);\n```\n\n"
+            "- **修复建议**：先校验边界。"
+        )
+        schema = {
+            "type": "object",
+            "properties": {"report": {"type": "string"}},
+            "required": ["report"],
+            "additionalProperties": False,
+        }
+        business_text = markdown if source_kind == "text" else "报告已写入 report.md"
+        calls: list[dict] = []
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = "ses-report" if index == 0 else "ses-report-formatter"
+            callback = kwargs["on_session_id"](session_id)
+            if hasattr(callback, "__await__"):
+                await callback
+            if index == 0 and source_kind == "file":
+                output_file.write_text(markdown, encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="write-markdown-report",
+                    path=str(output_file),
+                    created=True,
+                ))
+            text = (
+                business_text if index == 0
+                else json.dumps({"report": markdown}, ensure_ascii=False)
+            )
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id=f"msg-report-{index}",
+                lines=[text],
+                text=text,
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="recover markdown report",
+                prompt=original_prompt,
+                directory=tmp_path,
+                output_schema=schema,
+                json_repair_output_prompt=output_prompt,
+                output_retry_count=1,
+                output_retry_prompt=correction_prompt,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.session_id == "ses-report"
+        assert result.text == business_text
+        assert result.structured == {"report": markdown}
+        assert len(calls) == 2
+        assert calls[0]["prompt"] == original_prompt
+        formatter = calls[1]
+        assert output_prompt in formatter["prompt"]
+        assert original_prompt not in formatter["prompt"]
+        assert json.dumps(original_prompt, ensure_ascii=False) not in formatter["prompt"]
+        assert correction_prompt not in formatter["prompt"]
+        assert json.dumps(correction_prompt, ensure_ascii=False) not in formatter["prompt"]
+        assert formatter["prompt"].index(output_prompt) < formatter["prompt"].index("目标 JSON Schema：")
+        assert json.dumps(markdown, ensure_ascii=False) in formatter["prompt"]
+        assert formatter["session_id"] is None
+        assert formatter["disable_all_tools"] is True
+        assert formatter["permissions"] == []
+        assert formatter["mcp_tools"] == ()
+        assert formatter["system_prompt"] == ""
+        if source_kind == "file":
+            assert output_file.read_text(encoding="utf-8") == markdown
+
+    asyncio.run(run())
+
+
 def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
     async def run() -> None:
         work_dir = tmp_path / "work"
@@ -1956,6 +2092,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_time
                     timeout_seconds=77,
                     idle_timeout_seconds=23,
                     output_schema=SCHEMA,
+                    json_repair_output_prompt="JSON_REPAIR_ONLY：保留字段内容和格式。",
                     output_retry_count=2,
                     attempt=0,
                 ))
@@ -1985,6 +2122,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_time
         assert calls[0]["prompt"] == "initial prompt"
         formatter_prompt = calls[1]["prompt"]
         assert "你是一个只做格式转换的 JSON 修复器" in formatter_prompt
+        assert "JSON_REPAIR_ONLY：保留字段内容和格式。" in formatter_prompt
         assert json.dumps("not json", ensure_ascii=False) in formatter_prompt
         assert "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__" in formatter_prompt
         assert calls[1]["disable_all_tools"] is True
@@ -2176,6 +2314,7 @@ def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> N
         )
         patches = _service_patches(manager)
         custom_prompt = " \n只按我写的方式重新输出\n "
+        repair_output_prompt = "JSON_REPAIR_ONLY：保留已有字段内容。"
         with (
             patches[0],
             patches[1],
@@ -2190,6 +2329,7 @@ def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> N
                 prompt="original prompt",
                 directory=tmp_path,
                 output_schema=SCHEMA,
+                json_repair_output_prompt=repair_output_prompt,
                 output_retry_count=2,
                 output_retry_prompt=custom_prompt,
                 attempt=0,
@@ -2202,6 +2342,8 @@ def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> N
         ]
         assert calls[0]["prompt"] == "original prompt"
         assert "你是一个只做格式转换的 JSON 修复器" in calls[1]["prompt"]
+        assert repair_output_prompt in calls[1]["prompt"]
+        assert custom_prompt not in calls[1]["prompt"]
         assert [call["session_id"] for call in calls] == [
             None,
             None,

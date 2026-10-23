@@ -24,6 +24,14 @@ from threat_analysis_harness.stages.base import (
 )
 
 
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "返回包含 attack_trees 数组的 JSON 对象，保留 value_asset、nodes、edges、"
+    "attack_paths 的嵌套结构和中文描述。所有节点、边、路径、攻击模式及模块引用"
+    "保持原样，尤其保留 node_id、module_id、路径节点顺序及模块关联；"
+    "布尔值和 null 保持原类型，不新增、重编号或补全引用。"
+)
+
+
 class AttackTreeStage:
     task_type = "attack_tree_by_asset"
     skill_name = "attack-tree-by-asset"
@@ -67,6 +75,7 @@ class AttackTreeStage:
                     + [str(path) for path in context_files],
                     "output_path": str(self.layout.attack_trees_raw_dir / f"{task_id}.json"),
                     "output_schema": task_output_schema,
+                    "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                     "metadata": {
                         "stage": "attack_trees",
                         "asset_name": asset.get("资产名") or asset.get("asset_name"),

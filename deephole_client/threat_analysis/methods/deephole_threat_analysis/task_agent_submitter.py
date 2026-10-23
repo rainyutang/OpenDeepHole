@@ -89,6 +89,7 @@ class TaskAgentSubmitter:
                     default=self.required_capability,
                 ),
                 output_schema=output_schema,
+                json_repair_output_prompt=task.get("json_repair_output_prompt"),
                 invalid_json_retry_count=int(
                     task.get("invalid_json_retry_count", self.invalid_json_retry_count)
                 ),

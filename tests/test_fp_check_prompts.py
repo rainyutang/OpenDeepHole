@@ -155,6 +155,8 @@ class FpCheckPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"decision"', standard_prompt)
         self.assertIn("output_schema", invoke.await_args_list[0].kwargs)
         for call in invoke.await_args_list:
+            self.assertIn("Markdown", call.kwargs["json_repair_output_prompt"])
+            self.assertNotIn(call.kwargs["json_repair_output_prompt"], call.kwargs["prompt"])
             self.assertEqual(
                 _prompt_schema(call.kwargs["prompt"]),
                 call.kwargs["output_schema"],

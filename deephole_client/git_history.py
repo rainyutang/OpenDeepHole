@@ -30,6 +30,11 @@ from task_agent.task_service import (
 
 # 单条提交 diff 注入 prompt 的字符上限，避免超长提交撑爆上下文
 _DIFF_CHAR_LIMIT = 16000
+_JSON_REPAIR_OUTPUT_PROMPT = (
+    "保留 security_related 的布尔结论及 pattern、lens_hint、files、rationale 字段。"
+    "pattern 保留问题模式描述，rationale 保留判断理由；files 保留原始文件路径数组。"
+    "security_related=false 时允许其它字段保留原有空值，不补写安全问题。"
+)
 _LENS_VALUES = {
     "memory", "integer", "race", "injection", "authn", "crypto", "dos", "infoleak",
 }
@@ -241,6 +246,7 @@ async def mine_history(
                     prompt=prompt,
                     required_capability="high",
                     output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
+                    json_repair_output_prompt=_JSON_REPAIR_OUTPUT_PROMPT,
                 )
             if result.status == "timeout":
                 raise asyncio.TimeoutError(result.text)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import tempfile
 import threading
@@ -147,6 +148,56 @@ def test_adapter_loads_selected_method_under_native_package_name() -> None:
 
     assert Path(module.__file__).resolve() == expected
     assert callable(module.run_threat_analysis)
+
+
+@pytest.mark.parametrize("include_requirements", [True, False])
+def test_native_tasks_forward_repair_requirements_without_changing_prompt(
+    tmp_path: Path, include_requirements: bool,
+) -> None:
+    native = threat_analysis_runner._load_implementation()
+    value_assets = importlib.import_module(f"{native.__name__}.stages.value_assets")
+    high_risk = importlib.import_module(f"{native.__name__}.stages.high_risk_modules")
+    attack_trees = importlib.import_module(f"{native.__name__}.stages.attack_trees")
+    submitter_module = importlib.import_module(f"{native.__name__}.task_agent_submitter")
+    layout = native.ThreatAnalysisLayout(tmp_path / "analysis")
+    unused_submit = lambda *args, **kwargs: []
+    asset_stage = value_assets.ValueAssetStage(submit_tasks=unused_submit, layout=layout)
+    module_stage = high_risk.HighRiskModuleStage(submit_tasks=unused_submit, layout=layout)
+    tree_stage = attack_trees.AttackTreeStage(submit_tasks=unused_submit, layout=layout)
+    tasks = [
+        asset_stage.build_task(input_files=[tmp_path / "source"]),
+        *asset_stage.build_category_tasks(input_files=[tmp_path / "source"]),
+        *module_stage.build_map_tasks(input_batches=[[tmp_path / "source"]]),
+        *module_stage.build_map_tasks(
+            input_batches=[[tmp_path / "source"]], runtime_prompt="custom map task",
+        ),
+        module_stage.build_merge_task(candidate_files=[tmp_path / "candidates.json"]),
+        *tree_stage.build_tasks(
+            value_assets=[{"资产名": "凭据"}],
+            high_risk_modules=[],
+            high_risk_modules_file=tmp_path / "modules.json",
+        ),
+    ]
+    assert len({task["json_repair_output_prompt"] for task in tasks}) == 3
+    original_prompts = [submitter_module.build_task_agent_prompt(task) for task in tasks]
+    if not include_requirements:
+        for task in tasks:
+            task.pop("json_repair_output_prompt")
+    # Capture the service boundary; file persistence remains the submitter's job.
+    runner = AsyncMock(return_value=SimpleNamespace(
+        status="success", structured=[], session_id="ses-native", model="test/model", text="[]",
+    ))
+    submitter = native.TaskAgentSubmitter(run_opencode_task=runner)
+    results = asyncio.run(submitter.submit_tasks_async(tasks))
+
+    assert len(results) == len(tasks)
+    for task, prompt, call in zip(tasks, original_prompts, runner.await_args_list):
+        assert call.kwargs["prompt"] == prompt
+        assert call.kwargs["output_schema"] == task["output_schema"]
+        assert call.kwargs["json_repair_output_prompt"] == task.get("json_repair_output_prompt")
+        if include_requirements:
+            assert task["json_repair_output_prompt"] not in prompt
+        assert Path(task["output_path"]).with_suffix(".json.prompt.txt").read_text(encoding="utf-8") == prompt
 
 
 @pytest.mark.parametrize("use_standalone_config", [False, True])
@@ -437,6 +488,7 @@ def test_sync_component_can_call_async_task_agent_on_owner_loop() -> None:
         async def fake_local(**kwargs):
             observed["loop"] = asyncio.get_running_loop()
             observed["task_name"] = kwargs["task_name"]
+            observed["repair_output_prompt"] = kwargs["json_repair_output_prompt"]
             return OpenCodeResult(
                 session_id="session-1",
                 status="success",
@@ -452,6 +504,7 @@ def test_sync_component_can_call_async_task_agent_on_owner_loop() -> None:
                 task_type="threat_analysis",
                 prompt="inspect",
                 required_capability="high",
+                json_repair_output_prompt="保持数组及原始字段类型。",
             ))
 
         with patch("task_agent.api._run_opencode_task_local", new=fake_local):
@@ -461,6 +514,7 @@ def test_sync_component_can_call_async_task_agent_on_owner_loop() -> None:
         assert observed["loop"] is owner_loop
         assert observed["worker_thread"] != owner_thread
         assert observed["task_name"] == "native-sync-task"
+        assert observed["repair_output_prompt"] == "保持数组及原始字段类型。"
 
     asyncio.run(scenario())
 

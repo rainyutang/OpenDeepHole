@@ -10,6 +10,13 @@ from deephole_client.vulnerability_mining.engine_report import (
     build_engine_vulnerability_report,
 )
 
+FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT = (
+    "stage_markdown 及结果中已有的 vulnerability_report 使用中文 Markdown 字符串，"
+    "保留阶段报告的标题、论证、调用链、证据、表格、代码围栏和换行。"
+    "reason、evidence 等字段保留原文，枚举结论、布尔检查项及其对应关系保持原样；"
+    "不要把 Markdown 报告转换为对象或数组，也不要补写缺失的结论或证据。"
+)
+
 
 def original_vulnerability_report(value: Any) -> str:
     """Return the model-facing Markdown report for one vulnerability."""
@@ -83,6 +90,7 @@ def completed_stage_reports(
 
 
 __all__ = [
+    "FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT",
     "build_skill_prompt",
     "completed_stage_reports",
     "original_vulnerability_report",

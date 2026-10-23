@@ -117,6 +117,11 @@ def active_validation_snapshots() -> list[dict]:
         if not task.done()
     ]
 _SKILL_CREATOR_NAME = "deephole-skill-creator"
+_SKILL_CREATOR_JSON_REPAIR_OUTPUT_PROMPT = (
+    "skill_md 是完整的 SKILL.md 字符串，保留 YAML frontmatter、Markdown 标题、"
+    "列表、代码围栏、换行和缩进；scenarios_md 保留 Markdown 场景说明或原有空字符串；"
+    "summary 保留一句话说明。不要把文档内容转换成 JSON 对象或数组。"
+)
 
 
 def has_active_local_work() -> bool:
@@ -1780,6 +1785,7 @@ async def _run_skill_creator(
             prompt=prompt,
             required_capability="high",
             output_schema=output_schema,
+            json_repair_output_prompt=_SKILL_CREATOR_JSON_REPAIR_OUTPUT_PROMPT,
         )
     if result.status == "timeout":
         raise asyncio.TimeoutError(result.text)
