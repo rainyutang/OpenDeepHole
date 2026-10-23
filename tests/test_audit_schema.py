@@ -27,102 +27,19 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
         "line": 42,
         "description": "解析外部数据时缺少长度校验，可触发越界读取",
         "vuln_type": "越界读取（CWE-125）",
-        "attack_entry": "网络请求进入 handle_request",
-        "trigger_conditions": "攻击者提交长度字段大于实际负载的报文",
         "vulnerable_code": "src/parser.c:42 parse_payload\nvalue = payload[index];",
-        "root_cause": "使用外部长度前未验证缓冲区边界",
-        "call_chain": (
-            "- Entry: handle_request (src/server.c:12)\n"
-            "- Call Stack:\n"
-            "handle_request (src/server.c:12)\n"
-            f"  → {function} (src/parser.c:35)\n"
-            f"- Vulnerable Frame: {function} (src/parser.c:35)\n"
-            "- Source To Sink Stack:\n"
-            "request.length [SOURCE]\n"
-            f"  → {function} (src/parser.c:42) [SINK]"
-        ),
-        "impact": "机密性：可能泄露内存；完整性：无直接影响；可用性：可能崩溃",
+        "call_chain": f"```text\nhandle_request: src/server.c:12\n└── {function}: src/parser.c:42\n```",
+        "remediation": "读取前验证外部长度不超过实际负载和目标缓冲区容量。",
     }
 
 
-EXPECTED_FIELD_INSTRUCTIONS = """\
-## description
-一句话说明漏洞是什么（漏洞函数、漏洞类型、漏洞场景）、谁可以触发、会造成什么影响。
-
-## attack_entry
-描述这个漏洞的真实攻击入口：
-- 入口类型（HTTP route、RPC method、CLI 参数、文件解析、socket、IPC、插件 hook、后台任务、webhook 等）
-- 谁可以触发该入口，需要什么认证、权限、配置或环境前提
-- 攻击者可控输入从哪里进入，关键字段或参数是什么
-- 进入漏洞路径后的首个处理函数，以及从入口到漏洞函数的高层路径
-
-## trigger_conditions
-说明触发入口、身份前提、数据流和控制流。
-
-## vulnerable_code
-- Function:
-- File:
-- Lines:
-- Snippet:
-- Context:
-
-要求：
-- 必须明确写出漏洞函数名
-- 必须贴出函数漏洞代码片段，同时在代码片段中标注漏洞关键信息，在 `Context` 里补充必要上下文
-
-## root_cause
-详细解释漏洞成因：
-- 攻击者可控输入来自哪里
-- 经过了哪些转换或拼接
-- 哪个校验、编码、授权或隔离假设失效
-- 为什么这会导致真实可利用影响
-
-## call_chain
-- Entry:
-- Call Stack:
-- Vulnerable Frame:
-- Source To Sink Stack:
-
-要求：
-- 必须给出完整调用栈信息，从可触发入口一直写到漏洞函数
-- `Call Stack` 按时间顺序逐层展开，至少覆盖入口、关键中间函数、漏洞函数、sink
-- 如果某一层是条件分支、回调、虚函数分派、模板实例化或异步调度，要写清楚
-
-调用链的形式参考：
-
-CBTP_DhcpMsgProc (cbtp_msg.c:209)
-  → cbtpTopoChangedMsgProc (cbtp_event.c:744)
-    → cbtpGetBbuTopoInfo (cbtp_event.c:849)
-      → fnTomTOPOGetDhcpTopInfo [RRE_GPFN全局函数指针回调，当前唯一注册: TomTOPOGetDhcpTopInfo]
-      → cbtpArray2Str (cbtp_fsm.c:2790) [SINK: ulLength未校验即作为循环上界]
-
-## impact
-说明保密性、完整性、可用性或租户隔离方面的影响。"""
-
-
-def test_audit_field_instructions_match_public_schema_exactly() -> None:
-    assert CANDIDATE_FIELD_INSTRUCTIONS == EXPECTED_FIELD_INSTRUCTIONS
-    assert THREAT_FIELD_INSTRUCTIONS == EXPECTED_FIELD_INSTRUCTIONS
-
-    field_names = [
-        line.removeprefix("## ")
-        for line in EXPECTED_FIELD_INSTRUCTIONS.splitlines()
-        if line.startswith("## ")
-    ]
-    assert field_names == [
-        "description",
-        "attack_entry",
-        "trigger_conditions",
-        "vulnerable_code",
-        "root_cause",
-        "call_chain",
-        "impact",
-    ]
-    assert field_names == [
-        name
-        for name in VULNERABILITY_ITEM_SCHEMA["properties"]
-        if name in field_names
-    ]
+def test_audit_fields_follow_the_compact_report_contract() -> None:
+    expected = {
+        "confirmed", "severity", "file", "line", "function", "vuln_type",
+        "description", "call_chain", "vulnerable_code", "remediation",
+    }
+    assert set(VULNERABILITY_ITEM_SCHEMA["properties"]) == expected
+    assert CANDIDATE_FIELD_INSTRUCTIONS == THREAT_FIELD_INSTRUCTIONS
 
 
 @pytest.mark.parametrize(
@@ -146,13 +63,17 @@ def test_audit_field_instructions_match_public_schema_exactly() -> None:
 def test_audit_output_instructions_include_markdown_field_contract(
     instruction: str,
 ) -> None:
-    assert EXPECTED_FIELD_INSTRUCTIONS in instruction
-    assert instruction.index("## attack_entry") < instruction.index("## trigger_conditions")
-    assert instruction.index("## trigger_conditions") < instruction.index("## vulnerable_code")
-    assert instruction.index("## call_chain") < instruction.index("JSON Schema")
-    assert '"call_chain":{"type":"string","minLength":1}' in instruction
-    assert "必须使用 Markdown 字符串" in instruction
-    assert "整合为完整 Markdown 漏洞报告" in instruction
+    for label in ("问题", "调用链", "证据", "修复建议"):
+        assert label in instruction
+    for annotation in ("[报告注]", "[报告注·缺失校验]", "[报告注·问题点]"):
+        assert annotation in instruction
+    assert "└── func2: xxx.c:33" in instruction
+    assert "原始代码和行号" in instruction
+    assert "多条独立调用链时分别展示" in instruction
+    assert "它们之间的数据或状态关联" in instruction
+    assert "Markdown 字符串" in instruction
+    assert "标题" not in instruction
+    assert "attack_entry" not in instruction
 
 
 def test_candidate_output_instruction_requires_effective_guard_evidence() -> None:
@@ -205,9 +126,10 @@ def test_candidate_schema_rejects_invalid_false_result(update: dict) -> None:
         parse_llm_json_schema(json.dumps(value), VULNERABILITY_ITEM_SCHEMA)
 
 
-def test_candidate_schema_requires_all_confirmed_fields() -> None:
+@pytest.mark.parametrize("field", ["description", "call_chain", "vulnerable_code", "remediation"])
+def test_candidate_schema_requires_all_confirmed_fields(field: str) -> None:
     value = _confirmed_item()
-    del value["root_cause"]
+    del value[field]
 
     with pytest.raises(LLMJsonParseError):
         parse_llm_json_schema(
@@ -323,7 +245,7 @@ def test_threat_audit_output_instruction_limits_each_task_to_one_result() -> Non
     "update",
     [
         {"confirmed": True},
-        {"root_cause": None},
+        {"remediation": None},
         {"call_chain": []},
     ],
 )

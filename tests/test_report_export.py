@@ -1,8 +1,10 @@
 import asyncio
 import csv
 import io
+import json
 import unittest
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -59,6 +61,16 @@ def _fp_result(index: int, verdict: str, *, reason: str | None = None) -> FpRevi
 
 
 class ReportExportTests(unittest.TestCase):
+    def test_concise_report_export_preserves_the_documented_core_and_validation_entry(self):
+        examples = Path(__file__).resolve().parents[1] / "docs" / "examples"
+        vulnerability = Vulnerability(**json.loads((examples / "vulnerability-report.json").read_text()))
+        scan = ScanStatus(scan_id="scan-1", status=ScanItemStatus.COMPLETE, progress=1.0,
+                          total_candidates=1, processed_candidates=1, vulnerabilities=[vulnerability])
+        markdown = self._download_single(scan, 0).body.decode("utf-8")
+        self.assertTrue(markdown.startswith((examples / "vulnerability-report.md").read_text()))
+        self.assertIn("**验证入口函数**：HandlePacket", markdown)
+        self.assertEqual(markdown.count("**修复建议**"), 1)
+
     def _download(
         self,
         scan: ScanStatus,

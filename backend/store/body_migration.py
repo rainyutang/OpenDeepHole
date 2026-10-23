@@ -7,7 +7,7 @@ import hashlib
 import json
 
 from backend.models import Vulnerability
-from .bodies import AUDIT_BODY_FIELDS
+from .bodies import AUDIT_BODY_FIELDS, LEGACY_AUDIT_BODY_FIELDS
 from .history import canonical_json, utc_now
 from .migration import MAX_BATCH_BYTES
 
@@ -153,7 +153,7 @@ class BodyMigrationMixin:
                     if self._locked_scan(scan_id, include_pool=False) is None:
                         continue
                     # Compute length in SQL before transferring full bodies.
-                    fields = AUDIT_BODY_FIELDS if phase == 0 else ("audit_result",) if phase == 1 else ("markdown", "output_source") if phase == 2 else ("stage_outputs", "stage_output_sources", "reason", "vulnerability_report") if phase == 3 else ("validation_code", "validation_output", "intermediate_output", "final_output", "output_sections", "artifacts")
+                    fields = LEGACY_AUDIT_BODY_FIELDS if phase == 0 else ("audit_result",) if phase == 1 else ("markdown", "output_source") if phase == 2 else ("stage_outputs", "stage_output_sources", "reason", "vulnerability_report") if phase == 3 else ("validation_code", "validation_output", "intermediate_output", "final_output", "output_sections", "artifacts")
                     length = lambda field: f"OCTET_LENGTH(COALESCE({field}, ''))" if getattr(self, "distributed", False) else f"LENGTH(CAST(COALESCE({field}, '') AS BLOB))"
                     size = self._conn.execute(f"SELECT {' + '.join(length(field) for field in fields)} FROM {table} WHERE {condition}", args).fetchone()[0]
                     if used + int(size) > budget:
@@ -181,8 +181,8 @@ class BodyMigrationMixin:
                         result = _vulnerability_from_row(original) if phase == 0 else Vulnerability.model_validate_json(original["audit_result"])
                         body_id = self._store_audit_body_locked(scan_id, original["idx"], result, candidate_index=original["idx"] if phase == 1 else None)
                         if phase == 0:
-                            self._conn.execute(f"UPDATE vulnerabilities SET {', '.join(field + ' = ?' for field in AUDIT_BODY_FIELDS)}, audit_body_id = ? WHERE {condition}",
-                                (*("" for _ in AUDIT_BODY_FIELDS), body_id, *args))
+                            self._conn.execute(f"UPDATE vulnerabilities SET {', '.join(field + ' = ?' for field in LEGACY_AUDIT_BODY_FIELDS)}, audit_body_id = ? WHERE {condition}",
+                                (*("" for _ in LEGACY_AUDIT_BODY_FIELDS), body_id, *args))
                         else:
                             result_data = json.loads(original["audit_result"])
                             for field in AUDIT_BODY_FIELDS:

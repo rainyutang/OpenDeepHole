@@ -349,6 +349,7 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         vulnerable_code=(
             row["vulnerable_code"] if "vulnerable_code" in keys else ""
         ) or "",
+        remediation=(row["remediation"] if "remediation" in keys else "") or "",
         attack_entry=(row["attack_entry"] if "attack_entry" in keys else "") or "",
         root_cause=(row["root_cause"] if "root_cause" in keys else "") or "",
         trigger_conditions=(

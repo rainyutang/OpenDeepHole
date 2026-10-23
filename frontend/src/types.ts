@@ -142,6 +142,7 @@ export interface Vulnerability {
   description: string;
   impact?: string;
   vulnerable_code?: string;
+  remediation?: string;
   attack_entry?: string;
   root_cause?: string;
   trigger_conditions?: string;

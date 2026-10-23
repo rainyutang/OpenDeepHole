@@ -9,10 +9,11 @@ from backend.models import Vulnerability
 from .history import canonical_json, utc_now
 
 
-AUDIT_BODY_FIELDS = (
+LEGACY_AUDIT_BODY_FIELDS = (
     "ai_analysis", "vulnerability_report", "function_source", "impact", "vulnerable_code",
     "attack_entry", "root_cause", "trigger_conditions", "failure_reason", "call_chain",
 )
+AUDIT_BODY_FIELDS = (*LEGACY_AUDIT_BODY_FIELDS, "remediation")
 BODY_COLUMNS = {
     "vulnerabilities": {"audit_body_id": "TEXT"},
     "scan_candidates": {"audit_body_id": "TEXT"},

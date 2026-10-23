@@ -21,6 +21,7 @@
     "test:audit-navigation": "node tests/auditNavigation.test.mjs",
     "test:fp-review": "node tests/fpReview.test.mjs",
     "test:issue-loading": "node tests/issueLoading.test.mjs",
+    "test:reports": "node tests/vulnerabilityReport.test.mjs",
     "test:threat-analysis-loading": "node tests/threatAnalysisLoading.test.mjs",
     "test:threat-coverage": "node tests/threatCoverage.test.mjs",
     "benchmark:threat-coverage": "node scripts/benchmarkThreatCoverage.mjs",

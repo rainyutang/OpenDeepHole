@@ -35,13 +35,44 @@ def _finding() -> dict:
         "line": 88,
         "vuln_type": "会话伪造",
         "description": "攻击者可通过未绑定身份的会话数据伪造登录态。",
-        "attack_entry": "HTTP `/session/restore` 接收未认证请求中的 token。",
-        "trigger_conditions": "攻击者提交其他身份对应且未绑定当前连接的 token。",
-        "vulnerable_code": "Function: restore_session\nFile: src/auth/session.c\nLines: 80-90\nSnippet: token is trusted directly\nContext: no identity binding",
-        "root_cause": "外部 token 未绑定当前身份即被恢复为可信会话。",
-        "call_chain": "Entry: restore route\nCall Stack: route → restore_session\nVulnerable Frame: restore_session\nSource To Sink Stack: token → session identity",
-        "impact": "攻击者能够冒充其他用户，破坏机密性和完整性。",
+        "vulnerable_code": "`src/auth/session.c:88`\n```c\n88 | restore(token); // [报告注·问题点] 未绑定身份。\n```",
+        "call_chain": "```text\nroute: src/auth/route.c:12\n└── restore_session: src/auth/session.c:88\n```",
+        "remediation": "恢复会话前校验 token 与当前连接和身份的绑定关系。",
     }
+
+
+def _legacy_finding() -> dict:
+    value = _finding()
+    value.pop("remediation")
+    value.update({
+        "attack_entry": "HTTP 请求中的 token。",
+        "trigger_conditions": "攻击者可提交其他身份的 token。",
+        "root_cause": "token 未与当前身份绑定。",
+        "impact": "能够冒充其他用户。",
+    })
+    return value
+
+
+def test_legacy_artifact_is_read_only_compatible_and_still_requires_completion(tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps(THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA))
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps([_legacy_finding()]))
+    completion = tmp_path / "complete.json"
+    paths = {"validator_path": engine.VALIDATOR_PATH, "schema_path": schema, "result_path": result}
+    # A new Session cannot submit the old contract.
+    with pytest.raises(ValueError):
+        engine._validate_result(**paths)
+    # Cached legacy data does not bypass the existing success marker policy.
+    with pytest.raises(ValueError, match="successful Session marker"):
+        engine._load_completed_result(**paths, completion_path=completion, allow_legacy_result=False)
+    engine._write_completion_marker(completion, result, output_source={"model": "old-model"})
+    cached, source = engine._load_completed_result(**paths, completion_path=completion, allow_legacy_result=False)
+    assert cached == [_legacy_finding()]
+    assert source == {"model": "old-model"}
+    result.write_text(json.dumps([{**_legacy_finding(), "line": 89}]))
+    with pytest.raises(ValueError, match="digest mismatch"):
+        engine._load_completed_result(**paths, completion_path=completion, allow_legacy_result=False)
 
 
 def _artifacts(tmp_path: Path, *, pattern: dict | None = None) -> tuple[Path, Path]:
@@ -439,7 +470,8 @@ def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, r
     assert len(reported) == 1
     assert reported[0]["analysis_source"] == "threat_pattern_audit"
     assert reported[0]["confirmed"] is True
-    assert reported[0]["vulnerability_report"].startswith("# 漏洞报告")
+    assert reported[0]["vulnerability_report"].startswith("**漏洞类型**")
+    assert reported[0]["remediation"] == _finding()["remediation"]
     assert [
         (event["data"]["current"], event["data"]["total"])
         for event in events
@@ -635,7 +667,7 @@ def test_session_success_at_stop_boundary_is_reused_on_resume(
 
 @pytest.mark.parametrize(
     ("cached_result", "expected_report_count"),
-    [([], 0), ([_finding()], 1)],
+    [([], 0), ([_finding()], 1), ([_legacy_finding()], 1)],
 )
 def test_resume_reuses_completed_module_pattern_result_without_new_session(
     tmp_path: Path,

@@ -176,6 +176,7 @@ class Vulnerability(BaseModel):
     description: str
     impact: str = ""
     vulnerable_code: str = ""
+    remediation: str = ""
     attack_entry: str = ""
     root_cause: str = ""
     trigger_conditions: str = ""

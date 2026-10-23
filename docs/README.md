@@ -11,6 +11,7 @@
 | [配置参考](configuration.md) | 服务端与 Agent 配置、模型池、OpenCode 和 Codex 运行时 |
 | [架构与数据存储](architecture.md) | 组件职责、通信、数据流和本地存储 |
 | [审计结果](audit_results.md) | 候选点与威胁任务的权威结果、状态与页面入口 |
+| [漏洞报告格式](vulnerability-reports.md) | 精简字段、生成提示词、源码注释与 JSON/Markdown 示例 |
 | [威胁分析覆盖率](threat-coverage.md) | 文件清单、覆盖口径与模块路径匹配 |
 | [扫描分享](scan-sharing.md) | 分享链接、权限与撤销 |
 | [Token 分类统计](scan-token-categories.md) | 扫描、模型和任务的 Token 统计口径 |

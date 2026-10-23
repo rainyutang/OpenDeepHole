@@ -3,16 +3,33 @@ from test_storage_history import make_store
 from test_storage_summaries import finding
 
 
+def test_remediation_survives_legacy_restore_and_body_backfill(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        result = finding(remediation="检查实际目标容量。", vulnerability_report="完整报告及修复建议")
+        store.add_vulnerability("s", result)
+        assert store.restore_legacy_scan_fields("s")["restored"]
+        while not store.backfill_bodies_batch(batch_rows=1)["complete"]:
+            pass
+        restored = store.get_vulnerabilities("s")[0]
+        assert restored.remediation == result.remediation
+        assert restored.vulnerability_report == result.vulnerability_report
+    finally:
+        store.close()
+
+
 def test_candidate_and_promoted_finding_share_body_without_changing_human_state(tmp_path):
     store = make_store(tmp_path)
     try:
         candidate = Candidate(file="f0.c", line=1, function="parse", vuln_type="npd", description="candidate")
         store.replace_scan_candidates("s", [candidate])
-        result = finding(audit_index=0, vulnerability_report="完整报告" * 1000)
+        result = finding(audit_index=0, vulnerability_report="完整报告" * 1000,
+                         remediation="复制前检查实际目标容量。")
         store.add_vulnerability("s", result)
         stored = store.update_scan_candidate_audit("s", 0, state="success", result=result,
                                                     vulnerability_idx=0, dedup_decision={})
         assert stored.audit_result.vulnerability_report == result.vulnerability_report
+        assert stored.audit_result.remediation == result.remediation
         rows = store._conn.execute("SELECT audit_body_id FROM vulnerabilities UNION ALL SELECT audit_body_id FROM scan_candidates").fetchall()
         assert rows[0][0] == rows[1][0]
         assert store._conn.execute("SELECT COUNT(*) FROM scan_audit_versions").fetchone()[0] == 1
@@ -22,9 +39,11 @@ def test_candidate_and_promoted_finding_share_body_without_changing_human_state(
         assert store.get_vulnerabilities("s")[0].user_verdict == "false_positive"
         assert store.list_scan_candidates("s")[0].audit_result.user_verdict is None
         assert store.get_vulnerabilities("s")[0].vulnerability_report == result.vulnerability_report
+        assert store.get_vulnerabilities("s")[0].remediation == result.remediation
         source = store.get_vulnerability_audit_source("s", 0)
         assert source.status == "resolved"
         assert source.candidate.audit_result.vulnerability_report == result.vulnerability_report
+        assert source.candidate.audit_result.remediation == result.remediation
     finally:
         store.close()
 

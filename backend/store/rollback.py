@@ -3,7 +3,7 @@
 import json
 from backend.models import OpenCodePoolStatus
 
-from .bodies import AUDIT_BODY_FIELDS
+from .bodies import AUDIT_BODY_FIELDS, LEGACY_AUDIT_BODY_FIELDS
 from .history import canonical_json
 from .validation_history import TEXT_FIELDS
 
@@ -36,8 +36,13 @@ class StorageRollbackMixin:
                 if not finding.get("audit_body_id"):
                     continue
                 body = json.loads(finding["audit_body_json"])
-                self._conn.execute("UPDATE vulnerabilities SET " + ", ".join(f"{field} = ?" for field in AUDIT_BODY_FIELDS) + ", audit_body_id = NULL WHERE scan_id = ? AND idx = ?",
-                    (*(body[field] for field in AUDIT_BODY_FIELDS), scan_id, finding["idx"]))
+                # Restore old columns for older readers, retaining the body
+                # reference when newer fields have no legacy column.
+                body_id = finding["audit_body_id"] if any(
+                    body.get(field) for field in AUDIT_BODY_FIELDS if field not in LEGACY_AUDIT_BODY_FIELDS
+                ) else None
+                self._conn.execute("UPDATE vulnerabilities SET " + ", ".join(f"{field} = ?" for field in LEGACY_AUDIT_BODY_FIELDS) + ", audit_body_id = ? WHERE scan_id = ? AND idx = ?",
+                    (*(body[field] for field in LEGACY_AUDIT_BODY_FIELDS), body_id, scan_id, finding["idx"]))
             rows = self._conn.execute("SELECT * FROM scan_candidates WHERE scan_id = ?", (scan_id,)).fetchall()
             for candidate in self._hydrate_audit_rows(rows):
                 if candidate.get("audit_body_id") and candidate["audit_result"]:

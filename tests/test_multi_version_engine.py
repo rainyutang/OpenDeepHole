@@ -71,12 +71,11 @@ def _audit_item(
         "function": "parse_request",
         "vuln_type": "command_injection",
         "description": "命令注入" if confirmed else "已有边界校验，不构成漏洞",
-        "attack_entry": "网络请求" if confirmed else "",
-        "trigger_conditions": "参数可控" if confirmed else "",
-        "vulnerable_code": "run(input)" if confirmed else "",
-        "root_cause": "缺少过滤" if confirmed else "",
-        "call_chain": "entry -> parse_request" if confirmed else "",
-        "impact": "执行任意命令" if confirmed else "",
+        **({
+            "vulnerable_code": "run(input)",
+            "call_chain": "```text\nentry: src/server.c:12\n└── parse_request: src/parser.c:17\n```",
+            "remediation": "执行前对输入使用允许列表校验。",
+        } if confirmed else {}),
         "affected_versions": [{
             "version_name": version_name,
             "exists": confirmed,
@@ -109,6 +108,30 @@ def _version_match() -> dict:
             },
         ],
     }
+
+
+def test_old_completed_audit_checkpoint_is_accepted_only_when_reading(tmp_path):
+    from deephole_client.vulnerability_mining.engines.multi_version.checkpoints import load_completed_task, store_completed_task
+    from deephole_client.vulnerability_mining.engines.multi_version.engine import _AUDIT_ITEM_SCHEMA
+    from deephole_client.vulnerability_mining.engines.multi_version.legacy_schema import LEGACY_AUDIT_ITEM_SCHEMA
+
+    legacy = _audit_item(confirmed=True)
+    legacy.pop("remediation")
+    legacy.update(attack_entry="HTTP 请求", trigger_conditions="参数可控", root_cause="缺少校验", impact="执行命令")
+    kwargs = {"task_kind": "static_audit", "identity": {"version": "v1"}}
+    store_completed_task(tmp_path, **kwargs, output_schema=LEGACY_AUDIT_ITEM_SCHEMA,
+                         structured=legacy, output_source={"model": "old-model"})
+    cached = load_completed_task(tmp_path, **kwargs, output_schema=_AUDIT_ITEM_SCHEMA,
+                                 legacy_output_schema=LEGACY_AUDIT_ITEM_SCHEMA)
+    assert cached.structured == legacy
+    with pytest.raises(ValueError):
+        store_completed_task(tmp_path, **kwargs, output_schema=_AUDIT_ITEM_SCHEMA,
+                             structured=legacy, output_source={})
+    invalid = _audit_item(confirmed=True)
+    invalid.pop("remediation")
+    with pytest.raises(ValueError):
+        store_completed_task(tmp_path, **kwargs, output_schema=_AUDIT_ITEM_SCHEMA,
+                             structured=invalid, output_source={})
 
 
 def test_multi_version_mode_is_normalized_to_a_custom_component_mode() -> None:
@@ -632,7 +655,7 @@ def test_version_match_prompt_is_clear_and_does_not_dump_finding_json() -> None:
     assert "漏洞已经在版本「v1」中确认" in prompt
     assert "- 发现版本：v1" in prompt
     assert "- 漏洞位置：src/parser.c:42" in prompt
-    assert "## 漏洞详细信息" in prompt
+    assert "## 原始漏洞报告" in prompt
     assert "攻击者可通过请求参数注入命令。" in prompt
     assert "未经校验的数据进入 system。" in prompt
     assert "## 待检查的其它版本" in prompt

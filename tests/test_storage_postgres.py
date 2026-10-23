@@ -60,7 +60,7 @@ def test_postgres_finding_and_fp_triggers_match_summary(pg_store):
     store, scan_id = pg_store
     finding = Vulnerability(file="a.c", line=1, function="f", vuln_type="npd", severity="high",
                             description="evidence", confirmed=True, ai_verdict="confirmed",
-                            vulnerability_report="report body")
+                            vulnerability_report="report body", remediation="检查输入长度。")
     store.add_vulnerability(scan_id, finding)
     assert store.get_scan_totals([scan_id])[scan_id]["llm_issue_count"] == 1
     now = "2026-09-07T01:00:00+00:00"
@@ -72,6 +72,7 @@ def test_postgres_finding_and_fp_triggers_match_summary(pg_store):
     assert totals["fp_review_false_positive_count"] == 1
     assert store.get_fp_review_job(review_id).results[0].stage_outputs["proof"] == "original stage"
     assert store.get_vulnerabilities(scan_id)[0].vulnerability_report == "report body"
+    assert store.get_vulnerabilities(scan_id)[0].remediation == "检查输入长度。"
     assert store.get_scan_detail_counts(scan_id)["vulnerabilities"] == 1
     # This fixture predates the new scan FK migration for FP jobs.
     with store._lock:
