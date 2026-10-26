@@ -30,14 +30,16 @@ def reference_root() -> Path:
     return codex_runtime_reference_root()
 
 
-def reference_paths() -> tuple[Path, dict[str, Path]]:
+def reference_paths(*, attack_tree_directory: bool = False) -> tuple[Path, dict[str, Path]]:
     references_root = reference_root() / "references"
     guidance_path = references_root / "analysis-guidance.json"
     attack_mode_path = references_root / ATTACK_MODE_FILE
     schema_paths = {
         "value_asset_path": references_root / "value-assets.schema.json",
         "high_risk_modules_path": references_root / "high-risk-modules.schema.json",
-        "attack_tree_path": references_root / "attack-trees.schema.json",
+        "attack_tree_path": references_root / (
+            "attack-tree.schema.json" if attack_tree_directory else "attack-trees.schema.json"
+        ),
     }
     for path in (guidance_path, attack_mode_path, *schema_paths.values()):
         if not path.is_file():
@@ -118,6 +120,7 @@ def build_lightweight_prompt(
     schema_paths: Mapping[str, Path],
     paths: Mapping[str, Path],
     validation_owner: Literal["session", "host"] = "session",
+    attack_tree_directory: bool = False,
 ) -> str:
     """Build the shared prompt with method-specific validation ownership."""
 
@@ -126,15 +129,28 @@ def build_lightweight_prompt(
         opencode_validation_command if validation_owner == "host" else validation_command
     )
     command = command_builder(guidance_path=guidance_path, paths=paths)
+    artifact_description = (
+        "价值资产、高风险模块文件及攻击树目录" if attack_tree_directory else "三份文件"
+    )
+    tree_output = f"写入：{paths['attack_tree_path']}"
+    schema_constraint = "不得输出 Schema 之外的字段。"
+    if attack_tree_directory:
+        tree_output = (
+            f"输出到目录：{paths['attack_tree_path']}。"
+            "目录中的 index.json 登记全部树的 tree_id 和对应文件名；"
+            "每个 attack-tree-xxx.json 直接保存一个完整的攻击树对象，"
+            "不再使用 attack_trees 数组包装"
+        )
+        schema_constraint = "清单按指南中的 index.json 格式输出，单树文件不得输出 Schema 之外的字段。"
     if validation_owner == "session":
-        validation_completion = f"""1. 三份文件写完后，必须在本 Goal 内执行以下校验命令：
+        validation_completion = f"""1. {artifact_description}写完后，必须在本 Goal 内执行以下校验命令：
 {command}
 命令退出码为0才允许结束 Goal；如果失败，必须根据错误修正产物并反复执行，直至通过。不得跳过命令或只做人工目测；"""
     elif validation_owner == "host":
-        validation_completion = f"""1. 三份文件写完后可执行以下命令辅助自检：
+        validation_completion = f"""1. {artifact_description}写完后可执行以下命令辅助自检：
 {command}
 调用校验命令时必须逐字复制。保留原有空格和引号，不得额外增加、删除或替换空格、引号及参数；不得换行、添加 cd 前缀或拼接其他命令。
-是否执行该命令不作为 Session 完成条件。宿主会在本次回复结束后独立校验产物；如果校验失败，宿主会把校验结果发回当前 Session，请根据错误修正产物；"""
+是否执行该命令不作为 Session 完成条件。宿主会在本次回复结束后独立校验产物；如果校验失败，宿主会把具体文件和错误发回当前 Session，请根据错误修正对应产物；"""
     else:
         raise ValueError(f"Unknown lightweight validation owner: {validation_owner}")
     prompt = f"""你是威胁分析工程师。请使用攻击树威胁分析方法分析真实源码，生成可供后续威胁审计直接消费的最终产物。
@@ -150,13 +166,13 @@ def build_lightweight_prompt(
 分析范围：{code_root}（只读）。先识别项目架构、信任边界、外部入口、敏感数据流和安全关键职责，再按以下顺序落盘，可以参考代码仓中已有的相关文档：
 1. 从代码职责和攻击损失识别价值资产，写入：{paths['value_asset_path']}
 2. 找出外部暴露、处理不可信输入、执行安全决策或操作敏感数据的模块；“代码目录”使用相对于上述扫描目录的 POSIX 路径，扫描根目录写为“.”，不要添加扫描目录自身或项目目录前缀，写入：{paths['high_risk_modules_path']}
-3. 按“外部暴露高风险模块（叶）→内部源码模块（中）→价值资产（根）”构造有代码证据支撑的攻击路径，写入：{paths['attack_tree_path']}
+3. 按“外部暴露高风险模块（叶）→内部源码模块（中）→价值资产（根）”构造有代码证据支撑的攻击路径，{tree_output}
 
 关键硬约束：每棵树的根节点必须是一个已识别价值资产，node_name 与该价值资产的资产名完全相同，tree.value_asset 使用该资产的原始四字段；每个叶子节点必须是“是否外部暴露面=是”的高风险模块，node_name/module_name 与该模块的规范名称完全相同；内部节点只能是路径中的真实内部源码模块，不是漏洞、攻击动作、条件、权限或结果。
 
 三类产物必须保持来源一致：根节点关联的资产来自价值资产文件，叶子和路径引用的高风险模块来自高风险模块文件。路径首节点为叶子、末节点为根，中间只能是内部节点，边与节点逐段对应。扫描上下文中的 attack_modes 只作筛选或优先级提示，不能替代或扩写攻击模式库。
 
-不得修改源码，只能写指定产物。不得编造接口、调用关系或攻击路径，不得输出 Schema 之外的字段。
+不得修改源码，只能写指定产物。不得编造接口、调用关系或攻击路径，{schema_constraint}
 
 ##完成条件:
 {validation_completion}
@@ -199,7 +215,7 @@ def _validation_timeout_message() -> str:
 def _check_validation_result(returncode: int, stdout: str, stderr: str) -> None:
     if returncode == 0:
         return
-    detail = " ".join((stderr or stdout or "").split())
+    detail = (stderr or stdout or "").strip()
     raise ValueError(
         "Lightweight threat-analysis artifact validation failed"
         + (f": {detail}" if detail else f" (exit={returncode})")

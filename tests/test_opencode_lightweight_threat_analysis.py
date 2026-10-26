@@ -81,9 +81,16 @@ def _implementation(method_id: str = METHOD_ID) -> ModuleType:
 
 
 def _write_dummy_artifacts(paths: dict[str, Path]) -> None:
-    for path in paths.values():
+    for key, path in paths.items():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}\n", encoding="utf-8")
+        if key == "attack_tree_path" and path.name == "attack-trees":
+            path.mkdir(exist_ok=True)
+            (path / "index.json").write_text(json.dumps({"attack_trees": [
+                {"tree_id": "T001", "file": "attack-tree-001.json"},
+            ]}), encoding="utf-8")
+            (path / "attack-tree-001.json").write_text('{"tree_id":"T001"}', encoding="utf-8")
+        else:
+            path.write_text("{}\n", encoding="utf-8")
 
 
 def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
@@ -108,6 +115,7 @@ def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
 
     opencode = _implementation()
     opencode_paths = opencode._artifact_paths(artifact_root)
+    guidance_path, schema_paths = opencode._reference_paths()
     opencode_prompt = opencode.build_task_prompt(
         code_root=code_root,
         context_path=context_path,
@@ -116,11 +124,24 @@ def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
         paths=opencode_paths,
     )
 
-    assert opencode_paths == codex_paths
+    assert opencode_paths["attack_tree_path"] == artifact_root / "final" / "attack-trees"
+    assert codex_paths["attack_tree_path"] == artifact_root / "final" / "attack-trees.json"
+    for key in ("value_asset_path", "high_risk_modules_path"):
+        assert opencode_paths[key] == codex_paths[key]
     assert opencode_prompt != codex_prompt
-    assert opencode_prompt.split("##完成条件:", 1)[0] == codex_prompt.split(
-        "##完成条件:", 1
-    )[0]
+    opencode_core = opencode_prompt.split("关键硬约束：", 1)[1].split("##完成条件:", 1)[0]
+    assert opencode_core.replace(
+        "清单按指南中的 index.json 格式输出，单树文件不得输出 Schema 之外的字段。",
+        "不得输出 Schema 之外的字段。",
+    ) == (
+        codex_prompt.split("关键硬约束：", 1)[1].split("##完成条件:", 1)[0]
+    )
+    assert "输出到目录：" in opencode_prompt
+    assert "index.json 登记全部树的 tree_id 和对应文件名" in opencode_prompt
+    assert "每个 attack-tree-xxx.json 直接保存一个完整的攻击树对象" in opencode_prompt
+    assert "不再使用 attack_trees 数组包装" in opencode_prompt
+    assert "attack-tree.schema.json" in opencode_prompt
+    assert "index.json" not in codex_prompt
     assert "是否执行该命令不作为 Session 完成条件" in opencode_prompt
     assert "宿主会在本次回复结束后独立校验产物" in opencode_prompt
     assert "调用校验命令时必须逐字复制" in opencode_prompt
@@ -228,6 +249,7 @@ def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
     command = "python validate.py"
     guidance_path, _ = implementation._reference_paths()
     paths = implementation._artifact_paths(tmp_path)
+    paths["attack_tree_path"].mkdir()
 
     with (
         patch("task_agent.run_opencode_task", new=runner),
@@ -340,6 +362,7 @@ def test_post_session_validation_feedback_returns_diagnostics(
     implementation = _implementation()
     guidance_path, _ = implementation._reference_paths()
     paths = implementation._artifact_paths(tmp_path)
+    paths["attack_tree_path"].mkdir()
 
     with patch.object(
         implementation,
@@ -350,7 +373,7 @@ def test_post_session_validation_feedback_returns_diagnostics(
         assert asyncio.run(implementation._artifact_validation_feedback(
             guidance_path=guidance_path,
             paths=paths,
-        )) == "invalid attack tree"
+        )) == "invalid\nattack tree"
 
 
 def test_resume_reuses_valid_completed_outputs_without_new_task(
@@ -438,7 +461,9 @@ def test_resume_after_failure_starts_fresh_session_and_clears_partial_outputs(
 
     async def fake_run_task(**kwargs):
         calls.append(kwargs)
-        assert all(not path.exists() for path in paths.values())
+        assert paths["attack_tree_path"].is_dir()
+        assert not list(paths["attack_tree_path"].iterdir())
+        assert all(not path.exists() for key, path in paths.items() if key != "attack_tree_path")
         _write_dummy_artifacts(paths)
         return SimpleNamespace(
             session_id="ses-fresh",

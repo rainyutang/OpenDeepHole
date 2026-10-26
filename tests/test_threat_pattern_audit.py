@@ -205,8 +205,18 @@ class TaskReporter:
 
 
 @pytest.mark.parametrize("outcome", ["finding", "empty", "failure", "timeout", "cancelled"])
-def test_task_lifecycle_and_cached_resume(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("directory", [False, True])
+def test_task_lifecycle_and_cached_resume(tmp_path, monkeypatch, outcome, directory):
     tree, modules = _artifacts(tmp_path)
+    if directory:
+        data = json.loads(tree.read_text())["attack_trees"][0]
+        data["tree_id"] = "T001"
+        tree = tmp_path / "attack-trees"
+        tree.mkdir()
+        (tree / "index.json").write_text(json.dumps({"attack_trees": [
+            {"tree_id": "T001", "file": "attack-tree-001.json"},
+        ]}), encoding="utf-8")
+        (tree / "attack-tree-001.json").write_text(json.dumps(data), encoding="utf-8")
     work = tmp_path / "work"
     reporter = TaskReporter()
     cancel = threading.Event()

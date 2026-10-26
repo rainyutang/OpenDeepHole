@@ -1,5 +1,5 @@
 {
-  "guidance_version": 2,
+  "guidance_version": 3,
   "role": "项目级白盒威胁建模工程师",
   "objective": "从实际源码识别价值资产、承载攻击面的高风险模块，以及攻击者从入口影响价值资产的可解释攻击树",
   "workflow": [
@@ -110,7 +110,7 @@
   "cross_artifact_invariants": [
     "每棵攻击树的 value_asset 必须来源于价值资产文件中的一个资产，且每个价值资产至少被一棵树覆盖",
     "根节点 node_name 必须与该树 value_asset.asset_name 完全相同；叶子节点 node_name/module_name 必须与高风险模块文件中‘是否外部暴露面=是’模块的名称完全相同",
-    "tree_id 在文件内唯一；同一棵树内 node_id、edge_id 和 path_id 分别唯一，所有 ID 引用必须能够解析",
+    "tree_id 在全部攻击树之间唯一；同一棵树内 node_id、edge_id 和 path_id 分别唯一，所有 ID 引用必须能够解析",
     "external_exposure、path_role 和 external_interface_description 必须与模块证据和节点位置一致",
     "每条路径的攻击模式按可能性降序排列；有足够适用模式时至少输出10个，实际不足时输出全部适用模式；所有已选择模式的编号和名称组合必须存在于 attack_mode.json 且不得重复",
     "没有代码证据时不得编造资产、模块、接口、调用关系或攻击路径"
@@ -134,15 +134,23 @@
     },
     {
       "result_key": "attack_tree_path",
-      "file_name": "attack-trees.json",
-      "top_level": "object",
-      "required_top_level_property": "attack_trees",
-      "schema_file": "attack-trees.schema.json"
+      "file_name": "以扫描上下文 attack_tree_path 为准：OpenCode 为 attack-trees 目录，Codex 为 attack-trees.json 文件",
+      "top_level": "目录内 index.json 登记全部树的 tree_id 和 file，每个 attack-tree-xxx.json 直接保存单棵树对象；旧 JSON 文件包含 attack_trees 数组",
+      "required_top_level_property": "目录清单为 attack_trees 数组，每项仅含 tree_id 和 file；单树文件为 tree_id、value_asset、nodes、edges、attack_paths",
+      "schema_file": "attack-tree.schema.json（单树）；attack-trees.schema.json（旧总文件）",
+      "index_example": {
+        "attack_trees": [
+          {
+            "tree_id": "T001",
+            "file": "attack-tree-001.json"
+          }
+        ]
+      }
     }
   ],
   "completion_checks": [
-    "三份文件均存在并且可以按 UTF-8 JSON 解析",
-    "每份文件严格符合对应 JSON Schema，包括 required、enum、minItems、minLength 和 additionalProperties",
+    "价值资产、高风险模块文件及攻击树产物均存在并可按 UTF-8 JSON 解析；攻击树为目录时，index.json 中每棵树都有对应文件，文件名为目录内的 attack-tree-xxx.json，tree_id 与文件内容一致",
+    "每份产物严格符合任务指定的 JSON Schema，包括 required、enum、minItems、minLength 和 additionalProperties；目录中的单树文件不得使用 attack_trees 数组包装",
     "逐项检查根节点名称是否与价值资产名完全相同、叶子节点名称是否与外部暴露高风险模块名完全相同、高风险内部节点和路径模块引用是否有对应来源",
     "逐条确认路径从外部叶子经内部模块到根资产，边按相邻节点连接；攻击模式按可能性排序，有足够模式时至少输出10个，实际不足时才可少于10个",
     "确认除指定产物目录外没有修改任何文件"

@@ -452,6 +452,8 @@ Agent 重连恢复按主扫描和独立去误报各自的执行身份处理；�
 
 OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验器，最长运行 60 秒，且受本次调用剩余时间约束；主动取消或超时会终止并回收校验进程，Agent 心跳与状态上报继续运行。校验器自身超时作为明确的校验诊断，沿用一次同 Session 纠正及后续新 Session 重试；调用总时限耗尽则直接进入超时重试。恢复扫描时校验已完成产物的同步路径同样限制为 60 秒。校验规则、任务策略默认值、重试次数及轻量分析失败后的一次 DeepHole 回退均保持不变。部署需更新并重启 Agent，然后续扫受影响任务，无需数据库迁移。
 
+OpenCode 轻量分析的 `attack_tree_path` 现在指向攻击树目录：`index.json` 使用 `{"attack_trees":[{"tree_id":"T001","file":"attack-tree-001.json"}]}` 登记树，每个 `attack-tree-xxx.json` 直接保存一棵树对象。校验命令仍为 `--attack-trees <路径>`，直接传目录，无需额外清单参数或生成合并文件。校验器逐文件检查 JSON、单树 Schema 和跨产物关系，汇总缺失树、文件与树 ID、JSON 行列及字段错误，诊断按多行返回当前 Session；过多诊断会保留总数并说明未展示项数。上传的 `content` 保持现有树列表结构，并以 `files` 保存清单和树文件快照；续扫还原为目录，审计及多版本读取兼容目录和历史单文件。仅原位修改 Prompt 的输出说明及完成条件，不额外增加分批写入协议；Codex 的单文件输出保持原样。
+
 攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合原有 Schema，允许 `[]` 表示未发现漏洞。现有 Prompt 模板保留；调用设置 `output_schema=None`，仅按指定文件判定结果，不从最终回复补写或覆盖文件。Prompt 中的校验命令通过 `allowed_bash_commands` 与 `bound_python_script` 供模型自检，宿主仍在每次回复结束后独立校验。
 
 文件缺失、无法读取、JSON 损坏或 Schema 不匹配时，先向原 Session 回传诊断纠正一次，仍失败则按 `vulnerability_mining.max_retries` 创建新 Session 重试；耗尽后队列记录 `post_session_validation_failed`，引擎报告失败。异步校验最长 30 秒且受调用剩余时间约束，超时或取消时回收校验进程。已通过校验的文件用于漏洞上报和完成标记，续扫继续复用合法结果，缺失或损坏的结果重新执行。该行为适用于所有调用该引擎的扫描，包括多版本基线审计；需更新并重启 Agent，无需数据库迁移，不追溯修改历史任务队列记录。

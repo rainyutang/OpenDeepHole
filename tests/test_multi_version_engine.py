@@ -1024,8 +1024,10 @@ def test_threat_audit_delegates_baseline_to_threat_pattern_then_matches_versions
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("directory", [False, True])
 def test_threat_workflow_resume_reuses_analysis_difference_and_matches(
     tmp_path: Path,
+    directory: bool,
 ) -> None:
     async def scenario() -> None:
         analysis_calls: list[dict] = []
@@ -1038,13 +1040,19 @@ def test_threat_workflow_resume_reuses_analysis_difference_and_matches(
             final = Path(kwargs["output_path"]) / "final"
             final.mkdir(parents=True, exist_ok=True)
             value_assets = final / "value-assets.json"
-            attack_tree = final / "attack-trees.json"
+            attack_tree = final / ("attack-trees" if directory else "attack-trees.json")
             high_risk = final / "high-risk-modules.json"
             value_assets.write_text("[]", encoding="utf-8")
-            attack_tree.write_text(
-                json.dumps({"attack_trees": []}),
-                encoding="utf-8",
-            )
+            if directory:
+                attack_tree.mkdir()
+                (attack_tree / "index.json").write_text(json.dumps({"attack_trees": [
+                    {"tree_id": "checkpoint-tree", "file": "attack-tree-001.json"},
+                ]}), encoding="utf-8")
+                (attack_tree / "attack-tree-001.json").write_text(json.dumps({
+                    "tree_id": "checkpoint-tree", "nodes": [], "attack_paths": [],
+                }), encoding="utf-8")
+            else:
+                attack_tree.write_text(json.dumps({"attack_trees": []}), encoding="utf-8")
             high_risk.write_text("[]", encoding="utf-8")
             return {
                 "result": True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Awaitable, Mapping
@@ -22,7 +23,8 @@ validation_command = _lightweight_contract.opencode_validation_command
 _FINAL_DIR = "final"
 _VALUE_ASSET_FILE = "value-assets.json"
 _HIGH_RISK_MODULES_FILE = "high-risk-modules.json"
-_ATTACK_TREE_FILE = "attack-trees.json"
+_ATTACK_TREE_DIR = "attack-trees"
+_LEGACY_ATTACK_TREE_FILE = "attack-trees.json"
 _CONTEXT_FILE = "scan-context.json"
 _STATE_FILE = "opencode-task-state.json"
 _PROMPT_FILE = "opencode-task-prompt.txt"
@@ -45,12 +47,18 @@ def run_threat_analysis(
         paths = _artifact_paths(artifact_root)
         guidance_path, schema_paths = _reference_paths()
 
-        if is_resume and _completed_outputs(artifact_root, paths, guidance_path):
-            return _success(paths)
+        if is_resume:
+            resume_paths = dict(paths)
+            legacy_tree = paths["attack_tree_path"].parent / _LEGACY_ATTACK_TREE_FILE
+            if not paths["attack_tree_path"].exists() and legacy_tree.is_file():
+                resume_paths["attack_tree_path"] = legacy_tree
+            if _completed_outputs(artifact_root, resume_paths, guidance_path):
+                return _success(resume_paths)
         # A completed Session is reused through its validated artifacts. Any
         # incomplete attempt starts a fresh Session and must not inherit partial
         # output files from the failed/cancelled attempt.
         _clear_outputs(paths)
+        paths["attack_tree_path"].mkdir()
 
         context_path = artifact_root / _CONTEXT_FILE
         _write_json(
@@ -137,6 +145,7 @@ def build_task_prompt(
         schema_paths=schema_paths,
         paths=paths,
         validation_owner="host",
+        attack_tree_directory=True,
     )
 
 
@@ -174,10 +183,12 @@ async def _artifact_validation_feedback(
     guidance_path: Path,
     paths: Mapping[str, Path],
 ) -> str | None:
+    if not paths["attack_tree_path"].is_dir():
+        return f"缺少攻击树目录 {paths['attack_tree_path']}，请生成目录中的 index.json 和单树文件"
     try:
         await validate_artifacts_locally_async(guidance_path=guidance_path, paths=paths)
     except Exception as exc:
-        detail = " ".join(str(exc).split())
+        detail = str(exc).strip()
         return detail or type(exc).__name__
     return None
 
@@ -196,16 +207,18 @@ def _run_sync(awaitable: Awaitable[Any]) -> Any:
 
 
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
-    return reference_paths()
+    return reference_paths(attack_tree_directory=True)
 
 
 def _artifact_paths(root: Path) -> dict[str, Path]:
     final = root / _FINAL_DIR
+    if not final.resolve().is_relative_to(root.resolve()):
+        raise ValueError("threat-analysis final directory escapes output_path")
     final.mkdir(parents=True, exist_ok=True)
     return {
         "value_asset_path": final / _VALUE_ASSET_FILE,
         "high_risk_modules_path": final / _HIGH_RISK_MODULES_FILE,
-        "attack_tree_path": final / _ATTACK_TREE_FILE,
+        "attack_tree_path": final / _ATTACK_TREE_DIR,
     }
 
 
@@ -218,7 +231,12 @@ def _completed_outputs(
     if (
         state.get("status") != "complete"
         or state.get("validation_policy_version") != _VALIDATION_POLICY_VERSION
-        or not all(path.is_file() for path in paths.values())
+        or not all(
+            path.is_dir() if key == "attack_tree_path" and path.name == _ATTACK_TREE_DIR
+            else path.is_file()
+            for key, path in paths.items()
+        )
+        or not all(path.resolve().is_relative_to(artifact_root.resolve()) for path in paths.values())
     ):
         return False
     try:
@@ -229,8 +247,12 @@ def _completed_outputs(
 
 
 def _clear_outputs(paths: Mapping[str, Path]) -> None:
-    for path in paths.values():
-        path.unlink(missing_ok=True)
+    legacy_tree = paths["attack_tree_path"].parent / _LEGACY_ATTACK_TREE_FILE
+    for path in (*paths.values(), legacy_tree):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def _success(paths: Mapping[str, Path]) -> dict[str, Any]:
