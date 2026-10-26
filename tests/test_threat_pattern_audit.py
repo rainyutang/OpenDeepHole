@@ -290,6 +290,8 @@ def test_cancel_cleans_unstarted_tasks_and_resume_supersedes_removed_targets(tmp
     "攻击者伪造会话标识冒充可信身份。", "", " \t\n",
 ])
 def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_description: str) -> None:
+    from deephole_client.vulnerability_mining.report_schema import AUDIT_FIELD_INSTRUCTIONS
+
     prompt = build_threat_pattern_prompt(
         module_name="认证模块",
         code_paths="src/auth、src/shared",
@@ -316,9 +318,14 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_descri
     assert "python validate_result.py schema.json result.json" in prompt
     assert "问题要求：" in prompt
     assert "输出要求：" in prompt
+    assert AUDIT_FIELD_INSTRUCTIONS in prompt
     assert '"minItems"' not in prompt
     assert THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["minItems"] == 0
     assert THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["maxItems"] == 1
+    evidence_description = THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["items"]["properties"]["vulnerable_code"]["description"]
+    assert "source 到 sink" in evidence_description
+    assert "项目相对路径和起止行号" in evidence_description
+    assert "//[deephole]" in evidence_description
     assert (
         THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["items"]["properties"]
         ["call_chain"]["description"]

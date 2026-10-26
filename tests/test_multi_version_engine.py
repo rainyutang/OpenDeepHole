@@ -513,6 +513,8 @@ def test_context_and_subject_match_across_function_and_path_rename() -> None:
 
 
 def test_codepoint_prompt_uses_checker_skill_and_plain_multi_version_guidance() -> None:
+    from deephole_client.vulnerability_mining.report_schema import AUDIT_FIELD_INSTRUCTIONS
+
     versions = [
         {
             "version_name": "release-2025.12",
@@ -568,6 +570,7 @@ def test_codepoint_prompt_uses_checker_skill_and_plain_multi_version_guidance() 
     assert "新版本新增修复代码可以作为旧版本审计线索" in prompt
     assert "具体漏洞成立条件、误报排除规则和严重程度判断以当前问题类型加载的 Skill 为准" in prompt
     assert "## 输出要求" in prompt
+    assert AUDIT_FIELD_INSTRUCTIONS in prompt
     assert "affected_versions 按输入顺序包含全部版本" in prompt
     assert "静态规则推断这里存在越界写入" not in prompt
     assert '"metadata"' not in prompt
@@ -670,6 +673,8 @@ def test_version_match_prompt_is_clear_and_does_not_dump_finding_json() -> None:
 
 
 def test_difference_threat_prompt_audits_all_function_and_code_differences() -> None:
+    from deephole_client.vulnerability_mining.report_schema import AUDIT_FIELD_INSTRUCTIONS
+
     prompt = _difference_threat_prompt(
         baseline_version={
             "version_name": "v1",
@@ -698,6 +703,7 @@ def test_difference_threat_prompt_audits_all_function_and_code_differences() -> 
     assert "不能限制漏洞类型或审计范围" in prompt
     assert "只报告由对照版本的功能或代码差异引入、暴露或实质改变的问题" in prompt
     assert "存在问题时输出全部已确认问题" in prompt
+    assert AUDIT_FIELD_INSTRUCTIONS in prompt
     assert "### 参考线索 1" in prompt
     assert "- 风险：命令执行" in prompt
     assert '"version_name"' not in prompt

@@ -1919,13 +1919,18 @@ def test_json_formatter_receives_only_explicit_output_requirements(
         work_dir.mkdir()
         output_file = work_dir / "report.md"
         original_prompt = " \n原始任务的私有上下文：读取源码并审计。\n "
-        output_prompt = " \nJSON_REPAIR_ONLY：report 使用中文 Markdown，保留表格与代码围栏。\n "
+        from deephole_client.vulnerability_mining.report_schema import AUDIT_JSON_REPAIR_OUTPUT_PROMPT
+
+        output_prompt = " \nJSON_REPAIR_ONLY：report 使用中文 Markdown，保留表格与代码围栏。\n " + AUDIT_JSON_REPAIR_OUTPUT_PROMPT
         correction_prompt = "SAME_SESSION_ONLY：请重新输出原始任务结果。"
         markdown = (
             "## 问题\n"
             '路径 `src\\reader.c` 未校验 "length"。\n\n'
             "| 字段 | 状态 |\n| --- | --- |\n| length | 缺少检查 |\n\n"
-            "```c\n12 | memcpy(dst, src, length);\n```\n\n"
+            "`src/reader.c:10-12`\n\n"
+            "```c\n10 | size_t length = packet->length; //[deephole] SOURCE：读取报文长度。\n"
+            "11 | const char *src = packet->payload; //[deephole] FLOW：获取报文负载。\n"
+            "12 | memcpy(dst, src, length); //[deephole] SINK：未校验目标容量。\n```\n\n"
             "- **修复建议**：先校验边界。"
         )
         schema = {

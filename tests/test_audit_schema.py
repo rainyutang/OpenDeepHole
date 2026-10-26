@@ -65,12 +65,21 @@ def test_audit_output_instructions_include_markdown_field_contract(
 ) -> None:
     for label in ("问题", "调用链", "证据", "修复建议"):
         assert label in instruction
-    for annotation in ("[报告注]", "[报告注·缺失校验]", "[报告注·问题点]"):
+    for annotation in ("//[deephole] SOURCE", "//[deephole] FLOW", "//[deephole] 缺失校验", "//[deephole] SINK"):
         assert annotation in instruction
     assert "└── func2: xxx.c:33" in instruction
-    assert "原始代码和行号" in instruction
+    assert "source 到 sink" in instruction
+    assert "函数参数传递、返回值接收、校验与分支" in instruction
+    assert "实参与被调用函数形参" in instruction
+    assert "省略号、伪代码或文字描述" in instruction
+    assert "项目相对路径和真实起止行号" in instruction
+    assert "带准确语言标签的 Markdown 围栏" in instruction
+    assert "原始行号 | 源码" in instruction
+    assert "新增独立注释行不编造源码行号" in instruction
     assert "多条独立调用链时分别展示" in instruction
     assert "它们之间的数据或状态关联" in instruction
+    assert "对应写入与读取代码" in instruction
+    assert "[报告注" not in instruction
     assert "Markdown 字符串" in instruction
     assert "标题" not in instruction
     assert "attack_entry" not in instruction
