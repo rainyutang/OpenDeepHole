@@ -72,7 +72,7 @@ def test_audit_output_instructions_include_markdown_field_contract(
     assert "函数参数传递、返回值接收、校验与分支" in instruction
     assert "实参与被调用函数形参" in instruction
     assert "省略号、伪代码或文字描述" in instruction
-    assert "项目相对路径和真实起止行号" in instruction
+    assert "每个连续源码片段上方单独标注项目相对路径，例如 `src/proto/parser.c`。" in instruction
     assert "带准确语言标签的 Markdown 围栏" in instruction
     assert "原始行号 | 源码" in instruction
     assert "新增独立注释行不编造源码行号" in instruction
