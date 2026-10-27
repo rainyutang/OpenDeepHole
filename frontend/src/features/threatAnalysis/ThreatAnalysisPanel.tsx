@@ -11,13 +11,13 @@ import type {
 } from "../../types";
 import { moduleSourcePaths, scanRelativePaths } from "./coverage";
 import type { ThreatCoverage } from "./coverage";
-import { ThreatCoverageView } from "./ThreatCoveragePanel";
 import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatAnalysisPanel.css";
 
 interface ThreatAnalysisPanelProps {
   scanId: string;
   coverageRevision: number;
+  coverageState?: ReturnType<typeof useThreatCoverage>;
   analysisStatus?: string;
   analysis: ThreatAnalysis | null;
   events: ScanEvent[];
@@ -104,7 +104,7 @@ export function getThreatAnalysisResultCounts(
 export function ThreatAnalysisPanel({
   scanId,
   coverageRevision,
-  analysisStatus,
+  coverageState: sharedCoverage,
   analysis,
   events,
   loading,
@@ -114,8 +114,8 @@ export function ThreatAnalysisPanel({
   onResultTabChange,
   errorMessage = "",
 }: ThreatAnalysisPanelProps) {
-  const coverageState = useThreatCoverage(scanId, coverageRevision);
-  const coverage = <ThreatCoverageView {...coverageState} analysisStatus={analysisStatus} />;
+  const localCoverage = useThreatCoverage(scanId, coverageRevision, !sharedCoverage);
+  const coverageState = sharedCoverage ?? localCoverage;
   const assets = artifactArray<NativeThreatValueAsset>(
     analysis,
     "value_asset_path",
@@ -142,7 +142,6 @@ export function ThreatAnalysisPanel({
                 : "等待威胁分析结果。"
           }
         />
-        {coverage}
         <ThreatEventList events={events} />
       </div>
     );
@@ -159,7 +158,6 @@ export function ThreatAnalysisPanel({
           <ThreatAnalysisError methodLabel={methodLabel} message={errorMessage} />
         )}
         <EmptyState text="该扫描使用旧版威胁分析格式，当前版本不再提供兼容展示。" />
-        {coverage}
         <ThreatEventList events={events} />
       </div>
     );
@@ -241,7 +239,6 @@ export function ThreatAnalysisPanel({
         </section>
       </section>
 
-      {coverage}
       <ArtifactPaths analysis={analysis} />
       <ThreatEventList events={events} />
     </div>

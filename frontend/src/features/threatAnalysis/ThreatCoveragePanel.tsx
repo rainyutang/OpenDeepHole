@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CoverageNode, ThreatCoverage } from "./coverage";
-import { buildCoverageTree, coveragePercent, createCoverageMatcher, scanRelativePaths } from "./coverage";
+import type { ReactNode } from "react";
+import type { CoverageIssues, CoverageNode, ThreatCoverage } from "./coverage";
+import { buildCoverageIssueOverlay, coverageIssueRows, coveragePercent, createCoverageMatcher, scanRelativePaths } from "./coverage";
 import { CoverageTreemap } from "./CoverageTreemap";
-import { useThreatCoverage } from "./useThreatCoverage";
+import { useCoverageIssues, useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatCoveragePanel.css";
 
 const ISSUE_LABELS: Record<string, string> = {
@@ -11,8 +12,15 @@ const ISSUE_LABELS: Record<string, string> = {
   path_limit: "路径长度超过清单限制",
 };
 
-function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: ThreatCoverage; onOpen: (path: string) => void }) {
+function SelectionDetails({ node, data, issues, issuesLoading, issuesError, onOpen, onOpenIssue }: {
+  node: CoverageNode; data: ThreatCoverage; issues: CoverageIssues | null; issuesLoading?: boolean; issuesError?: string;
+  onOpen: (path: string) => void; onOpenIssue?: (index: number) => void;
+}) {
   const [page, setPage] = useState(0);
+  const [issuePage, setIssuePage] = useState(0);
+  const issueRows = useMemo(() => coverageIssueRows(issues, node), [issues, node]);
+  const issuePages = Math.max(1, Math.ceil(issueRows.length / 8));
+  const currentIssuePage = Math.min(issuePage, issuePages - 1);
   const targets = data.targets.filter((target) => node.targetIds.has(target.id));
   const modules = data.modules.filter((module) => node.moduleIds.has(module.id));
   const pages = Math.max(1, Math.ceil(targets.length / 8));
@@ -22,6 +30,19 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
     <h3>{node.path}</h3>
     <p>{node.files.toLocaleString()} 个文件 · {node.highRisk.toLocaleString()} 个高风险文件</p>
     {node.kind !== "file" && <button type="button" className="coverage-button" onClick={() => onOpen(node.path)}>进入此目录</button>}
+    <h4>确认问题 <span>{issues ? issueRows.length : "—"}</span></h4>
+    {!issues && !issuesError && <p className="coverage-muted">{issuesLoading ? "正在加载确认问题…" : "等待确认问题数据。"}</p>}
+    {issues && !issueRows.length && <p className="coverage-muted">此范围暂无去误报复核确认的问题。</p>}
+    {issueRows.slice(currentIssuePage * 8, currentIssuePage * 8 + 8).map(({ path, issue }) => <button
+      type="button" className="coverage-issue" key={issue.vuln_index} disabled={!onOpenIssue}
+      onClick={() => onOpenIssue?.(issue.vuln_index)} aria-label={`查看问题 #${issue.vuln_index}`}>
+      <strong>#{issue.vuln_index} · {issue.vuln_type}</strong><code>{path}:{issue.line}</code>
+    </button>)}
+    {issuePages > 1 && <div className="coverage-pagination" aria-label="确认问题分页">
+      <button type="button" disabled={currentIssuePage === 0} onClick={() => setIssuePage(currentIssuePage - 1)}>上一页</button>
+      <span>{currentIssuePage + 1} / {issuePages}</span>
+      <button type="button" disabled={currentIssuePage + 1 === issuePages} onClick={() => setIssuePage(currentIssuePage + 1)}>下一页</button>
+    </div>}
     <h4>高风险模块 <span>{modules.length}</span></h4>
     {modules.length ? <div className="coverage-module-list">{modules.map((module) => <div key={module.id} title={scanRelativePaths(module).join("\n")}>{module.name}</div>)}</div>
       : <p className="coverage-muted">{data.analysis_ready ? "此范围未标注高风险模块。" : "等待威胁分析结果。"}</p>}
@@ -42,11 +63,35 @@ function SelectionDetails({ node, data, onOpen }: { node: CoverageNode; data: Th
   </aside>;
 }
 
-export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "" }: { scanId: string; revision: number; analysisStatus?: string }) {
-  return <ThreatCoverageView {...useThreatCoverage(scanId, revision)} analysisStatus={analysisStatus} />;
+export function ThreatCoveragePanel({ scanId, revision, analysisStatus = "", onOpenIssue }: {
+  scanId: string; revision: number; analysisStatus?: string; onOpenIssue?: (index: number) => void;
+}) {
+  const state = useThreatCoverage(scanId, revision);
+  const issuesState = useCoverageIssues(scanId, String(revision), state.data?.inventory?.snapshot_id, true);
+  return <ThreatCoverageView {...state} issuesState={issuesState} analysisStatus={analysisStatus} onOpenIssue={onOpenIssue} />;
 }
 
-export function ThreatCoverageView({ data, loading, error, refresh, analysisStatus = "" }: ReturnType<typeof useThreatCoverage> & { analysisStatus?: string }) {
+/** The scan owns cached data; the bottom-of-page view activates it near the viewport. */
+export function CoverageViewport({ onVisible, children }: { onVisible: () => void; children: ReactNode }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    if (visible) { onVisible(); return; }
+    if (!host.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "400px" });
+    observer.observe(host.current);
+    return () => observer.disconnect();
+  }, [visible, onVisible]);
+  return <div ref={host} className="coverage-viewport">{visible ? children
+    : <section className="threat-coverage"><h2>威胁分析覆盖图</h2><p className="coverage-caption">滚动至此加载覆盖数据。</p></section>}</div>;
+}
+
+export function ThreatCoverageView({ data, tree, loading, error, refresh, issuesState, onOpenIssue, analysisStatus = "" }:
+  ReturnType<typeof useThreatCoverage> & {
+    analysisStatus?: string; issuesState?: ReturnType<typeof useCoverageIssues>; onOpenIssue?: (index: number) => void;
+  }) {
   const panel = useRef<HTMLElement>(null);
   const [history, setHistory] = useState<string[]>(["."]);
   const [selected, setSelected] = useState(".");
@@ -70,7 +115,8 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
       setFullscreenError("未能进入全屏，可收起详情扩大图表。");
     }
   };
-  const tree = useMemo(() => data ? buildCoverageTree(data) : null, [data]);
+  const issues = issuesState?.data ?? null;
+  const issueCounts = useMemo(() => tree ? buildCoverageIssueOverlay(tree, issues) : new Map(), [tree, issues]);
   const targetMap = useMemo(() => new Map(data?.targets.map((target) => [target.id, target]) ?? []), [data]);
   const patterns = useMemo(() => [...new Map(data?.targets.map((target) => [target.pattern_id || target.pattern_name,
     `${target.pattern_id} ${target.pattern_name}`.trim()]) ?? []).entries()].sort((a, b) => a[1].localeCompare(b[1])), [data]);
@@ -102,13 +148,18 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
     const steps = parent === "." ? [] : parent.split("/").map((_part, index, parts) => parts.slice(0, index + 1).join("/"));
     setHistory([".", ...steps]); setSelected(item.path); setQuery(""); setShowDetails(true);
   };
+  const openIssue = (index: number) => {
+    if (document.fullscreenElement === panel.current) void document.exitFullscreen().catch(() => {});
+    onOpenIssue?.(index);
+  };
 
   return <section ref={panel} className="threat-coverage" aria-label="威胁分析覆盖图">
     <header className="coverage-header"><div><span className="coverage-eyebrow">扫描范围 / 覆盖统计</span><h2>威胁分析覆盖图</h2>
-      <p>面积按文件数量计算，标注来自高风险模块与攻击树产物。</p></div>
-      <div className="coverage-actions"><button type="button" className="coverage-button" onClick={refresh} disabled={loading}>{loading ? "加载中…" : "刷新"}</button>
+      <p>面积按文件数量计算，红色文件表示去误报复核确认的问题。</p></div>
+      <div className="coverage-actions"><button type="button" className="coverage-button" onClick={() => { refresh(); issuesState?.refresh(); }} disabled={loading || issuesState?.loading}>{loading || issuesState?.loading ? "加载中…" : "刷新"}</button>
         {hasTree && <button type="button" className="coverage-button" onClick={toggleFullscreen}>{fullscreen ? "退出全屏" : "全屏总览"}</button>}</div></header>
     {error && <p role="alert" className="coverage-warning">{error}</p>}
+    {issuesState?.error && <p role="alert" className="coverage-warning">问题标注加载失败，请刷新重试；已加载的标注仍然保留。</p>}
     {fullscreenError && <p role="alert" className="coverage-warning">{fullscreenError}</p>}
     {!hasTree && <div className="coverage-empty" role="status">
       {inventory?.status === "failed" ? `文件清单采集失败：${inventory.error_message}`
@@ -129,6 +180,9 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
         <div><span>攻击模式关联</span><strong>{data.analysis_ready ? root.covered.toLocaleString() : "—"}<em>{percent(root.covered)}</em></strong><small>关联攻击模式的去重文件</small></div>
         <div><span>模块 / 攻击模式</span><strong>{data.analysis_ready ? `${data.modules.length} / ${patterns.length}` : "—"}</strong><small>{data.analysis_ready ? `${data.targets.length} 个模块 × 模式关联` : "等待分析产物"}</small></div>
       </div>
+      <p className="coverage-issue-summary">确认问题：{issues ? issues.total_issue_count.toLocaleString() : "—"} 个 ·
+        涉及文件：{issues ? (issueCounts.get(".")?.files ?? 0).toLocaleString() : "—"} 个
+        {issues && issues.unmapped_count > 0 ? ` · ${issues.unmapped_count} 个问题未映射到文件清单` : ""}</p>
       <div className="coverage-toolbar">
         <label><span>搜索路径或模块</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如 src/auth 或认证模块" /></label>
         <label><span>高亮攻击模式</span><select value={pattern} onChange={(event) => setPattern(event.target.value)}><option value="">全部攻击模式</option>{patterns.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
@@ -137,7 +191,7 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
         {searchResults.map((item) => <button type="button" key={item.path} onClick={() => locate(item)}><code>{item.path}</code><span>{item.files} 个文件</span></button>)}
         <p>{searchResults.length ? `显示 ${searchResults.length} 项${searchResults.length === 100 ? "，可缩小搜索范围查看其它路径" : ""}` : "没有匹配的路径或模块。"}</p>
       </div>}
-      <div className="coverage-legend"><span><i className="is-neutral" />{data.analysis_ready ? "未标注" : "尚未标注"}</span><span><i className="is-risk" />高风险未关联模式</span><span><i className="is-covered" />已关联攻击模式</span><small>筛选高亮不改变全扫描统计</small></div>
+      <div className="coverage-legend"><span><i className="is-neutral" />{data.analysis_ready ? "未标注" : "尚未标注"}</span><span><i className="is-risk" />高风险未关联模式</span><span><i className="is-covered" />已关联攻击模式</span><span><i className="is-issue" />确认问题文件</span><small>红色边框表示目录含问题；筛选不隐藏问题</small></div>
       <div className="coverage-navigation"><nav className="coverage-breadcrumb" aria-label="覆盖图目录">
         {history.map((path, index) => <button type="button" key={`${index}:${path}`} onClick={() => { setHistory(history.slice(0, index + 1)); setSelected(path); }}
           aria-current={index === history.length - 1 ? "location" : undefined}>{index ? "› " : ""}{tree!.byPath.get(path)?.name ?? "扫描范围"}</button>)}
@@ -146,10 +200,16 @@ export function ThreatCoverageView({ data, loading, error, refresh, analysisStat
         <button type="button" className="coverage-button" aria-expanded={showDetails} onClick={() => setShowDetails(!showDetails)}>{showDetails ? "收起详情" : "显示详情"}</button>
       </div></div>
       <div className={`coverage-workspace ${showDetails ? "" : "is-map-only"}`}><div className="coverage-map-column">
-        <CoverageTreemap parent={view} selected={selected} highlighted={highlighted} targets={targetMap}
-          onSelect={setSelected} onOpen={open} />
+        <CoverageTreemap parent={view} selected={selected} highlighted={highlighted} targets={targetMap} issueCounts={issueCounts}
+          onSelect={(path) => { setSelected(path); setShowDetails(true); }} onOpen={open} />
         <p className="coverage-caption">自动适配全部格子 · 单击查看关联，双击目录下钻 · 小格子可悬停或搜索查看完整路径</p></div>
-        {showDetails && <SelectionDetails key={detail.path} node={detail} data={data} onOpen={open} />}</div>
+        {showDetails && <SelectionDetails key={detail.path} node={detail} data={data} issues={issues}
+          issuesLoading={issuesState?.loading} issuesError={issuesState?.error} onOpen={open} onOpenIssue={onOpenIssue ? openIssue : undefined} />}</div>
+      {!!issues?.unmapped_count && <details className="coverage-diagnostics"><summary>未映射的确认问题（{issues.unmapped_count}）</summary>
+        {issues.unmapped.map((item) => <p key={item.vuln_index}><button type="button" className="coverage-button"
+          disabled={!onOpenIssue} onClick={() => openIssue(item.vuln_index)}>查看问题 #{item.vuln_index}</button> <code>{item.file}</code>：未精确匹配清单中的文件</p>)}
+        {issues.unmapped_count > issues.unmapped.length && <p>仅列出前 {issues.unmapped.length} 项。</p>}
+      </details>}
       {(data.unmapped.length > 0 || inventory.issues.length > 0 || inventory.excluded_paths.length > 0) && <details className="coverage-diagnostics"><summary>范围说明与未映射路径（{data.unmapped.length + inventory.issue_count + inventory.excluded_paths.length}）</summary>
         {inventory.excluded_paths.map((path) => <p key={`excluded:${path}`}><code>{path}</code>：排除本次扫描工作目录</p>)}
         {inventory.issues.map((issue, index) => <p key={`issue:${index}`}><code>{issue.path}</code>：{ISSUE_LABELS[issue.reason] ?? issue.reason}</p>)}

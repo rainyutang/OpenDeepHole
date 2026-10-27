@@ -179,6 +179,11 @@ async def threat_coverage(scan_id: str, user: SharedUser):
     return await scan_api.get_scan_threat_coverage(scan_id, user)
 
 
+@shared.get("/threat-coverage/issues")
+async def threat_coverage_issues(scan_id: str, user: SharedUser):
+    return await scan_api.get_scan_threat_coverage_issues(scan_id, user)
+
+
 @shared.get("/checkers")
 async def checkers(scan_id: str, user: SharedUser):
     from backend.api.checkers import list_checkers

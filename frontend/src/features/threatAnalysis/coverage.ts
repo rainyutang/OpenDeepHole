@@ -49,6 +49,55 @@ export interface CoverageNode {
   covered: number;
 }
 
+export interface CoverageIssue {
+  vuln_index: number;
+  line: number;
+  vuln_type: string;
+  severity: string;
+  engine_id: string;
+}
+export interface CoverageIssues {
+  inventory_snapshot_id: string | null;
+  total_issue_count: number;
+  files: Array<{ path: string; issues: CoverageIssue[] }>;
+  unmapped_count: number;
+  unmapped: Array<{ vuln_index: number; file: string }>;
+}
+export interface CoverageIssueCount { issues: number; files: number }
+export type CoverageTree = ReturnType<typeof buildCoverageTree>;
+const NO_ISSUE_COUNTS: ReadonlyMap<string, CoverageIssueCount> = new Map();
+
+/** Sparse counters only: descendants never inherit issue IDs from a directory. */
+export function buildCoverageIssueOverlay(tree: CoverageTree, data: CoverageIssues | null): ReadonlyMap<string, CoverageIssueCount> {
+  if (!data?.files.length) return NO_ISSUE_COUNTS;
+  const byPath = new Map<string, CoverageIssueCount>();
+  const byFile = new Map((data?.files ?? []).filter((group) => tree.byPath.get(group.path)?.kind === "file")
+    .map((group) => [group.path, group.issues]));
+  function aggregate(node: CoverageNode): CoverageIssueCount {
+    let issues = node.kind === "file" ? byFile.get(node.path)?.length ?? 0 : 0;
+    let files = Number(issues > 0);
+    for (const child of node.children) {
+      const count = aggregate(child);
+      issues += count.issues; files += count.files;
+    }
+    const count = { issues, files };
+    if (issues) byPath.set(node.path, count);
+    return count;
+  }
+  aggregate(tree.root);
+  return byPath;
+}
+
+/** Materialize only the selected path's list, retaining references to summaries. */
+export function coverageIssueRows(data: CoverageIssues | null, node: CoverageNode) {
+  const rows: Array<{ path: string; issue: CoverageIssue }> = [];
+  for (const group of data?.files ?? []) {
+    if (group.path !== node.path && !(node.kind === "directory" && (node.path === "." || group.path.startsWith(node.path + "/")))) continue;
+    for (const issue of group.issues) rows.push({ path: group.path, issue });
+  }
+  return rows.sort((a, b) => a.issue.vuln_index - b.issue.vuln_index);
+}
+
 /** Source comparison only; path resolution belongs to the shared backend resolver. */
 export function moduleSourcePaths(value: unknown): string[] {
   const values = Array.isArray(value) ? value : [value];

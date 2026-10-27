@@ -11,6 +11,8 @@ const client = await server.ssrLoadModule("/src/api/client.ts");
 const threatApi = await server.ssrLoadModule("/src/features/threatAnalysis/api.ts");
 const { default: ScanStatus } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
+const { CoverageTreemap } = await server.ssrLoadModule("/src/features/threatAnalysis/CoverageTreemap.tsx");
+const { CoverageViewport } = await server.ssrLoadModule("/src/features/threatAnalysis/ThreatCoveragePanel.tsx");
 const originalAdapter = client.api.defaults.adapter;
 const originalSetInterval = globalThis.setInterval;
 const originalClearInterval = globalThis.clearInterval;
@@ -44,6 +46,7 @@ afterEach(async () => {
   assert.equal(polls.size, 0);
   streams.length = 0;
   document.hidden = false;
+  delete globalThis.IntersectionObserver;
   client.api.defaults.adapter = originalAdapter;
   client.setPublicScanAccess(null);
 });
@@ -119,6 +122,9 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
         else if (config.url.endsWith("/threat-analysis")) {
           data = structuredClone(value.analysis);
         } else if (config.url.endsWith("/threat-coverage")) data = structuredClone(value.coverage ?? { inventory: null, analysis_ready: false, modules: [], targets: [], unmapped: [] });
+        else if (config.url.endsWith("/threat-coverage/issues")) data = structuredClone(value.coverageIssues ?? {
+          inventory_snapshot_id: value.coverage?.inventory?.snapshot_id, total_issue_count: 0, files: [], unmapped_count: 0, unmapped: [],
+        });
         else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
         else if (config.url.endsWith("/git_history")) data = [];
         else if (/\/(stop|resume)$/.test(config.url)) data = {};
@@ -134,7 +140,8 @@ function component(scanId) { return createElement(ThemeProvider, null, createEle
 async function mount(scanId = "s") {
   let root;
   await act(async () => { root = create(component(scanId), { createNodeMock(element) {
-    return element.props.className === "coverage-canvas" ? { clientWidth: 960, clientHeight: 360 } : null;
+    return element.props.className === "coverage-canvas" ? { clientWidth: 960, clientHeight: 360 }
+      : element.props.className === "coverage-viewport" ? {} : null;
   } }); });
   roots.push(root);
   return root;
@@ -147,6 +154,92 @@ async function notify(...events) {
 }
 async function poll() { await act(async () => { [...polls.values()].forEach((callback) => callback()); }); }
 const threatNotice = ["resource_changed", { resource: "threat-analysis", index: null }];
+
+function coverageFixture() {
+  return { analysis_ready: true, modules: [], targets: [], unmapped: [], inventory: {
+    snapshot_id: "snapshot", status: "complete", project_path: "/project", scan_root: "/project/src",
+    captured_at: "2026-10-27T00:00:00Z", issues: [], issue_count: 0, excluded_paths: [], error_message: "",
+    entries: [{ path: ".", kind: "directory" }, { path: "auth.c", kind: "file" }, { path: "other.c", kind: "file" }],
+  } };
+}
+
+test("coverage is last on the scan homepage, cached across tabs, and absent from the threat page", async () => {
+  const value = fixture(); value.coverage = coverageFixture();
+  const calls = installApi([value]);
+  const root = await mount();
+  const viewport = root.root.findByType(CoverageViewport);
+  assert.equal(viewport.parent.children.at(-1), viewport);
+  assert.equal(root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" }).length, 1);
+  const count = calls.filter((call) => call.url.endsWith("/threat-coverage")).length;
+  await act(async () => button(root, "价值资产2 项").props.onClick());
+  assert.equal(root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" }).length, 0);
+  await act(async () => button(root, "首页扫描概览与任务队列").props.onClick());
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage")).length, count);
+});
+
+test("the bottom map waits for the viewport before requesting the large inventory", async () => {
+  let observed;
+  globalThis.IntersectionObserver = class {
+    constructor(callback) { observed = callback; }
+    observe() {} disconnect() {}
+  };
+  const value = fixture(); value.coverage = coverageFixture();
+  const calls = installApi([value]);
+  const root = await mount();
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage")).length, 0);
+  await act(async () => observed([{ isIntersecting: true }]));
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage")).length, 1);
+  assert.ok(root.root.findByProps({ "aria-label": "文件树矩形图" }));
+});
+
+test("scans without threat analysis can show final problems without polling the frozen inventory", async () => {
+  const value = fixture(); value.overview.threat_analysis_enabled = false; value.analysis = null;
+  value.coverage = { ...coverageFixture(), analysis_ready: false };
+  value.coverageIssues = { inventory_snapshot_id: "snapshot", total_issue_count: 1, unmapped_count: 0, unmapped: [],
+    files: [{ path: "auth.c", issues: [{ vuln_index: 42, line: 10, vuln_type: "oob" }] }] };
+  const calls = installApi([value]);
+  const root = await mount();
+  const tile = root.root.findAllByType("button").find((node) => node.props["aria-label"]?.startsWith("auth.c，"));
+  assert.equal(tile.props.style.background, "var(--coverage-issue)");
+  const count = calls.filter((call) => call.url.endsWith("/threat-coverage")).length;
+  await poll();
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage")).length, count);
+});
+
+test("final-review changes refresh only issue markings and navigate to a sparse unloaded issue", async () => {
+  const value = fixture(); value.coverage = coverageFixture();
+  const empty = { inventory_snapshot_id: "snapshot", total_issue_count: 0, files: [], unmapped_count: 0, unmapped: [] };
+  value.coverageIssues = empty;
+  const finding = { file: "auth.c", line: 10, function: "parse", vuln_type: "oob", severity: "high", confirmed: true,
+    ai_verdict: "confirmed", description: "边界问题", engine_id: "static_candidate", vulnerability_report: "# 定位的完整问题报告" };
+  const calls = installApi([value], async (config) => {
+    if (config.url.endsWith("/details/fp-review/42")) return { vuln_index: 42, verdict: "tp", reason: "完整结论", severity: "high" };
+    if (config.url.endsWith("/vulnerabilities") && config.params?.after === 41) return { items: [{ index: 42, vulnerability: finding }], next_cursor: null };
+  });
+  const root = await mount();
+  const parent = root.root.findByType(CoverageTreemap).props.parent;
+  const baseRequests = calls.filter((call) => call.url.endsWith("/threat-coverage")).length;
+  const issueRequests = calls.filter((call) => call.url.endsWith("/threat-coverage/issues")).length;
+  await notify(["resource_changed", { resource: "fp-review", index: 42, change: "stage_output" }]);
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage/issues")).length, issueRequests);
+  value.coverageIssues = { ...empty, total_issue_count: 1, files: [{ path: "auth.c", issues: [{
+    vuln_index: 42, line: 10, vuln_type: "oob", severity: "high", engine_id: "static_candidate",
+  }] }] };
+  const tile = () => root.root.findAllByType("button").find((node) => node.props["aria-label"]?.startsWith("auth.c，"));
+  await notify(["resource_changed", { resource: "fp-review", index: 42, change: "result" }]);
+  assert.equal(tile().props.style.background, "var(--coverage-issue)");
+  assert.equal(root.root.findByType(CoverageTreemap).props.parent, parent);
+  assert.equal(calls.filter((call) => call.url.endsWith("/threat-coverage")).length, baseRequests);
+  value.coverageIssues = empty;
+  await notify(["resource_changed", { resource: "fp-review", index: 42 }]);
+  assert.notEqual(tile().props.style.background, "var(--coverage-issue)");
+  value.coverageIssues = { ...empty, total_issue_count: 1, files: [{ path: "auth.c", issues: [{ vuln_index: 42, line: 10, vuln_type: "oob" }] }] };
+  await notify(["resource_changed", { resource: "fp-review", index: 42, change: "result" }]);
+  await act(async () => tile().props.onClick());
+  await act(async () => root.root.findByProps({ "aria-label": "查看问题 #42" }).props.onClick());
+  assert.ok(calls.some((call) => call.url.endsWith("/vulnerabilities") && call.params?.after === 41 && call.params?.limit === 1));
+  assert.match(text(root.toJSON()), /定位的完整问题报告/);
+});
 
 for (const kind of ["authenticated", "integration", "shared"]) {
   test(`optional result APIs distinguish absence from real failures (${kind})`, async () => {
@@ -208,7 +301,6 @@ test("resuming a historical scan shows existing annotations on inventory arrival
     if (config.url.endsWith("/resume")) value.overview.status = "auditing";
   });
   const root = await mount();
-  await act(async () => button(root, "价值资产2 项").props.onClick());
   assert.match(text(root.toJSON()), /当前扫描尚无独立文件清单/);
   await act(async () => button(root, "续扫").props.onClick());
   assert.ok(calls.some((call) => call.url.endsWith("/resume") && call.method === "post"));
@@ -244,9 +336,6 @@ for (const event of [
     value.overview.threat_analysis_run = { status: "running" };
     const calls = installApi([value]);
     const root = await mount();
-    const threatNav = root.root.findAllByType("button").find((node) => text(node).startsWith("威胁分析"));
-    assert.ok(threatNav);
-    await act(async () => threatNav.props.onClick());
     const coverage = root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" });
     assert.equal(coverage.length, 1);
     value.coverage = {

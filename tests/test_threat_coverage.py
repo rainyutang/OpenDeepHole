@@ -18,14 +18,55 @@ from pydantic import ValidationError
 from backend import auth, report_routes, sse
 from backend.api import agent, integration, scan, sharing
 from backend.file_inventory import FileInventoryUpload, ScanFileInventory
-from backend.models import ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import FpReviewResult, ScanItemStatus, ScanMeta, ScanStatus, Vulnerability
 from backend.store.sqlite import SqliteScanStore
-from backend.threat_coverage import analysis_targets, build_threat_coverage
+from backend.threat_coverage import analysis_targets, build_coverage_issues, build_threat_coverage
 from deephole_client import file_inventory as collector, scanner
 from deephole_client.config import AgentConfig
 from deephole_client.codex_runtime import ScanCodexConfigResult
 from deephole_client.reporter import Reporter
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit.engine import _build_targets
+
+
+def overlay_finding(index=7, file="src/auth/a.c", **changes):
+    return {"vuln_index": index, "file": file, "line": 12, "vuln_type": "oob", "severity": "high",
+            "engine_id": "static_candidate", **changes}
+
+
+@pytest.mark.parametrize("project,root,paths", [
+    ("/project", "/project/src", ["src/auth/a.c", "auth/a.c", "./auth/a.c", "/project/src/auth/a.c"]),
+    ("C:\\Project", "C:\\Project\\src", ["src\\auth\\a.c", "auth/a.c", "c:\\PROJECT\\SRC\\AUTH\\a.c"]),
+    ("\\\\server\\share\\project", "\\\\server\\share\\project\\src",
+     ["src/auth/a.c", "auth/a.c", "\\\\SERVER\\SHARE\\PROJECT\\SRC\\auth\\a.c"]),
+])
+def test_issue_overlay_exact_file_mapping_across_agent_platforms(project, root, paths):
+    data = build_coverage_issues(inventory(project_path=project, scan_root=root),
+                                 [overlay_finding(index, path) for index, path in enumerate(paths)])
+    assert [group["path"] for group in data["files"]] == ["auth/a.c"]
+    assert len(data["files"][0]["issues"]) == len(paths)
+    assert data["unmapped_count"] == 0
+
+
+def test_issue_overlay_never_expands_directories_or_guesses_file_names():
+    paths = ["src/auth", "a.c", "/outside/auth/a.c", "../auth/a.c", "src/missing/a.c", "src/auth/a.c*"]
+    data = build_coverage_issues(inventory(), [overlay_finding(i, path) for i, path in enumerate(paths)])
+    assert data["files"] == []
+    assert data["unmapped_count"] == len(paths)
+    snapshot = inventory(entries=[*inventory()["entries"], {"path": "src", "kind": "directory"},
+                                   {"path": "src/auth", "kind": "directory"}, {"path": "src/auth/a.c", "kind": "file"}])
+    # An existing project-relative file wins over a second, nested candidate.
+    assert build_coverage_issues(snapshot, [overlay_finding()])["files"][0]["path"] == "auth/a.c"
+    absent = build_coverage_issues(None, [overlay_finding(i) for i in range(150)])
+    assert absent["inventory_snapshot_id"] is None
+    assert absent["unmapped_count"] == 150 and len(absent["unmapped"]) == 100
+
+
+def test_issue_overlay_uses_complete_inventory_prefix_repairs_only():
+    snapshot = inventory(project_path="/work/project", scan_root="/work/project/src")
+    findings = [overlay_finding(file="project/src/auth/a.c")]
+    assert build_coverage_issues(snapshot, findings)["files"][0]["path"] == "auth/a.c"
+    snapshot["status"] = "partial"
+    assert build_coverage_issues(snapshot, findings)["files"] == []
 
 
 def inventory(**changes):
@@ -191,6 +232,76 @@ def coverage_env(request, tmp_path, monkeypatch):
     headers = {"Authorization": "Bearer " + auth.create_token(owner, owner, "user")}
     yield SimpleNamespace(store=store, scan_id=scan_id, revision=revision, app=app, headers=headers)
     store.close()
+
+
+def test_final_tp_issue_overlay_is_read_only_all_source_and_available_before_analysis(coverage_env, monkeypatch):
+    env = coverage_env
+    store, sid = env.store, env.scan_id
+    store.replace_file_inventory(sid, FileInventoryUpload(
+        inventory=inventory(), execution_revision=env.revision, agent_session_id="session-1"))
+    indexes = []
+    for source in ("static_candidate", "threat_audit", "threat_pattern_audit", "custom_engine"):
+        indexes.append(store.add_vulnerability(sid, Vulnerability(
+            file="/project/src/auth/a.c", line=12, function="test", vuln_type="oob", severity="high",
+            description="finding", confirmed=True, ai_verdict="confirmed", analysis_source=source, engine_id=source,
+            vulnerability_report="large body " * 20000)))
+
+    def review(index, verdict="tp", hour=1, reason="完整复核结论"):
+        rid = uuid.uuid4().hex
+        created = f"2026-10-27T{hour:02}:00:00+00:00"
+        store.create_fp_review_job(rid, sid, 1, created)
+        store.add_fp_review_result(rid, FpReviewResult(vuln_index=index, verdict=verdict,
+                                   severity="high", reason=reason, created_at=created))
+
+    with monkeypatch.context() as zero:
+        zero.setattr(store, "get_file_inventory", lambda *_args: pytest.fail("Empty overlays must skip inventory parsing"))
+        assert store.get_threat_coverage_issues(sid)["total_issue_count"] == 0
+    # Artificially sparse indexes must survive the projection and navigation.
+    store._conn.execute("UPDATE vulnerabilities SET idx = 42 WHERE scan_id = ? AND idx = ?", (sid, indexes[-1]))
+    store._conn.commit()
+    indexes[-1] = 42
+    for index in indexes:
+        review(index)
+    review(indexes[0], hour=2, reason="Review incomplete: no report")
+    review(indexes[1], "fp", hour=3)
+    # Independent human feedback does not change the final-TP list's semantics.
+    store.update_vulnerability(sid, indexes[2], "false_positive", "人工标记")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Coverage issues must not hydrate scan, analysis or report bodies")
+    for method in ("get_vulnerabilities", "get_threat_analysis"):
+        monkeypatch.setattr(store, method, forbidden)
+    before = store._conn.execute("SELECT COUNT(*) AS n FROM scan_issue_facts WHERE scan_id = ?", (sid,)).fetchone()["n"]
+    result = store.get_threat_coverage_issues(sid)
+    assert result["total_issue_count"] == 3 and result["unmapped_count"] == 0
+    assert [item["vuln_index"] for item in result["files"][0]["issues"]] == [indexes[0], indexes[2], 42]
+    assert "large body" not in str(result)
+    store._conn.execute("UPDATE scan_summary_state SET ready = 0 WHERE scan_id = ?", (sid,))
+    store._conn.commit()
+    assert store.get_threat_coverage_issues(sid) == result
+    assert store._conn.execute("SELECT COUNT(*) AS n FROM scan_issue_facts WHERE scan_id = ?", (sid,)).fetchone()["n"] == before
+
+
+def test_coverage_issue_api_uses_existing_owner_public_and_share_permissions(coverage_env):
+    env = coverage_env
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.app), base_url="http://test") as client:
+            path = f"/api/scan/{env.scan_id}/threat-coverage/issues"
+            assert (await client.get(path)).status_code == 401
+            other = "other-" + env.scan_id
+            env.store.create_user(other, other, "unused", "user", other)
+            denied = {"Authorization": "Bearer " + auth.create_token(other, other, "user")}
+            assert (await client.get(path, headers=denied)).status_code == 403
+            response = await client.get(path, headers=env.headers)
+            assert response.status_code == 200
+            result = response.json()
+            assert result["total_issue_count"] == 0
+            token = (await client.post(f"/api/scan/{env.scan_id}/share", headers=env.headers)).json()["token"]
+            for route, credential in (("shared", token), ("public", "integration-token")):
+                public_path = f"/api/{route}/scans/{env.scan_id}/threat-coverage/issues"
+                assert (await client.get(public_path, params={"token": "bad"})).status_code == 403
+                assert (await client.get(public_path, params={"token": credential})).json() == result
+    asyncio.run(run())
 
 
 def test_independent_inventory_round_trip_auth_idempotency_and_deletion(coverage_env):

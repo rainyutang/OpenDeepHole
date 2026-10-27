@@ -79,3 +79,31 @@ class ScanFileInventoriesMixin:
             "project_path": meta.project_path,
             "code_scan_path": meta.code_scan_path or meta.project_path,
         } if meta else None)
+
+    def get_threat_coverage_issues(self, scan_id: str) -> dict:
+        from backend.store.summaries import EFFECTIVE_FP
+        from backend.threat_coverage import build_coverage_issues
+
+        with self._lock:
+            state = self._conn.execute(
+                "SELECT ready FROM scan_summary_state WHERE scan_id = ?", (scan_id,),
+            ).fetchone()
+            columns = "v.idx AS vuln_index, v.file, v.line, v.vuln_type, v.severity, v.engine_id"
+            if state and state["ready"]:
+                sql = (f"SELECT {columns} FROM scan_issue_facts f JOIN vulnerabilities v "
+                       "ON v.scan_id = f.scan_id AND v.idx = f.vuln_index "
+                       "WHERE f.scan_id = ? AND f.fp_review_issue_count = 1 ORDER BY v.idx")
+            else:
+                # Keep historical scans readable before the existing summary
+                # backfill finishes, without hydrating any report bodies.
+                sql = (f"SELECT {columns} FROM vulnerabilities v WHERE v.scan_id = ? AND ("
+                       "SELECT r.verdict FROM fp_review_results r JOIN fp_review_jobs j ON j.review_id = r.review_id "
+                       f"WHERE j.scan_id = v.scan_id AND r.vuln_index = v.idx AND {EFFECTIVE_FP} "
+                       "ORDER BY j.created_at DESC, r.created_at DESC, r.id DESC LIMIT 1) = 'tp' ORDER BY v.idx")
+            findings = [dict(row) for row in self._conn.execute(sql, (scan_id,)).fetchall()]
+            if not findings:
+                # An empty overlay applies to any inventory. Avoid parsing a
+                # potentially large frozen inventory when there are no TPs.
+                return build_coverage_issues(None, [])
+            inventory = self.get_file_inventory(scan_id)
+        return build_coverage_issues(inventory, findings)

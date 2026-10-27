@@ -6,7 +6,7 @@ import { createServer } from "vite";
 
 const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
-const { buildCoverageTree, createCoverageMatcher, layoutTreemap, layoutCoverageTree, hitCoverageTile } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
+const { buildCoverageTree, buildCoverageIssueOverlay, coverageIssueRows, createCoverageMatcher, layoutTreemap, layoutCoverageTree, hitCoverageTile } = await server.ssrLoadModule("/src/features/threatAnalysis/coverage.ts");
 const { ThreatCoveragePanel } = await server.ssrLoadModule("/src/features/threatAnalysis/ThreatCoveragePanel.tsx");
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { getThreatCoverage } = await server.ssrLoadModule("/src/features/threatAnalysis/api.ts");
@@ -21,7 +21,7 @@ globalThis.ResizeObserver = class {
   observe(element) { this.element = element; }
   disconnect() { resizers.delete(this); }
 };
-globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#456789" });
+globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => name === "--coverage-issue" ? "#a82c3c" : "#456789" });
 globalThis.setInterval = (callback, delay) => {
   assert.equal(delay, 30_000);
   const id = Symbol("coverage poll");
@@ -94,28 +94,30 @@ function deferred() {
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
-function installApi(value) {
+function installApi(value, issues = null) {
   const calls = [];
   client.api.defaults.adapter = async (config) => {
     calls.push(config);
-    const data = typeof value === "function" ? await value(config) : value;
+    const data = config.url.endsWith("/threat-coverage/issues")
+      ? typeof issues === "function" ? await issues(config) : issues ?? { inventory_snapshot_id: "snapshot", total_issue_count: 0, files: [], unmapped_count: 0, unmapped: [] }
+      : typeof value === "function" ? await value(config) : value;
     return { config, data, status: 200, statusText: "OK", headers: {} };
   };
   return calls;
 }
-function component(scanId = "s", revision = 0) { return createElement(ThreatCoveragePanel, { scanId, revision, analysisStatus: "running" }); }
-async function mount(scanId = "s") {
+function component(scanId = "s", revision = 0, extra = {}) { return createElement(ThreatCoveragePanel, { scanId, revision, analysisStatus: "running", ...extra }); }
+async function mount(scanId = "s", extra = {}) {
   let root;
   const host = { clientWidth: 960, clientHeight: 360 };
-  const fills = [], scales = [], alphas = [];
+  const fills = [], scales = [], alphas = [], colors = [];
   const context = {
-    fillRect: (...args) => { fills.push(args); alphas.push(context.globalAlpha); }, scale: (...args) => scales.push(args),
+    fillRect: (...args) => { fills.push(args); alphas.push(context.globalAlpha); colors.push(context.fillStyle); }, scale: (...args) => scales.push(args),
     save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, fillText() {},
   };
   const bitmap = { getContext: () => context };
   const panel = { requestFullscreen: async () => { document.fullscreenElement = panel; document.dispatchEvent(new Event("fullscreenchange")); } };
   document.exitFullscreen = async () => { document.fullscreenElement = null; document.dispatchEvent(new Event("fullscreenchange")); };
-  await act(async () => { root = create(component(scanId), { createNodeMock(element) {
+  await act(async () => { root = create(component(scanId, 0, extra), { createNodeMock(element) {
     if (element.props.className === "coverage-canvas") return host;
     if (element.type === "canvas") return bitmap;
     if (element.props.className === "threat-coverage") return panel;
@@ -126,9 +128,68 @@ async function mount(scanId = "s") {
   root.fills = fills;
   root.scales = scales;
   root.alphas = alphas;
+  root.colors = colors;
   roots.push(root);
   return root;
 }
+
+function issueData(files) {
+  return { inventory_snapshot_id: "snapshot", total_issue_count: files.reduce((n, file) => n + file.issues.length, 0), files,
+    unmapped_count: 0, unmapped: [] };
+}
+function issue(index) { return { vuln_index: index, line: 10, vuln_type: "oob", severity: "high", engine_id: "static_candidate" }; }
+
+test("issue overlays count files once, preserve summaries, and never spread to siblings", () => {
+  const tree = buildCoverageTree(fixture());
+  const summary = issue(42);
+  const data = issueData([{ path: "auth/a.c", issues: [summary, issue(81)] }, { path: "authentication.c", issues: [issue(7)] }]);
+  const counts = buildCoverageIssueOverlay(tree, data);
+  assert.deepEqual(counts.get("."), { issues: 3, files: 2 });
+  assert.deepEqual(counts.get("auth"), { issues: 2, files: 1 });
+  assert.equal(counts.has("auth/b.c"), false);
+  const rows = coverageIssueRows(data, tree.byPath.get("auth"));
+  assert.deepEqual(rows.map(({ issue }) => issue.vuln_index), [42, 81]);
+  assert.equal(rows[0].issue, summary);
+  assert.equal(coverageIssueRows(data, tree.byPath.get("auth/b.c")).length, 0);
+  assert.equal(tree.root.covered, 2);
+  assert.equal(buildCoverageIssueOverlay(tree, issueData([])).size, 0);
+});
+
+test("problem files stay red under mode filters and offer paginated stable-index links", async () => {
+  let fail = false;
+  let data = issueData([{ path: "auth/a.c", issues: Array.from({ length: 9 }, (_, i) => issue(2 + 3 * i)) }]);
+  installApi(fixture(false), () => { if (fail) throw new Error("offline"); return data; });
+  const opened = [];
+  const root = await mount("s", { onOpenIssue: (index) => opened.push(index) });
+  const tile = (name) => root.root.findAllByType("button").find((node) => node.props["aria-label"]?.startsWith(name + "，"));
+  assert.equal(tile("a.c").props.style.background, "var(--coverage-issue)");
+  assert.match(tile("auth").props.className, /has-issues/);
+  assert.notEqual(tile("b.c").props.style.background, "var(--coverage-issue)");
+  await act(async () => root.root.findByType("select").props.onChange({ target: { value: "absent" } }));
+  assert.doesNotMatch(tile("a.c").props.className, /is-dimmed/);
+  await act(async () => tile("a.c").props.onClick());
+  const pagination = section(root, "确认问题分页");
+  await act(async () => pagination.findAllByType("button")[1].props.onClick());
+  await act(async () => root.root.findByProps({ "aria-label": "查看问题 #26" }).props.onClick());
+  assert.deepEqual(opened, [26]);
+  fail = true;
+  await act(async () => button(root, "刷新").props.onClick());
+  assert.equal(tile("a.c").props.style.background, "var(--coverage-issue)");
+  assert.match(text(root.toJSON()), /问题标注加载失败/);
+  fail = false; data = issueData([]);
+  await act(async () => button(root, "刷新").props.onClick());
+  assert.notEqual(tile("a.c").props.style.background, "var(--coverage-issue)");
+});
+
+test("dense canvas paints only the confirmed file red", async () => {
+  const data = fixture(false);
+  data.inventory.entries = [{ path: ".", kind: "directory" },
+    ...Array.from({ length: 1500 }, (_, i) => ({ path: `file-${i}.c`, kind: "file" }))];
+  installApi(data, issueData([{ path: "file-420.c", issues: [issue(42)] }]));
+  const root = await mount();
+  assert.equal(section(root, "文件树矩形图").props["data-renderer"], "canvas");
+  assert.equal(root.colors.filter((color) => color === "#a82c3c").length, 1);
+});
 
 test("directory inheritance and overlapping paths count each file once without leaking to siblings", () => {
   const { root, byPath } = buildCoverageTree(fixture());

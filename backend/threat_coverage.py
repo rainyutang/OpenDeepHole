@@ -121,3 +121,41 @@ def build_threat_coverage(inventory: dict | None, analysis: dict | None, *, scan
                for index, module in enumerate(raw_modules if ready else []) if isinstance(module, dict)]
     targets = [annotate(target, "target") for target in analysis_targets(attack_tree, raw_modules, root)] if ready else []
     return {"inventory": inventory, "analysis_ready": ready, "modules": modules, "targets": targets, "unmapped": unmapped}
+
+
+def build_coverage_issues(inventory: dict | None, findings: list[dict]) -> dict:
+    """Sparse final-TP overlay. Never expand a finding into a directory scope."""
+    snapshot = inventory or {}
+    entries = snapshot.get("entries") or []
+    resolver = ModulePathResolver(
+        snapshot.get("project_path", ""), snapshot.get("scan_root", ""),
+        match=lambda path: known.get(resolver.canonical(path)),
+        allow_repair=snapshot.get("status") == "complete",
+        allow_project_parent_prefix=snapshot.get("status") == "complete",
+    )
+    known = {resolver.canonical(entry["path"]): entry["path"] for entry in entries}
+    files = {entry["path"] for entry in entries if entry["kind"] == "file"}
+    resolved = {}
+    grouped: dict[str, list[dict]] = {}
+    unmapped = []
+    unmapped_count = 0
+    for finding in findings:
+        raw = finding["file"]
+        if raw not in resolved:
+            match = resolver.resolve(raw)
+            resolved[raw] = match.scan_relative if match.matched and match.scan_relative in files else None
+        path = resolved[raw]
+        if path is None:
+            unmapped_count += 1
+            if len(unmapped) < 100:
+                unmapped.append({"vuln_index": finding["vuln_index"], "file": raw})
+            continue
+        grouped.setdefault(path, []).append({key: finding[key] for key in (
+            "vuln_index", "line", "vuln_type", "severity", "engine_id",
+        )})
+    return {
+        "inventory_snapshot_id": snapshot.get("snapshot_id"),
+        "total_issue_count": len(findings),
+        "files": [{"path": path, "issues": issues} for path, issues in grouped.items()],
+        "unmapped_count": unmapped_count, "unmapped": unmapped,
+    }

@@ -4873,6 +4873,14 @@ async def get_scan_threat_coverage(
     return await run_store_call(get_scan_store(), "get_threat_coverage", scan_id)
 
 
+@router.get("/api/scan/{scan_id}/threat-coverage/issues", response_model=dict)
+async def get_scan_threat_coverage_issues(
+    scan_id: str, current_user: User = Depends(get_current_user),
+) -> dict:
+    await _check_scan_owner(scan_id, current_user)
+    return await run_store_call(get_scan_store(), "get_threat_coverage_issues", scan_id)
+
+
 @router.get("/api/scan/{scan_id}/threat-audit-tasks", response_model=list[ThreatAuditTask])
 async def get_scan_threat_audit_tasks(
     scan_id: str,

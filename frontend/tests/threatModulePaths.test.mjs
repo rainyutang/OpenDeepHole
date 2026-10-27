@@ -122,11 +122,7 @@ test("module table and coverage share one scan-relative projection and reject st
   const codeCells = () => table().findAllByType("tr").slice(1).map((row) => text(row.findAllByType("td")[1]));
   assert.match(text(table()), /代码目录（相对扫描路径）/);
   assert.deepEqual(codeCells(), ["auth", "authentication.c"]);
-  assert.deepEqual(root.root.findAllByProps({ className: "coverage-paths" }).map(text), ["auth\nauth/a.c", "auth/a.c"]);
-  await act(async () => root.root.findByType("input").props.onChange({ target: { value: "auth" } }));
-  const directory = section(root, "路径搜索结果").findAllByType("button")
-    .find((item) => item.findAllByType("code").some((code) => text(code) === "auth"));
-  await act(async () => directory.props.onClick());
+  assert.equal(root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" }).length, 0);
   data = structuredClone(data);
   data.modules[0].paths = ["src/auth/a.c"];
   data.modules[0].scan_relative_paths = ["auth/a.c"];
@@ -136,12 +132,11 @@ test("module table and coverage share one scan-relative projection and reject st
   await act(async () => gate.resolve(data));
   assert.equal(calls.length, 2);
   assert.deepEqual(codeCells(), ["auth/a.c", "authentication.c"]);
-  assert.equal(text(section(root, "覆盖图目录")), "扫描范围› auth");
   // Projection is useful before an inventory arrives, without invented tiles.
   data = { ...data, inventory: null };
   await act(async () => root.update(panel(data, 2)));
   assert.deepEqual(codeCells(), ["auth/a.c", "authentication.c"]);
-  assert.match(text(root.toJSON()), /当前扫描尚无独立文件清单/);
+  assert.equal(root.root.findAllByProps({ "aria-label": "威胁分析覆盖图" }).length, 0);
 });
 
 test("module paths show loading or failure instead of flashing raw repeated paths", async () => {

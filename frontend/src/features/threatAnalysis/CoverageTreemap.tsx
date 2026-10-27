@@ -1,22 +1,24 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
-import type { CoverageNode, CoverageTarget, CoverageTreeTile } from "./coverage";
+import type { CoverageIssueCount, CoverageNode, CoverageTarget, CoverageTreeTile } from "./coverage";
 import { coverageBackground, createCoverageMatcher, hitCoverageTile, layoutCoverageTree } from "./coverage";
 
 const DOM_TILE_LIMIT = 1200;
+const NO_ISSUES: ReadonlyMap<string, CoverageIssueCount> = new Map();
 
 function tileLabel(tile: CoverageTreeTile) {
   return tile.nested ? tile.width >= 64 && tile.height >= 40 : tile.width >= 40 && tile.height >= 16;
 }
 
-function tileTitle(node: CoverageNode, targets: Map<string, CoverageTarget>) {
+function tileTitle(node: CoverageNode, targets: Map<string, CoverageTarget>, count?: CoverageIssueCount) {
   const first = targets.get(node.targetIds.values().next().value ?? "")?.pattern_name;
-  return `${node.path}\n${node.files.toLocaleString()} 个文件 · ${node.highRisk.toLocaleString()} 个高风险文件 · ${node.covered.toLocaleString()} 个文件关联攻击模式${first ? `\n${first}${node.targetIds.size > 1 ? ` 等 ${node.targetIds.size} 个关联` : ""}` : ""}`;
+  return `${node.path}\n${node.files.toLocaleString()} 个文件 · ${node.highRisk.toLocaleString()} 个高风险文件 · ${node.covered.toLocaleString()} 个文件关联攻击模式${count ? `\n${count.issues} 个确认问题 · ${count.files} 个问题文件` : ""}${first ? `\n${first}${node.targetIds.size > 1 ? ` 等 ${node.targetIds.size} 个关联` : ""}` : ""}`;
 }
 
-export function CoverageTreemap({ parent, selected, highlighted, targets, onSelect, onOpen }: {
+export function CoverageTreemap({ parent, selected, highlighted, targets, issueCounts = NO_ISSUES, onSelect, onOpen }: {
   parent: CoverageNode; selected: string; highlighted: Set<string> | null;
   targets: Map<string, CoverageTarget>; onSelect: (path: string) => void; onOpen: (path: string) => void;
+  issueCounts?: ReadonlyMap<string, CoverageIssueCount>;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -62,12 +64,13 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
       context.scale(size.ratio, size.ratio);
       const style = getComputedStyle(host);
       const color = (name: string) => style.getPropertyValue(`--coverage-${name}`).trim();
-      const neutral = color("neutral"), risk = color("risk"), covered = color("covered");
+      const neutral = color("neutral"), risk = color("risk"), covered = color("covered"), issueColor = color("issue");
       const text = color("text");
       for (const tile of tiles) {
         const { node, x, y, width, height } = tile;
+        const count = issueCounts.get(node.path);
         const gap = Math.min(width, height) >= 8 ? .5 : 0;
-        context.globalAlpha = matchesPattern(node.targetIds) ? 1 : .22;
+        context.globalAlpha = count?.issues || matchesPattern(node.targetIds) ? 1 : .22;
         context.fillStyle = neutral;
         context.fillRect(x + gap, y + gap, width - 2 * gap, height - 2 * gap);
         if (!tile.nested && node.files && (node.covered || node.riskOnly)) {
@@ -78,6 +81,17 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
           context.fillStyle = risk;
           context.fillRect(x + gap + coveredWidth, y + gap, riskWidth, height - 2 * gap);
         }
+        if (count?.issues) {
+          context.fillStyle = issueColor;
+          if (node.kind === "file") context.fillRect(x + gap, y + gap, width - 2 * gap, height - 2 * gap);
+          else {
+            const border = Math.min(2, width / 2, height / 2);
+            context.fillRect(x, y, width, border);
+            context.fillRect(x, y + height - border, width, border);
+            context.fillRect(x, y, border, height);
+            context.fillRect(x + width - border, y, border, height);
+          }
+        }
         if (!tileLabel(tile)) continue;
         context.save();
         context.beginPath();
@@ -86,7 +100,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
         context.fillStyle = text;
         context.font = "10px system-ui, sans-serif";
         context.textBaseline = "middle";
-        context.fillText(node.name, x + 4, y + 8);
+        context.fillText(`${count?.issues ? `[${count.issues}] ` : ""}${node.name}`, x + 4, y + 8);
         context.restore();
       }
     };
@@ -94,7 +108,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
     const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(draw);
     observer?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
     return () => observer?.disconnect();
-  }, [dense, tiles, size, matchesPattern]);
+  }, [dense, tiles, size, matchesPattern, issueCounts]);
 
   const pick = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -118,7 +132,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
   return <div ref={container} className="coverage-canvas" aria-label="文件树矩形图" data-renderer={dense ? "canvas" : "dom"}>
     {dense ? <>
       <canvas ref={canvas} className="coverage-bitmap" tabIndex={0} role="group" aria-label="全部路径格子"
-        aria-describedby={instructions} title={hover ? tileTitle(hover.node, targets) : "单击查看关联，双击目录下钻"}
+        aria-describedby={instructions} title={hover ? tileTitle(hover.node, targets, issueCounts.get(hover.node.path)) : "单击查看关联，双击目录下钻"}
         onMouseMove={(event) => setHovered(pick(event)?.node.path ?? null)} onMouseLeave={() => setHovered(null)}
         onClick={(event) => { const tile = pick(event); if (tile) onSelect(tile.node.path); }}
         onDoubleClick={(event) => { const tile = pick(event); if (tile?.node.kind === "directory") onOpen(tile.node.path); }}
@@ -126,17 +140,18 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, onSele
       {(hover || active) && <div className="coverage-tile-outline" aria-hidden="true" style={{ left: (hover || active)!.x, top: (hover || active)!.y,
         width: (hover || active)!.width, height: (hover || active)!.height }} />}
       <span id={instructions} className="sr-only">方向键切换路径，Home 和 End 跳到首尾，Enter 进入目录，也可通过上方搜索定位路径。</span>
-      <span className="sr-only" aria-live="polite">{active ? tileTitle(active.node, targets) : "尚未选择路径"}</span>
+      <span className="sr-only" aria-live="polite">{active ? tileTitle(active.node, targets, issueCounts.get(active.node.path)) : "尚未选择路径"}</span>
     </> : tiles.map((tile) => {
       const { node, x, y, width, height, nested } = tile;
+      const count = issueCounts.get(node.path);
       const firstPattern = targets.get(node.targetIds.values().next().value ?? "")?.pattern_name;
       return <button key={node.path} type="button"
-        className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${matchesPattern(node.targetIds) ? "" : "is-dimmed"}`}
-        style={{ left: x, top: y, width, height, background: nested ? "var(--coverage-neutral)" : coverageBackground(node), borderWidth: Math.min(width, height) >= 8 ? .5 : 0 }}
-        aria-label={`${node.name}，${node.files} 个文件，${node.highRisk} 个高风险文件，${node.covered} 个文件关联攻击模式`}
-        aria-pressed={selected === node.path} title={tileTitle(node, targets)}
+        className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${count?.issues || matchesPattern(node.targetIds) ? "" : "is-dimmed"} ${count?.issues && node.kind === "directory" ? "has-issues" : ""}`}
+        style={{ left: x, top: y, width, height, background: count?.issues && node.kind === "file" ? "var(--coverage-issue)" : nested ? "var(--coverage-neutral)" : coverageBackground(node), borderWidth: Math.min(width, height) >= 8 ? .5 : 0 }}
+        aria-label={`${node.name}，${node.files} 个文件，${node.highRisk} 个高风险文件，${node.covered} 个文件关联攻击模式${count ? `，${count.issues} 个确认问题` : ""}`}
+        aria-pressed={selected === node.path} title={tileTitle(node, targets, count)}
         onClick={() => onSelect(node.path)} onDoubleClick={() => { if (node.kind === "directory") onOpen(node.path); }}>
-        {tileLabel(tile) && <span className="coverage-tile__name">{node.kind === "directory" ? "▱ " : ""}{node.name}</span>}
+        {tileLabel(tile) && <span className="coverage-tile__name">{count?.issues ? `[${count.issues}] ` : ""}{node.kind === "directory" ? "▱ " : ""}{node.name}</span>}
         {!nested && width >= 100 && height >= 38 && <span className="coverage-tile__body">
           <span>{node.files.toLocaleString()} 个文件{node.directModules.size ? " · 高风险模块" : ""}</span>
           {firstPattern && height >= 56 && <span className="coverage-tile__pattern">{firstPattern}{node.targetIds.size > 1 ? ` +${node.targetIds.size - 1}` : ""}</span>}

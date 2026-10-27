@@ -187,6 +187,7 @@ export interface ScanSSEHandlers {
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
   onThreatAnalysisRefresh?: (force?: boolean) => void;
   onThreatCoverageRefresh?: () => void;
+  onCoverageIssuesRefresh?: () => void;
   onThreatAnalysisRun?: (data: ThreatAnalysisRunEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
   onThreatPatternAuditTask?: (data: { task: ThreatPatternAuditTask }) => void;
@@ -515,12 +516,15 @@ export function useScanSSE(
     setFailedResources(new Set());
     let fullRefresh = false;
     let resourceRunning = false;
+    let coverageIssuesDirty = false;
     const reloadResources = async () => {
       resourceTimer = null;
       if (disposed || document.hidden || resourceRunning) return;
       resourceRunning = true;
       const reloadAll = fullRefresh;
       fullRefresh = false;
+      const refreshCoverageIssues = coverageIssuesDirty;
+      coverageIssuesDirty = false;
       const notices = [...pendingResources.values()];
       pendingResources.clear();
       const collections = reloadAll ? [...SCAN_DETAIL_RESOURCES] : Array.from(new Set(
@@ -534,6 +538,9 @@ export function useScanSSE(
       }
       if (reloadAll || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
         handlersRef.current.onThreatCoverageRefresh?.();
+      }
+      if (reloadAll || refreshCoverageIssues || notices.some((notice) => notice.resource === "file-inventory")) {
+        handlersRef.current.onCoverageIssuesRefresh?.();
       }
       handlersRef.current.onDetailRefreshState?.(collections, true);
       try {
@@ -589,7 +596,7 @@ export function useScanSSE(
         if (!disposed) {
           handlersRef.current.onDetailRefreshState?.(collections, false);
           refreshState();
-          if (fullRefresh || pendingResources.size) scheduleResources();
+          if (fullRefresh || pendingResources.size || coverageIssuesDirty) scheduleResources();
         }
       }
     };
@@ -606,10 +613,14 @@ export function useScanSSE(
       fullRefresh = true;
       requestCollections(SCAN_DETAIL_RESOURCES);
     };
+    const queueCoverageIssues = () => { coverageIssuesDirty = true; scheduleResources(); };
     es.addEventListener("resource_changed", ((event: MessageEvent) => {
       try {
         const notice = JSON.parse(event.data);
         if (!isRecord(notice) || typeof notice.resource !== "string") throw new Error("Invalid resource notice");
+        if (notice.resource === "vulnerabilities" || (notice.resource === "fp-review" && notice.change !== "stage_output")) {
+          coverageIssuesDirty = true;
+        }
         if (typeof notice.index !== "number" && isScanDetailResource(notice.resource)) {
           requestCollections([notice.resource]);
           return;
@@ -637,11 +648,12 @@ export function useScanSSE(
     handle<ScanCandidateAuditEvent>("scan_candidate_audit", (d) => handlersRef.current.onScanCandidateAudit?.({
       candidate: normalizeScanCandidate(d.candidate, d.candidate.idx),
     }));
-    handle<ScanVulnerabilityEvent>("scan_vulnerability", (d) => handlersRef.current.onScanVulnerability?.({
-      index: d.index,
-      vulnerability: normalizeVulnerability(d.vulnerability),
-    }));
+    handle<ScanVulnerabilityEvent>("scan_vulnerability", (d) => {
+      queueCoverageIssues();
+      handlersRef.current.onScanVulnerability?.({ index: d.index, vulnerability: normalizeVulnerability(d.vulnerability) });
+    });
     handle<ScanVulnerabilitiesChangedEvent>("scan_vulnerabilities_changed", (d) => {
+      queueCoverageIssues();
       requestCollections(["vulnerabilities"]);
       handlersRef.current.onScanVulnerabilitiesChanged?.(d);
     });
@@ -659,14 +671,15 @@ export function useScanSSE(
     handle<FpReviewStartedEvent>("fp_review_started", (d) => handlersRef.current.onFpReviewStarted?.(d));
     handle<FpReviewProgressEvent>("fp_review_progress", (d) => handlersRef.current.onFpReviewProgress?.(d));
     handle<FpReviewStageOutputEvent>("fp_review_stage_output", (d) => handlersRef.current.onFpReviewStageOutput?.(d));
-    handle<FpReviewResultEvent>("fp_review_result", (d) => handlersRef.current.onFpReviewResult?.(d));
-    handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
+    handle<FpReviewResultEvent>("fp_review_result", (d) => { queueCoverageIssues(); handlersRef.current.onFpReviewResult?.(d); });
+    handle<FpReviewFinishEvent>("fp_review_finish", (d) => { queueCoverageIssues(); handlersRef.current.onFpReviewFinish?.(d); });
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.({
       validation: normalizeValidation(d.validation),
     }));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => {
       handlersRef.current.onThreatAnalysis?.(d);
       handlersRef.current.onThreatCoverageRefresh?.();
+      handlersRef.current.onCoverageIssuesRefresh?.();
     });
     handle<{ status: string }>("file_inventory", () => handlersRef.current.onThreatCoverageRefresh?.());
     handle<ThreatAnalysisRunEvent>("threat_analysis_run", (d) => {
@@ -690,6 +703,7 @@ export function useScanSSE(
       refreshState();
       handlersRef.current.onThreatAnalysisRefresh?.(true);
       handlersRef.current.onThreatCoverageRefresh?.();
+      handlersRef.current.onCoverageIssuesRefresh?.();
     };
 
     es.onerror = () => {

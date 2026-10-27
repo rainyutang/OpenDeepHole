@@ -1,6 +1,14 @@
 import { api, isMissingOptionalResult, isPublicScan, publicParams, publicScanPath } from "../../api/client";
 import type { ThreatAnalysis } from "../../types";
-import type { ThreatCoverage } from "./coverage";
+import type { CoverageIssues, ThreatCoverage } from "./coverage";
+
+export async function getCoverageIssues(scanId: string, signal?: AbortSignal): Promise<CoverageIssues> {
+  const { data } = await api.get<CoverageIssues>(
+    isPublicScan(scanId) ? publicScanPath("/threat-coverage/issues") : `/api/scan/${scanId}/threat-coverage/issues`,
+    { params: isPublicScan(scanId) ? publicParams() : undefined, signal, timeout: 30_000 },
+  );
+  return data;
+}
 
 export async function getThreatCoverage(scanId: string, signal?: AbortSignal): Promise<ThreatCoverage> {
   const { data } = await api.get<ThreatCoverage>(

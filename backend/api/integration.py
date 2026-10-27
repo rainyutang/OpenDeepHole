@@ -685,6 +685,13 @@ async def get_public_scan_threat_coverage(
     return await scan_api.get_scan_threat_coverage(scan_id, current_user)
 
 
+@router.get("/api/public/scans/{scan_id}/threat-coverage/issues", response_model=dict)
+async def get_public_scan_threat_coverage_issues(
+    scan_id: str, current_user: User = Depends(_public_user_dependency),
+) -> dict:
+    return await scan_api.get_scan_threat_coverage_issues(scan_id, current_user)
+
+
 @router.get("/api/public/scans/{scan_id}/checkers", response_model=list[CheckerInfo])
 async def list_public_checkers(
     scan_id: str,

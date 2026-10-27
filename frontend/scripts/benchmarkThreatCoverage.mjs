@@ -17,6 +17,7 @@ const scenarios = [
   { name: "large", entries: 200_000, modules: 100, patterns: 10, overlap: false },
   { name: "many-patterns", entries: 200_000, modules: 100, patterns: 50, overlap: false },
   { name: "overlap", entries: 200_000, modules: 10, patterns: 50, overlap: true },
+  { name: "issues", entries: 200_000, modules: 10, patterns: 50, overlap: true, issues: 10_000 },
 ];
 const chosen = values.scenario === "all" ? scenarios : scenarios.filter(({ name }) => name === values.scenario);
 assert.ok(chosen.length, `Unknown scenario: ${values.scenario}`);
@@ -55,13 +56,18 @@ if (values.sample) {
   const ts = await import("typescript");
   const source = readFileSync(new URL("../src/features/threatAnalysis/coverage.ts", import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } });
-  const { buildCoverageTree, createCoverageMatcher, layoutCoverageTree } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+  const { buildCoverageTree, buildCoverageIssueOverlay, createCoverageMatcher, layoutCoverageTree } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
   const scenario = chosen[0];
   global.gc();
   const before = process.memoryUsage().heapUsed;
   const data = fixture(scenario);
+  const issues = { inventory_snapshot_id: "benchmark", total_issue_count: scenario.issues ?? 0,
+    files: data.inventory.entries.filter((entry) => entry.kind === "file").slice(0, scenario.issues ?? 0)
+      .map((entry, i) => ({ path: entry.path, issues: [{ vuln_index: i * 3, line: 10, vuln_type: "oob", severity: "high", engine_id: "static_candidate" }] })),
+    unmapped_count: 0, unmapped: [] };
   const start = performance.now();
   const tree = buildCoverageTree(data);
+  const overlay = buildCoverageIssueOverlay(tree, issues);
   const buildMs = performance.now() - start;
   global.gc();
   // Retained fixture + tree only; layout/filter allocations are measured later.
@@ -71,6 +77,8 @@ if (values.sample) {
   assert.equal(tree.root.files, expectedFiles);
   assert.equal(tree.root.highRisk, expectedFiles);
   assert.equal(tree.root.covered, expectedFiles);
+  assert.equal(overlay.get(".")?.issues ?? 0, scenario.issues ?? 0);
+  assert.equal(overlay.get(".")?.files ?? 0, scenario.issues ?? 0);
   assert.deepEqual([...tree.root.targetIds].sort(), data.targets.map(({ id }) => id).sort());
   const layoutStart = performance.now();
   const tiles = layoutCoverageTree(tree.root, 1200, 600);
@@ -89,7 +97,17 @@ if (values.sample) {
   assert.equal(count, scenario.entries);
   const scopes = new Set([...tree.byPath.values()].map((node) => node.targetIds)).size;
   if (scenario.overlap) assert.equal(scopes, 1);
-  console.log(JSON.stringify({ buildMs, retainedMiB, layoutMs, filterMs, scopes }));
+  let issueUpdateMs = 0;
+  if (scenario.issues) {
+    for (let i = 0; i < 5; i++) {
+      const updateStart = performance.now();
+      const updated = buildCoverageIssueOverlay(tree, { ...issues, files: i % 2 ? [] : issues.files });
+      issueUpdateMs = Math.max(issueUpdateMs, performance.now() - updateStart);
+      assert.equal(updated.get(".")?.issues ?? 0, i % 2 ? 0 : scenario.issues);
+      assert.equal(tiles[0].node, tree.root.children[0]);
+    }
+  }
+  console.log(JSON.stringify({ buildMs, retainedMiB, layoutMs, filterMs, issueUpdateMs, scopes }));
 } else {
   console.log(JSON.stringify({ node: process.version, platform: `${process.platform}/${process.arch}`,
     logicalCpus: cpus().length, memoryGiB: totalmem() / 1024 ** 3, repeat,
@@ -104,12 +122,13 @@ if (values.sample) {
       assert.equal(run.status, 0, run.stderr || run.stdout);
       samples.push(JSON.parse(run.stdout));
     }
-    const max = Object.fromEntries(["buildMs", "retainedMiB", "layoutMs", "filterMs"].map((key) =>
+    const max = Object.fromEntries(["buildMs", "retainedMiB", "layoutMs", "filterMs", "issueUpdateMs"].map((key) =>
       [key, Number(Math.max(...samples.map((sample) => sample[key])).toFixed(2))]));
     console.log(JSON.stringify({ ...scenario, samples, max }));
     if (values.check) {
       assert.ok(samples.every(({ buildMs }) => buildMs <= 2000), `${scenario.name}: build exceeded 2 s`);
       assert.ok(samples.every(({ retainedMiB }) => retainedMiB <= 256), `${scenario.name}: retained heap exceeded 256 MiB`);
+      assert.ok(samples.every(({ issueUpdateMs }) => issueUpdateMs <= 2000), `${scenario.name}: issue update exceeded 2 s`);
     }
   }
 }

@@ -122,7 +122,10 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
             detail = data.get(field) if field else data
             detail = detail if isinstance(detail, dict) else {}
             index = data.get("index", detail.get("vuln_index", detail.get("idx")))
-            return "resource_changed", {"resource": resource, "index": index}
+            notice = {"resource": resource, "index": index}
+            if event_type in {"fp_review_result", "fp_review_stage_output"}:
+                notice["change"] = "result" if event_type == "fp_review_result" else "stage_output"
+            return "resource_changed", notice
         if event_type == "scan_status" and isinstance(data.get("opencode_pool"), dict):
             from backend.store.history import TASK_METADATA_FIELDS
             data = {**data, "opencode_pool": dict(data["opencode_pool"])}

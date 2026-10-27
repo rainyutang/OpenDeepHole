@@ -1,6 +1,6 @@
 import { ScanTokenUsagePanel } from "./ScanTokenUsagePanel";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { RefCallback } from "react";
+import type { ReactNode, RefCallback } from "react";
 import { isInvalidTaskCursorError } from "../api/client";
 import { compareTaskHistory, shouldMergeTaskHistory, taskHistorySortTime } from "../taskOrder";
 import ReactMarkdown from "react-markdown";
@@ -14,6 +14,8 @@ import {
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
 import { useThreatAnalysisResult } from "../features/threatAnalysis/useThreatAnalysisResult";
+import { CoverageViewport, ThreatCoverageView } from "../features/threatAnalysis/ThreatCoveragePanel";
+import { useCoverageIssues, useThreatCoverage } from "../features/threatAnalysis/useThreatCoverage";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
 import type { ThreatAuditTaskResult, ThreatPatternAuditTask } from "../types";
 import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
@@ -793,6 +795,15 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget, fpReview, setFpReview);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [coverageRevision, setCoverageRevision] = useState(0);
+  const [coverageIssuesRevision, setCoverageIssuesRevision] = useState(0);
+  const [coverageRequestedScan, setCoverageRequestedScan] = useState("");
+  const activateCoverage = useCallback(() => setCoverageRequestedScan(scanId), [scanId]);
+  const coverageVisible = activeTab === "overview" && coverageRequestedScan === scanId;
+  const coverageState = useThreatCoverage(scanId, coverageRevision,
+    scan?.scan_id === scanId && (coverageVisible || activeTab === "threat"), scan ? isThreatAnalysisSelected(scan) : true);
+  const coverageIssues = useCoverageIssues(scanId, `${coverageRevision}:${coverageIssuesRevision}`,
+    coverageState.data?.inventory?.snapshot_id, coverageVisible && !!coverageState.data?.inventory?.entries.length,
+    !!fpReview && ["pending", "running"].includes(fpReview.status));
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewPageLoading, setFpReviewPageLoading] = useState(false);
   const [fpReviewPageFailed, setFpReviewPageFailed] = useState(false);
@@ -1339,6 +1350,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     },
     onThreatAnalysisRefresh: refreshThreatAnalysis,
     onThreatCoverageRefresh: () => setCoverageRevision((value) => value + 1),
+    onCoverageIssuesRefresh: () => setCoverageIssuesRevision((value) => value + 1),
     onThreatAnalysisRun: (data) => {
       setScan((prev) => prev ? { ...prev, threat_analysis_run: data.run } : prev);
     },
@@ -2275,6 +2287,10 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             currentFpReviewTargets={currentFpReviewTargets}
             confirmedIssueCount={confirmedIssueCount}
             onNavigate={setActiveTab}
+            coverage={<CoverageViewport key={`coverage:${scanId}`} onVisible={activateCoverage}>
+              <ThreatCoverageView {...coverageState} issuesState={coverageIssues}
+                analysisStatus={scan.threat_analysis_run?.status} onOpenIssue={auditNavigation.openIssue} />
+            </CoverageViewport>}
           />
         )}
         {activeTab === "index" && (
@@ -2309,6 +2325,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             key={scanId}
             scanId={scanId}
             coverageRevision={coverageRevision}
+            coverageState={coverageState}
             analysisStatus={scan.threat_analysis_run?.status}
             analysis={scan.threat_analysis ?? null}
             events={threatAnalysisEvents}
@@ -4457,6 +4474,7 @@ function ScanOverview({
   currentFpReviewTargets,
   confirmedIssueCount,
   onNavigate,
+  coverage,
 }: {
   scan: ScanStatusType;
   issueCount: number;
@@ -4473,6 +4491,7 @@ function ScanOverview({
   currentFpReviewTargets: Vulnerability[];
   confirmedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
+  coverage: ReactNode;
 }) {
   const engines = effectiveMiningEngines(scan);
   const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
@@ -4715,6 +4734,7 @@ function ScanOverview({
           </section>
         </aside>
       </div>
+      {coverage}
     </div>
   );
 }

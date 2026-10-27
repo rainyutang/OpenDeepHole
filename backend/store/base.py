@@ -431,6 +431,10 @@ class ScanStoreBase(ABC):
         """Join the independent inventory to the existing analysis artifacts."""
         raise NotImplementedError
 
+    def get_threat_coverage_issues(self, scan_id: str) -> dict:
+        """Read compact final-TP findings mapped to inventory files."""
+        raise NotImplementedError
+
     @abstractmethod
     def upsert_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask:
         """Create or update one threat-analysis-derived audit task."""

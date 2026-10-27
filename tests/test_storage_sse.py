@@ -1,6 +1,12 @@
 from backend import sse
 
 
+def test_fp_review_notices_distinguish_final_result_from_stage_text():
+    for event, change in (("fp_review_result", "result"), ("fp_review_stage_output", "stage_output")):
+        assert sse.storage_notification(event, {"vuln_index": 42, "reason": "body" * 10000}) == (
+            "resource_changed", {"resource": "fp-review", "index": 42, "change": change})
+
+
 def test_pool_notifications_keep_live_task_identity_without_bodies():
     queued = {"task_id": "queued", "request_id": "queued", "revision": 2,
               "queued_at": "2026-10-15T00:00:00Z", "prompt_length": 100000,
