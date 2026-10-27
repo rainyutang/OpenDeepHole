@@ -2267,14 +2267,12 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             gitHistoryCount={gitHistory.length}
             showGitHistoryStages={showGitHistoryStages}
             currentStage={currentStageLabel(scan, scan.events)}
-            indexProgress={indexProgress}
             pct={pct}
             isRunning={!!isRunning}
             isDone={!!isDone}
             fpReview={fpReview}
             isFpReviewing={isFpReviewing}
             currentFpReviewTargets={currentFpReviewTargets}
-            hasReportModeSkill={hasReportModeSkill}
             confirmedIssueCount={confirmedIssueCount}
             onNavigate={setActiveTab}
           />
@@ -3239,12 +3237,6 @@ function CapabilityStatusCard({
         <span className="text-sm font-semibold text-slate-100">{label}</span>
         <StatusPill label={enabled ? "已启用" : "未启用"} tone={enabled ? "green" : "slate"} />
       </div>
-      {node && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} />
-          <span className="text-xs text-slate-400">{node.detail}</span>
-        </div>
-      )}
     </>
   );
   const className = `min-h-[5.5rem] rounded-lg border p-3 text-left ${
@@ -4457,14 +4449,12 @@ function ScanOverview({
   gitHistoryCount,
   showGitHistoryStages,
   currentStage,
-  indexProgress,
   pct,
   isRunning,
   isDone,
   fpReview,
   isFpReviewing,
   currentFpReviewTargets,
-  hasReportModeSkill,
   confirmedIssueCount,
   onNavigate,
 }: {
@@ -4475,14 +4465,12 @@ function ScanOverview({
   gitHistoryCount: number;
   showGitHistoryStages: boolean;
   currentStage: string;
-  indexProgress: ReturnType<typeof formatIndexProgress>;
   pct: number;
   isRunning: boolean;
   isDone: boolean;
   fpReview: FpReviewJob | null;
   isFpReviewing: boolean;
   currentFpReviewTargets: Vulnerability[];
-  hasReportModeSkill: boolean;
   confirmedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
 }) {
@@ -4572,14 +4560,9 @@ function ScanOverview({
           <div className="space-y-3">
             <TaskSummaryRow
               label="代码图谱构建（底层能力）"
-              status={indexProgress.skipped ? "已跳过" : taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
-              tone={indexProgress.failed ? "red" : indexProgress.done ? "green" : indexProgress.running ? "amber" : "slate"}
-              progress={indexProgress.total ? percent(indexProgress.current, indexProgress.total) : undefined}
-              detail={indexProgress.skipped
-                ? "本次扫描未选择静态分析引擎"
-                : indexProgress.total
-                  ? `${indexProgress.current}/${indexProgress.total} 文件`
-                  : "等待代码图谱状态"}
+              status={scan.code_graph_mcp_enabled ? "已启用" : "未启用"}
+              tone={scan.code_graph_mcp_enabled ? "green" : "slate"}
+              detail={scan.code_graph_mcp_enabled ? "本次扫描已启用 CodeGraph" : "本次扫描未启用 CodeGraph"}
             />
             <TaskSummaryRow
               label="静态分析"
@@ -4691,18 +4674,12 @@ function ScanOverview({
                 ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
                 : fpReviewTargetCount > 0 ? "等待" : "无目标"}
               tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
-              progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
+              progress={percent(fpReview?.processed ?? 0, fpReview?.total ?? 0)}
               detail={fpReview
                 ? `${fpReview.processed}/${fpReview.total} 已复核`
                 : fpReviewTargetCount > 0
                   ? `${fpReviewTargetCount} 个可复核问题`
                   : "当前没有可复核问题"}
-            />
-            <TaskSummaryRow
-              label="报告导出"
-              status={hasReportModeSkill ? (isRunning ? "同步中" : "可查看") : "预留"}
-              tone={hasReportModeSkill ? "purple" : "slate"}
-              detail={hasReportModeSkill ? `${scan.skill_reports?.length ?? 0} 个 SKILL 报告` : "可使用顶部导出按钮"}
             />
           </div>
         </section>

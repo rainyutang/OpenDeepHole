@@ -77,18 +77,22 @@ function overview(completed = 100, revision = 1) {
   };
 }
 function installApi(initial = overview()) {
-  const state = { overview: initial, intercept: null, overviewRequestCount: 0 };
+  const state = {
+    overview: initial, intercept: null, overviewRequestCount: 0,
+    fpReview: { review_id: "r", scan_id: "s", status: "complete", total: 0, processed: 0, results: [] },
+    indexStatus: { status: "skipped" },
+  };
   client.api.defaults.adapter = async (config) => {
     let data;
     if (config.url === "/api/mining-engines") data = { engines: [] };
     else if (config.url.includes("checkers")) data = [];
-    else if (config.url.endsWith("/fp-review/overview")) data = { review_id: "r", scan_id: "s", status: "complete", total: 0, processed: 0, results: [] };
+    else if (config.url.endsWith("/fp-review/overview")) data = structuredClone(state.fpReview);
     else if (config.url.endsWith("/overview")) {
       state.overviewRequestCount += 1;
       data = state.intercept ? await state.intercept() : structuredClone(state.overview);
     }
     else if (config.url.endsWith("/resume")) { state.overview = overview(80, 2); data = { scan_id: "s" }; }
-    else if (config.url.endsWith("/index-status")) data = { status: "skipped" };
+    else if (config.url.endsWith("/index-status")) data = structuredClone(state.indexStatus);
     else if (config.url.endsWith("/git_history")) data = [];
     else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|threat-pattern-audit-tasks|validations|results|tasks)$/.test(config.url)) {
       data = { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
@@ -118,6 +122,89 @@ async function poll(delay) {
     callbacks.forEach(({ callback }) => callback());
   });
 }
+
+function summaryRow(root, label) {
+  const row = root.root.findAll((node) => typeof node.type === "function"
+    && node.type.name === "TaskSummaryRow" && node.props.label === label)[0];
+  assert.ok(row, "Missing task progress row: " + label);
+  return row;
+}
+
+function assertReviewProgress(root, processed, total) {
+  const row = summaryRow(root, "对抗式复核");
+  assert.ok(text(row).includes(`${processed}/${total} 已复核`), text(row));
+  const fill = row.findAllByType("div").find((node) => node.props.style?.width !== undefined);
+  assert.ok(fill, "Review progress must include a progress bar even at zero");
+  assert.equal(fill.props.style.width, `${total > 0 ? Math.round(processed / total * 100) : 0}%`);
+}
+
+for (const enabled of [false, true]) {
+  for (const staticSelected of [false, true]) {
+    test(`codegraph capability agrees with task progress (enabled=${enabled}, static=${staticSelected})`, async () => {
+      const value = { ...overview(), code_graph_mcp_enabled: enabled };
+      if (!staticSelected) Object.assign(value, { mining_engines: [], mining_engine_runs: [], scan_items: [] });
+      const state = installApi(value);
+      if (staticSelected) state.indexStatus = { status: "done", parsed_files: 12, total_files: 12 };
+      const root = await mount();
+      const expected = enabled ? "已启用" : "未启用";
+      const card = root.root.findAllByType("button").find((node) => text(node).startsWith("代码图谱"));
+      assert.ok(card);
+      assert.equal(text(card), `代码图谱${expected}`);
+      const row = summaryRow(root, "代码图谱构建（底层能力）");
+      assert.ok(text(row).includes(expected), text(row));
+      assert.doesNotMatch(text(row), /已跳过|静态分析引擎|文件/);
+      assert.equal(row.findAllByType("div").some((node) => node.props.style?.width !== undefined), false);
+      await act(async () => card.props.onClick());
+      assert.ok(root.root.findAllByType("h2").some((node) => text(node) === "代码图谱构建"));
+    });
+  }
+}
+
+test("review task progress follows live completion counts and survives reload", async () => {
+  const value = {
+    ...overview(), auto_fp_review: true,
+    fp_review_method_selection: { method_id: "adversarial", method_label: "对抗式复核", stages: [] },
+  };
+  const state = installApi(value);
+  state.fpReview.status = "pending";
+  const root = await mount();
+  assertReviewProgress(root, 0, 0);
+  await notify(["fp_review_started", { review_id: "r", status: "running", total: 10, processed: 0 }]);
+  assertReviewProgress(root, 0, 10);
+  await notify(["fp_review_progress", { review_id: "r", vuln_index: 4, total: 10, processed: 4, active_indices: [4] }]);
+  assertReviewProgress(root, 4, 10);
+  state.fpReview = { ...state.fpReview, status: "running", total: 10, processed: 4 };
+  const reloaded = await mount();
+  assertReviewProgress(reloaded, 4, 10);
+  await notify(
+    ["fp_review_progress", { review_id: "r", vuln_index: 9, total: 10, processed: 10, active_indices: [] }],
+    ["fp_review_finish", { review_id: "r", status: "complete", error_message: null }],
+  );
+  assertReviewProgress(reloaded, 10, 10);
+});
+
+for (const status of ["error", "cancelled"]) {
+  test(`review task progress retains partial completion after ${status}`, async () => {
+    const state = installApi({
+      ...overview(), auto_fp_review: true,
+      fp_review_method_selection: { method_id: "adversarial", method_label: "对抗式复核", stages: [] },
+    });
+    Object.assign(state.fpReview, { status: "running", total: 10, processed: 4 });
+    const root = await mount();
+    await notify(["fp_review_finish", { review_id: "r", status, error_message: null }]);
+    assertReviewProgress(root, 4, 10);
+  });
+}
+
+test("report export is removed from task progress while the export menu remains available", async () => {
+  installApi();
+  const root = await mount();
+  assert.doesNotMatch(text(root.toJSON()), /报告导出|可使用顶部导出按钮/);
+  const exportButton = root.root.findAllByType("button").find((node) => text(node) === "导出报告");
+  assert.ok(exportButton);
+  await act(async () => exportButton.props.onClick());
+  assert.deepEqual(root.root.findAllByProps({ role: "menuitem" }).map(text), ["ZIP", "CSV"]);
+});
 
 test("completed scan resumes and both flow views advance despite pool and old execution events", async () => {
   const state = installApi();
