@@ -6,13 +6,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.staticfiles import StaticFiles
 
 import uuid
 
 from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, scan, sharing, skills
 from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
+from backend.frontend import FrontendStaticFiles
 from backend.logger import get_logger
 from backend.registry import get_registry
 from backend.runtime_metrics import RequestMetricsMiddleware, monitor_event_loop_lag
@@ -154,4 +154,4 @@ app.include_router(agent.public_router)
 # Serve frontend static files (built by Vite)
 static_dir = Path(__file__).parent / "static"
 if static_dir.is_dir():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    app.mount("/", FrontendStaticFiles(directory=str(static_dir), html=True), name="static")

@@ -1,8 +1,11 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from "react-router";
 import { getStoredUser, isAuthenticated, logout, setPublicScanAccess } from "./api/client";
+import type { PublicScanAccess } from "./api/client";
+import { legacyRoute, loginDestination, parsePublicScanAccess, parseScanRoute, scanPath } from "./routing";
+import type { ScanRouteState } from "./routing";
 import ScanStatusView from "./components/ScanStatus";
 import SharedScanView from "./components/SharedScanView";
-import type { PublicScanAccess } from "./api/client";
 import ScanHistory from "./components/ScanHistory";
 import AgentDownload from "./components/AgentDownload";
 import AgentConfigPage from "./components/AgentConfigPage";
@@ -15,45 +18,80 @@ import CheckerCatalogPage from "./components/CheckerCatalogPage";
 import RuntimeErrorBoundary from "./components/RuntimeErrorBoundary";
 import type { User } from "./types";
 
-type Page = "history" | "newScan" | "scanning" | "agent" | "agentConfig" | "users" | "checkerDashboard" | "checkerCatalog";
-type AuthPage = "login" | "register";
+export { parsePublicScanAccess } from "./routing";
 
-export function parsePublicScanAccess(hash = window.location.hash || ""): PublicScanAccess | null {
-  const match = hash.match(/^#\/(public|shared)-scan\/([^?]*)(?:\?(.*))?$/);
-  if (!match) return null;
-  const kind = match[1] === "shared" ? "shared" : "integration";
-  let scanId = "";
-  try {
-    scanId = decodeURIComponent(match[2] || "");
-  } catch {
-    return kind === "shared" ? { scanId: "", token: "", kind } : null;
-  }
-  const params = new URLSearchParams(match[3] || "");
-  const token = params.get("token") || "";
-  if ((!scanId || !token) && kind !== "shared") return null;
-  return { scanId, token, kind };
+function RequireAuth({ user, admin = false }: { user: User | null; admin?: boolean }) {
+  const location = useLocation();
+  if (!user || !isAuthenticated()) return <Navigate to="/login" replace state={{ returnTo: location.pathname + location.search + location.hash }} />;
+  if (admin && user.role !== "admin") return <Navigate to="/" replace />;
+  return <Outlet />;
+}
+
+function NotFound({ message = "页面不存在" }: { message?: string }) {
+  const navigate = useNavigate();
+  return <div className="flex min-h-screen items-center justify-center bg-slate-900 p-6 text-slate-200">
+    <div className="text-center"><p role="alert" className="text-lg">{message}</p>
+      <button type="button" onClick={() => navigate("/")} className="mt-5 rounded-lg border border-slate-600 px-4 py-2 text-sm">返回首页</button>
+    </div>
+  </div>;
+}
+
+function useBack() {
+  const navigate = useNavigate();
+  return useCallback(() => {
+    // BrowserRouter assigns an index within this tab, including after reload.
+    if ((window.history.state?.idx ?? 0) > 0) navigate(-1);
+    else navigate("/", { replace: true });
+  }, [navigate]);
+}
+
+function ScanDetailRoute({ access, publicView = false }: { access?: PublicScanAccess | null; publicView?: boolean }) {
+  const { scanId = "", section } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const action = useNavigationType();
+  const onBack = useBack();
+  const state = parseScanRoute(section, location.search);
+  const onNavigate = useCallback((next: ScanRouteState) => {
+    const to = scanPath(scanId, next, access);
+    if (to !== location.pathname + location.search) navigate(to);
+  }, [scanId, access, location.pathname, location.search, navigate]);
+  if (!state) return <NotFound />;
+  if (publicView && !access) return <NotFound message="访问链接无效" />;
+  if (!section) return <Navigate to={scanPath(scanId, state, access)} replace />;
+  const navigation = { state, onNavigate, locationKey: location.key, action };
+  const identity = `${access?.kind || "owner"}:${scanId}:${access?.token || ""}`;
+  return <RuntimeErrorBoundary name={publicView ? "public-scan-detail" : "scan-detail"} resetKey={identity} fullscreen>
+    {access?.kind === "shared" ? <SharedScanView key={identity} access={access} onBack={onBack}
+      onHome={() => navigate("/")} navigation={navigation} />
+      : <ScanStatusView key={identity} scanId={scanId} onBack={onBack} navigation={navigation} />}
+  </RuntimeErrorBoundary>;
+}
+
+function AgentConfigRoute() {
+  const [params] = useSearchParams();
+  return <AgentConfigPage onBack={useBack()} initialAgentKey={params.get("agent") || ""} />;
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null>(getStoredUser);
-  const [page, setPage] = useState<Page>("history");
-  const [authPage, setAuthPage] = useState<AuthPage>("login");
-  const [scanId, setScanId] = useState<string>("");
-  const [preferredAgentKey, setPreferredAgentKey] = useState("");
-  const [publicAccess, setPublicAccess] = useState<PublicScanAccess | null>(
-    parsePublicScanAccess,
-  );
+  const location = useLocation();
+  const navigate = useNavigate();
+  const onBack = useBack();
+  const parsedAccess = parsePublicScanAccess(location.pathname + location.search);
+  const publicAccess = useMemo(() => parsedAccess, [parsedAccess?.kind, parsedAccess?.scanId, parsedAccess?.token]);
 
   useEffect(() => {
     const handleExpired = () => setUser(null);
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === "auth_token" || event.key === "auth_user") setUser(getStoredUser());
+    };
     window.addEventListener("auth_expired", handleExpired);
-    return () => window.removeEventListener("auth_expired", handleExpired);
-  }, []);
-
-  useEffect(() => {
-    const syncPublicAccess = () => setPublicAccess(parsePublicScanAccess());
-    window.addEventListener("hashchange", syncPublicAccess);
-    return () => window.removeEventListener("hashchange", syncPublicAccess);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener("auth_expired", handleExpired);
+      window.removeEventListener("storage", handleStorage);
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -61,104 +99,45 @@ export default function App() {
     return () => setPublicScanAccess(null);
   }, [publicAccess]);
 
-  const handleLogin = (u: User) => {
-    setUser(u);
-    setPage("history");
-  };
+  const legacy = legacyRoute(location.pathname, location.hash);
+  if (legacy) return <Navigate to={legacy} replace />;
 
+  const handleLogin = (next: User) => {
+    setUser(next);
+    navigate(loginDestination(location.state), { replace: true });
+  };
   const handleLogout = () => {
     logout();
     setUser(null);
+    navigate("/login", { replace: true });
   };
+  const viewScan = (id: string) => navigate(scanPath(id));
+  const authPage = (register: boolean) => user && isAuthenticated()
+    ? <Navigate to={loginDestination(location.state)} replace />
+    : register ? <RegisterPage onRegister={handleLogin} onGoLogin={() => navigate("/login", { state: location.state })} />
+      : <LoginPage onLogin={handleLogin} onGoRegister={() => navigate("/register", { state: location.state })} />;
 
-  if (publicAccess) {
-    const back = () => { window.location.hash = ""; setPublicAccess(null); };
-    return (
-      <RuntimeErrorBoundary
-        name="public-scan-detail"
-        resetKey={`${publicAccess.kind}:${publicAccess.scanId}:${publicAccess.token}`}
-        fullscreen
-      >
-        {publicAccess.kind === "shared" ? <SharedScanView
-          key={`${publicAccess.scanId}:${publicAccess.token}`} access={publicAccess} onBack={back}
-        /> : <ScanStatusView
-          key={`${publicAccess.scanId}:${publicAccess.token}`}
-          scanId={publicAccess.scanId}
-          onBack={back}
-        />}
-      </RuntimeErrorBoundary>
-    );
-  }
-
-  if (!user || !isAuthenticated()) {
-    if (authPage === "register") {
-      return <RegisterPage onRegister={handleLogin} onGoLogin={() => setAuthPage("login")} />;
-    }
-    return <LoginPage onLogin={handleLogin} onGoRegister={() => setAuthPage("register")} />;
-  }
-
-  const handleViewScan = (id: string) => {
-    setScanId(id);
-    setPage("scanning");
-  };
-
-  const handleScanStarted = (id: string) => {
-    setScanId(id);
-    setPage("scanning");
-  };
-
-  const handleBack = () => {
-    setPage("history");
-  };
-
-  return (
-    <>
-      {page === "history" && (
-        <ScanHistory
-          onViewScan={handleViewScan}
-          onDownloadAgent={() => setPage("agent")}
-          onAgentConfig={() => {
-            setPreferredAgentKey("");
-            setPage("agentConfig");
-          }}
-          onNewScan={() => setPage("newScan")}
-          user={user}
-          onLogout={handleLogout}
-          onManageUsers={() => setPage("users")}
-          onCheckerDashboard={() => setPage("checkerDashboard")}
-          onCheckerCatalog={() => setPage("checkerCatalog")}
-        />
-      )}
-      {page === "newScan" && (
-        <NewScanForm
-          onScanStarted={handleScanStarted}
-          onBack={handleBack}
-          onConfigureAgent={(agentKey) => {
-            setPreferredAgentKey(agentKey);
-            setPage("agentConfig");
-          }}
-        />
-      )}
-      {page === "scanning" && (
-        <RuntimeErrorBoundary name="scan-detail" resetKey={scanId} fullscreen>
-          <ScanStatusView scanId={scanId} onBack={handleBack} />
-        </RuntimeErrorBoundary>
-      )}
-      {page === "agent" && (
-        <AgentDownload onBack={handleBack} />
-      )}
-      {page === "agentConfig" && (
-        <AgentConfigPage onBack={handleBack} initialAgentKey={preferredAgentKey} />
-      )}
-      {page === "users" && (
-        <UserManagement onBack={handleBack} user={user} />
-      )}
-      {page === "checkerDashboard" && (
-        <AdminCheckerDashboard onBack={handleBack} onViewScan={handleViewScan} user={user} />
-      )}
-      {page === "checkerCatalog" && (
-        <CheckerCatalogPage onBack={handleBack} />
-      )}
-    </>
-  );
+  return <Routes>
+    <Route path="login" element={authPage(false)} />
+    <Route path="register" element={authPage(true)} />
+    <Route path="shared-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
+    <Route path="public-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
+    <Route element={<RequireAuth user={user} />}>
+      <Route index element={<ScanHistory user={user!} onViewScan={viewScan} onLogout={handleLogout}
+        onDownloadAgent={() => navigate("/agents/download")} onAgentConfig={() => navigate("/agents/config")}
+        onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
+        onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")} />} />
+      <Route path="scans/new" element={<NewScanForm onScanStarted={viewScan} onBack={onBack}
+        onConfigureAgent={(agentKey) => navigate(`/agents/config?${new URLSearchParams({ agent: agentKey })}`)} />} />
+      <Route path="scans/:scanId/:section?" element={<ScanDetailRoute />} />
+      <Route path="agents/download" element={<AgentDownload onBack={onBack} />} />
+      <Route path="agents/config" element={<AgentConfigRoute />} />
+      <Route path="dashboard" element={<AdminCheckerDashboard user={user!} onBack={onBack} onViewScan={viewScan} />} />
+      <Route path="checkers" element={<CheckerCatalogPage onBack={onBack} />} />
+      <Route element={<RequireAuth user={user} admin />}>
+        <Route path="admin/users" element={<UserManagement user={user!} onBack={onBack} />} />
+      </Route>
+    </Route>
+    <Route path="*" element={<NotFound />} />
+  </Routes>;
 }

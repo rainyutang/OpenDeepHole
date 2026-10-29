@@ -236,7 +236,7 @@ test("share dialog generates browser-origin links and can revoke and regenerate"
   client.api.defaults.adapter = async (config) => response(config, config.method === "delete" ? (generation++, { ok: true }) : { scan_id: "s", token: `token-${generation}` });
   const root = await mount(ShareButton, { scanId: "s" });
   await act(async () => button(root, "分享").props.onClick());
-  assert.equal(root.root.findByType("input").props.value, "https://example.test/#/shared-scan/s?token=token-1");
+  assert.equal(root.root.findByType("input").props.value, "https://example.test/shared-scan/s/overview?token=token-1");
   await act(async () => button(root, "关闭分享").props.onClick());
   assert.ok(content(root.toJSON()).includes("原链接已失效"));
   await act(async () => button(root, "重新开启分享").props.onClick());

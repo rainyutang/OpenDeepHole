@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { scanPath } from "../routing";
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 import { mergeScanMetadata } from "../scanRuntime";
@@ -697,7 +698,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                         {scan.knowledge_base_enabled && <span className="mt-1 block text-xs text-emerald-300">已启用知识库</span>}
                       </td>
                       <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
-                        {displayProjectName}
+                        <a href={scanPath(scan.scan_id)} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 hover:underline">{displayProjectName}</a>
                       </td>
                       <td className="min-w-[6.5rem] whitespace-nowrap px-4 py-3">
                         <span className="inline-flex items-center gap-2 whitespace-nowrap">
@@ -728,12 +729,12 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => onViewScan(scan.scan_id)}
+                          <a
+                            href={scanPath(scan.scan_id)} target="_blank" rel="noopener noreferrer"
                             className="text-xs px-2 py-1 rounded text-blue-400 hover:bg-blue-500/10 transition-colors"
                           >
                             查看
-                          </button>
+                          </a>
                           <ScanShareButton scanId={scan.scan_id} compact />
                           {running && (
                             <button

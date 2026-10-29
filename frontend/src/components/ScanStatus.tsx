@@ -22,6 +22,8 @@ import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditR
 import { useCandidateAuditResults } from "../features/auditResults/useAuditResults";
 import { useAuditNavigation, useListFocus } from "../auditNavigation";
 import type { AuditTarget, ListFocusRequest } from "../auditNavigation";
+import { DEFAULT_SCAN_ROUTE } from "../routing";
+import type { ScanNavigation, ScanRouteState, ScanTab } from "../routing";
 import type { CandidateAuditTaskResult, ScanMetadata } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -89,7 +91,7 @@ const LEGACY_VULNERABILITY_MINING_TASK_TYPES = new Set([
 ]);
 const THREAT_AUDIT_PAGE_SIZE = 20;
 
-type MainTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues";
+type MainTab = ScanTab;
 type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_tasks" | "pattern_tasks" | "validations";
 const DETAIL_REFRESH_RESOURCE: Record<DetailResource, ScanDetailResource> = {
   candidates: "candidates", vulnerabilities: "vulnerabilities", events: "events", validations: "validations",
@@ -718,13 +720,25 @@ interface Props {
   scanId: string;
   onBack: () => void;
   sharedView?: boolean;
+  navigation?: ScanNavigation;
 }
 
-export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(scanId) }: Props) {
+export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(scanId), navigation }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
-  const [activeTab, setActiveTab] = useState<MainTab>("overview");
-  const [activeEngineId, setActiveEngineId] = useState("");
-  const [threatAnalysisResultTab, setThreatAnalysisResultTab] = useState<ThreatAnalysisResultTab>("valueAssets");
+  const [localRoute, setLocalRoute] = useState(DEFAULT_SCAN_ROUTE);
+  const route = navigation?.state ?? localRoute;
+  const { tab: activeTab, engineId: activeEngineId, threatResult: threatAnalysisResultTab } = route;
+  const routeRef = useRef(route);
+  const navigationRef = useRef(navigation);
+  routeRef.current = route;
+  navigationRef.current = navigation;
+  const changeRoute = useCallback((patch: Partial<ScanRouteState>) => {
+    const next = { ...routeRef.current, ...patch };
+    if (navigationRef.current) navigationRef.current.onNavigate(next);
+    else setLocalRoute(next);
+  }, []);
+  const setActiveTab = useCallback((tab: MainTab) => changeRoute({ tab }), [changeRoute]);
+  const setThreatAnalysisResultTab = useCallback((threatResult: ThreatAnalysisResultTab) => changeRoute({ threatResult }), [changeRoute]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [scanInfoOpen, setScanInfoOpen] = useState(false);
   const [editingScan, setEditingScan] = useState<Pick<ScanMetadata, "scan_id" | "scan_name" | "product"> | null>(null);
@@ -756,10 +770,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     else if (kind === "static_candidate") setActiveTab("static");
     else if (kind === "fp_review") setActiveTab("fp_review");
     else {
-      setActiveEngineId(kind === "threat_pattern_audit" ? THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID);
-      setActiveTab("mining");
+      changeRoute({ tab: "mining", engineId: kind === "threat_pattern_audit" ? THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID });
     }
-  }, []);
+  }, [setActiveTab, changeRoute]);
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -793,6 +806,9 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
   const fpReviewRef = useRef(fpReview);
   fpReviewRef.current = fpReview;
   const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget, fpReview, setFpReview);
+  useEffect(() => {
+    if (navigation?.action === "POP") auditNavigation.cancel();
+  }, [navigation?.locationKey, navigation?.action, auditNavigation.cancel]);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [coverageRevision, setCoverageRevision] = useState(0);
   const [coverageIssuesRevision, setCoverageIssuesRevision] = useState(0);
@@ -847,7 +863,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
     detailGenerationRef.current.clear();
     refreshingResourcesRef.current.clear();
     setRefreshingResources(new Set());
-    setThreatAnalysisResultTab("valueAssets");
+    if (!navigationRef.current) setLocalRoute((previous) => previous.threatResult === "valueAssets"
+      ? previous : { ...previous, threatResult: "valueAssets" });
     setSidebarOpen(false);
     setScanInfoOpen(false);
     setExportMenuOpen(false);
@@ -1800,8 +1817,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       return;
     }
     if (node.startsWith("threat_result:")) {
-      setThreatAnalysisResultTab(node.slice("threat_result:".length) as ThreatAnalysisResultTab);
-      setActiveTab("threat");
+      changeRoute({ tab: "threat", threatResult: node.slice("threat_result:".length) as ThreatAnalysisResultTab });
       return;
     }
     if (node === "index") {
@@ -1825,8 +1841,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
       return;
     }
     const engineId = node.slice("engine:".length);
-    setActiveEngineId(engineId);
-    setActiveTab("mining");
+    changeRoute({ tab: "mining", engineId });
   };
 
   const loadSkill = async (vulnType: string) => {

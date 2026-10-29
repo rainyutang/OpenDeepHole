@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:routing": "node tests/routing.test.mjs",
     "test:scan-paths": "node tests/scanPathValidation.test.mjs",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
     "test:scan-metadata": "node tests/scanMetadata.test.mjs",
@@ -35,6 +36,7 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-markdown": "^10.1.0",
+    "react-router": "^7.18.5",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {

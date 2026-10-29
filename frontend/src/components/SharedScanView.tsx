@@ -1,8 +1,11 @@
 import { useLayoutEffect, useState } from "react";
 import type { PublicScanAccess } from "../api/client";
+import type { ScanNavigation } from "../routing";
 import ScanStatus from "./ScanStatus";
 
-export default function SharedScanView({ access, onBack }: { access: PublicScanAccess; onBack: () => void }) {
+export default function SharedScanView({ access, onBack, onHome = onBack, navigation }: {
+  access: PublicScanAccess; onBack: () => void; onHome?: () => void; navigation?: ScanNavigation;
+}) {
   const [unavailable, setUnavailable] = useState(!access.scanId || !access.token);
   useLayoutEffect(() => {
     const handleUnavailable = (event: Event) => {
@@ -16,9 +19,9 @@ export default function SharedScanView({ access, onBack }: { access: PublicScanA
   if (unavailable) return <div className="flex min-h-screen items-center justify-center bg-slate-900 p-6 text-slate-200">
     <div className="text-center">
       <p role="alert" className="text-lg">分享已关闭或链接无效</p>
-      <button type="button" onClick={onBack} className="mt-5 rounded-lg border border-slate-600 px-4 py-2 text-sm">返回首页</button>
+      <button type="button" onClick={onHome} className="mt-5 rounded-lg border border-slate-600 px-4 py-2 text-sm">返回首页</button>
     </div>
   </div>;
 
-  return <ScanStatus scanId={access.scanId} onBack={onBack} sharedView />;
+  return <ScanStatus scanId={access.scanId} onBack={onBack} navigation={navigation} sharedView />;
 }

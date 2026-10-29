@@ -162,7 +162,7 @@ def _base_url(request: Request) -> str:
 
 
 def _result_url(request: Request, scan_id: str, token: str) -> str:
-    return f"{_base_url(request)}/#/public-scan/{scan_id}?token={token}"
+    return f"{_base_url(request)}/public-scan/{scan_id}/overview?token={token}"
 
 
 def _progress_api_url(request: Request, scan_id: str, token: str) -> str:

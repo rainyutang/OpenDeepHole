@@ -989,8 +989,9 @@ export async function updateScanMetadata(scanId: string, body: ScanMetadataUpdat
 export async function createScanShare(scanId: string): Promise<string> {
   const { data } = await api.post<{ scan_id: string; token: string }>(`/api/scan/${scanId}/share`);
   const url = new URL(window.location.href);
-  url.search = "";
-  url.hash = `/shared-scan/${encodeURIComponent(data.scan_id)}?token=${encodeURIComponent(data.token)}`;
+  url.pathname = `/shared-scan/${encodeURIComponent(data.scan_id)}/overview`;
+  url.search = new URLSearchParams({ token: data.token }).toString();
+  url.hash = "";
   return url.toString();
 }
 

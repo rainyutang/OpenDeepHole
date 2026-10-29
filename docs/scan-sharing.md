@@ -17,7 +17,7 @@
 | POST | `/api/scan/{scan_id}/share` | 创建或获取分享，返回 `{ "scan_id": "...", "token": "..." }` |
 | DELETE | `/api/scan/{scan_id}/share` | 关闭分享，返回 `{ "ok": true }` |
 
-网页使用浏览器当前站点地址生成 `#/shared-scan/{scan_id}?token=...` 链接。访问分享数据使用 `/api/shared/scans/{scan_id}` 前缀，携带 `?token=<分享令牌>`。令牌只能访问对应扫描，不接受登录 JWT 或外部集成令牌替代。
+网页使用浏览器当前站点地址生成 `/shared-scan/{scan_id}/overview?token=...` 链接。切换扫描栏目时地址同步变化并保留令牌，支持刷新和浏览器前进、后退。历史 `/#/shared-scan/{scan_id}?token=...` 链接自动转换为新地址，原令牌继续有效。访问分享数据使用 `/api/shared/scans/{scan_id}` 前缀，携带 `?token=<分享令牌>`。令牌只能访问对应扫描，不接受登录 JWT 或外部集成令牌替代。
 
 | 方法 | 后缀 | 功能 |
 | --- | --- | --- |

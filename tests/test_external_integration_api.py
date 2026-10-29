@@ -187,7 +187,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.checkers, ["public_check"])
-            self.assertIn("/#/public-scan/", result.result_url)
+            self.assertIn("/public-scan/", result.result_url)
+            self.assertIn("/overview?token=", result.result_url)
             loaded = store.load_scan(result.scan_id)
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].scan_items, ["public_check"])
