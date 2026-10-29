@@ -1,10 +1,15 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import type { CoverageIssueCount, CoverageNode, CoverageTarget, CoverageTreeTile } from "./coverage";
 import { coverageBackground, createCoverageMatcher, hitCoverageTile, layoutCoverageTree } from "./coverage";
 
 const DOM_TILE_LIMIT = 1200;
 const NO_ISSUES: ReadonlyMap<string, CoverageIssueCount> = new Map();
+
+function tileGap(tile: CoverageTreeTile) {
+  // Keep boundaries below 8px without consuming subpixel cells' coverage color.
+  return Math.min(.5, tile.width / 8, tile.height / 8);
+}
 
 function tileLabel(tile: CoverageTreeTile) {
   return tile.nested ? tile.width >= 64 && tile.height >= 40 : tile.width >= 40 && tile.height >= 16;
@@ -65,12 +70,17 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, issueC
       const style = getComputedStyle(host);
       const color = (name: string) => style.getPropertyValue(`--coverage-${name}`).trim();
       const neutral = color("neutral"), risk = color("risk"), covered = color("covered"), issueColor = color("issue");
-      const text = color("text");
+      const text = color("text"), surface = color("surface");
+      const issueDirectories: CoverageTreeTile[] = [];
       for (const tile of tiles) {
         const { node, x, y, width, height } = tile;
         const count = issueCounts.get(node.path);
-        const gap = Math.min(width, height) >= 8 ? .5 : 0;
+        const gap = tileGap(tile);
         context.globalAlpha = count?.issues || matchesPattern(node.targetIds) ? 1 : .22;
+        // Transparent gaps expose a same-color directory underneath. Paint the
+        // separator explicitly so nested and top-level cells share a boundary.
+        context.fillStyle = surface;
+        context.fillRect(x, y, width, height);
         context.fillStyle = neutral;
         context.fillRect(x + gap, y + gap, width - 2 * gap, height - 2 * gap);
         if (!tile.nested && node.files && (node.covered || node.riskOnly)) {
@@ -84,13 +94,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, issueC
         if (count?.issues) {
           context.fillStyle = issueColor;
           if (node.kind === "file") context.fillRect(x + gap, y + gap, width - 2 * gap, height - 2 * gap);
-          else {
-            const border = Math.min(2, width / 2, height / 2);
-            context.fillRect(x, y, width, border);
-            context.fillRect(x, y + height - border, width, border);
-            context.fillRect(x, y, border, height);
-            context.fillRect(x + width - border, y, border, height);
-          }
+          else issueDirectories.push(tile);
         }
         if (!tileLabel(tile)) continue;
         context.save();
@@ -102,6 +106,16 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, issueC
         context.textBaseline = "middle";
         context.fillText(`${count?.issues ? `[${count.issues}] ` : ""}${node.name}`, x + 4, y + 8);
         context.restore();
+      }
+      // Descendant backgrounds must not cover their directory's issue outline.
+      context.globalAlpha = 1;
+      context.fillStyle = issueColor;
+      for (const { x, y, width, height } of issueDirectories) {
+        const border = Math.min(2, width / 2, height / 2);
+        context.fillRect(x, y, width, border);
+        context.fillRect(x, y + height - border, width, border);
+        context.fillRect(x, y, border, height);
+        context.fillRect(x + width - border, y, border, height);
       }
     };
     draw();
@@ -147,7 +161,7 @@ export function CoverageTreemap({ parent, selected, highlighted, targets, issueC
       const firstPattern = targets.get(node.targetIds.values().next().value ?? "")?.pattern_name;
       return <button key={node.path} type="button"
         className={`coverage-tile ${selected === node.path ? "is-selected" : ""} ${count?.issues || matchesPattern(node.targetIds) ? "" : "is-dimmed"} ${count?.issues && node.kind === "directory" ? "has-issues" : ""}`}
-        style={{ left: x, top: y, width, height, background: count?.issues && node.kind === "file" ? "var(--coverage-issue)" : nested ? "var(--coverage-neutral)" : coverageBackground(node), borderWidth: Math.min(width, height) >= 8 ? .5 : 0 }}
+        style={{ left: x, top: y, width, height, background: count?.issues && node.kind === "file" ? "var(--coverage-issue)" : nested ? "var(--coverage-neutral)" : coverageBackground(node), "--coverage-gap": `${tileGap(tile)}px` } as CSSProperties}
         aria-label={`${node.name}，${node.files} 个文件，${node.highRisk} 个高风险文件，${node.covered} 个文件关联攻击模式${count ? `，${count.issues} 个确认问题` : ""}`}
         aria-pressed={selected === node.path} title={tileTitle(node, targets, count)}
         onClick={() => onSelect(node.path)} onDoubleClick={() => { if (node.kind === "directory") onOpen(node.path); }}>

@@ -15,13 +15,24 @@ const originalSetInterval = globalThis.setInterval;
 const originalClearInterval = globalThis.clearInterval;
 const polls = new Map();
 const resizers = new Set();
+const mutations = new Set();
 const roots = [];
+const palettes = {
+  dark: { surface: "#0f172a", neutral: "#263549", risk: "#785020", covered: "#146852", issue: "#a82c3c", text: "#e2e8f0" },
+  light: { surface: "#ffffff", neutral: "#e2e8f0", risk: "#fde4b7", covered: "#b2e4d4", issue: "#f7b5bc", text: "#0f172a" },
+};
+let theme = "dark";
 globalThis.ResizeObserver = class {
   constructor(callback) { this.callback = callback; resizers.add(this); }
   observe(element) { this.element = element; }
   disconnect() { resizers.delete(this); }
 };
-globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => name === "--coverage-issue" ? "#a82c3c" : "#456789" });
+globalThis.MutationObserver = class {
+  constructor(callback) { this.callback = callback; mutations.add(this); }
+  observe(element) { this.element = element; }
+  disconnect() { mutations.delete(this); }
+};
+globalThis.getComputedStyle = () => ({ getPropertyValue: (name) => palettes[theme][name.replace("--coverage-", "")] ?? "" });
 globalThis.setInterval = (callback, delay) => {
   assert.equal(delay, 30_000);
   const id = Symbol("coverage poll");
@@ -30,13 +41,15 @@ globalThis.setInterval = (callback, delay) => {
 };
 globalThis.clearInterval = (id) => polls.delete(id);
 globalThis.localStorage = { getItem: () => null };
-globalThis.document = Object.assign(new EventTarget(), { hidden: false });
+globalThis.document = Object.assign(new EventTarget(), { hidden: false, documentElement: {} });
 globalThis.window = new EventTarget();
 
 afterEach(async () => {
   await act(async () => { roots.splice(0).forEach((root) => root.unmount()); });
   assert.equal(polls.size, 0);
   assert.equal(resizers.size, 0);
+  assert.equal(mutations.size, 0);
+  theme = "dark";
   document.hidden = false;
   document.fullscreenElement = null;
   window.devicePixelRatio = 1;
@@ -50,6 +63,7 @@ after(async () => {
   delete globalThis.document;
   delete globalThis.window;
   delete globalThis.ResizeObserver;
+  delete globalThis.MutationObserver;
   delete globalThis.getComputedStyle;
   await server.close();
 });
@@ -106,12 +120,13 @@ function installApi(value, issues = null) {
   return calls;
 }
 function component(scanId = "s", revision = 0, extra = {}) { return createElement(ThreatCoveragePanel, { scanId, revision, analysisStatus: "running", ...extra }); }
-async function mount(scanId = "s", extra = {}) {
+async function mount(scanId = "s", extra = {}, viewport = { width: 960, height: 360 }) {
   let root;
-  const host = { clientWidth: 960, clientHeight: 360 };
-  const fills = [], scales = [], alphas = [], colors = [];
+  const host = { clientWidth: viewport.width, clientHeight: viewport.height };
+  const fills = [], scales = [], alphas = [], colors = [], frames = [];
   const context = {
-    fillRect: (...args) => { fills.push(args); alphas.push(context.globalAlpha); colors.push(context.fillStyle); }, scale: (...args) => scales.push(args),
+    fillRect: (...args) => { fills.push(args); alphas.push(context.globalAlpha); colors.push(context.fillStyle); },
+    scale: (...args) => { scales.push(args); frames.push(fills.length); },
     save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, fillText() {},
   };
   const bitmap = { getContext: () => context };
@@ -129,6 +144,7 @@ async function mount(scanId = "s", extra = {}) {
   root.scales = scales;
   root.alphas = alphas;
   root.colors = colors;
+  root.frames = frames;
   roots.push(root);
   return root;
 }
@@ -138,6 +154,89 @@ function issueData(files) {
     unmapped_count: 0, unmapped: [] };
 }
 function issue(index) { return { vuln_index: index, line: 10, vuln_type: "oob", severity: "high", engine_id: "static_candidate" }; }
+
+function canvasRects(root, color) {
+  const start = root.frames.at(-1) ?? 0;
+  return root.fills.slice(start).filter((_, index) => root.colors[start + index] === color);
+}
+
+function assertCanvasSeparators(root, tiles) {
+  const edges = canvasRects(root, palettes[theme].surface);
+  const interiors = canvasRects(root, palettes[theme].neutral);
+  assert.equal(edges.length, tiles.length, "every tile has an explicit separator background");
+  assert.equal(interiors.length, tiles.length, "every tile retains its coverage fill");
+  for (let i = 0; i < tiles.length; i++) {
+    const { x, y, width, height } = tiles[i];
+    assert.deepEqual(edges[i], [x, y, width, height]);
+    const [left, top, innerWidth, innerHeight] = interiors[i];
+    assert.ok(left > x && top > y, "small tiles keep a visible inset");
+    assert.ok(left + innerWidth < x + width && top + innerHeight < y + height);
+    assert.ok(innerWidth > 0 && innerHeight > 0);
+    assert.ok(innerWidth * innerHeight >= width * height / 2, "separators preserve most of the tile color");
+  }
+}
+
+for (const count of [1200, 1201]) {
+  for (const viewport of [{ width: 400, height: 280 }, { width: 10, height: 10 }]) {
+    test(`small tiles keep separators and positive fill across the renderer boundary (${count} files, ${viewport.width}px)`, async () => {
+      const data = fixture(false);
+      data.inventory.entries = [{ path: ".", kind: "directory" },
+        ...Array.from({ length: count }, (_, i) => ({ path: `file-${i}.c`, kind: "file" }))];
+      installApi(data);
+      const root = await mount("s", {}, viewport);
+      const tiles = layoutCoverageTree(buildCoverageTree(data).root, viewport.width, viewport.height);
+      assert.ok(tiles.some((tile) => Math.min(tile.width, tile.height) < 8));
+      assert.equal(section(root, "文件树矩形图").props["data-renderer"], count === 1200 ? "dom" : "canvas");
+      if (count === 1201) {
+        assertCanvasSeparators(root, tiles);
+      } else {
+        const cells = root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile "));
+        assert.equal(cells.length, count);
+        for (const cell of cells) {
+          const { width, height } = cell.props.style;
+          const gap = parseFloat(cell.props.style["--coverage-gap"]);
+          assert.ok(gap > 0 && gap <= .5, "DOM separators remain enabled for small tiles");
+          assert.ok((width - 2 * gap) * (height - 2 * gap) >= width * height / 2);
+        }
+      }
+    });
+  }
+}
+
+test("nested canvas tiles keep same-color separators beneath directory issue outlines", async () => {
+  const data = fixture(false);
+  data.inventory.entries = [{ path: ".", kind: "directory" }, { path: "nested", kind: "directory" },
+    ...Array.from({ length: 1500 }, (_, i) => ({ path: `nested/file-${i}.c`, kind: "file" }))];
+  installApi(data, issueData([{ path: "nested/file-420.c", issues: [issue(42)] }]));
+  const root = await mount("s", {}, { width: 400, height: 280 });
+  const tiles = layoutCoverageTree(buildCoverageTree(data).root, 400, 280);
+  assertCanvasSeparators(root, tiles);
+  assert.equal(canvasRects(root, palettes[theme].issue).length, 5, "one problem file and four directory edges");
+  assert.deepEqual(root.colors.slice(-4), Array(4).fill(palettes[theme].issue), "directory outlines remain above descendant fills");
+});
+
+test("canvas separators repaint with the theme at standard, fractional, and high pixel ratios", async () => {
+  const data = fixture(false);
+  data.inventory.entries = [{ path: ".", kind: "directory" },
+    ...Array.from({ length: 1500 }, (_, i) => ({ path: `file-${i}.c`, kind: "file" }))];
+  installApi(data);
+  const root = await mount("s", {}, { width: 401, height: 281 });
+  const tiles = layoutCoverageTree(buildCoverageTree(data).root, 401, 281);
+  for (const nextTheme of Object.keys(palettes)) {
+    for (const ratio of [1, 1.25, 2]) {
+      await act(async () => {
+        window.devicePixelRatio = ratio;
+        window.dispatchEvent(new Event("resize"));
+      });
+      theme = nextTheme;
+      await act(async () => [...mutations].forEach((observer) => observer.callback()));
+      assert.equal(root.bitmap.width, Math.ceil(401 * ratio));
+      assert.equal(root.bitmap.height, Math.ceil(281 * ratio));
+      assert.deepEqual(root.scales.at(-1), [ratio, ratio]);
+      assertCanvasSeparators(root, tiles);
+    }
+  }
+});
 
 test("issue overlays count files once, preserve summaries, and never spread to siblings", () => {
   const tree = buildCoverageTree(fixture());
@@ -333,7 +432,7 @@ test("dense maps draw every cell at device resolution and preserve hit testing a
   installApi(data);
   const root = await mount();
   assert.equal(section(root, "文件树矩形图").props["data-renderer"], "canvas");
-  assert.equal(root.fills.length, 5000);
+  assert.equal(canvasRects(root, palettes[theme].neutral).length, 5000);
   assert.equal(root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile ")).length, 0);
   await act(async () => {
     root.host.clientWidth = 400; root.host.clientHeight = 280;
@@ -344,6 +443,7 @@ test("dense maps draw every cell at device resolution and preserve hit testing a
   assert.equal(root.bitmap.height, 560);
   assert.deepEqual(root.scales.at(-1), [2, 2]);
   const tiles = layoutCoverageTree(buildCoverageTree(data).root, 400, 280);
+  assertCanvasSeparators(root, tiles);
   const chosen = tiles[4200];
   // Simulate CSS-scaled coordinates as well as a device pixel ratio change.
   await act(async () => root.root.findByType("canvas").props.onClick({
@@ -367,9 +467,11 @@ for (const count of [4, 1500]) {
     data.targets[1].mapped_paths = ["file-0.c"];
     installApi(() => data);
     const root = await mount();
-    const activeCells = () => count > 1200
-      ? root.alphas.slice(-count * 3).filter((alpha) => alpha === 1).length / 3
-      : root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile ") && !node.props.className.includes("is-dimmed")).length;
+    const activeCells = () => {
+      if (count <= 1200) return root.root.findAllByType("button").filter((node) => node.props.className?.startsWith("coverage-tile ") && !node.props.className.includes("is-dimmed")).length;
+      const start = root.frames.at(-1);
+      return root.colors.slice(start).filter((color, i) => color === palettes[theme].neutral && root.alphas[start + i] === 1).length;
+    };
     const select = async (value) => act(async () => root.root.findByType("select").props.onChange({ target: { value } }));
     const search = async (value) => act(async () => root.root.findByType("input").props.onChange({ target: { value } }));
     await select("P1");
