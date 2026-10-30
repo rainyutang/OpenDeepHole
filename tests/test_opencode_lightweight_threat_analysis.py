@@ -80,6 +80,14 @@ def _implementation(method_id: str = METHOD_ID) -> ModuleType:
     return importlib.import_module("threat_analysis_harness.threat_analysis")
 
 
+@pytest.fixture(params=[
+    METHOD_ID,
+    "opencode_coverage_guided_lightweight_threat_analysis",
+], ids=["lightweight", "coverage-guided"])
+def implementation(request: pytest.FixtureRequest) -> ModuleType:
+    return _implementation(request.param)
+
+
 def _write_dummy_artifacts(paths: dict[str, Path]) -> None:
     for key, path in paths.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +103,7 @@ def _write_dummy_artifacts(paths: dict[str, Path]) -> None:
 
 def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
     tmp_path: Path,
+    implementation: ModuleType,
 ) -> None:
     code_root = tmp_path / "source"
     artifact_root = tmp_path / "artifacts"
@@ -113,7 +122,7 @@ def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
         paths=codex_paths,
     )
 
-    opencode = _implementation()
+    opencode = implementation
     opencode_paths = opencode._artifact_paths(artifact_root)
     guidance_path, schema_paths = opencode._reference_paths()
     opencode_prompt = opencode.build_task_prompt(
@@ -184,8 +193,8 @@ def test_all_prompt_references_are_inside_the_agent_readable_root() -> None:
 def test_method_runs_one_task_with_read_only_references_and_exact_command(
     tmp_path: Path,
     monkeypatch,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     code_root = tmp_path / "source"
     artifact_root = tmp_path / "artifacts"
     code_root.mkdir()
@@ -242,8 +251,8 @@ def test_method_runs_one_task_with_read_only_references_and_exact_command(
 
 def test_task_adapter_allows_optional_command_and_uses_post_session_validator(
     tmp_path: Path,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     runner = AsyncMock(return_value=SimpleNamespace(status="success"))
     reference_root = codex_runtime_reference_root()
     command = "python validate.py"
@@ -358,8 +367,8 @@ def test_local_validation_executes_an_argv_without_a_shell(
 
 def test_post_session_validation_feedback_returns_diagnostics(
     tmp_path: Path,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     guidance_path, _ = implementation._reference_paths()
     paths = implementation._artifact_paths(tmp_path)
     paths["attack_tree_path"].mkdir()
@@ -379,8 +388,8 @@ def test_post_session_validation_feedback_returns_diagnostics(
 def test_resume_reuses_valid_completed_outputs_without_new_task(
     tmp_path: Path,
     monkeypatch,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     code_root = tmp_path / "source"
     artifact_root = tmp_path / "artifacts"
     code_root.mkdir()
@@ -411,8 +420,8 @@ def test_resume_reuses_valid_completed_outputs_without_new_task(
 def test_failed_task_persists_session_for_diagnostics(
     tmp_path: Path,
     monkeypatch,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     code_root = tmp_path / "source"
     artifact_root = tmp_path / "artifacts"
     code_root.mkdir()
@@ -442,8 +451,8 @@ def test_failed_task_persists_session_for_diagnostics(
 def test_resume_after_failure_starts_fresh_session_and_clears_partial_outputs(
     tmp_path: Path,
     monkeypatch,
+    implementation: ModuleType,
 ) -> None:
-    implementation = _implementation()
     code_root = tmp_path / "source"
     artifact_root = tmp_path / "artifacts"
     code_root.mkdir()

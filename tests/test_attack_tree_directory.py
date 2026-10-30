@@ -20,7 +20,7 @@ from deephole_client.threat_analysis.methods.codex_goal_threat_analysis.schema_v
 from deephole_client.vulnerability_mining.engines.threat_audit.runner import _load_json as load_audit
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit.engine import _load_json as load_pattern
 from test_codex_goal_threat_analysis import _valid_artifacts
-from test_opencode_lightweight_threat_analysis import _implementation
+from test_opencode_lightweight_threat_analysis import implementation
 from test_threat_analysis import _scan
 
 
@@ -202,8 +202,7 @@ def test_audit_consumers_read_directory_and_legacy_file_identically(artifacts, t
     assert loader(artifacts["attack_tree_path"], "attack_tree_path") == loader(legacy, "attack_tree_path")
 
 
-def test_post_session_feedback_keeps_file_errors_and_accepts_local_repair(artifacts):
-    implementation = _implementation()
+def test_post_session_feedback_keeps_file_errors_and_accepts_local_repair(artifacts, implementation):
     root = artifacts["attack_tree_path"]
     path = root / "attack-tree-002.json"
     original = path.read_text()
@@ -220,8 +219,7 @@ def test_post_session_feedback_keeps_file_errors_and_accepts_local_repair(artifa
     assert (root / "attack-tree-001.json").read_bytes() == first_original
 
 
-def test_resume_accepts_completed_legacy_file_without_running_model(tmp_path, monkeypatch):
-    implementation = _implementation()
+def test_resume_accepts_completed_legacy_file_without_running_model(tmp_path, monkeypatch, implementation):
     code = tmp_path / "source"
     code.mkdir()
     output = tmp_path / "output"
@@ -242,8 +240,7 @@ def test_resume_accepts_completed_legacy_file_without_running_model(tmp_path, mo
     assert result["attack_tree_path"] == str(legacy)
 
 
-def test_native_method_returns_validated_directory_and_completion_state(artifacts, tmp_path, monkeypatch):
-    implementation = _implementation()
+def test_native_method_returns_validated_directory_and_completion_state(artifacts, tmp_path, monkeypatch, implementation):
     output = artifacts["attack_tree_path"].parent.parent
     snapshot = collect_json_artifacts({"result": True, **artifacts}, output_root=output / "final")
     code = tmp_path / "source"
@@ -269,8 +266,7 @@ def test_native_method_returns_validated_directory_and_completion_state(artifact
     assert json.loads((output / "opencode-task-state.json").read_text())["status"] == "complete"
 
 
-def test_new_task_rejects_aggregate_file_at_directory_path(tmp_path):
-    implementation = _implementation()
+def test_new_task_rejects_aggregate_file_at_directory_path(tmp_path, implementation):
     paths = implementation._artifact_paths(tmp_path)
     _write(paths["attack_tree_path"], _valid_artifacts()[2])
     guidance, _ = implementation._reference_paths()
@@ -296,8 +292,7 @@ def test_directory_diagnostics_keep_summary_inside_host_capture_budget(artifacts
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires unprivileged symlink creation")
-def test_native_cleanup_cannot_follow_final_directory_outside_output(tmp_path):
-    implementation = _implementation()
+def test_native_cleanup_cannot_follow_final_directory_outside_output(tmp_path, implementation):
     code = tmp_path / "source"
     output = tmp_path / "output"
     outside = tmp_path / "outside"

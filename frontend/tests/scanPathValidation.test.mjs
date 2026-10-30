@@ -11,6 +11,8 @@ const { default: NewScanForm } = await server.ssrLoadModule("/src/components/New
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const originalAdapter = client.api.defaults.adapter;
 const roots = [];
+const coverageGuidedMethodId = "opencode_coverage_guided_lightweight_threat_analysis";
+const coverageGuidedMethodLabel = "覆盖率引导的轻量级威胁分析（OpenCode）";
 globalThis.localStorage = { getItem: () => null, setItem() {} };
 globalThis.window = Object.assign(new EventTarget(), { localStorage });
 globalThis.document = { documentElement: { dataset: {}, style: {} } };
@@ -39,7 +41,10 @@ async function mount() {
     let data;
     if (config.url === "/api/agents") data = [{ agent_key: "client-1", name: "client-1", online: true, has_explicit_model: true }];
     else if (config.url === "/api/mining-engines") data = { engines: [{ engine_id: "threat_pattern_audit", label: "攻击模式审计" }] };
-    else if (config.url === "/api/threat-analysis-methods") data = { methods: [{ method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" }] };
+    else if (config.url === "/api/threat-analysis-methods") data = { methods: [
+      { method_id: coverageGuidedMethodId, label: coverageGuidedMethodLabel },
+      { method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" },
+    ] };
     else if (config.url === "/api/fp-review-methods") data = { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
     else if (config.url.endsWith("/validator-catalog")) data = { methods: [], errors: [] };
     else if (config.url.includes("/config-memory/")) data = { knowledge_base: null, validation_by_product: {} };
@@ -71,6 +76,22 @@ async function mode(root, label) {
 async function submit(root) {
   await act(async () => root.root.findByType("form").props.onSubmit({ preventDefault() {} }));
 }
+
+test("custom scans can select coverage-guided analysis while keeping the original default", async () => {
+  const { root, submissions } = await mount();
+  await mode(root, "自定义模式");
+  const original = root.root.findAllByType("label").find((node) => text(node) === "威胁分析");
+  const coverageGuided = root.root.findAllByType("label").find((node) => text(node) === coverageGuidedMethodLabel);
+  assert.ok(original);
+  assert.ok(coverageGuided);
+  assert.equal(original.findByType("input").props.checked, true);
+  assert.equal(coverageGuided.findByType("input").props.checked, false);
+  await act(async () => coverageGuided.findByType("input").props.onChange());
+  await change(root, "/path/to/project", "/repo/project");
+  await submit(root);
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].threat_analysis_method, coverageGuidedMethodId);
+});
 
 for (const scanMode of ["标准模式", "自定义模式"]) {
   for (const field of ["project", "module"]) {

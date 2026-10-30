@@ -67,6 +67,11 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
             "description": "生成价值资产、高风险模块和攻击树。",
         },
         {
+            "method_id": "opencode_coverage_guided_lightweight_threat_analysis",
+            "label": "覆盖率引导的轻量级威胁分析（OpenCode）",
+            "description": "生成价值资产、高风险模块和攻击树。",
+        },
+        {
             "method_id": "codex_goal_threat_analysis",
             "label": "轻量级威胁分析（Codex）",
             "description": "生成价值资产、高风险模块和攻击树。",
@@ -102,6 +107,16 @@ def test_backend_resolves_default_method_and_rejects_unknown_selection() -> None
     assert raised.value.status_code == 400
 
 
+def test_backend_resolves_coverage_guided_method() -> None:
+    method_id, selection = _resolve_threat_analysis_method(
+        "opencode_coverage_guided_lightweight_threat_analysis"
+    )
+
+    assert method_id == "opencode_coverage_guided_lightweight_threat_analysis"
+    assert selection.method_id == method_id
+    assert selection.method_label == "覆盖率引导的轻量级威胁分析（OpenCode）"
+
+
 def test_method_discovery_rejects_extra_yaml_and_incomplete_directories(
     tmp_path: Path,
 ) -> None:
@@ -135,8 +150,14 @@ def test_method_discovery_rejects_extra_yaml_and_incomplete_directories(
     assert any("requires method.yaml, __init__.py" in item for item in errors)
 
 
-def test_default_method_entry_has_the_documented_five_parameter_contract() -> None:
-    manifest = resolve_threat_analysis_method(None)
+@pytest.mark.parametrize("method_id", [
+    None,
+    "codex_goal_threat_analysis",
+    "opencode_lightweight_threat_analysis",
+    "opencode_coverage_guided_lightweight_threat_analysis",
+])
+def test_method_entry_has_the_documented_five_parameter_contract(method_id) -> None:
+    manifest = resolve_threat_analysis_method(method_id)
     module = _load_implementation(manifest.method_id)
 
     assert Path(module.__file__).resolve() == manifest.directory / "__init__.py"
@@ -218,11 +239,22 @@ def test_method_result_contract_requires_three_paths_or_failure_reason() -> None
     assert _validate_native_result(failed) is failed
 
 
-def test_method_selection_round_trips_through_scan_storage(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("method_id", "method_label"), [
+    ("custom", "Custom analysis"),
+    (
+        "opencode_coverage_guided_lightweight_threat_analysis",
+        "覆盖率引导的轻量级威胁分析（OpenCode）",
+    ),
+])
+def test_method_selection_round_trips_through_scan_storage(
+    tmp_path: Path,
+    method_id: str,
+    method_label: str,
+) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     selection = ThreatAnalysisMethodSelection(
-        method_id="custom",
-        method_label="Custom analysis",
+        method_id=method_id,
+        method_label=method_label,
         description="snapshot",
     )
     scan = ScanStatus(
@@ -232,13 +264,13 @@ def test_method_selection_round_trips_through_scan_storage(tmp_path: Path) -> No
         total_candidates=0,
         processed_candidates=0,
         vulnerabilities=[],
-        threat_analysis_method="custom",
+        threat_analysis_method=method_id,
         threat_analysis_method_selection=selection,
     )
     meta = ScanMeta(
         scan_items=[],
         created_at="2026-08-05T00:00:00+00:00",
-        threat_analysis_method="custom",
+        threat_analysis_method=method_id,
         threat_analysis_method_selection=selection,
     )
 
@@ -246,7 +278,8 @@ def test_method_selection_round_trips_through_scan_storage(tmp_path: Path) -> No
     loaded_scan, loaded_meta = store.load_scan("scan-method")  # type: ignore[misc]
 
     assert loaded_scan.threat_analysis_method_selection == selection
-    assert loaded_meta.threat_analysis_method == "custom"
+    assert loaded_scan.threat_analysis_method == method_id
+    assert loaded_meta.threat_analysis_method == method_id
     assert loaded_meta.threat_analysis_method_selection == selection
 
 

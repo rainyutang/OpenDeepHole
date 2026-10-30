@@ -1028,6 +1028,19 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_reuses_stored_threat_analysis_for_dependent_engine(
         self,
     ) -> None:
+        await self._assert_resume_reuses_stored_threat_analysis(
+            "deephole_threat_analysis"
+        )
+
+    async def test_coverage_guided_resume_reuses_stored_threat_analysis(self) -> None:
+        await self._assert_resume_reuses_stored_threat_analysis(
+            "opencode_coverage_guided_lightweight_threat_analysis"
+        )
+
+    async def _assert_resume_reuses_stored_threat_analysis(
+        self,
+        method_id: str,
+    ) -> None:
         reporter = _reporter()
         manifest = SimpleNamespace(
             engine_id="threat_pattern_audit",
@@ -1103,6 +1116,10 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "deephole_client.scanner.run_threat_analysis",
                     new=analysis,
                 ),
+                patch(
+                    "deephole_client.scanner.register_planned_task",
+                    new=AsyncMock(),
+                ) as register_planned,
             ):
                 await run_scan(
                     config=AgentConfig(),
@@ -1118,6 +1135,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     is_resume=True,
                     resume_threat_analysis=True,
                     threat_analysis_enabled=True,
+                    threat_analysis_method=method_id,
                     retry_mining_engine_ids=["threat_pattern_audit"],
                     mining_engines=[{
                         "engine_id": "threat_pattern_audit",
@@ -1130,6 +1148,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             assert Path(restored["high_risk_modules_path"]).is_file()
 
         analysis.assert_not_awaited()
+        register_planned.assert_not_awaited()
         reporter.report_threat_analysis_run.assert_not_awaited()
         reporter.push_threat_analysis.assert_not_awaited()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
@@ -1768,6 +1787,21 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_opencode_lightweight_is_archived_then_deephole_runs_once(
         self,
     ) -> None:
+        await self._assert_failed_opencode_lightweight_falls_back(
+            "opencode_lightweight_threat_analysis"
+        )
+
+    async def test_failed_coverage_guided_is_archived_then_deephole_runs_once(
+        self,
+    ) -> None:
+        await self._assert_failed_opencode_lightweight_falls_back(
+            "opencode_coverage_guided_lightweight_threat_analysis"
+        )
+
+    async def _assert_failed_opencode_lightweight_falls_back(
+        self,
+        method_id: str,
+    ) -> None:
         reporter = _reporter()
         attempts: list[tuple[str, bool]] = []
 
@@ -1782,7 +1816,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 attempts.append((kwargs["method_id"], kwargs["is_resume"]))
                 output_path = Path(kwargs["output_path"])
                 output_path.mkdir(parents=True, exist_ok=True)
-                if kwargs["method_id"] == "opencode_lightweight_threat_analysis":
+                if kwargs["method_id"] == method_id:
                     (output_path / "partial.json").write_text(
                         '{"partial": true}',
                         encoding="utf-8",
@@ -1852,7 +1886,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     is_resume=True,
                     resume_threat_analysis=True,
                     threat_analysis_enabled=True,
-                    threat_analysis_method="opencode_lightweight_threat_analysis",
+                    threat_analysis_method=method_id,
                     mining_engines=[],
                 )
 
@@ -1877,7 +1911,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ))
 
         self.assertEqual(attempts, [
-            ("opencode_lightweight_threat_analysis", True),
+            (method_id, True),
             ("deephole_threat_analysis", False),
         ])
         register_planned.assert_awaited_once_with(
@@ -1904,6 +1938,19 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_cancelled_opencode_lightweight_does_not_fallback(self) -> None:
+        await self._assert_cancelled_opencode_lightweight_does_not_fallback(
+            "opencode_lightweight_threat_analysis"
+        )
+
+    async def test_cancelled_coverage_guided_does_not_fallback(self) -> None:
+        await self._assert_cancelled_opencode_lightweight_does_not_fallback(
+            "opencode_coverage_guided_lightweight_threat_analysis"
+        )
+
+    async def _assert_cancelled_opencode_lightweight_does_not_fallback(
+        self,
+        method_id: str,
+    ) -> None:
         reporter = _reporter()
         cancel_event = threading.Event()
         attempts: list[str] = []
@@ -1952,11 +1999,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     scan_id="scan-opencode-lightweight-cancelled",
                     cancel_event=cancel_event,
                     threat_analysis_enabled=True,
-                    threat_analysis_method="opencode_lightweight_threat_analysis",
+                    threat_analysis_method=method_id,
                     mining_engines=[],
                 )
 
-        self.assertEqual(attempts, ["opencode_lightweight_threat_analysis"])
+        self.assertEqual(attempts, [method_id])
         self.assertEqual(reporter.finish_scan.await_args.args[2], "cancelled")
 
     async def test_resume_runs_only_requested_failed_engine(self) -> None:

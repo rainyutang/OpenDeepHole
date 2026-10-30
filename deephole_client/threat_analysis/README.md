@@ -5,14 +5,17 @@
 一个方法，扫描创建后会固化方法 ID、名称和说明快照。内置方法 ID 是
 `deephole_threat_analysis`，界面名称是“DeepHole威胁分析”。
 
-仓库还提供两个运行时可区分的轻量级方法：
+仓库还提供三个轻量级方法：
 
 - `codex_goal_threat_analysis`，界面名称“轻量级威胁分析（Codex）”，通过
   `codex_sdk` 启动可恢复 Goal。
 - `opencode_lightweight_threat_analysis`，界面名称“轻量级威胁分析（OpenCode）”，通过一次
   逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是新建扫描的默认选择。
+- `opencode_coverage_guided_lightweight_threat_analysis`，界面名称
+  “覆盖率引导的轻量级威胁分析（OpenCode）”，当前原样复制 OpenCode 轻量级方法的实现，
+  包含相同的任务登记、产物校验、重试、续扫、取消和 DeepHole 回退流程；覆盖率引导逻辑后续再添加。
 
-两个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
+三个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
 和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，
 只携带路径和关键约束；完整
 接口契约与三份字段 Schema 都来自 Codex 方法目录下的只读 `references/*.json`，校验器也继续位于
@@ -147,11 +150,11 @@ return {
 当前扫描目录并直接提供给依赖引擎；这一过程不会注册模型任务、上报 `running` 或重置成功状态。
 历史结果包没有可选范围字段时，仍按不可变的扫描 ID 兼容复用。
 
-只有服务端结果缺失、损坏或范围不匹配时，平台才调用原生入口。两个轻量级方法在续扫时会收到
+只有服务端结果缺失、损坏或范围不匹配时，平台才调用原生入口。轻量级方法在续扫时会收到
 `is_resume=True`，但该参数只允许它们识别已经完整且带成功标记的本地产物；如果上次任务失败、
 取消、超时或产物不完整，方法会先清除残留，再创建全新 Session/线程从头执行，不会续写失败
 Session。其它方法直接以 `is_resume=False` 新建任务，业务层也不再先做一次失败 Session 的增量恢复。
-两个轻量级方法失败时仍保留一次 clean DeepHole 方法回退：失败产物会归档到同级
+轻量级方法失败时仍保留一次 clean DeepHole 方法回退：失败产物会归档到同级
 `threat_analysis_failed/<UTC-attempt-id>/`，OpenCode 在 Windows 上遇到文件锁时降级复制诊断并
 尽力清空原目录。取消不回退，DeepHole 回退失败时会同时保留主错误、归档警告和回退错误。
 

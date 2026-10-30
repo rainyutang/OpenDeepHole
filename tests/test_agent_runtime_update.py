@@ -256,6 +256,13 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names,
         )
         self.assertIn("deephole_client/threat_analysis_runner.py", names)
+        for filename in ("__init__.py", "threat_analysis.py", "method.yaml"):
+            self.assertIn(
+                "deephole_client/threat_analysis/methods/"
+                "opencode_coverage_guided_lightweight_threat_analysis/"
+                + filename,
+                names,
+            )
         self.assertNotIn(
             "deephole_client/threat_analysis/__main__.py",
             names,

@@ -64,10 +64,14 @@ CODEX_THREAT_ANALYSIS_METHOD_ID = "codex_goal_threat_analysis"
 OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID = (
     "opencode_lightweight_threat_analysis"
 )
+OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID = (
+    "opencode_coverage_guided_lightweight_threat_analysis"
+)
 DEEPHOLE_THREAT_ANALYSIS_METHOD_ID = "deephole_threat_analysis"
 LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS = frozenset({
     CODEX_THREAT_ANALYSIS_METHOD_ID,
     OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
+    OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
 })
 
 
@@ -1217,7 +1221,10 @@ async def _run_scan_pipeline(
                     cancel_event=cancel_event,
                 )
 
-            if method_id == OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID:
+            if method_id in {
+                OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
+                OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
+            }:
                 planned_task_id = await register_planned_task(
                     scan_id,
                     {
