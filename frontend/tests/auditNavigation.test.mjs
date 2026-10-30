@@ -424,6 +424,7 @@ test("issues can focus a manual-only report across pages and reset an excluding 
   assert.ok(selectedRow);
   await act(async () => selectedRow.props.onClick());
   assert.match(text(root), /指定问题报告 207/);
+  await act(async () => button(root, "详情 ▸").props.onClick());
   await act(async () => button(root, "查看静态候选点").props.onClick());
   assert.deepEqual(opened, [207]);
   const humanFilter = root.root.findAllByType("select").find((item) => textContent(item.parent).startsWith("人工"));
@@ -844,6 +845,10 @@ test("forward review action requires effective TP and reverse action requires a 
     assert.equal(panel.root.findAllByType("button").some((item) => textContent(item) === "查看疑似问题"), forward);
     const issues = await mount(VulnerabilityList, { scanId: "s", vulnerabilities, fpReview: job, viewMode: "final_tp",
       focusRequest: { key: 0, revision: 1 }, onOpenFpReview: (index) => opened.push(index) });
+    if (reverse) {
+      assert.equal(issues.root.findAllByType("button").some((item) => textContent(item) === "查看去误报详情"), false);
+      await act(async () => button(issues, "详情 ▸").props.onClick());
+    }
     assert.equal(issues.root.findAllByType("button").some((item) => textContent(item) === "查看去误报详情"), reverse);
     if (reverse) {
       await act(async () => button(issues, "查看去误报详情").props.onClick());

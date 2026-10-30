@@ -2199,12 +2199,12 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
           </div>
         </div>
 
-        <ProcessFlowNav
+        {activeTab === "overview" && <ProcessFlowNav
           flow={flowModel}
           onNodeClick={handleFlowNodeClick}
           activeThreatResultTab={threatAnalysisResultTab}
-          issuesActive={activeTab === "issues"}
-        />
+          issuesActive={false}
+        />}
 
         {/* Error */}
         {visibleErrorMessage && (

@@ -66,7 +66,7 @@ async function mount(scanId = "s") {
   roots.push(root);
   return root;
 }
-async function openIssues(root) { await act(async () => button(root, "疑似问题").props.onClick()); }
+async function openIssues(root) { await act(async () => root.root.findAllByType("button").find((item) => text(item).startsWith("疑似问题")).props.onClick()); }
 function selectedIssue(root) {
   return root.root.findAll((node) => typeof node.type === "function" && node.type.name === "VulnDetail")[0];
 }
@@ -317,6 +317,7 @@ for (const publicAccess of [false, true]) {
     assert.equal(issueProps(root).focusRequest.key, 312);
     assert.match(text(root.toJSON()), /第 3\/3 页/);
     const count = calls.length;
+    await act(async () => button(root, "详情 ▸").props.onClick());
     await act(async () => button(root, "查看去误报详情").props.onClick());
     assert.match(text(root.toJSON()), /第 6\/6 页 · 共 105 条/);
     assert.match(text(root.toJSON()), /有效结论 104/);

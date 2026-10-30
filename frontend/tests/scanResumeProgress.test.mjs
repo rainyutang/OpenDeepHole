@@ -422,6 +422,7 @@ test("attack-pattern engine shows live tasks and navigates to the linked report 
   await click("查看问题报告");
   assert.match(text(root.toJSON()), /当前定位：结果 #207/);
   assert.match(text(root.toJSON()), /攻击模式审计报告 207/);
+  await click("详情 ▸");
   await click("查看攻击模式审计任务");
   assert.match(text(root.toJSON()), /高风险模块认证模块/);
   assert.match(text(root.toJSON()), /threat-pattern-audit-1/);
