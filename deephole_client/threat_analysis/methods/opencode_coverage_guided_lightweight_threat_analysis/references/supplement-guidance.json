@@ -1,0 +1,16 @@
+{
+  "task": "检查指定范围，补充高风险模块、价值资产及独立攻击树。",
+  "references": {
+    "modeling_rules": "../../codex_goal_threat_analysis/references/analysis-guidance.json",
+    "new_module_schema": "../../codex_goal_threat_analysis/references/high-risk-modules.schema.json",
+    "new_value_asset_schema": "../../codex_goal_threat_analysis/references/value-assets.schema.json"
+  },
+  "requirements": [
+    "资产识别、模块识别、攻击树构造和攻击模式匹配沿用原指南的建模规则；本任务只输出增量，输出格式和完成要求以本任务 Schema 为准。",
+    "每个输入目标都有处理记录。已完成范围按 existing_module、non_high_risk、new_module 分类，给出范围内真实文件和行号证据；未完成范围标记 incomplete 并说明原因。",
+    "已有模块使用精确名称，代码路径只追加，其他字段只填写需要更新的部分；更新必须与已有攻击树兼容。新模块和新资产使用原有完整条目格式。",
+    "新增路径和判定范围须属于指定目标，使用相对于源码根目录的 POSIX 路径；一个目录含不同分类时分别记录实际子范围。",
+    "本次独立攻击树可引用已有或新增模块、资产；模式编号和名称从权威模式库原样选取。没有合理新增内容时允许空增量和空树清单。",
+    "仅写指定输出目录，不修改源码或已有产物。收到校验错误后，只修正本次输出。"
+  ]
+}

@@ -9,6 +9,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Awaitable, Mapping
 
+from .workflow import build_supplement_prompt, _run_supplement_task, run_coverage
+
 _lightweight_contract = import_module(
     "deephole_client.threat_analysis.lightweight_contract"
 )
@@ -53,6 +55,12 @@ def run_threat_analysis(
             if not paths["attack_tree_path"].exists() and legacy_tree.is_file():
                 resume_paths["attack_tree_path"] = legacy_tree
             if _completed_outputs(artifact_root, resume_paths, guidance_path):
+                if (artifact_root / "coverage-workflow-state.json").is_file():
+                    return run_coverage(
+                        code_root=code_root, artifact_root=artifact_root,
+                        initial_paths=resume_paths, is_resume=True,
+                        run_task=_run_supplement_task,
+                    )
                 return _success(resume_paths)
         # A completed Session is reused through its validated artifacts. Any
         # incomplete attempt starts a fresh Session and must not inherit partial
@@ -122,7 +130,11 @@ def run_threat_analysis(
             session_id=session_id,
             status="complete",
         )
-        return _success(paths)
+        return run_coverage(
+            code_root=code_root, artifact_root=artifact_root,
+            initial_paths=paths, is_resume=False,
+            run_task=_run_supplement_task,
+        )
     except Exception as exc:
         return {
             "result": False,

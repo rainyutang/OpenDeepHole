@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 async def file_inventory_lifecycle(
     *, project: Path, scan_root: Path, scan_dir: Path, scan_id: str,
     reporter: Any, cancel_event: Any, is_resume: bool,
-) -> AsyncIterator[Callable[[], None]]:
+) -> AsyncIterator[Callable[[], asyncio.Task[dict] | None]]:
     """Own collection across setup, indexing, analysis and every early return."""
-    task: asyncio.Task[None] | None = None
+    task: asyncio.Task[dict] | None = None
 
-    def start() -> None:
+    def start() -> asyncio.Task[dict] | None:
         nonlocal task
         if task is None and callable(getattr(reporter, "push_file_inventory", None)):
             task = asyncio.create_task(collect_and_report_file_inventory(
@@ -37,6 +37,7 @@ async def file_inventory_lifecycle(
                 scan_id=scan_id, reporter=reporter, cancel_event=cancel_event,
                 is_resume=is_resume,
             ))
+        return task
 
     cancelled = False
     try:
@@ -151,10 +152,63 @@ def _reusable(data: Any, project: Path, root: Path) -> bool:
                 and data.get("project_path") == str(project) and data.get("scan_root") == str(root))
 
 
+async def prepare_coverage_inventory(
+    *, project: Path, scan_root: Path, output_path: Path,
+    start: Callable[[], Any], cancel_event: Any,
+) -> dict:
+    """Pass the scan's exact inventory snapshot to the coverage method."""
+    fallback = {
+        "schema_version": 1, "snapshot_id": uuid.uuid4().hex,
+        "status": "failed", "project_path": str(project), "scan_root": str(scan_root),
+        "captured_at": datetime.now(timezone.utc).isoformat(), "entries": [],
+        "issues": [], "issue_count": 0, "excluded_paths": [],
+        "error_message": "扫描文件清单不可用，保留初轮威胁分析结果并跳过补查",
+    }
+    snapshot = fallback
+    try:
+        task = start()
+        if task is not None:
+            value = await asyncio.wait_for(asyncio.shield(task), timeout=160.0)
+        else:
+            # Older/custom reporters can omit independent inventory uploads.
+            value = await asyncio.to_thread(
+                _load, output_path.parent / "coverage" / "file-inventory.json",
+                project, scan_root,
+            )
+        if isinstance(value, dict):
+            parsed = ScanFileInventory.model_validate(value).model_dump(mode="json")
+            if parsed["project_path"] != str(project) or parsed["scan_root"] != str(scan_root):
+                raise ValueError("扫描文件清单范围与本次扫描不一致")
+            snapshot = parsed
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        snapshot = {**fallback, "error_message": str(exc).strip() or type(exc).__name__}
+    if cancel_event.is_set():
+        raise asyncio.CancelledError
+
+    root = output_path.resolve()
+    destination = root / "coverage-input" / "file-inventory.json"
+    if not destination.parent.resolve().is_relative_to(root):
+        raise ValueError("coverage inventory input directory escapes output_path")
+
+    def save() -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.parent / f".inventory-{uuid.uuid4().hex}.tmp"
+        try:
+            temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    await asyncio.to_thread(save)
+    return snapshot
+
+
 async def collect_and_report_file_inventory(
     *, project: Path, scan_root: Path, scan_dir: Path, scan_id: str,
     reporter: Any, cancel_event: Any, is_resume: bool,
-) -> None:
+) -> dict:
     """Own the inventory lifecycle independently of the model result future."""
     stop_event = threading.Event()
     snapshot_path = scan_dir / "coverage" / "file-inventory.json"
@@ -182,12 +236,12 @@ async def collect_and_report_file_inventory(
             saved = await asyncio.to_thread(_load, snapshot_path, project, scan_root)
             if saved is not None:
                 await upload(saved)
-                return
+                return saved
             try:
                 saved = await asyncio.wait_for(reporter.get_file_inventory(scan_id), timeout=5.0)
                 if _reusable(saved, project, scan_root):
                     await asyncio.to_thread(_save, snapshot_path, saved)
-                    return
+                    return saved
             except Exception:
                 pass
         if cancel_event.is_set():
@@ -204,14 +258,19 @@ async def collect_and_report_file_inventory(
         except OSError as exc:
             logger.warning("Unable to save local inventory for %s: %s", scan_id, exc)
         await upload(snapshot)
+        return snapshot
     except asyncio.CancelledError:
         stop_event.set()
         try:
-            await asyncio.wait_for(upload({**latest, "status": "cancelled"}), timeout=2.0)
+            latest = {**latest, "status": "cancelled"}
+            await asyncio.wait_for(upload(latest), timeout=2.0)
         except (Exception, asyncio.CancelledError):
             pass
+        return latest
     except Exception as exc:
         logger.warning("File inventory failed for %s: %s", scan_id, exc)
-        await upload({**latest, "status": "failed", "error_message": str(exc) or type(exc).__name__})
+        latest = {**latest, "status": "failed", "error_message": str(exc) or type(exc).__name__}
+        await upload(latest)
+        return latest
     finally:
         stop_event.set()

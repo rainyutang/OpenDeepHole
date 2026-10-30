@@ -12,8 +12,9 @@
 - `opencode_lightweight_threat_analysis`，界面名称“轻量级威胁分析（OpenCode）”，通过一次
   逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是新建扫描的默认选择。
 - `opencode_coverage_guided_lightweight_threat_analysis`，界面名称
-  “覆盖率引导的轻量级威胁分析（OpenCode）”，当前原样复制 OpenCode 轻量级方法的实现，
-  包含相同的任务登记、产物校验、重试、续扫、取消和 DeepHole 回退流程；覆盖率引导逻辑后续再添加。
+  “覆盖率引导的轻量级威胁分析（OpenCode）”，初轮沿用 OpenCode 轻量级流程，随后根据文件清单
+  最多定向补查两次，每次最多五个未覆盖路径。独立增量通过脚本试合并校验后由代码合入累计结果；
+  每次补查作为独立计划任务显示在扫描队列中。原默认方法不变。
 
 三个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
 和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，

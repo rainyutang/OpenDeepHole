@@ -69,7 +69,7 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
         {
             "method_id": "opencode_coverage_guided_lightweight_threat_analysis",
             "label": "覆盖率引导的轻量级威胁分析（OpenCode）",
-            "description": "生成价值资产、高风险模块和攻击树。",
+            "description": "识别资产、模块和攻击树后，对未覆盖路径定向补查并合并结果。",
         },
         {
             "method_id": "codex_goal_threat_analysis",

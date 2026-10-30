@@ -25,6 +25,13 @@ from deephole_client.opencode_integration import (
 )
 
 
+def _coverage_method_root() -> Path:
+    return (
+        Path(__file__).resolve().parents[1] / "deephole_client" / "threat_analysis"
+        / "methods" / "opencode_coverage_guided_lightweight_threat_analysis"
+    )
+
+
 def assert_opencode_read_permissions(
     testcase: unittest.TestCase,
     config: dict,
@@ -49,6 +56,7 @@ def assert_opencode_read_permissions(
         workspace / ".opencode",
         workspace / ".opencode" / "skills",
         codex_runtime_reference_root().resolve(),
+        _coverage_method_root(),
     ):
         for pattern in writable_edit_patterns(root):
             testcase.assertEqual(read.get(pattern), "allow")
@@ -94,7 +102,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(
             bindings.readable_roots(),
-            (codex_runtime_reference_root().resolve(),),
+            (
+                codex_runtime_reference_root().resolve(),
+                _coverage_method_root(),
+            ),
         )
 
     def test_runtime_environment_only_adds_no_proxy(self) -> None:
@@ -624,17 +635,20 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             ):
                 workspace = get_global_opencode_workspace()
                 config_path = managed_opencode_config_path(workspace)
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                reference_root = codex_runtime_reference_root().resolve()
-                for pattern in writable_edit_patterns(reference_root):
-                    config["permission"]["read"].pop(pattern, None)
-                    config["permission"]["external_directory"].pop(pattern, None)
-                config_path.write_text(json.dumps(config), encoding="utf-8")
+                for reference_root in (
+                    codex_runtime_reference_root().resolve(), _coverage_method_root(),
+                ):
+                    with self.subTest(reference_root=reference_root):
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                        for pattern in writable_edit_patterns(reference_root):
+                            config["permission"]["read"].pop(pattern, None)
+                            config["permission"]["external_directory"].pop(pattern, None)
+                        config_path.write_text(json.dumps(config), encoding="utf-8")
 
-                get_global_opencode_workspace()
+                        get_global_opencode_workspace()
 
-            refreshed = json.loads(config_path.read_text(encoding="utf-8"))
-            assert_opencode_read_permissions(self, refreshed, workspace)
+                        refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+                        assert_opencode_read_permissions(self, refreshed, workspace)
 
     def test_denied_global_external_read_permission_triggers_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

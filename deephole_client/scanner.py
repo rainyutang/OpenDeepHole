@@ -29,7 +29,7 @@ from task_agent.model_pool import clear_planned_task, register_planned_task
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
-from .file_inventory import file_inventory_lifecycle
+from .file_inventory import file_inventory_lifecycle, prepare_coverage_inventory
 from .codex_runtime import (
     CodexRuntimeState,
     get_codex_runtime_state,
@@ -707,7 +707,7 @@ async def _run_scan_pipeline(
     project: Path,
     scan_root: Path,
     scan_dir: Path,
-    start_file_inventory: Callable[[], None],
+    start_file_inventory: Callable[[], asyncio.Task[dict] | None],
     reporter: Reporter,
     scan_name: str,
     product: str,
@@ -1201,6 +1201,11 @@ async def _run_scan_pipeline(
             resume: bool,
         ) -> dict[str, Any]:
             async def invoke() -> dict[str, Any]:
+                if method_id == OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID:
+                    await prepare_coverage_inventory(
+                        project=project, scan_root=scan_root, output_path=output_path,
+                        start=start_file_inventory, cancel_event=cancel_event,
+                    )
                 return await run_threat_analysis(
                     scan_mode=runtime_scan_mode,
                     method_id=method_id,

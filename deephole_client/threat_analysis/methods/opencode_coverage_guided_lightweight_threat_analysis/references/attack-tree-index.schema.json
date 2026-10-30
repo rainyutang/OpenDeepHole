@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attack-tree-index.schema.json",
+  "title": "Independent supplement attack tree index",
+  "type": "object",
+  "required": [
+    "attack_trees"
+  ],
+  "properties": {
+    "attack_trees": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "tree_id",
+          "file"
+        ],
+        "properties": {
+          "tree_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

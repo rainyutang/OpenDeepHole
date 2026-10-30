@@ -282,7 +282,11 @@ def _agent_readable_roots() -> tuple[Path, ...]:
     """Return packaged Agent resources that every Serve may read, never edit."""
     from .codex_scan_config import codex_runtime_reference_root
 
-    return (codex_runtime_reference_root().resolve(),)
+    coverage_method = (
+        Path(__file__).resolve().parent / "threat_analysis" / "methods"
+        / "opencode_coverage_guided_lightweight_threat_analysis"
+    )
+    return (codex_runtime_reference_root().resolve(), coverage_method.resolve())
 
 
 def get_workspace_lock(workspace: Path) -> threading.RLock:
