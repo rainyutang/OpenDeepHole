@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextlib
+import fnmatch
 import hashlib
 import json
 import logging
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +93,7 @@ import { fileURLToPath } from "node:url"
 const pluginDirectory = path.dirname(fileURLToPath(import.meta.url))
 const bindingDirectory = path.join(pluginDirectory, "command-bindings")
 const parents = new Map()
+const childBindings = new Map()
 const digest = (value) => crypto.createHash("sha256").update(String(value || "")).digest("hex")
 const bindingPath = (sessionID) => path.join(bindingDirectory, `${digest(sessionID)}.json`)
 const normalizedTool = (value) => String(value || "").trim().toLowerCase().replaceAll("-", "_")
@@ -114,7 +117,14 @@ const resolveBinding = async (sessionID) => {
   for (let depth = 0; current && depth < 32 && !visited.has(current); depth += 1) {
     visited.add(current)
     const binding = await readDirectBinding(current)
-    if (binding) return binding
+    if (binding) {
+      // Existing children do not inherit updated parent Session permissions.
+      if (current !== String(sessionID || "") && binding.binding_id
+        && childBindings.get(String(sessionID || "")) !== binding.binding_id) {
+        return { ...binding, allowed_commands: [], tool_rules: [] }
+      }
+      return binding
+    }
     current = String(parents.get(current) || "")
   }
   return null
@@ -182,8 +192,20 @@ const boundCommand = (binding, command) => {
 }
 const unboundCommandError = (binding, phase) => new Error(
   `Shell command is not bound to this OpenDeepHole task (${phase}). `
-  + `Copy one bound command verbatim:\n${binding.allowed_commands.join("\n")}`,
+  + (binding.allowed_commands.length
+    ? `Copy one bound command verbatim:\n${binding.allowed_commands.join("\n")}`
+    : "This task does not allow shell commands."),
 )
+const toolAllowed = (binding, tool) => {
+  if (!Array.isArray(binding.tool_rules)) return false
+  let allowed = false
+  for (const [pattern, enabled] of binding.tool_rules) {
+    const expression = pattern.split("*")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")
+    if (new RegExp(`^${expression}$`).test(tool)) allowed = enabled === true
+  }
+  return allowed
+}
 const commandOutputText = (output, metadata) => {
   const values = [
     output?.output,
@@ -261,8 +283,16 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
     if (sessionID && parentID) {
       parents.set(sessionID, parentID)
       if (parents.size > 4096) parents.delete(parents.keys().next().value)
+      if (event?.type === "session.created") {
+        const binding = await resolveBinding(parentID)
+        if (binding?.binding_id) childBindings.set(sessionID, binding.binding_id)
+        if (childBindings.size > 4096) childBindings.delete(childBindings.keys().next().value)
+      }
     }
-    if (event?.type === "session.deleted" && sessionID) parents.delete(sessionID)
+    if (event?.type === "session.deleted" && sessionID) {
+      parents.delete(sessionID)
+      childBindings.delete(sessionID)
+    }
   },
   "shell.env": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
@@ -277,10 +307,17 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
   },
   "tool.execute.before": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
-    if (!binding) return
+    if (!binding) throw new Error("This Session has no active OpenDeepHole task permission binding")
+    if (!toolAllowed(binding, String(input?.tool || ""))) {
+      throw new Error("Tool is not allowed for this OpenDeepHole task")
+    }
     const tool = normalizedTool(input?.tool)
-    if (!["bash", "shell"].includes(tool)) return
     const args = objectValue(output?.args)
+    if (tool === "task" && pathText(args.task_id)
+      && binding.binding_id && childBindings.get(args.task_id) !== binding.binding_id) {
+      throw new Error("This child Session has no current task permission binding. Start a new subtask without task_id.")
+    }
+    if (!["bash", "shell"].includes(tool)) return
     const command = boundCommand(binding, commandText(args))
     if (!command) throw unboundCommandError(binding, "before")
     // Mutate the same args object consumed by native permissions and execution.
@@ -455,7 +492,13 @@ _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "webfetch",
     "websearch",
     "write",
+    "shell",
+    "lsp",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
 })
+_MANAGED_NATIVE_TOOL_IDS = _FORMATTER_DISABLED_TOOL_IDS | {"invalid", "StructuredOutput"}
 _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
 _EXPECTED_PASSWORD_WARNING = (
     "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured."
@@ -1111,17 +1154,18 @@ def _write_command_binding(
     bash_command_match_mode: str = "exact",
     success_markers: tuple[tuple[str, str], ...] = (),
     path_prepend: tuple[str, ...] = (),
+    tool_rules: dict[str, bool] | None = None,
 ) -> tuple[Path, Path]:
     normalized_commands = tuple(dict.fromkeys(
         str(command or "").strip() for command in required_commands
     ))
-    if not normalized_commands or any(not command for command in normalized_commands):
-        raise ValueError("Command binding requires non-empty commands")
+    if any(not command for command in normalized_commands):
+        raise ValueError("Command binding commands cannot be blank")
     if any("\n" in command or "\r" in command for command in normalized_commands):
         raise ValueError("Command binding commands cannot contain newlines")
     match_metadata = command_binding_metadata(
         normalized_commands,
-        match_mode=bash_command_match_mode,
+        match_mode=bash_command_match_mode if normalized_commands else "exact",
     )
     binding_path = _command_binding_path(cwd, session_id)
     audit_path = _command_audit_path(cwd, session_id)
@@ -1131,12 +1175,16 @@ def _write_command_binding(
         json.dumps(
             {
                 "version": 2,
+                "binding_id": uuid.uuid4().hex,
                 "session_id": str(session_id),
                 "allowed_commands": list(normalized_commands),
                 "audit_path": str(audit_path),
                 "success_markers": dict(success_markers),
                 "path_prepend": list(path_prepend),
                 "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
+                "tool_rules": list((tool_rules if tool_rules is not None else {
+                    tool_id: True for tool_id in sorted(_MANAGED_NATIVE_TOOL_IDS)
+                }).items()),
                 **match_metadata,
             },
             ensure_ascii=False,
@@ -3772,13 +3820,26 @@ def _mcp_tool_overrides(
     tool_ids: list[str],
     requested: list[str] | tuple[str, ...] | None,
     disabled: list[str] | tuple[str, ...] | None = None,
+    *,
+    mcp_names: set[str] | tuple[str, ...] = (),
 ) -> dict[str, bool]:
-    """Build message-level MCP overrides while leaving built-in tools untouched."""
-    mcp_ids = [tool_id for tool_id in tool_ids if _tool_source(tool_id) == "mcp"]
-    if requested is None:
-        overrides = {tool_id: True for tool_id in tool_ids}
-    else:
-        overrides = {tool_id: False for tool_id in mcp_ids}
+    """Select MCP tools without granting global permissions to native tools."""
+    mcp_ids = [
+        tool_id for tool_id in tool_ids
+        if _tool_source(tool_id) == "mcp"
+        or any(_tool_belongs_to_mcp(tool_id, name) for name in mcp_names)
+    ]
+    overrides = {
+        f"{prefix}*": requested is None
+        for name in sorted(mcp_names)
+        for prefix in _opencode_mcp_tool_prefixes(name)
+    }
+    overrides.update({
+        tool_id: requested is None and any(
+            _tool_belongs_to_mcp(tool_id, name) for name in mcp_names
+        )
+        for tool_id in mcp_ids
+    })
     unresolved: list[str] = []
     for raw_selector in requested or ():
         selector = str(raw_selector or "").strip()
@@ -3811,6 +3872,35 @@ def _mcp_tool_overrides(
             "Unknown OpenCode MCP tool selector(s): " + ", ".join(unresolved)
         )
     return overrides
+
+
+def _session_tool_permissions(
+    permissions: list[dict[str, str]] | None,
+    tool_ids: list[str],
+    overrides: dict[str, bool],
+) -> list[dict[str, str]] | None:
+    """Keep path/command scopes when adding tool selection to Session rules.
+
+    OpenCode's legacy message.tools replaces Session permission completely.
+    Only deny native tools here: a native allow with pattern=* would erase
+    the task's path or command boundary.
+    """
+    rules = [dict(rule) for rule in permissions or ()]
+    for tool_id in tool_ids:
+        if tool_id not in _MANAGED_NATIVE_TOOL_IDS and not any(
+            fnmatch.fnmatchcase(tool_id, pattern) for pattern in overrides
+        ):
+            rules.append({"permission": tool_id, "pattern": "*", "action": "deny"})
+    for tool_id, enabled in overrides.items():
+        if enabled and tool_id in _MANAGED_NATIVE_TOOL_IDS:
+            continue
+        permission = "edit" if tool_id in {"write", "apply_patch", "patch"} else tool_id
+        rules.append({
+            "permission": permission,
+            "pattern": "*",
+            "action": "allow" if enabled else "deny",
+        })
+    return rules if rules or permissions is not None else None
 
 
 def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
@@ -6925,18 +7015,7 @@ class OpenCodeServeManager:
                     "POST /session",
                 )
                 active_session_id = _session_id(created.json())
-            elif permissions is not None:
-                updated = await deadline.wait(client.patch(
-                    f"/session/{active_session_id}",
-                    params=params,
-                    headers=headers,
-                    json={"permission": permissions},
-                ), phase="session_permissions")
-                self._raise_for_session_control_status(
-                    updated,
-                    "PATCH /session/{session_id}",
-                )
-            binding_workspace = self._startup_cwd or config_workspace
+            binding_workspace = self._startup_cwd or config_workspace or _serve_bootstrap_cwd(tool)
             if binding_workspace is not None:
                 try:
                     _remove_file(_knowledge_binding_path(
@@ -6953,32 +7032,6 @@ class OpenCodeServeManager:
                 *allowed_bash_commands,
                 *required_bash_commands,
             )))
-            if bound_bash_commands:
-                if binding_workspace is None:
-                    raise RuntimeError(
-                        "Managed plugin workspace is unavailable for bound shell commands"
-                    )
-                command_binding_path, command_audit_path = (
-                    _write_command_binding(
-                        binding_workspace,
-                        session_id=active_session_id,
-                        required_commands=bound_bash_commands,
-                        bash_command_match_mode=bash_command_match_mode,
-                        success_markers=required_bash_success_markers,
-                        path_prepend=required_bash_path_prepend,
-                    )
-                )
-            elif binding_workspace is not None:
-                with contextlib.suppress(Exception):
-                    _remove_file(_command_binding_path(
-                        binding_workspace,
-                        active_session_id,
-                    ))
-                with contextlib.suppress(Exception):
-                    _remove_file(_command_audit_path(
-                        binding_workspace,
-                        active_session_id,
-                    ))
             if session_mode == "continued":
                 token_baseline, token_baseline_complete = (
                     await deadline.wait(_session_tree_token_entries(
@@ -7075,11 +7128,18 @@ class OpenCodeServeManager:
                 on_line=(lambda message: emit("session", message)) if on_line else None,
                 tool=tool,
             ), phase="tool_discovery")
+            managed_mcp_names = self._enabled_managed_mcp_names()
+            source_mcp_names = self._source_graph_mcp_names(directory)
+            known_mcp_names = managed_mcp_names | source_mcp_names
+            if selected_source_mcp:
+                known_mcp_names.add(selected_source_mcp)
+            if knowledge_mcp_lease is not None and knowledge_mcp_lease.connected:
+                known_mcp_names.add(knowledge_mcp_lease.name)
             if disable_all_tools:
                 mcp_overrides = {
                     tool_id: False
                     for tool_id in sorted(
-                        set(tool_ids) | set(_FORMATTER_DISABLED_TOOL_IDS)
+                        (set(tool_ids) | set(_FORMATTER_DISABLED_TOOL_IDS)) - {"StructuredOutput"}
                     )
                 }
                 source_available = False
@@ -7088,20 +7148,31 @@ class OpenCodeServeManager:
                     tool_ids,
                     mcp_tools,
                     disabled_mcp_tools,
+                    mcp_names=managed_mcp_names,
                 )
                 mcp_overrides, source_available = _apply_source_graph_overrides(
                     tool_ids,
                     mcp_overrides,
                     selected_source_mcp,
-                    source_mcp_names=self._source_graph_mcp_names(directory),
+                    source_mcp_names=source_mcp_names,
                     protected_mcp_names=(
-                        self._enabled_managed_mcp_names()
+                        managed_mcp_names
                         | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
                     ),
                     allow_undiscovered=bool(
                         scan_mcp_lease is not None and scan_mcp_lease.connected
                     ),
                 )
+            # Dynamic MCP IDs may be absent from experimental/tool/ids. Bind
+            # their prefixes explicitly, keeping foreign scan MCPs disabled.
+            for name in sorted(known_mcp_names):
+                if name in managed_mcp_names and not disable_all_tools:
+                    continue
+                for prefix in _opencode_mcp_tool_prefixes(name):
+                    pattern = f"{prefix}*"
+                    mcp_overrides[pattern] = bool(
+                        not disable_all_tools and name == selected_source_mcp
+                    )
             # OpenCode 1.18.4's experimental tool-ID route only exposes
             # registry tools; MCP tools are merged later when a Session
             # resolves its tools. Build the deterministic MCP IDs instead.
@@ -7194,8 +7265,60 @@ class OpenCodeServeManager:
                     "session",
                     "CODE_GRAPH_MCP no_tools fallback=file_tools",
                 )
-            if mcp_overrides:
-                payload["tools"] = mcp_overrides
+            # Explicitly disabled MCP selectors win over broad dynamic prefixes.
+            for raw_selector in disabled_mcp_tools or ():
+                selector = str(raw_selector or "").strip()
+                normalized = _normalize_tool_selector(selector)
+                for pattern in tuple(mcp_overrides):
+                    if normalized and normalized in _normalize_tool_selector(pattern):
+                        mcp_overrides.pop(pattern)
+                        mcp_overrides[pattern] = False
+                for name in sorted(known_mcp_names):
+                    raw_tool_name = selector.rsplit("/", 1)[-1]
+                    for prefix in _opencode_mcp_tool_prefixes(name):
+                        if selector.startswith(prefix):
+                            raw_tool_name = selector[len(prefix):]
+                            break
+                    for tool_id in _opencode_mcp_tool_ids(name, raw_tool_name):
+                        mcp_overrides.pop(tool_id, None)
+                        mcp_overrides[tool_id] = False
+
+            session_permissions = _session_tool_permissions(permissions, tool_ids, mcp_overrides)
+            if session_mode == "continued" and permissions is None and session_permissions is not None:
+                existing = await deadline.wait(client.get(
+                    f"/session/{active_session_id}", params=params, headers=headers,
+                ), phase="session_permissions")
+                self._raise_for_session_control_status(existing, "GET /session/{session_id}")
+                existing_rules = existing.json().get("permission", [])
+                if not isinstance(existing_rules, list) or any(
+                    not isinstance(rule, dict) for rule in existing_rules
+                ):
+                    raise RuntimeError("OpenCode Session returned invalid permission rules")
+                session_permissions = _session_tool_permissions(existing_rules, tool_ids, mcp_overrides)
+            if session_permissions is not None and (
+                session_mode == "continued" or session_permissions != permissions
+            ):
+                updated = await deadline.wait(client.patch(
+                    f"/session/{active_session_id}",
+                    params=params,
+                    headers=headers,
+                    json={"permission": session_permissions},
+                ), phase="session_permissions")
+                self._raise_for_session_control_status(updated, "PATCH /session/{session_id}")
+            hook_tools = {
+                tool_id: not disable_all_tools or tool_id == "StructuredOutput"
+                for tool_id in sorted(_MANAGED_NATIVE_TOOL_IDS)
+            }
+            hook_tools.update(mcp_overrides)
+            command_binding_path, command_audit_path = _write_command_binding(
+                binding_workspace,
+                session_id=active_session_id,
+                required_commands=bound_bash_commands,
+                bash_command_match_mode=bash_command_match_mode,
+                success_markers=required_bash_success_markers,
+                path_prepend=required_bash_path_prepend,
+                tool_rules=hook_tools,
+            )
             if model:
                 provider_id, model_id = split_model_id(model)
                 payload["model"] = {"providerID": provider_id, "modelID": model_id}

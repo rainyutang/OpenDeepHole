@@ -400,7 +400,9 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行声明的标准命令。默认策略拒绝变形命令；脚本策略允许引号、空格、Python 名称及参数写法差异，并在原生权限检查前还原标准命令，不扩大原生 shell 白名单。受管 Hook 拒绝未绑定脚本、命令拼接、管道、重定向、变量/命令展开及 `python -c/-m`。只有必需命令会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
-原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限，并合入 MCP、知识库和格式修复的工具选择；消息不发送旧 `tools` 字段，避免 OpenCode 将整份 Session 权限替换成全局工具开关。未知自定义工具默认拒绝，空命令白名单也写入 Shell 拒绝规则和父子 Session 命令 Hook 绑定。续接、纠正及新 Session 重试均重新应用当前权限，避免上一次调用的额外写路径残留。补查不声明 Shell 命令，校验仍由 Task Agent 端 Python 程序执行。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+
+子任务只能复用本次绑定内创建的 Session；续接或纠正重新绑定后需新建子任务，以免恢复旧子任务未更新的权限。
 
 ## JSON 自动纠正和新 Session 重试
 

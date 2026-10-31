@@ -1,4 +1,5 @@
 import asyncio
+import fnmatch
 import hashlib
 import json
 import os
@@ -160,6 +161,8 @@ class _FakeAsyncClient:
         self.requests: list[dict] = []
         self.streams: list[dict] = []
         self.message_response: _FakeResponse | None = None
+        self.session_permissions: list[dict[str, str]] = []
+        self.message_permissions: list[list[dict[str, str]]] = []
 
     async def __aenter__(self):
         self.instances.append(self)
@@ -181,8 +184,18 @@ class _FakeAsyncClient:
     async def post(self, path: str, **kwargs):
         self.posts.append({"path": path, **kwargs})
         if path == "/session":
+            self.session_permissions = list(kwargs.get("json", {}).get("permission", []))
             return _FakeResponse({"id": "session-1"})
         if path.startswith("/session/") and path.endswith("/message"):
+            # Match OpenCode 1.18.4: legacy tools replaces, rather than merges,
+            # the entire Session permission set before model execution.
+            legacy_tools = kwargs.get("json", {}).get("tools", {})
+            if legacy_tools:
+                self.session_permissions = [
+                    {"permission": name, "pattern": "*", "action": "allow" if enabled else "deny"}
+                    for name, enabled in legacy_tools.items()
+                ]
+            self.message_permissions.append(list(self.session_permissions))
             await asyncio.sleep(0)
             data = {
                 "parts": (
@@ -198,6 +211,8 @@ class _FakeAsyncClient:
         return _FakeResponse({})
 
     async def patch(self, path: str, **kwargs):
+        if "permission" in kwargs.get("json", {}):
+            self.session_permissions = list(kwargs["json"]["permission"])
         self.patches.append({"path": path, **kwargs})
         return _FakeResponse({"id": path.rsplit("/", 1)[-1]})
 
@@ -457,11 +472,11 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         assert message["params"] == expected_params
         assert message["headers"] == expected_headers
         assert message["json"]["agent"] == "build"
-        assert message["json"]["tools"] == {
-            "read": True,
-            "grep": True,
-            "mcp__deephole-code__view_function_code": True,
-        }
+        assert "tools" not in message["json"]
+        assert session_client.message_permissions == [[{
+            "permission": "mcp__deephole-code__view_function_code",
+            "pattern": "*", "action": "deny",
+        }]]
         assert [item for item in session_client.gets if item["path"] == "/experimental/tool/ids"] == [{
             "path": "/experimental/tool/ids",
             "params": expected_params,
@@ -535,6 +550,151 @@ def test_run_prompt_allows_optional_command_without_completion_audit(
         assert not list(
             (runtime / ".opendeephole-plugins" / "command-audits").glob("*")
         )
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("continued, pass_permissions", [(False, True), (True, True), (True, False)])
+def test_message_tool_selection_preserves_scoped_permissions(
+    monkeypatch, tmp_path: Path, continued: bool, pass_permissions: bool,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.tool_ids = [
+            "read", "write", "edit", "apply_patch", "bash", "python", "exec",
+            "mcp__code__lookup", "mcp__code__other",
+        ]
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", _FakeAsyncClient)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        source, baseline, prior, current = [tmp_path / name for name in (
+            "source", "baseline", "round-1", "round-2",
+        )]
+        for directory in (source, baseline, prior, current):
+            directory.mkdir()
+        permissions = [
+            {"permission": "edit", "pattern": "*", "action": "deny"},
+            {"permission": "edit", "pattern": f"{current}/**", "action": "allow"},
+            {"permission": "read", "pattern": f"{source}/**", "action": "allow"},
+            {"permission": "bash", "pattern": "*", "action": "deny"},
+        ]
+        original_get = _FakeAsyncClient.get
+
+        async def get_session(client, path: str, **kwargs):
+            if path == "/session/session-1":
+                return _FakeResponse({"id": "session-1", "permission": permissions})
+            return await original_get(client, path, **kwargs)
+
+        monkeypatch.setattr(_FakeAsyncClient, "get", get_session)
+        await manager.run_prompt(
+            tool="opencode", executable="opencode", directory=source,
+            config_workspace=tmp_path / "runtime", prompt="supplement or correct artifacts",
+            model="provider/model", timeout=30, permissions=permissions if pass_permissions else None,
+            session_id="session-1" if continued else None,
+            mcp_tools=["lookup"],
+        )
+        client = _FakeAsyncClient.instances[0]
+        message = next(item for item in client.posts if item["path"].endswith("/message"))
+        assert "tools" not in message["json"]
+        rules = client.message_permissions[0]
+        assert rules[:len(permissions)] == permissions
+
+        def action(permission: str, pattern: str) -> str:
+            return next((
+                rule["action"] for rule in reversed(rules)
+                if fnmatch.fnmatchcase(permission, rule["permission"])
+                and fnmatch.fnmatchcase(pattern, rule["pattern"])
+            ), "allow")
+
+        assert action("edit", str(current / "delta.json")) == "allow"
+        for directory in (source, baseline, prior):
+            assert action("edit", str(directory / "protected.json")) == "deny"
+        assert action("bash", "python -c 'print(1)'") == "deny"
+        assert action("python", "*") == "deny"
+        assert action("exec", "*") == "deny"
+        assert action("mcp__code__lookup", "*") == "allow"
+        assert action("mcp__code__other", "*") == "deny"
+        assert action("read", str(source / "main.c")) == "allow"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("tool_ids", [RuntimeError("tool discovery unavailable"), ["read", "mcp__python__exec"]])
+def test_tool_discovery_cannot_enable_unbound_execution_tools(
+    monkeypatch, tmp_path: Path, tool_ids,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.tool_ids = tool_ids
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", _FakeAsyncClient)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        with patch("task_agent.serve_client._write_command_binding", wraps=_write_command_binding) as binding:
+            await manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path,
+                config_workspace=tmp_path / "runtime", prompt="write artifacts",
+                model="provider/model", timeout=30,
+                permissions=[{"permission": "bash", "pattern": "*", "action": "deny"}],
+            )
+        assert binding.call_args.kwargs["required_commands"] == ()
+        tool_rules = binding.call_args.kwargs["tool_rules"]
+        assert tool_rules["read"] and tool_rules["write"]
+        assert "python" not in tool_rules and "exec" not in tool_rules
+        assert tool_rules.get("mcp__python__exec", False) is False
+        message = next(item for item in _FakeAsyncClient.instances[0].posts if item["path"].endswith("/message"))
+        assert "tools" not in message["json"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("formatter", [False, True])
+def test_dynamic_mcp_permissions_keep_scan_binding_and_disabled_selectors(
+    monkeypatch, tmp_path: Path, formatter: bool,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.tool_ids = ["read"]
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", _FakeAsyncClient)
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._source_graph_mcp_names = lambda _directory: {"selected-code", "foreign-code"}
+        manager._enabled_managed_mcp_names = lambda: {"configured-docs"}
+        manager._acquire_scan_mcp = AsyncMock(return_value=_ScanMcpLease(
+            directory_key="directory", state_key="source", identity="source",
+            name="selected-code", fingerprint="source", connected=True,
+        ))
+        manager._release_scan_mcp = AsyncMock()
+        with patch("task_agent.serve_client._write_command_binding", wraps=_write_command_binding) as binding:
+            await manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path,
+                config_workspace=tmp_path / "runtime", prompt="format" if formatter else "analyze",
+                model="provider/model", timeout=30, scan_id="scan-a",
+                disable_all_tools=formatter, disabled_mcp_tools=["dangerous", "mcp__selected-code__control"],
+                permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
+            )
+        rules = _FakeAsyncClient.instances[0].message_permissions[0]
+
+        def action(tool: str) -> str:
+            return next((rule["action"] for rule in reversed(rules)
+                if fnmatch.fnmatchcase(tool, rule["permission"])), "allow")
+
+        assert action("edit") == "deny"
+        assert action("selected-code_lookup") == ("deny" if formatter else "allow")
+        assert action("configured-docs_lookup") == ("deny" if formatter else "allow")
+        assert action("foreign-code_lookup") == "deny"
+        assert action("selected-code_dangerous") == "deny"
+        assert action("selected-code_control") == "deny"
+        assert action("mcp__selected-code__control") == "deny"
+        hook_rules = binding.call_args.kwargs["tool_rules"]
+        assert hook_rules["StructuredOutput"] is True
+        assert hook_rules["read"] is (not formatter)
+        assert "execute" not in hook_rules
 
     asyncio.run(run())
 
@@ -623,8 +783,12 @@ def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
         }]
         assert "system" not in messages[0]["json"]
         assert knowledge["project_id"] not in json.dumps(messages[0]["json"])
-        assert messages[0]["json"]["tools"] == {
-            "read": True,
+        assert "tools" not in messages[0]["json"]
+        selected_tools = {
+            rule["permission"]: rule["action"] == "allow"
+            for rule in client.message_permissions[0]
+        }
+        assert selected_tools == {
             "product-info_*": True,
             "mcp__product-info__*": True,
             "mcp--product-info--*": True,
@@ -635,7 +799,7 @@ def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
             "mcp__product-info__xxx_set_project": False,
             "mcp--product-info--xxx_set_project": False,
         }
-        tool_rules = list(messages[0]["json"]["tools"].items())
+        tool_rules = list(selected_tools.items())
         assert max(
             index for index, (name, _enabled) in enumerate(tool_rules)
             if name.endswith("*")
@@ -747,9 +911,11 @@ def test_run_prompt_disables_knowledge_tools_when_binding_fails(
             item for item in _FakeAsyncClient.instances[0].posts
             if item["path"].endswith("/message")
         )
-        assert message["json"]["tools"]["read"] is True
-        assert message["json"]["tools"] == {
-            "read": True,
+        assert "tools" not in message["json"]
+        assert {
+            rule["permission"]: rule["action"] == "allow"
+            for rule in _FakeAsyncClient.instances[0].message_permissions[0]
+        } == {
             "product-info_*": False,
             "mcp__product-info__*": False,
             "mcp--product-info--*": False,
@@ -949,6 +1115,92 @@ await after(
     assert events[-1]["exit_code"] is None
     assert events[-1]["success_source"] == "output_marker"
     assert marker in events[-1]["output_tail"]
+
+
+def test_empty_command_binding_blocks_execution_and_unsafe_child_reuse(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _write_serve_config_file(runtime, "{}")
+    binding_path, _ = _write_command_binding(
+        runtime, session_id="parent-session", required_commands=(),
+        bash_command_match_mode="bound_python_script",
+        tool_rules={
+            "read": True, "write": True, "edit": True, "bash": True,
+            "shell": True, "task": True, "StructuredOutput": True,
+            "trusted_lookup": True,
+        },
+    )
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding["allowed_commands"] == []
+    assert binding.get("bash_command_match_mode", "exact") == "exact"
+    plugin_path = runtime / ".opendeephole-plugins" / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+    marker = tmp_path / "execution-must-not-happen"
+    script = r'''
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import { pathToFileURL } from "node:url"
+import { execSync } from "node:child_process"
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const marker = process.argv[2]
+const bindingPath = process.argv[3]
+const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
+const before = hooks["tool.execute.before"]
+const command = `python3 -c "open('${marker}', 'w').write('unsafe')"`
+await assert.rejects(
+  before({ sessionID: "unbound-session", tool: "bash" }, { args: { command } }),
+  /no active.*permission binding/,
+)
+const execute = async (sessionID, tool, args) => {
+  await before({ sessionID, tool }, { args })
+  // A real command or custom tool would run only after the before hook returns.
+  if (tool === "bash" || tool === "shell") execSync(args.command)
+  else await fs.writeFile(marker, "unsafe")
+}
+await hooks.event({ event: {
+  type: "session.created",
+  properties: { info: { id: "child-session", parentID: "parent-session" } },
+} })
+for (const sessionID of ["parent-session", "child-session"]) {
+  for (const shell of ["bash", "shell"]) {
+    for (const value of [command, "python3 -m http.server", `${command} && echo chained`]) {
+      await assert.rejects(execute(sessionID, shell, { command: value }), /not bound/)
+    }
+  }
+  for (const tool of ["python", "exec", "custom_run_code", "execute", "mcp__python__exec"]) {
+    await assert.rejects(execute(sessionID, tool, { command }), /not allowed/)
+  }
+  for (const tool of ["read", "write", "edit", "trusted_lookup", "StructuredOutput"]) {
+    await before({ sessionID, tool }, { args: {} })
+  }
+}
+await assert.rejects(
+  before({ sessionID: "parent-session", tool: "task" }, { args: { task_id: "old-child" } }),
+  /Start a new subtask/,
+)
+await before({ sessionID: "parent-session", tool: "task" }, { args: { task_id: "child-session" } })
+await before({ sessionID: "parent-session", tool: "task" }, { args: {} })
+const renewed = JSON.parse(await fs.readFile(bindingPath, "utf8"))
+renewed.binding_id = "next-correction-binding"
+await fs.writeFile(bindingPath, JSON.stringify(renewed))
+await before({ sessionID: "parent-session", tool: "read" }, { args: {} })
+await assert.rejects(before({ sessionID: "child-session", tool: "write" }, { args: {} }), /not allowed/)
+await assert.rejects(
+  before({ sessionID: "parent-session", tool: "task" }, { args: { task_id: "child-session" } }),
+  /Start a new subtask/,
+)
+await fs.unlink(bindingPath)
+for (const sessionID of ["parent-session", "child-session"]) {
+  await assert.rejects(execute(sessionID, "python", { command }), /no active.*permission binding/)
+  await assert.rejects(before({ sessionID, tool: "write" }, { args: {} }), /no active.*permission binding/)
+}
+await assert.rejects(fs.stat(marker), { code: "ENOENT" })
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(plugin_path), str(marker), str(binding_path)],
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not marker.exists()
 
 
 def test_required_command_audit_rejects_failure_and_post_validation_write(
@@ -1255,6 +1507,7 @@ def test_run_prompt_disable_all_tools_overrides_builtins_and_mcp(
         _FakeAsyncClient.tool_ids = [
             "read",
             "write",
+            "StructuredOutput",
             "mcp__deephole-code__view_function_code",
         ]
         monkeypatch.setattr(
@@ -1283,14 +1536,15 @@ def test_run_prompt_disable_all_tools_overrides_builtins_and_mcp(
             item for item in client.posts
             if item["path"] == "/session/session-1/message"
         )
-        assert message["json"]["tools"]
-        assert all(value is False for value in message["json"]["tools"].values())
-        assert message["json"]["tools"]["bash"] is False
-        assert message["json"]["tools"]["skill"] is False
-        assert (
-            message["json"]["tools"]["mcp__deephole-code__view_function_code"]
-            is False
-        )
+        assert "tools" not in message["json"]
+        rules = {rule["permission"]: rule["action"] for rule in client.message_permissions[0]}
+        assert rules
+        assert set(rules.values()) == {"deny"}
+        assert rules["bash"] == "deny"
+        assert rules["read"] == "deny"
+        assert rules["skill"] == "deny"
+        assert rules["mcp__deephole-code__view_function_code"] == "deny"
+        assert "StructuredOutput" not in rules
 
     asyncio.run(run())
 
@@ -1987,7 +2241,7 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
                 directory=tmp_path,
                 prompt="hang",
                 model="provider/model",
-                timeout=0.01,
+                timeout=0.1,
                 on_line=output.append,
                 on_model_request_failure=request_failures.append,
                 log_stage="validation",
@@ -2471,15 +2725,16 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
             "path": "/session/session-existing",
             "params": {"directory": str(project)},
             "headers": {"x-opencode-directory": str(project)},
-            "json": {"permission": permissions},
+            "json": {"permission": [*permissions,
+                {"permission": "mcp__deephole-code__view_function_code", "pattern": "*", "action": "allow"},
+                {"permission": "mcp__deephole-code__view_struct_code", "pattern": "*", "action": "deny"},
+            ]},
         }]
         message = next(item for item in client.posts if item["path"].endswith("/message"))
         assert "format" not in message["json"]
         assert message["json"]["system"] == "selected skill"
-        assert message["json"]["tools"] == {
-            "mcp__deephole-code__view_function_code": True,
-            "mcp__deephole-code__view_struct_code": False,
-        }
+        assert "tools" not in message["json"]
+        assert client.message_permissions[0] == client.patches[0]["json"]["permission"]
         assert any(
             line.startswith("[audit][session-existing][session] START mode=continued")
             for line in output

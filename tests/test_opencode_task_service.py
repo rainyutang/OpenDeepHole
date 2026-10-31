@@ -112,14 +112,16 @@ def test_writable_path_permissions_allow_read_external_access_and_edits(
         "action": "deny",
     }
     assert [rule["pattern"] for rule in edit_rules[1:]] == expected_patterns
-    assert all(rule["action"] == "allow" for rule in permissions if rule is not edit_rules[0])
-    assert all(rule["permission"] != "bash" for rule in permissions)
-    assert _writable_path_permissions(None) is None
-    assert _writable_path_permissions(()) == [{
-        "permission": "edit",
-        "pattern": "*",
-        "action": "deny",
-    }]
+    assert all(rule["action"] == "allow" for rule in permissions
+               if rule["permission"] not in {"edit", "bash"})
+    assert [rule for rule in permissions if rule["permission"] == "bash"] == [
+        {"permission": "bash", "pattern": "*", "action": "deny"},
+    ]
+    for empty_paths in (None, ()):
+        assert _writable_path_permissions(empty_paths) == [
+            {"permission": "edit", "pattern": "*", "action": "deny"},
+            {"permission": "bash", "pattern": "*", "action": "deny"},
+        ]
 
 
 def test_task_permissions_add_read_only_roots_and_exact_shell_command(
@@ -2914,13 +2916,16 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("match_mode", ["exact", "bound_python_script"])
+@pytest.mark.parametrize(("match_mode", "allow_command"), [
+    ("exact", True), ("bound_python_script", True), ("exact", False),
+])
 def test_post_session_validator_returns_feedback_to_the_same_session(
-    tmp_path: Path, match_mode: str,
+    tmp_path: Path, match_mode: str, allow_command: bool,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
         command = f'python "{tmp_path / "validate.py"}"'
+        commands = (command,) if allow_command else ()
         calls: list[tuple[str, str | None, tuple[str, ...]]] = []
         rogue_path = tmp_path / "post-validation-rogue.json"
         validation_calls = 0
@@ -2936,8 +2941,7 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
             assert kwargs["bash_command_match_mode"] == match_mode
             assert [rule for rule in kwargs["permissions"] if rule["permission"] == "bash"] == [
                 {"permission": "bash", "pattern": "*", "action": "deny"},
-                {"permission": "bash", "pattern": command, "action": "allow"},
-            ]
+            ] + [{"permission": "bash", "pattern": item, "action": "allow"} for item in commands]
             calls.append((
                 kwargs["prompt"],
                 kwargs["session_id"],
@@ -2979,7 +2983,7 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
                     task_name="post-session validation correction",
                     prompt="run",
                     directory=tmp_path,
-                    allowed_bash_commands=(command,),
+                    allowed_bash_commands=commands,
                     bash_command_match_mode=match_mode,
                     post_session_validator=validate,
                     post_session_validation_retry_count=1,
@@ -2991,7 +2995,7 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
             None,
             "ses_post_validation",
         ]
-        assert all(commands == (command,) for _, _, commands in calls)
+        assert all(actual_commands == commands for _, _, actual_commands in calls)
         assert validation_calls == 2
         assert not rogue_path.exists()
         assert "missing required property 'nodes'" in calls[1][0]

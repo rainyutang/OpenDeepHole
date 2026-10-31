@@ -100,10 +100,12 @@ standalone 默认仍只允许写 `work_dir`；嵌入宿主可通过
 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读声明不会获得 `edit`。每次调用都会把
 `work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
 `permission` 覆盖；兼容参数 `readable_paths` 继续显式记录只读路径，但全局读取不依赖该参数。
-调用方不能传原生权限规则，所有非白名单路径仍不可编辑，`bash` 默认保持禁用。显式
-传入 `allowed_bash_commands` 或 `required_bash_commands` 时，Task Agent 才会先拒绝所有命令再按
-完整字符串放行；受管 Session 绑定 Hook 默认对父、子 Session 再做一次精确检查。前者只提供可选执行
-权限，不会因为缺失或失败阻止 Session 完成；后者还记录命令退出码和文件写入顺序，并要求每条必需
+调用方不能传原生权限规则，所有非白名单路径仍不可编辑，`bash` 始终先全局拒绝。工具选择与
+目录规则合入同一份 Session 权限，不发送会覆盖权限的旧版消息 `tools` 字段；未知自定义工具默认拒绝。
+显式传入 `allowed_bash_commands` 或 `required_bash_commands` 时，Task Agent 才按
+完整字符串放行；受管 Session 绑定 Hook 对父、子 Session 再做一次精确检查，空白名单也明确拒绝。
+子任务只能复用本次绑定内创建的 Session；续接或纠正重新绑定后需新建子任务。
+可选命令只提供执行权限，不会因为缺失或失败阻止 Session 完成；必需命令还记录退出码和文件写入顺序，并要求每条必需
 命令必须在最后一次受管文件写入后完成：正常以退出码 0 判定；调用方显式配置成功标记时，若
 OpenCode 没有暴露退出码，也可由输出中的完全匹配行判定。失败审计会保留至多末尾 16 KiB 命令输出。
 `required_bash_retry_count > 0` 时，Task Agent 先把失败类型、退出码、超时状态和该输出追加到原

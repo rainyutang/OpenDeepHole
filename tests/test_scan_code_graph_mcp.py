@@ -421,7 +421,7 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
         "mcp--product-info--lookup",
         "read",
     ]
-    overrides = _mcp_tool_overrides(tool_ids, None)
+    overrides = _mcp_tool_overrides(tool_ids, None, mcp_names={"product-info"})
     overrides, available = _apply_source_graph_overrides(
         tool_ids,
         overrides,
@@ -436,11 +436,11 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
     assert overrides[tool_ids[1]] is False
     assert overrides["mcp--manual-source--view_function_code"] is False
     assert overrides["mcp--product-info--lookup"] is True
-    assert overrides["read"] is True
+    assert "read" not in overrides
 
     disabled, available = _apply_source_graph_overrides(
         tool_ids,
-        _mcp_tool_overrides(tool_ids, None),
+        _mcp_tool_overrides(tool_ids, None, mcp_names={"product-info"}),
         "",
         source_mcp_names={"static-mcp", "other-graph", "manual-source"},
     )
@@ -512,7 +512,7 @@ def test_scan_mcp_name_collision_does_not_disconnect_global_mcp(
         ]
         overrides, available = _apply_source_graph_overrides(
             tool_ids,
-            _mcp_tool_overrides(tool_ids, None),
+            _mcp_tool_overrides(tool_ids, None, mcp_names=manager._enabled_managed_mcp_names()),
             "",
             source_mcp_names=manager._source_graph_mcp_names(project),
             protected_mcp_names=manager._enabled_managed_mcp_names(),

@@ -457,6 +457,39 @@ def test_sync_component_registers_and_clears_supplement_on_owner_loop(setup_scan
     assert observations == ["planned", "invoked", "cleared"]
 
 
+def test_validator_returns_chinese_diagnostics_with_non_utf8_parent_environment(
+    setup_scan, monkeypatch,
+):
+    from deephole_client.threat_analysis.methods.opencode_coverage_guided_lightweight_threat_analysis import workflow
+
+    implementation, code_root, output, prepare = setup_scan
+    inventory_path, _ = prepare(1)
+    _initial_artifacts(implementation._artifact_paths(output))
+    round_root = output / "rounds" / "round-1"
+    _negative_delta(code_root, round_root, ["uncovered-00"])
+    delta_path = round_root / "delta.json"
+    delta = json.loads(delta_path.read_text(encoding="utf-8"))
+    delta["path_results"][0]["evidence"][0]["line_end"] = 999
+    _write(delta_path, delta)
+    context_path = inventory_path.parent / "round-1.json"
+    _write(context_path, {
+        "baseline": str(output / "final"), "round_root": str(round_root),
+        "code_root": str(code_root), "targets": ["uncovered-00"],
+        "inventory_path": str(inventory_path),
+    })
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+
+    feedback = asyncio.run(workflow._supplement_validation_feedback(context_path))
+
+    assert feedback is not None
+    assert "delta.json $.path_results[0].evidence[0]" in feedback
+    assert "行" in feedback
+    assert "\ufffd" not in feedback
+    _negative_delta(code_root, round_root, ["uncovered-00"])
+    assert asyncio.run(workflow._supplement_validation_feedback(context_path)) is None
+
+
 @pytest.mark.parametrize("corruption", ["json", "missing_status", "invalid_rounds"])
 def test_corrupt_supplement_checkpoint_keeps_initial_result_without_new_tasks(setup_scan, monkeypatch, corruption):
     implementation, code_root, output, prepare = setup_scan

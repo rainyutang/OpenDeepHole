@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -283,8 +284,9 @@ async def _supplement_validation_feedback(context_path: Path) -> str | None:
     """Run the standalone script without blocking heartbeats or cancellation."""
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = await asyncio.create_subprocess_exec(
-            sys.executable, str(METHOD_ROOT / "supplement.py"), "--context", str(context_path),
-            stdout=stdout, stderr=stderr)
+            sys.executable, "-X", "utf8", str(METHOD_ROOT / "supplement.py"),
+            "--context", str(context_path), stdout=stdout, stderr=stderr,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
         try:
             await asyncio.wait_for(process.wait(), timeout=60)
         except BaseException as exc:

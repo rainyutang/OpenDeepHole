@@ -3239,13 +3239,11 @@ def _writable_path_permissions(
     readable_paths: tuple[Path, ...] = (),
     allowed_bash_commands: tuple[str, ...] = (),
     required_bash_commands: tuple[str, ...] = (),
-) -> list[dict[str, str]] | None:
+) -> list[dict[str, str]]:
     bash_commands = tuple(dict.fromkeys((
         *allowed_bash_commands,
         *required_bash_commands,
     )))
-    if paths is None and not readable_paths and not bash_commands:
-        return None
     rules: list[dict[str, str]] = []
     write_paths = paths or ()
     read_paths = tuple(dict.fromkeys((*readable_paths, *write_paths)))
@@ -3268,17 +3266,16 @@ def _writable_path_permissions(
                     "action": "allow",
                 })
                 seen.add(pattern)
-    if bash_commands:
-        rules.append({
-            "permission": "bash",
-            "pattern": "*",
-            "action": "deny",
-        })
-        rules.extend({
-            "permission": "bash",
-            "pattern": command,
-            "action": "allow",
-        } for command in bash_commands)
+    rules.append({
+        "permission": "bash",
+        "pattern": "*",
+        "action": "deny",
+    })
+    rules.extend({
+        "permission": "bash",
+        "pattern": command,
+        "action": "allow",
+    } for command in bash_commands)
     return rules
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import codecs
+import errno
 import json
 from pathlib import Path
 import subprocess
@@ -116,6 +118,144 @@ def test_empty_tree_delta_merges_and_preserves_all_original_files(sample, tmp_pa
     assert read(result["paths"]["attack_tree_path"] / "attack-tree-001.json") == sample["tree"]
     assert before == {path.relative_to(sample["baseline"]): path.read_bytes()
                       for path in sample["baseline"].rglob("*") if path.is_file()}
+
+
+def test_contextual_evidence_is_allowed_without_expanding_coverage(sample, tmp_path):
+    sample["delta"]["path_results"][0]["evidence"].append({
+        "file": "src/tools/tool.c", "line_start": 1, "line_end": 1,
+    })
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    result = merge(sample, destination=tmp_path / "merged")
+    assert result["reviewed_paths"] == result["non_high_risk_paths"] == ["src/storage"]
+    assert read(result["paths"]["high_risk_modules_path"]) == sample["modules"]
+    assert supplement.coverage_counts(sample["inventory"], result["paths"], result["non_high_risk_paths"]) == {
+        "total_files": 3, "high_risk_files": 1, "non_high_risk_files": 1,
+        "remaining_uncovered_files": 2, "pending_files": 1,
+    }
+
+
+def test_contextual_evidence_alone_cannot_complete_a_range(sample):
+    sample["delta"]["path_results"][0]["evidence"][0]["file"] = "src/tools/tool.c"
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=r"path_results\[0\]\.evidence: 至少一条有效证据.*src/storage"):
+        merge(sample)
+
+
+@pytest.mark.parametrize("file,error", [
+    ("../outside.c", "规范相对"),
+    ("src/unlisted.c", "文件清单"),
+    ("src/tools", "证据必须是文件"),
+])
+def test_contextual_evidence_still_requires_safe_inventory_file(sample, file, error):
+    (sample["source"] / "src/unlisted.c").write_text("int x;\n", encoding="utf-8")
+    sample["delta"]["path_results"][0]["evidence"].append({
+        "file": file, "line_start": 1, "line_end": 1,
+    })
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=rf"evidence\[1\]\.file:.*{error}"):
+        merge(sample)
+
+
+def test_invalid_context_line_cannot_be_ignored_when_local_evidence_is_valid(sample):
+    sample["delta"]["path_results"][0]["evidence"].append({
+        "file": "src/tools/tool.c", "line_start": 1, "line_end": 2,
+    })
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=r"evidence\[1\]\.line_end:.*共 1 行"):
+        merge(sample)
+
+
+@pytest.mark.parametrize("content", [
+    pytest.param("int x;\n// 中文注释".encode("gbk"), id="gbk"),
+    pytest.param("int x;\n// 中文注释".encode("utf-8"), id="utf8"),
+    pytest.param("int x;\n// 中文注释".encode("utf-8-sig"), id="utf8-bom"),
+    pytest.param(codecs.BOM_UTF16_LE + "int x;\n// 中文注释".encode("utf-16-le"), id="utf16-le"),
+    pytest.param(codecs.BOM_UTF16_BE + "int x;\n// 中文注释".encode("utf-16-be"), id="utf16-be"),
+    pytest.param(codecs.BOM_UTF32_LE + "int x;\n// 中文注释".encode("utf-32-le"), id="utf32-le"),
+    pytest.param(codecs.BOM_UTF32_BE + "int x;\n// 中文注释".encode("utf-32-be"), id="utf32-be"),
+])
+def test_source_encoding_does_not_invalidate_real_lines_or_modify_source(sample, content):
+    source = sample["source"] / "src/storage/store.c"
+    source.write_bytes(content)
+    # In particular, a GBK comment after the cited ASCII line must not fail buffering.
+    assert merge(sample)["reviewed_paths"] == ["src/storage"]
+    sample["delta"]["path_results"][0]["evidence"][0]["line_end"] = 2
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    assert merge(sample)["reviewed_paths"] == ["src/storage"]
+    sample["delta"]["path_results"][0]["evidence"][0]["line_end"] = 3
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=r"line_end:.*共 2 行"):
+        merge(sample)
+    assert source.read_bytes() == content
+
+
+@pytest.mark.parametrize("content,count", [
+    (b"", 0), (codecs.BOM_UTF8, 0), (b"\n", 1), (b"int x;", 1),
+    (b"int x;\n", 1), (b"int\t\v\f x;", 1),
+    (b"int x;\r\nint y;", 2), (b"int x;\rint y;\r", 2),
+    (b"x" * 65535 + b"\r\nint y;", 2),
+])
+def test_source_line_boundaries(sample, content, count):
+    (sample["source"] / "src/storage/store.c").write_bytes(content)
+    evidence = sample["delta"]["path_results"][0]["evidence"][0]
+    if count:
+        evidence["line_end"] = count
+        write(sample["round_root"] / "delta.json", sample["delta"])
+        assert merge(sample)["reviewed_paths"] == ["src/storage"]
+    evidence["line_end"] = count + 1
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=rf"line_end:.*共 {count} 行"):
+        merge(sample)
+
+
+@pytest.mark.parametrize("content", [b"int x;\n\x00binary", b"\x89PNG\r\n\x1a\n"])
+def test_binary_evidence_is_rejected_even_with_valid_first_line(sample, content):
+    (sample["source"] / "src/storage/store.c").write_bytes(content)
+    with pytest.raises(ValueError, match=r"evidence\[0\]\.file:.*二进制"):
+        merge(sample)
+
+
+def test_malformed_bom_unicode_is_reported_separately(sample):
+    (sample["source"] / "src/storage/store.c").write_bytes(codecs.BOM_UTF16_LE + b"x")
+    with pytest.raises(ValueError, match=r"evidence\[0\]\.file:.*Unicode 内容无效"):
+        merge(sample)
+
+
+def test_source_read_failure_is_not_reported_as_encoding_failure(sample, monkeypatch):
+    source = sample["source"] / "src/storage/store.c"
+    original_open = Path.open
+
+    def denied(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(ValueError, match=r"evidence\[0\]\.file: 证据文件读取失败：Permission denied"):
+        merge(sample)
+
+
+def test_artifact_json_still_requires_utf8(sample):
+    sample["delta"]["path_results"][0]["reason"] = "本地存储辅助功能"
+    (sample["round_root"] / "delta.json").write_bytes(json.dumps(
+        sample["delta"], ensure_ascii=False).encode("gbk"))
+    with pytest.raises(ValueError, match="not readable UTF-8 JSON.*delta.json"):
+        merge(sample)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires unprivileged symlink creation")
+def test_contextual_source_symlink_is_rejected(sample, tmp_path):
+    source = sample["source"] / "src/tools/tool.c"
+    outside = tmp_path / "outside.c"
+    outside.write_bytes(source.read_bytes())
+    source.unlink()
+    source.symlink_to(outside)
+    sample["delta"]["path_results"][0]["evidence"].append({
+        "file": "src/tools/tool.c", "line_start": 1, "line_end": 1,
+    })
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(ValueError, match=r"evidence\[1\]\.file: 不允许符号链接"):
+        merge(sample)
 
 
 def test_module_path_and_fields_update_plus_independent_tree(sample, tmp_path):

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 import hashlib
+import io
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
 import shutil
 import sys
 import tempfile
@@ -25,6 +28,7 @@ from deephole_client.threat_analysis.methods.codex_goal_threat_analysis import s
 REFERENCES = Path(__file__).resolve().parent / "references"
 NATIVE_REFERENCES = Path(native.__file__).resolve().parent / "references"
 Error = native.ArtifactValidationError
+_BINARY_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 
 
 def _read(path: Path) -> Any:
@@ -218,27 +222,57 @@ def _baseline(baseline: Path) -> tuple[list, list, list[tuple[str, dict]]]:
     return deepcopy(assets), deepcopy(modules), trees
 
 
-def _evidence(result: dict, *, label: str, code_root: Path, entries: Mapping[str, str]) -> None:
+def _source_line_count(source: Path, *, label: str) -> int:
+    """Count source lines without requiring UTF-8 for legacy source encodings."""
+    try:
+        with source.open("rb") as raw:
+            prefix = raw.read(4)
+            raw.seek(0)
+            # Test UTF-32 first because its little-endian BOM starts with UTF-16's.
+            if prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+                encoding, errors = "utf-32", "strict"
+            elif prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+                encoding, errors = "utf-16", "strict"
+            else:
+                # ASCII-compatible encodings such as GBK use the same line breaks.
+                encoding, errors = "utf-8-sig", "replace"
+            count, last = 0, ""
+            with io.TextIOWrapper(raw, encoding=encoding, errors=errors, newline=None) as stream:
+                while chunk := stream.read(65536):
+                    if _BINARY_CONTROLS.search(chunk):
+                        raise Error(f"{label}.file: 证据文件不是文本文件（含二进制控制字符）")
+                    count += chunk.count("\n")
+                    last = chunk[-1]
+            return count + int(bool(last) and last != "\n")
+    except UnicodeError as exc:
+        raise Error(f"{label}.file: 证据文件的 Unicode 内容无效或不完整") from exc
+    except OSError as exc:
+        raise Error(f"{label}.file: 证据文件读取失败：{exc.strerror or str(exc)}") from exc
+
+
+def _evidence(
+    result: dict, *, label: str, code_root: Path, entries: Mapping[str, str],
+    line_counts: dict[Path, int],
+) -> None:
     if result["status"] != "complete":
         return
     if not result["evidence"]:
         raise Error(f"{label}.evidence: 已完成的判定需要源码证据")
+    has_local_evidence = False
     for index, item in enumerate(result["evidence"]):
         pointer = f"{label}.evidence[{index}]"
-        if not _under(item["file"], result["path"]):
-            raise Error(f"{pointer}.file: 证据必须位于实际判定范围内")
         source = _source_path(item["file"], code_root, entries, label=pointer + ".file")
         if entries[item["file"]] != "file":
             raise Error(f"{pointer}.file: 证据必须是文件")
         if item["line_start"] < 1 or item["line_end"] < item["line_start"]:
             raise Error(f"{pointer}: 证据行号必须是正数且结束行不小于开始行")
-        try:
-            with source.open(encoding="utf-8") as stream:
-                found = any(number >= item["line_end"] for number, _ in enumerate(stream, 1))
-        except (OSError, UnicodeError) as exc:
-            raise Error(f"{pointer}: 证据文件无法按 UTF-8 读取") from exc
-        if not found:
-            raise Error(f"{pointer}.line_end: 超出证据文件行数")
+        if source not in line_counts:
+            line_counts[source] = _source_line_count(source, label=pointer)
+        if item["line_end"] > line_counts[source]:
+            raise Error(f"{pointer}.line_end: 超出证据文件行数（共 {line_counts[source]} 行）")
+        has_local_evidence = has_local_evidence or _under(item["file"], result["path"])
+    if not has_local_evidence:
+        raise Error(f"{label}.evidence: 至少一条有效证据必须位于实际判定范围 {result['path']!r} 内")
 
 
 def validate_and_merge(
@@ -323,6 +357,7 @@ def validate_and_merge(
     reviewed: list[str] = []
     seen_targets: set[str] = set()
     risk_evidence: dict[str, set[str]] = defaultdict(set)
+    line_counts: dict[Path, int] = {}
     for index, result in enumerate(delta["path_results"]):
         pointer = f"delta.json $.path_results[{index}]"
         if result["input_path"] not in targets:
@@ -335,7 +370,7 @@ def validate_and_merge(
             continue
         if "classification" not in result:
             raise Error(f"{pointer}.classification: 已完成判定必须填写分类")
-        _evidence(result, label=pointer, code_root=code_root, entries=entries)
+        _evidence(result, label=pointer, code_root=code_root, entries=entries, line_counts=line_counts)
         reviewed.append(path)
         files = _files_in(path, entries)
         if not files:
