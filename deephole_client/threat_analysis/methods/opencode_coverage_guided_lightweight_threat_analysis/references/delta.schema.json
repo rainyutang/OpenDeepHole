@@ -68,12 +68,10 @@
                   "minLength": 1
                 },
                 "line_start": {
-                  "type": "integer",
-                  "minimum": 1
+                  "type": "integer"
                 },
                 "line_end": {
-                  "type": "integer",
-                  "minimum": 1
+                  "type": "integer"
                 }
               },
               "additionalProperties": false

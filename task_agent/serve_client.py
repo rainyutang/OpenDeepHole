@@ -190,12 +190,6 @@ const boundCommand = (binding, command) => {
   return typeof canonical === "string" && binding.allowed_commands.includes(canonical)
     ? canonical : ""
 }
-const unboundCommandError = (binding, phase) => new Error(
-  `Shell command is not bound to this OpenDeepHole task (${phase}). `
-  + (binding.allowed_commands.length
-    ? `Copy one bound command verbatim:\n${binding.allowed_commands.join("\n")}`
-    : "This task does not allow shell commands."),
-)
 const toolAllowed = (binding, tool) => {
   if (!Array.isArray(binding.tool_rules)) return false
   let allowed = false
@@ -206,6 +200,18 @@ const toolAllowed = (binding, tool) => {
   }
   return allowed
 }
+const permissionDeniedError = (binding, reason) => {
+  // Task context changes guidance only; the existing binding decides access.
+  const validationHint = binding?.task_type === "threat_analysis"
+    && binding.allowed_commands.length
+    && (toolAllowed(binding, "bash") || toolAllowed(binding, "shell"))
+      ? ` To validate the artifacts, run one of these exact commands:\n${binding.allowed_commands.join("\n")}`
+      : ""
+  return new Error(`Permission denied: ${reason}${validationHint}`)
+}
+const unboundCommandError = (binding, phase) => permissionDeniedError(
+  binding, `Shell command is not bound to this OpenDeepHole task (${phase}).`,
+)
 const commandOutputText = (output, metadata) => {
   const values = [
     output?.output,
@@ -307,9 +313,9 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
   },
   "tool.execute.before": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
-    if (!binding) throw new Error("This Session has no active OpenDeepHole task permission binding")
+    if (!binding) throw permissionDeniedError(null, "This Session has no active OpenDeepHole task permission binding")
     if (!toolAllowed(binding, String(input?.tool || ""))) {
-      throw new Error("Tool is not allowed for this OpenDeepHole task")
+      throw permissionDeniedError(binding, "Tool is not allowed for this OpenDeepHole task")
     }
     const tool = normalizedTool(input?.tool)
     const args = objectValue(output?.args)
@@ -1155,6 +1161,7 @@ def _write_command_binding(
     success_markers: tuple[tuple[str, str], ...] = (),
     path_prepend: tuple[str, ...] = (),
     tool_rules: dict[str, bool] | None = None,
+    task_type: str = "",
 ) -> tuple[Path, Path]:
     normalized_commands = tuple(dict.fromkeys(
         str(command or "").strip() for command in required_commands
@@ -1177,6 +1184,7 @@ def _write_command_binding(
                 "version": 2,
                 "binding_id": uuid.uuid4().hex,
                 "session_id": str(session_id),
+                "task_type": str(task_type or "").strip(),
                 "allowed_commands": list(normalized_commands),
                 "audit_path": str(audit_path),
                 "success_markers": dict(success_markers),
@@ -7318,6 +7326,7 @@ class OpenCodeServeManager:
                 success_markers=required_bash_success_markers,
                 path_prepend=required_bash_path_prepend,
                 tool_rules=hook_tools,
+                task_type=normalized_log_stage,
             )
             if model:
                 provider_id, model_id = split_model_id(model)

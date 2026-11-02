@@ -29,6 +29,83 @@ def _run_hook(runtime: Path, script: str, data: dict) -> str:
     return completed.stdout
 
 
+@pytest.mark.parametrize(("task_type", "commands_enabled", "shell_enabled", "legacy", "hint"), [
+    ("threat_analysis", True, True, False, True),
+    ("vulnerability_mining", True, True, False, False),
+    ("fp_review", True, True, False, False),
+    ("threat_analysis", False, True, False, False),
+    ("threat_analysis", True, False, False, False),
+    ("threat_analysis", True, True, True, False),
+])
+def test_permission_denial_hints_follow_task_binding_without_changing_authorization(
+    tmp_path: Path, task_type: str, commands_enabled: bool,
+    shell_enabled: bool, legacy: bool, hint: bool,
+) -> None:
+    command = f'python "{tmp_path / "supplement.py"}" --context "round-1.json"'
+    binding_path, _ = _write_command_binding(
+        tmp_path, session_id="parent", required_commands=(command,) if commands_enabled else (),
+        task_type=task_type,
+        tool_rules={"bash": shell_enabled, "shell": shell_enabled, "read": True},
+    )
+    if legacy:
+        binding = json.loads(binding_path.read_text())
+        binding.pop("task_type")
+        binding_path.write_text(json.dumps(binding))
+    _run_hook(tmp_path, r'''
+import assert from "node:assert/strict"
+import fs from "node:fs/promises"
+import { pathToFileURL } from "node:url"
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const data = JSON.parse(process.argv[2])
+const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
+const before = hooks["tool.execute.before"], after = hooks["tool.execute.after"]
+const checkError = (hint) => (error) => {
+  assert.match(error.message, /^Permission denied:/)
+  assert.equal(error.message.includes(data.command), hint)
+  assert.equal(error.message.includes("To validate the artifacts"), hint)
+  return true
+}
+await hooks.event({ event: {
+  type: "session.created", properties: { info: { id: "child", parentID: "parent" } },
+} })
+for (const sessionID of ["parent", "child"]) {
+  await before({ sessionID, tool: "read" }, { args: {} })
+  await assert.rejects(before({ sessionID, tool: "exec" }, { args: {} }), checkError(data.hint))
+  for (const tool of ["bash", "shell"]) {
+    await assert.rejects(
+      before({ sessionID, tool }, { args: { command: "echo forbidden" } }), checkError(data.hint),
+    )
+    await assert.rejects(
+      after({ sessionID, tool, args: { command: "echo forbidden" } }, {}), checkError(data.hint),
+    )
+    const invocation = before({ sessionID, tool }, { args: { command: data.command } })
+    if (data.commands_enabled && data.shell_enabled) await invocation
+    else await assert.rejects(invocation, checkError(false))
+  }
+}
+await assert.rejects(
+  before({ sessionID: "missing", tool: "bash" }, { args: { command: "echo forbidden" } }),
+  checkError(false),
+)
+// Rebinding a parent for retry must not offer its commands to an old child.
+const binding = JSON.parse(await fs.readFile(data.binding_path, "utf8"))
+binding.binding_id = "retry-binding"
+await fs.writeFile(data.binding_path, JSON.stringify(binding))
+await assert.rejects(
+  before({ sessionID: "child", tool: "bash" }, { args: { command: data.command } }), checkError(false),
+)
+await hooks.event({ event: {
+  type: "session.created", properties: { info: { id: "retry-child", parentID: "parent" } },
+} })
+await assert.rejects(
+  before({ sessionID: "retry-child", tool: "exec" }, { args: {} }), checkError(data.hint),
+)
+''', {
+        "command": command, "binding_path": str(binding_path), "hint": hint,
+        "commands_enabled": commands_enabled, "shell_enabled": shell_enabled,
+    })
+
+
 @pytest.mark.parametrize("platform", ["posix", "win32"])
 def test_bound_python_script_rewrites_before_permissions_and_audits(
     tmp_path: Path, platform: str,

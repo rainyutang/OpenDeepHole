@@ -146,7 +146,10 @@ def validate_artifacts(
     high_risk_modules_schema_path: Path,
     attack_tree_schema_path: Path,
     attack_mode_path: Path,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
+    """Validate consumable artifacts, optionally reporting modeling issues as warnings."""
     if attack_tree_path.is_dir():
         _validate_directory_artifacts(
             value_asset_path=value_asset_path,
@@ -156,6 +159,8 @@ def validate_artifacts(
             high_risk_modules_schema_path=high_risk_modules_schema_path,
             attack_tree_schema_path=attack_tree_schema_path,
             attack_mode_path=attack_mode_path,
+            strict_modeling=strict_modeling,
+            warnings=warnings,
         )
         return
     artifacts = (
@@ -193,6 +198,8 @@ def validate_artifacts(
         high_risk_modules=artifacts[1][0],
         attack_trees=artifacts[2][0],
         attack_modes=attack_modes,
+        strict_modeling=strict_modeling,
+        warnings=warnings,
     )
 
 
@@ -205,6 +212,8 @@ def _validate_directory_artifacts(
     high_risk_modules_schema_path: Path,
     attack_tree_schema_path: Path,
     attack_mode_path: Path,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     errors: list[str] = []
     bases: list[Any] = []
@@ -241,6 +250,7 @@ def _validate_directory_artifacts(
             value_assets=bases[0], high_risk_modules=bases[1],
             attack_trees={"attack_trees": valid_trees}, attack_modes=attack_modes,
             tree_sources=valid_sources, errors=errors,
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     _raise_directory_errors(errors)
 
@@ -253,6 +263,8 @@ def _validate_artifact_relationships(
     attack_modes: list[Any],
     tree_sources: list[str] | None = None,
     errors: list[str] | None = None,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     """Enforce semantic relationships that JSON Schema cannot express."""
 
@@ -308,6 +320,7 @@ def _validate_artifact_relationships(
             _validate_attack_tree(
                 tree, canonical_asset=canonical_asset, module_index=module_index,
                 allowed_patterns=allowed_patterns, path=tree_path,
+                strict_modeling=strict_modeling, warnings=warnings,
             )
         except ArtifactValidationError as exc:
             report(exc)
@@ -316,10 +329,22 @@ def _validate_artifact_relationships(
         asset[0] for asset in asset_index if asset not in covered_assets
     ]
     if missing_assets:
-        report(ArtifactValidationError(
-            "value assets without an attack tree: "
-            + ", ".join(repr(value) for value in missing_assets)
-        ))
+        message = "value assets without an attack tree: " + ", ".join(
+            repr(value) for value in missing_assets
+        )
+        if strict_modeling:
+            report(ArtifactValidationError(message))
+        else:
+            _modeling_issue(message, strict_modeling=False, warnings=warnings)
+
+
+def _modeling_issue(
+    message: str, *, strict_modeling: bool, warnings: list[str] | None,
+) -> None:
+    if strict_modeling:
+        raise ArtifactValidationError(message)
+    if warnings is not None and message not in warnings:
+        warnings.append(message)
 
 
 def _validate_attack_tree(
@@ -329,6 +354,8 @@ def _validate_attack_tree(
     module_index: Mapping[str, Mapping[str, Any]],
     allowed_patterns: set[tuple[str, str]],
     path: str,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     nodes = tree["nodes"]
     edges = tree["edges"]
@@ -359,9 +386,10 @@ def _validate_attack_tree(
                 f"{path}.nodes root {field}: must exactly equal {expected!r}"
             )
     if root["node_name"] != asset_name:
-        raise ArtifactValidationError(
+        _modeling_issue(
             f"{path}.nodes root node_name: must exactly equal value asset name "
-            f"{asset_name!r}, got {root['node_name']!r}"
+            f"{asset_name!r}, got {root['node_name']!r}",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
 
     leaf_ids: set[str] = set()
@@ -371,10 +399,16 @@ def _validate_attack_tree(
         if node_type == "根节点":
             continue
         if node_type == "叶子节点":
-            _validate_leaf_node(node, module_index=module_index, path=node_path)
+            _validate_leaf_node(
+                node, module_index=module_index, path=node_path,
+                strict_modeling=strict_modeling, warnings=warnings,
+            )
             leaf_ids.add(node["node_id"])
             continue
-        _validate_internal_node(node, module_index=module_index, path=node_path)
+        _validate_internal_node(
+            node, module_index=module_index, path=node_path,
+            strict_modeling=strict_modeling, warnings=warnings,
+        )
 
     if not leaf_ids:
         raise ArtifactValidationError(f"{path}.nodes: expected at least one leaf node")
@@ -423,6 +457,8 @@ def _validate_attack_tree(
             path_nodes=path_nodes,
             module_index=module_index,
             path=path_label,
+            strict_modeling=strict_modeling,
+            warnings=warnings,
         )
         _validate_attack_patterns(
             attack_path["attack_patterns"],
@@ -452,6 +488,8 @@ def _validate_leaf_node(
     *,
     module_index: Mapping[str, Mapping[str, Any]],
     path: str,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     module_name = node["module_name"]
     if not isinstance(module_name, str) or module_name not in module_index:
@@ -460,21 +498,30 @@ def _validate_leaf_node(
         )
     module = module_index[module_name]
     if module["是否外部暴露面"] != "是":
-        raise ArtifactValidationError(
-            f"{path}: leaf must reference a high-risk module with 是否外部暴露面=是"
+        _modeling_issue(
+            f"{path}: leaf must reference a high-risk module with 是否外部暴露面=是",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     if node["node_name"] != module_name:
-        raise ArtifactValidationError(
-            f"{path}: leaf node_name and module_name must be exactly identical"
+        _modeling_issue(
+            f"{path}: leaf node_name and module_name must be exactly identical",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
-    if node["is_high_risk_module"] is not True or node["external_exposure"] is not True:
+    if node["is_high_risk_module"] is not True:
         raise ArtifactValidationError(
             f"{path}: leaf high-risk and external-exposure flags must both be true"
+            if strict_modeling else f"{path}: leaf must use is_high_risk_module=true"
+        )
+    if node["external_exposure"] is not True:
+        _modeling_issue(
+            f"{path}: leaf high-risk and external-exposure flags must both be true",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     description = node["external_interface_description"]
     if not isinstance(description, str) or not description.strip():
-        raise ArtifactValidationError(
-            f"{path}: leaf requires a non-empty external interface description"
+        _modeling_issue(
+            f"{path}: leaf requires a non-empty external interface description",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
 
 
@@ -483,6 +530,8 @@ def _validate_internal_node(
     *,
     module_index: Mapping[str, Mapping[str, Any]],
     path: str,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     module_name = node["module_name"]
     if not isinstance(module_name, str) or not module_name.strip():
@@ -490,16 +539,19 @@ def _validate_internal_node(
             f"{path}: internal node must identify a concrete source module"
         )
     if node["node_name"] != module_name:
-        raise ArtifactValidationError(
-            f"{path}: internal node_name and module_name must be exactly identical"
+        _modeling_issue(
+            f"{path}: internal node_name and module_name must be exactly identical",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     if node["external_exposure"] is not False:
-        raise ArtifactValidationError(
-            f"{path}: internal node cannot be externally exposed"
+        _modeling_issue(
+            f"{path}: internal node cannot be externally exposed",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     if node["external_interface_description"] is not None:
-        raise ArtifactValidationError(
-            f"{path}: internal node external_interface_description must be null"
+        _modeling_issue(
+            f"{path}: internal node external_interface_description must be null",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
 
     matched_module = module_index.get(module_name)
@@ -511,8 +563,9 @@ def _validate_internal_node(
             )
         return
     if matched_module["是否外部暴露面"] != "否":
-        raise ArtifactValidationError(
-            f"{path}: an externally exposed high-risk module must be a leaf, not an internal node"
+        _modeling_issue(
+            f"{path}: an externally exposed high-risk module must be a leaf, not an internal node",
+            strict_modeling=strict_modeling, warnings=warnings,
         )
     if node["is_high_risk_module"] is not True:
         raise ArtifactValidationError(
@@ -526,6 +579,8 @@ def _validate_related_modules(
     path_nodes: list[Mapping[str, Any]],
     module_index: Mapping[str, Mapping[str, Any]],
     path: str,
+    strict_modeling: bool = True,
+    warnings: list[str] | None = None,
 ) -> None:
     related = attack_path["related_high_risk_modules"]
     related_by_node: dict[str, Mapping[str, Any]] = {}
@@ -556,9 +611,10 @@ def _validate_related_modules(
             )
         expected_exposure = module["是否外部暴露面"] == "是"
         if item["external_exposure"] is not expected_exposure:
-            raise ArtifactValidationError(
+            _modeling_issue(
                 f"{path}.related_high_risk_modules: external exposure does not "
-                f"match {module_name!r}"
+                f"match {module_name!r}",
+                strict_modeling=strict_modeling, warnings=warnings,
             )
         if node["node_type"] == "叶子节点":
             allowed_roles = {"外部攻击入口"}
@@ -567,8 +623,9 @@ def _validate_related_modules(
         else:
             allowed_roles = {"内部影响模块"}
         if item["path_role"] not in allowed_roles:
-            raise ArtifactValidationError(
-                f"{path}.related_high_risk_modules: invalid path_role for node {node['node_id']!r}"
+            _modeling_issue(
+                f"{path}.related_high_risk_modules: invalid path_role for node {node['node_id']!r}",
+                strict_modeling=strict_modeling, warnings=warnings,
             )
 
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
+import sys
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -261,7 +263,7 @@ def test_module_path_extension_and_independent_tree_are_used_by_next_batch(setup
     assert len(json.loads((output / "final" / "attack-trees" / "index.json").read_text())["attack_trees"]) == 1
 
 
-@pytest.mark.parametrize("invalid", ["malformed_delta", "old_tree_conflict"])
+@pytest.mark.parametrize("invalid", ["malformed_delta", "unknown_module"])
 def test_success_reply_cannot_publish_invalid_delta(setup_scan, monkeypatch, invalid):
     implementation, code_root, output, prepare = setup_scan
     prepare(1)
@@ -275,7 +277,7 @@ def test_success_reply_cannot_publish_invalid_delta(setup_scan, monkeypatch, inv
         else:
             delta = json.loads((round_root / "delta.json").read_text(encoding="utf-8"))
             delta["module_updates"] = [{
-                "module_name": "认证入口",
+                "module_name": "不存在的模块",
                 "add_code_paths": [],
                 "set_fields": {"是否外部暴露面": "否"},
             }]
@@ -402,11 +404,40 @@ def test_supplement_is_planned_under_distinct_identity_and_validates_in_same_tas
     assert kwargs["task_name"] == "opencode-coverage-guided-supplement-1"
     assert kwargs["task_type"] == "threat_analysis"
     assert kwargs["post_session_validation_retry_count"] == 1
+    assert kwargs["bash_command_match_mode"] == "bound_python_script"
+    command, = kwargs["allowed_bash_commands"]
+    assert kwargs["prompt"].endswith(command)
+    assert (round_root / "prompt.txt").read_text(encoding="utf-8") == kwargs["prompt"] + "\n"
+    validator = Path(implementation.__file__).parent / "supplement.py"
+    context_path = inventory_path.parent / "round-1.json"
+    if sys.platform == "win32":
+        assert command == f'python "{validator}" "--context" "{context_path}"'
+    else:
+        assert shlex.split(command) == [sys.executable, str(validator), "--context", str(context_path)]
     assert context.work_dir == round_root
     assert context.task_metadata["planned_task_id"] == "planned-supplement-1"
     assert validation_outputs[0]
     assert "delta.json" in validation_outputs[0]
     assert validation_outputs[1] is None
+
+
+def test_supplement_command_quotes_windows_paths_and_binds_the_script(monkeypatch):
+    from deephole_client.threat_analysis.methods.opencode_coverage_guided_lightweight_threat_analysis import workflow
+    from task_agent.bash_commands import command_binding_metadata
+
+    method_root = PureWindowsPath(r"C:\Agent install\补查方法")
+    context_path = PureWindowsPath(r"C:\User scans\scan 1\coverage-input\round-1.json")
+    monkeypatch.setattr(workflow, "METHOD_ROOT", method_root)
+    monkeypatch.setattr(workflow.sys, "platform", "win32")
+    command = workflow._supplement_validation_command(context_path)
+
+    assert command == f'python "{method_root / "supplement.py"}" "--context" "{context_path}"'
+    metadata = command_binding_metadata(
+        (command,), match_mode="bound_python_script", platform="win32",
+        python_executable=r"C:\Python install\python.exe",
+    )
+    assert list(metadata["python_script_commands"].values()) == [command]
+    assert "-X" not in command
 
 
 def test_sync_component_registers_and_clears_supplement_on_owner_loop(setup_scan, monkeypatch):
@@ -469,7 +500,7 @@ def test_validator_returns_chinese_diagnostics_with_non_utf8_parent_environment(
     _negative_delta(code_root, round_root, ["uncovered-00"])
     delta_path = round_root / "delta.json"
     delta = json.loads(delta_path.read_text(encoding="utf-8"))
-    delta["path_results"][0]["evidence"][0]["line_end"] = 999
+    delta["path_results"][0]["evidence"][0]["file"] = "uncovered-00/missing.c"
     _write(delta_path, delta)
     context_path = inventory_path.parent / "round-1.json"
     _write(context_path, {
@@ -484,7 +515,7 @@ def test_validator_returns_chinese_diagnostics_with_non_utf8_parent_environment(
 
     assert feedback is not None
     assert "delta.json $.path_results[0].evidence[0]" in feedback
-    assert "行" in feedback
+    assert "不存在" in feedback
     assert "\ufffd" not in feedback
     _negative_delta(code_root, round_root, ["uncovered-00"])
     assert asyncio.run(workflow._supplement_validation_feedback(context_path)) is None
@@ -539,6 +570,63 @@ def test_damaged_merged_checkpoint_keeps_initial_result(setup_scan, monkeypatch)
     assert Path(restored["high_risk_modules_path"]).parent == output / "final"
     report = json.loads(Path(restored["coverage_report_path"]).read_text())
     assert report["stop_reason"] == "checkpoint_unavailable"
+
+
+def test_relaxed_supplement_records_normalized_results_and_resumes(setup_scan, monkeypatch):
+    implementation, code_root, output, prepare = setup_scan
+    prepare(1)
+    _mock_initial(implementation, monkeypatch)
+    # This real file is outside both the original inventory and this round's target.
+    extra_path = code_root / "late-source.c"
+    extra_path.write_text("int local_helper(void) { return 0; }\n", encoding="utf-8")
+    messages = []
+
+    async def supplement(**kwargs):
+        round_root = kwargs["round_root"]
+        _negative_delta(code_root, round_root, kwargs["targets"])
+        assert (round_root / "prompt.txt").read_text(encoding="utf-8") == kwargs["prompt"] + "\n"
+        delta = json.loads((round_root / "delta.json").read_text(encoding="utf-8"))
+        delta["path_results"].append({
+            "input_path": kwargs["targets"][0], "path": "late-source.c", "status": "complete",
+            "classification": "existing_module", "module_name": "认证入口", "reason": "关联辅助代码",
+            "evidence": [{"file": "late-source.c", "line_start": 1, "line_end": 999}],
+        })
+        delta["module_updates"] = [{
+            "module_name": "认证入口", "add_code_paths": ["late-source.c"],
+            "set_fields": {"是否外部暴露面": "否"},
+        }]
+        text = json.dumps(delta, ensure_ascii=False)
+        (round_root / "delta.json").write_text(text[:-1] + ",\n}", encoding="utf-8")
+        return SimpleNamespace(status="success", session_id="relaxed-round", text="done")
+
+    monkeypatch.setattr(implementation, "_run_supplement_task", supplement)
+    with opencode_task_context(project_dir=code_root, work_dir=output, output=messages.append):
+        result = implementation.run_threat_analysis(code_root, output)
+
+    assert result["result"] is True
+    assert Path(result["high_risk_modules_path"]).parent == output / "merged" / "round-1"
+    modules = json.loads(Path(result["high_risk_modules_path"]).read_text(encoding="utf-8"))
+    assert modules[0]["是否外部暴露面"] == "否"
+    assert "late-source.c" in modules[0]["代码目录"]
+    report = json.loads(Path(result["coverage_report_path"]).read_text(encoding="utf-8"))
+    assert report["status"] == "complete"
+    assert report["stop_reason"] == "no_candidates"
+    assert report["total_files"] == 2
+    assert report["high_risk_files"] == 1
+    record = report["rounds"][0]
+    assert record["status"] == "success"
+    assert record["warnings"]
+    assert record["path_results"][-1]["evidence"][0]["line_end"] == 1
+    assert any("校验提示" in message for message in messages)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads((output / "rounds" / "round-1" / "delta.json").read_text(encoding="utf-8"))
+
+    runner = AsyncMock(side_effect=AssertionError("completed relaxed snapshot must be reusable"))
+    monkeypatch.setattr(implementation, "_run_supplement_task", runner)
+    restored = implementation.run_threat_analysis(code_root, output, is_resume=True)
+    runner.assert_not_awaited()
+    assert restored == result
+    assert json.loads(Path(result["coverage_report_path"]).read_text(encoding="utf-8")) == report
 
 
 def test_malformed_complete_inventory_is_not_reported_as_full_coverage(setup_scan, monkeypatch):

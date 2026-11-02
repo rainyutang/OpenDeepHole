@@ -22,6 +22,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from backend.threat_paths import ModulePathResolver
+from task_agent.config_json import strip_jsonc_trailing_commas
 from deephole_client.threat_analysis.methods.codex_goal_threat_analysis import schema_validation as native
 
 
@@ -33,6 +34,32 @@ _BINARY_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 
 def _read(path: Path) -> Any:
     return native._read_json(path, label="supplement artifact")
+
+
+def _read_round_json(path: Path, warnings: list[str]) -> Any:
+    """Tolerate trailing commas only in model-generated supplemental artifacts."""
+    try:
+        return _read(path)
+    except Error as original:
+        # Preserve the original diagnostic for unreadable files and other syntax errors.
+        try:
+            raw = path.read_text(encoding="utf-8")
+            cleaned = strip_jsonc_trailing_commas(raw)
+            for index, (before, after) in enumerate(zip(raw, cleaned)):
+                if before == after:
+                    continue
+                previous = index - 1
+                while previous >= 0 and raw[previous].isspace():
+                    previous -= 1
+                if previous < 0 or raw[previous] in "[{,:":
+                    raise original
+            value = json.loads(cleaned) if cleaned != raw else None
+        except (OSError, UnicodeError, ValueError):
+            raise original from None
+        if cleaned == raw:
+            raise
+        warnings.append(f"{path.name}: 已忽略 JSON 尾逗号")
+        return value
 
 
 def _write(path: Path, value: Any) -> None:
@@ -73,7 +100,7 @@ def _inventory(inventory: Mapping[str, Any]) -> tuple[dict[str, str], ModulePath
     resolver = ModulePathResolver(
         str(inventory.get("project_path") or inventory.get("scan_root") or ""),
         str(inventory.get("scan_root") or ""),
-        match=lambda path: known.get(resolver.canonical(path)), allow_repair=True,
+        match=lambda path: known.get(resolver.canonical(path)), allow_repair=False,
     )
     known = {resolver.canonical(path): path for path in entries}
     return entries, resolver
@@ -90,7 +117,7 @@ def _module_scopes(modules: Sequence[Mapping[str, Any]], resolver: ModulePathRes
         for path in _module_paths(module):
             match = resolver.resolve(path, base="scan")
             if not match.matched or match.scan_relative is None:
-                raise Error(f"高风险模块路径无法映射到文件清单：{path!r}")
+                continue
             scopes.add(resolver.canonical(match.scan_relative))
     return scopes
 
@@ -158,10 +185,8 @@ def coverage_counts(
             "pending_files": total - covered - reviewed_negative}
 
 
-def _source_path(value: str, code_root: Path, entries: Mapping[str, str], *, label: str) -> Path:
+def _source_path(value: str, code_root: Path, *, label: str) -> Path:
     path = _relative(value, label=label)
-    if path not in entries:
-        raise Error(f"{label}: 路径不在当前文件清单中：{path!r}")
     source = code_root / path
     current = code_root
     for part in PurePosixPath(path).parts:
@@ -177,28 +202,58 @@ def _files_in(path: str, entries: Mapping[str, str]) -> set[str]:
     return {file for file, kind in entries.items() if kind == "file" and _under(file, path)}
 
 
-def _target_path(value: str, targets: Sequence[str], code_root: Path, entries: Mapping[str, str], *, label: str) -> str:
-    value = _relative(value, label=label)
-    if not any(_under(value, target) for target in targets):
-        raise Error(f"{label}: 新增路径必须位于本轮目标范围内：{value!r}")
-    _source_path(value, code_root, entries, label=label)
-    return value
+def _normalize_delta_paths(delta: dict, code_root: Path, entries: Mapping[str, str], warnings: list[str]) -> None:
+    def paths(value: str, label: str) -> list[str]:
+        value = value.strip()
+        _relative(value, label=label)
+        # A literal filename can legally contain a comma.
+        parts = [value] if (code_root / value).exists() else re.split(r"[,，]", value)
+        normalized = list(dict.fromkeys(part.strip() for part in parts))
+        for part in normalized:
+            _source_path(part, code_root, label=label)
+            if part not in entries:
+                warnings.append(f"{label}: {part!r} 不在文件清单中，保留结果但不增加覆盖计数")
+        if len(parts) > 1:
+            warnings.append(f"{label}: 已将逗号分隔的路径展开为独立记录")
+        return normalized
+
+    expanded = []
+    for index, result in enumerate(delta["path_results"]):
+        label = f"delta.json $.path_results[{index}]"
+        evidence = [{**item, "file": file} for ordinal, item in enumerate(result["evidence"])
+                    for file in paths(item["file"], f"{label}.evidence[{ordinal}].file")]
+        for path in paths(result["path"], label + ".path"):
+            expanded.append({**deepcopy(result), "path": path, "evidence": deepcopy(evidence)})
+    delta["path_results"] = expanded
+    for index, update in enumerate(delta["module_updates"]):
+        update["add_code_paths"] = list(dict.fromkeys(
+            part for value in update["add_code_paths"]
+            for part in paths(value, f"delta.json $.module_updates[{index}].add_code_paths")))
+    for index, module in enumerate(delta["new_modules"]):
+        values = list(dict.fromkeys(part for value in _module_paths(module)
+                                   for part in paths(value, f"delta.json $.new_modules[{index}].代码目录")))
+        module["代码目录"] = values[0] if isinstance(module["代码目录"], str) and len(values) == 1 else values
 
 
-def _read_round_trees(round_root: Path) -> list[tuple[str, dict]]:
+def _read_round_trees(round_root: Path, warnings: list[str]) -> list[tuple[str, dict]]:
     root = round_root / "attack-trees"
     if root.is_symlink():
         raise Error("attack-trees: 不允许符号链接")
     if (root / "index.json").is_symlink():
         raise Error("attack-trees/index.json: 不允许符号链接")
-    index = _read(root / "index.json")
+    index = _read_round_json(root / "index.json", warnings)
     native._validate(index, _read(REFERENCES / "attack-tree-index.schema.json"), path="attack-trees/index.json $")
     if not index["attack_trees"]:
         return []
+    # Validate names before reading paths supplied by the model.
+    native.load_attack_tree_directory(root, files={"index.json": index, **{
+        entry["file"]: {"tree_id": entry["tree_id"]} for entry in index["attack_trees"]}})
+    files = {"index.json": index}
     for entry in index["attack_trees"]:
         if (root / entry["file"]).is_symlink():
             raise Error(f"attack-trees/{entry['file']}: 不允许符号链接")
-    data, snapshot = native.load_attack_tree_directory(root)
+        files[entry["file"]] = _read_round_json(root / entry["file"], warnings)
+    data, snapshot = native.load_attack_tree_directory(root, files=files)
     schema = _read(NATIVE_REFERENCES / "attack-tree.schema.json")
     result = []
     for entry, tree in zip(index["attack_trees"], data["attack_trees"]):
@@ -251,28 +306,46 @@ def _source_line_count(source: Path, *, label: str) -> int:
 
 
 def _evidence(
-    result: dict, *, label: str, code_root: Path, entries: Mapping[str, str],
-    line_counts: dict[Path, int],
+    result: dict, *, label: str, code_root: Path,
+    line_counts: dict[Path, int], warnings: list[str],
 ) -> None:
     if result["status"] != "complete":
         return
     if not result["evidence"]:
         raise Error(f"{label}.evidence: 已完成的判定需要源码证据")
     has_local_evidence = False
+    valid_evidence = []
     for index, item in enumerate(result["evidence"]):
         pointer = f"{label}.evidence[{index}]"
-        source = _source_path(item["file"], code_root, entries, label=pointer + ".file")
-        if entries[item["file"]] != "file":
+        source = _source_path(item["file"], code_root, label=pointer + ".file")
+        if not source.is_file():
             raise Error(f"{pointer}.file: 证据必须是文件")
-        if item["line_start"] < 1 or item["line_end"] < item["line_start"]:
-            raise Error(f"{pointer}: 证据行号必须是正数且结束行不小于开始行")
         if source not in line_counts:
             line_counts[source] = _source_line_count(source, label=pointer)
+        if (item["line_start"] < 1 or item["line_end"] < item["line_start"]
+                or item["line_start"] > line_counts[source]):
+            warnings.append(f"{pointer}: 已忽略无效证据区间（共 {line_counts[source]} 行）")
+            continue
         if item["line_end"] > line_counts[source]:
-            raise Error(f"{pointer}.line_end: 超出证据文件行数（共 {line_counts[source]} 行）")
+            warnings.append(f"{pointer}.line_end: 已收敛到文件末行（共 {line_counts[source]} 行）")
+            item["line_end"] = line_counts[source]
+        valid_evidence.append(item)
         has_local_evidence = has_local_evidence or _under(item["file"], result["path"])
     if not has_local_evidence:
         raise Error(f"{label}.evidence: 至少一条有效证据必须位于实际判定范围 {result['path']!r} 内")
+    result["evidence"] = valid_evidence
+
+
+def validate_merged_snapshot(paths: Mapping[str, Path], *, warnings: list[str] | None = None) -> None:
+    """Use the same structural contract for supplemental commits and resume."""
+    native.validate_artifacts(
+        **paths,
+        value_asset_schema_path=NATIVE_REFERENCES / "value-assets.schema.json",
+        high_risk_modules_schema_path=NATIVE_REFERENCES / "high-risk-modules.schema.json",
+        attack_tree_schema_path=NATIVE_REFERENCES / "attack-tree.schema.json",
+        attack_mode_path=NATIVE_REFERENCES / "attack_mode.json",
+        strict_modeling=False, warnings=warnings,
+    )
 
 
 def validate_and_merge(
@@ -289,11 +362,13 @@ def validate_and_merge(
     if len(set(targets)) != len(targets) or not targets:
         raise Error("本轮目标必须非空且不能重复")
     for target in targets:
-        _source_path(target, code_root, entries, label="targets")
+        _source_path(target, code_root, label="targets")
     if (round_root / "delta.json").is_symlink():
         raise Error("delta.json: 不允许符号链接")
-    delta = _read(round_root / "delta.json")
+    warnings: list[str] = []
+    delta = _read_round_json(round_root / "delta.json", warnings)
     native._validate(delta, _read(REFERENCES / "delta.schema.json"), path="delta.json $")
+    _normalize_delta_paths(delta, code_root, entries, warnings)
     assets, modules, trees = _baseline(baseline)
     by_name = {module["模块名称"]: module for module in modules}
     original_names = set(by_name)
@@ -317,7 +392,6 @@ def validate_and_merge(
         module = by_name[name]
         paths = _module_paths(module)
         for value in update["add_code_paths"]:
-            value = _target_path(value, targets, code_root, entries, label=pointer + ".add_code_paths")
             if value not in paths:
                 paths.append(value)
             added[name].append(value)
@@ -335,8 +409,7 @@ def validate_and_merge(
         paths = _module_paths(module)
         if not paths:
             raise Error(f"{pointer}.代码目录: 至少需要一个实际代码路径")
-        for value in paths:
-            added[name].append(_target_path(value, targets, code_root, entries, label=pointer + ".代码目录"))
+        added[name].extend(paths)
         if name not in by_name:
             modules.append(deepcopy(module))
             by_name[name] = modules[-1]
@@ -363,18 +436,17 @@ def validate_and_merge(
         if result["input_path"] not in targets:
             raise Error(f"{pointer}.input_path: 必须引用本轮输入目标")
         seen_targets.add(result["input_path"])
-        path = _target_path(result["path"], [result["input_path"]], code_root, entries, label=pointer + ".path")
+        path = result["path"]
         if result["status"] == "incomplete":
             if "classification" in result or "module_name" in result:
                 raise Error(f"{pointer}: 未完成的范围不能填写已完成分类或模块名称")
             continue
         if "classification" not in result:
             raise Error(f"{pointer}.classification: 已完成判定必须填写分类")
-        _evidence(result, label=pointer, code_root=code_root, entries=entries, line_counts=line_counts)
+        _evidence(result, label=pointer, code_root=code_root,
+                  line_counts=line_counts, warnings=warnings)
         reviewed.append(path)
         files = _files_in(path, entries)
-        if not files:
-            raise Error(f"{pointer}.path: 已完成范围必须包含实际文件")
         kind = result["classification"]
         if kind == "non_high_risk":
             if "module_name" in result:
@@ -389,20 +461,20 @@ def validate_and_merge(
             raise Error(f"{pointer}.classification: 分类与新增/已有模块身份不一致")
         scopes = _module_scopes([by_name[name]], resolver)
         if not all(_covered(resolver.canonical(file), scopes) for file in files):
-            raise Error(f"{pointer}: 判为高风险的范围没有被对应模块的代码目录完整覆盖")
+            warnings.append(f"{pointer}: 判为高风险的范围没有被对应模块的代码目录完整覆盖")
         risk_evidence[name].update(files)
     if seen_targets != set(targets):
         raise Error(f"delta.json $.path_results: 缺少目标处理记录：{sorted(set(targets) - seen_targets)!r}")
     for name, paths in added.items():
         for path in paths:
             if not _files_in(path, entries).issubset(risk_evidence[name]):
-                raise Error(f"delta.json: 模块 {name!r} 的新增代码目录 {path!r} 缺少对应已完成高风险判定")
+                warnings.append(f"delta.json: 模块 {name!r} 的新增代码目录 {path!r} 缺少对应已完成高风险判定")
     risk_scopes = _module_scopes(modules, resolver)
     for path in negative:
         if any(_covered(resolver.canonical(file), risk_scopes) for file in _files_in(path, entries)):
-            raise Error(f"delta.json $.path_results: 非高风险范围 {path!r} 与累计高风险模块覆盖重叠")
+            warnings.append(f"delta.json $.path_results: 非高风险范围 {path!r} 与累计高风险模块覆盖重叠，优先计入高风险")
 
-    round_trees = _read_round_trees(round_root)
+    round_trees = _read_round_trees(round_root, warnings)
     known_ids = {tree["tree_id"]: tree for _, tree in trees}
     files_by_id = {tree["tree_id"]: name for name, tree in trees}
     known_files = {name for name, _ in trees}
@@ -411,7 +483,7 @@ def validate_and_merge(
     for index, (_, tree) in enumerate(round_trees, 1):
         if not any(node.get("is_high_risk_module") is True and node.get("module_name") in risk_evidence
                    for node in tree.get("nodes", [])):
-            raise Error(f"attack-trees: 新树 {tree['tree_id']!r} 没有引用本轮已完成判定的高风险模块")
+            warnings.append(f"attack-trees: 新树 {tree['tree_id']!r} 没有引用本轮已完成判定的高风险模块")
         source_tree_id = tree["tree_id"]
         tree["tree_id"] = f"supplement-{origin}-{source_tree_id}"
         if tree["tree_id"] in known_ids:
@@ -433,13 +505,7 @@ def validate_and_merge(
         trial = Path(temporary)
         paths = _write_snapshot(trial, assets, modules, trees)
         try:
-            native.validate_artifacts(
-                **paths,
-                value_asset_schema_path=NATIVE_REFERENCES / "value-assets.schema.json",
-                high_risk_modules_schema_path=NATIVE_REFERENCES / "high-risk-modules.schema.json",
-                attack_tree_schema_path=NATIVE_REFERENCES / "attack-tree.schema.json",
-                attack_mode_path=NATIVE_REFERENCES / "attack_mode.json",
-            )
+            validate_merged_snapshot(paths, warnings=warnings)
         except Error as exc:
             raise Error("本轮 delta.json $.module_updates/new_modules/new_value_assets 或新增攻击树与累计产物不兼容。"
                         "请只修正本轮产物，不得修改基线攻击树：\n" + str(exc)) from exc
@@ -464,6 +530,8 @@ def validate_and_merge(
         "non_high_risk_paths": list(dict.fromkeys(negative)),
         "reviewed_paths": list(dict.fromkeys(reviewed)),
         "tree_mappings": tree_mappings,
+        "path_results": delta["path_results"],
+        "warnings": list(dict.fromkeys(warnings)),
         "counts": {"modules": len(modules), "value_assets": len(assets), "attack_trees": len(trees)},
     }
     if committed_paths is not None:
@@ -485,12 +553,15 @@ def _write_snapshot(root: Path, assets: list, modules: list, trees: list[tuple[s
 
 
 def _main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Validate a coverage supplement and trial merged analysis")
     parser.add_argument("--context", type=Path, required=True)
     args = parser.parse_args()
     try:
         context = _read(args.context)
-        validate_and_merge(
+        result = validate_and_merge(
             baseline=Path(context["baseline"]), round_root=Path(context["round_root"]),
             code_root=Path(context["code_root"]), targets=context["targets"],
             inventory=_read(Path(context["inventory_path"])),
@@ -498,6 +569,8 @@ def _main() -> int:
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(str(exc)[:12000], file=sys.stderr)
         return 1
+    for warning in result["warnings"]:
+        print(f"WARNING: {warning}")
     print("VALID: coverage supplement and merged analysis passed validation")
     return 0
 

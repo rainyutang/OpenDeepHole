@@ -494,10 +494,12 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("match_mode", ["exact", "bound_python_script"])
+@pytest.mark.parametrize("task_type", ["threat_analysis", "vulnerability_mining", "fp_review"])
 def test_run_prompt_allows_optional_command_without_completion_audit(
     monkeypatch,
     tmp_path: Path,
     match_mode: str,
+    task_type: str,
 ) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
@@ -528,21 +530,27 @@ def test_run_prompt_allows_optional_command_without_completion_audit(
                 "task_agent.serve_client._validate_required_command_audit"
             ) as audit_mock,
         ):
-            lines = await manager.run_prompt(
-                tool="opencode",
-                executable="opencode",
-                directory=project,
-                config_workspace=runtime,
-                prompt="write artifacts",
-                model="provider/model",
-                timeout=30,
-                allowed_bash_commands=(command,),
-                bash_command_match_mode=match_mode,
-            )
+            for session_id in (None, "session-1"):
+                lines = await manager.run_prompt(
+                    tool="opencode",
+                    executable="opencode",
+                    directory=project,
+                    config_workspace=runtime,
+                    prompt="write artifacts",
+                    model="provider/model",
+                    timeout=30,
+                    allowed_bash_commands=(command,),
+                    bash_command_match_mode=match_mode,
+                    log_stage=task_type,
+                    session_id=session_id,
+                )
+                assert lines == ["done"]
 
-        assert lines == ["done"]
-        assert binding_mock.call_args.kwargs["required_commands"] == (command,)
-        assert binding_mock.call_args.kwargs["bash_command_match_mode"] == match_mode
+        assert binding_mock.call_count == 2
+        for call in binding_mock.call_args_list:
+            assert call.kwargs["required_commands"] == (command,)
+            assert call.kwargs["bash_command_match_mode"] == match_mode
+            assert call.kwargs["task_type"] == task_type
         audit_mock.assert_not_called()
         assert not list(
             (runtime / ".opendeephole-plugins" / "command-bindings").glob("*")

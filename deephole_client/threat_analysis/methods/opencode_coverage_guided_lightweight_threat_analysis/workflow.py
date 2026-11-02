@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -68,6 +69,18 @@ def _emit(message: str) -> None:
         output(message)
 
 
+def _supplement_validation_command(context_path: Path) -> str:
+    args = (str(METHOD_ROOT / "supplement.py"), "--context", str(context_path))
+    if sys.platform == "win32":
+        return " ".join(("python", *(lightweight_contract._windows_command_argument(arg) for arg in args)))
+    return shlex.join((sys.executable, *args))
+
+
+def _with_validation_command(prompt: str, command: str) -> str:
+    guidance = "\n\n可运行以下已授权命令校验本轮产物；收到校验错误后只修改本轮输出：\n" + command
+    return prompt if prompt.endswith(guidance) else prompt + guidance
+
+
 def build_supplement_prompt(*, code_root: Path, targets: list[str],
                             baseline: Path, round_root: Path) -> str:
     references = METHOD_ROOT / "references"
@@ -121,7 +134,7 @@ def _result(paths: Mapping[str, Path], report_path: Path) -> dict:
 def run_coverage(*, code_root: Path, artifact_root: Path,
                  initial_paths: Mapping[str, Path], is_resume: bool,
                  run_task: Callable[..., Any]) -> dict:
-    from .supplement import coverage_counts, select_targets, validate_and_merge
+    from .supplement import coverage_counts, select_targets, validate_and_merge, validate_merged_snapshot
 
     state_path = artifact_root / STATE_FILE
     report_path = artifact_root / REPORT_FILE
@@ -159,11 +172,10 @@ def run_coverage(*, code_root: Path, artifact_root: Path,
             checkpoint_warning = f"补查检查点不可用，保留已校验初轮结果且不重复补查：{exc}"
     baseline = _owned(artifact_root, state["active_directory"])
     paths = dict(initial_paths) if baseline == initial_directory else _paths(baseline)
-    guidance, _ = lightweight_contract.reference_paths(attack_tree_directory=True)
     # Resume cannot advertise a damaged checkpoint as a successful business result.
     if is_resume and baseline != initial_directory:
         try:
-            lightweight_contract.validate_artifacts_locally(guidance_path=guidance, paths=paths)
+            validate_merged_snapshot(paths)
         except Exception as exc:
             checkpoint_warning = f"累计产物检查点损坏，保留已校验初轮结果且不重复补查：{exc}"
             state = initial_state
@@ -222,6 +234,8 @@ def run_coverage(*, code_root: Path, artifact_root: Path,
                     (round_root / "attack-trees").mkdir()
                     prompt = build_supplement_prompt(code_root=code_root, targets=targets,
                                                      baseline=baseline, round_root=round_root)
+                    context_path = (inventory_path.parent / f"round-{ordinal}.json").resolve()
+                    prompt = _with_validation_command(prompt, _supplement_validation_command(context_path))
                     (round_root / "prompt.txt").write_text(prompt + "\n", encoding="utf-8")
                     _emit(f"覆盖率引导补查 {ordinal}/{MAX_ROUNDS}：{', '.join(targets)}")
                     try:
@@ -252,8 +266,11 @@ def run_coverage(*, code_root: Path, artifact_root: Path,
                     state["non_high_risk_paths"] = list(dict.fromkeys(
                         [*state["non_high_risk_paths"], *merged["non_high_risk_paths"]]))
                     state["attempted_paths"] = list(dict.fromkeys([*state["attempted_paths"], *targets]))
-                    record["path_results"] = _read(round_root / "delta.json")["path_results"]
+                    record["path_results"] = merged["path_results"]
                     record["tree_mappings"] = merged.get("tree_mappings", [])
+                    record["warnings"] = merged.get("warnings", [])
+                    for message in record["warnings"]:
+                        _emit(f"补查 {ordinal} 校验提示：{message}")
                     record["status"] = "success"
                     _write(state_path, state)
                 counts = coverage_counts(inventory, paths, state["non_high_risk_paths"])
@@ -336,9 +353,12 @@ async def _run_supplement_task_local(*, prompt: str, round_root: Path, baseline:
 
     context = get_opencode_execution_context()
     name = f"opencode-coverage-guided-supplement-{round_number}"
-    context_path = inventory_path.parent / f"round-{round_number}.json"
+    context_path = (inventory_path.parent / f"round-{round_number}.json").resolve()
     _write(context_path, {"baseline": str(baseline), "round_root": str(round_root),
         "code_root": str(code_root), "targets": targets, "inventory_path": str(inventory_path)})
+    validation_command = _supplement_validation_command(context_path)
+    prompt = _with_validation_command(prompt, validation_command)
+    (round_root / "prompt.txt").write_text(prompt + "\n", encoding="utf-8")
     planned = ""
     if context.scan_id:
         planned = await register_planned_task(context.scan_id,
@@ -352,6 +372,8 @@ async def _run_supplement_task_local(*, prompt: str, round_root: Path, baseline:
                 prompt=prompt, required_capability="high", output_schema=None,
                 readable_paths=(lightweight_contract.reference_root(), METHOD_ROOT,
                                 baseline, inventory_path.parent),
+                allowed_bash_commands=(validation_command,),
+                bash_command_match_mode="bound_python_script",
                 post_session_validator=lambda: _supplement_validation_feedback(context_path),
                 post_session_validation_retry_count=1, session_id=None)
     finally:
