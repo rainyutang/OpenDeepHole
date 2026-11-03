@@ -1083,14 +1083,16 @@ async def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
 
     if meta.agent_key:
         resolved = await resolve_agent_connection_async(meta.agent_key)
-        if resolved is not None:
-            return resolved[0]
+        # A stable binding must not fall back to a different, same-named Agent
+        # while offline (scan commands can carry private review notes).
+        return resolved[0] if resolved is not None else None
     agent_id = meta.agent_id
     if agent_id and agent_id in _agent_ws:
         return agent_id
     if meta.agent_name:
         for aid, ainfo in _registered_agents.items():
-            if ainfo.name == meta.agent_name and aid in _agent_ws:
+            if (ainfo.name == meta.agent_name and aid in _agent_ws
+                    and (not meta.user_id or ainfo.user_id == meta.user_id)):
                 return aid
     store = get_scan_store()
     if getattr(store, "distributed", False):
@@ -1782,6 +1784,11 @@ async def create_agent_scan(
     )
 
     store = get_scan_store()
+    if body.review_note_ids:
+        try:
+            await run_store_call(store, "validate_review_note_ids", current_user.user_id, body.review_note_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     for name_attempt in range(0x10000):
         if not requested_scan_name:
             scan_name = (
@@ -1805,6 +1812,20 @@ async def create_agent_scan(
             status_code=409,
             detail=f"无法为项目「{generated_name_base}」生成不重复的扫描名称",
         )
+    review_notes = None
+    if body.review_notes_enabled or body.review_note_ids:
+        try:
+            review_notes = await run_store_call(
+                store, "set_scan_review_notes", scan_id, current_user.user_id,
+                body.review_notes_enabled, body.review_note_ids,
+            )
+        except ValueError as exc:
+            # A selected note can be deleted after the initial validation.
+            # This new scan has not been dispatched or exposed in local state.
+            await run_store_call(store, "update_scan_progress", scan_id,
+                                 status=ScanItemStatus.ERROR, error_message=str(exc))
+            await run_store_call(store, "delete_scan", scan_id)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id
 
@@ -1831,6 +1852,7 @@ async def create_agent_scan(
     ok = await send_agent_command(agent_id, {
         "type": "task",
         "scan_id": scan_id,
+        "review_notes": review_notes,
         "execution_revision": execution_revision,
         "project_path": project_path,
         "code_scan_path": code_scan_path,
@@ -3088,9 +3110,12 @@ async def _continue_scan(
         server_url,
         meta.agent_key,
     )
+    from backend.review_notes import scan_review_notes_payload
+
     resume_payload = {
         "type": "resume",
         "scan_id": scan_id,
+        "review_notes": await scan_review_notes_payload(scan_id, store=store),
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "multi_versions": [
@@ -4640,9 +4665,12 @@ async def _start_fp_review(
             "total": int(fp_job_info.get("total") or len(confirmed)),
             "processed": int(fp_job_info.get("processed") or 0),
         })
+        from backend.review_notes import scan_review_notes_payload
+
         ok = await send_agent_command(agent_id, {
             "type": "fp_review",
             "scan_id": scan_id,
+            "review_notes": await scan_review_notes_payload(scan_id, store=store),
             "execution_revision": execution_revision,
             "scan_mode": component_scan_mode(meta.scan_mode),
             "review_id": review_id,

@@ -48,6 +48,33 @@ class DuplicateScanNameError(ValueError):
 class ScanStoreBase(ABC):
     """Scan data storage abstract interface."""
 
+    def list_review_notes(self, user_id: str) -> list[dict]:
+        raise NotImplementedError
+
+    def create_review_note(self, user_id: str, title: str, content: str) -> dict:
+        raise NotImplementedError
+
+    def update_review_note(self, user_id: str, note_id: str, title: str, content: str) -> dict | None:
+        raise NotImplementedError
+
+    def delete_review_note(self, user_id: str, note_id: str) -> list[str] | None:
+        raise NotImplementedError
+
+    def get_review_note_scan_ids(self, note_id: str) -> list[str]:
+        raise NotImplementedError
+
+    def validate_review_note_ids(self, user_id: str, note_ids: list[str]) -> list[str]:
+        raise NotImplementedError
+
+    def get_scan_review_notes(self, scan_id: str) -> dict:
+        raise NotImplementedError
+
+    def set_scan_review_notes(self, scan_id: str, user_id: str, enabled: bool, note_ids: list[str]) -> dict:
+        raise NotImplementedError
+
+    def list_agent_review_notes(self, agent_key: str) -> list[dict]:
+        raise NotImplementedError
+
     def get_scan_share(self, scan_id: str) -> dict | None:
         """Return the active share and its scan owner; exclude deleted scans."""
         raise NotImplementedError

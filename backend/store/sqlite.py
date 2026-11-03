@@ -87,6 +87,7 @@ from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
 from .file_inventories import FILE_INVENTORY_SCHEMA, ScanFileInventoriesMixin
 from .model_usage import MODEL_USAGE_SCHEMA, ScanModelUsageMixin
 from .pattern_audit import PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin
+from .review_notes import REVIEW_NOTES_SCHEMA, ReviewNotesStoreMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 STORAGE_COLUMNS["scans"] = {
@@ -999,6 +1000,7 @@ _SCHEMA += TOKEN_CATEGORY_SCHEMA
 _SCHEMA += FILE_INVENTORY_SCHEMA
 _SCHEMA += MODEL_USAGE_SCHEMA
 _SCHEMA += PATTERN_AUDIT_SCHEMA
+_SCHEMA += REVIEW_NOTES_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1020,7 +1022,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:

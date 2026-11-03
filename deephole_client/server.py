@@ -1036,6 +1036,9 @@ async def _run_single_fp_review_item(
     )
     review_dir.mkdir(parents=True, exist_ok=True)
     from deephole_client.fp_review import load_fp_review_methods, run_fp_review
+    from deephole_client.review_notes import get_review_notes_dir
+
+    review_notes_dir = get_review_notes_dir(item.scan_id)
 
     loaded = load_fp_review_methods().get(item.method)
     if loaded is None:
@@ -1089,6 +1092,7 @@ async def _run_single_fp_review_item(
             review_id=item.review_id,
             vuln_index=vuln_index,
             vulnerability=item.vulnerability,
+            review_notes_dir=review_notes_dir,
             feedback_entries=item.feedback_entries,
             required_capability="high",
             output=process_output,

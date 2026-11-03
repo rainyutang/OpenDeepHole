@@ -48,6 +48,7 @@ async function mount() {
     else if (config.url === "/api/fp-review-methods") data = { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
     else if (config.url.endsWith("/validator-catalog")) data = { methods: [], errors: [] };
     else if (config.url.includes("/config-memory/")) data = { knowledge_base: null, validation_by_product: {} };
+    else if (config.url === "/api/review-notes") data = [{ id: "note-1", title: "检查边界", content: "核对调用方校验", created_at: "", updated_at: "" }];
     else if (config.url === "/api/scan" && config.method === "post") {
       submissions.push(JSON.parse(config.data));
       data = { scan_id: "new-scan" };
@@ -75,6 +76,23 @@ async function mode(root, label) {
 }
 async function submit(root) {
   await act(async () => root.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+}
+
+for (const scanMode of ["标准模式", "自定义模式"]) {
+  test(`${scanMode} defaults review notes off and submits the selected personal entries when enabled`, async () => {
+    const { root, submissions } = await mount();
+    await mode(root, scanMode);
+    await change(root, "/path/to/project", "/repo/project");
+    assert.equal(root.root.findByProps({ "aria-label": "启用问题判定依据" }).props.checked, false);
+    await submit(root);
+    assert.equal(submissions.at(-1).review_notes_enabled, false);
+    assert.deepEqual(submissions.at(-1).review_note_ids, []);
+    await act(async () => root.root.findByProps({ "aria-label": "启用问题判定依据" }).props.onChange({ target: { checked: true } }));
+    await act(async () => root.root.findByProps({ "aria-label": "检查边界" }).props.onChange({ target: { checked: true } }));
+    await submit(root);
+    assert.equal(submissions.at(-1).review_notes_enabled, true);
+    assert.deepEqual(submissions.at(-1).review_note_ids, ["note-1"]);
+  });
 }
 
 test("custom scans can select coverage-guided analysis while keeping the original default", async () => {

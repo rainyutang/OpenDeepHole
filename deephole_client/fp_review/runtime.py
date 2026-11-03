@@ -43,6 +43,7 @@ _COMMON_REQUIRED_KEYS = {
 }
 _COMMON_ALLOWED_KEYS = _COMMON_REQUIRED_KEYS | {
     "scan_mode",
+    "review_notes_dir",
     "feedback_entries",
     "history",
     "required_capability",

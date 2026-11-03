@@ -41,6 +41,7 @@ _STAGE_LABELS = {
 _DEEP_STAGE_KEYS = FP_CHECK_STAGE_KEYS[2:]
 _ALLOWED_KEYS = {
     "scan_mode",
+    "review_notes_dir",
     "method_id",
     "project_path",
     "code_scan_path",
@@ -380,6 +381,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             ),
             sections=sections,
             output_schema=schema,
+            review_notes_dir=kwargs.get("review_notes_dir"),
         )
         await _emit(
             output,
@@ -401,6 +403,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
                 invalid_json_retry_count=retry_count,
                 invalid_json_retry_prompt=_retry_instruction(schema),
                 config_path=kwargs.get("task_agent_config"),
+                readable_paths=kwargs.get("review_notes_dir"),
                 cancel_event=cancel_event,
             )
             payload = _task_payload(result)

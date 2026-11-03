@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 import uuid
 
-from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, scan, sharing, skills
+from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, review_notes, scan, sharing, skills
 from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
 from backend.frontend import FrontendStaticFiles
@@ -147,6 +147,7 @@ app.include_router(sharing.router)
 app.include_router(checkers.router)
 app.include_router(skills.router)
 app.include_router(feedback.router)
+app.include_router(review_notes.router)
 app.include_router(announcements.router)
 app.include_router(agent.router)
 app.include_router(agent.public_router)

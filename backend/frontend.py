@@ -11,8 +11,8 @@ from starlette.types import Scope
 
 
 _PAGE_PATH = re.compile(
-    r"^(?:login|register|dashboard|checkers|admin/users|agents/(?:download|config)"
-    r"|(?:scans|shared-scan|public-scan)/[^/]+(?:/(?:overview|index|static|threat|mining|validation|fp-review|issues))?)/?$"
+    r"^(?:login|register|dashboard|checkers|review-notes|admin/users|agents/(?:download|config)"
+    r"|(?:scans|shared-scan|public-scan)/[^/]+(?:/(?:overview|index|static|threat|mining|validation|fp-review|issues|review-notes))?)/?$"
 )
 
 

@@ -1,4 +1,5 @@
 import axios from "axios";
+import type { ReviewNote, ScanReviewNotes } from "../types";
 import type { ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource, ScanMetadata, ScanMetadataUpdate } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
@@ -358,6 +359,8 @@ export async function createScan(body: {
   code_graph_mcp?: AgentMcpConfig | null;
   auto_fp_review?: boolean;
   fp_review_method?: FpReviewMethod;
+  review_notes_enabled?: boolean;
+  review_note_ids?: string[];
   multi_versions?: Array<{
     version_name: string;
     project_path: string;
@@ -983,6 +986,35 @@ export async function deleteScan(scanId: string): Promise<void> {
 export async function updateScanMetadata(scanId: string, body: ScanMetadataUpdate): Promise<ScanMetadata> {
   if (isPublicScan(scanId)) throw new Error("当前访问方式不支持编辑扫描名称");
   const { data } = await api.patch<ScanMetadata>(`/api/scan/${scanId}/metadata`, body);
+  return data;
+}
+
+export async function getReviewNotes(signal?: AbortSignal): Promise<ReviewNote[]> {
+  const { data } = await api.get<ReviewNote[]>("/api/review-notes", { signal });
+  return data;
+}
+
+export async function saveReviewNote(body: Pick<ReviewNote, "title" | "content">, id?: string): Promise<ReviewNote & Pick<ScanReviewNotes, "sync_status">> {
+  const { data } = id
+    ? await api.put<ReviewNote>(`/api/review-notes/${encodeURIComponent(id)}`, body)
+    : await api.post<ReviewNote>("/api/review-notes", body);
+  return data;
+}
+
+export async function deleteReviewNote(id: string): Promise<Pick<ScanReviewNotes, "sync_status">> {
+  const { data } = await api.delete<Pick<ScanReviewNotes, "sync_status">>(`/api/review-notes/${encodeURIComponent(id)}`);
+  return data;
+}
+
+export async function getScanReviewNotes(scanId: string, signal?: AbortSignal): Promise<ScanReviewNotes> {
+  if (isPublicScan(scanId)) throw new Error("当前访问方式不支持管理问题判定依据");
+  const { data } = await api.get<ScanReviewNotes>(`/api/scan/${encodeURIComponent(scanId)}/review-notes`, { signal });
+  return data;
+}
+
+export async function updateScanReviewNotes(scanId: string, body: Pick<ScanReviewNotes, "enabled" | "note_ids">): Promise<ScanReviewNotes> {
+  if (isPublicScan(scanId)) throw new Error("当前访问方式不支持管理问题判定依据");
+  const { data } = await api.put<ScanReviewNotes>(`/api/scan/${encodeURIComponent(scanId)}/review-notes`, body);
   return data;
 }
 

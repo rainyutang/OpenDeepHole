@@ -1789,10 +1789,37 @@ class CreateScanRequest(BaseModel):
     checkers: list[str] | None = None
     mining_engines: list[MiningEngineRequest] | None = None
     feedback_ids: list[str] = []
+    review_notes_enabled: bool = False
+    review_note_ids: list[str] = Field(default_factory=list, max_length=200)
     code_graph_mcp: AgentMcpConfig | None = None
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
+
+
+class ReviewNoteRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("title")
+    @classmethod
+    def nonempty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("标题不能为空")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def nonempty_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("内容不能为空")
+        return value
+
+
+class ScanReviewNotesRequest(BaseModel):
+    enabled: bool = False
+    note_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 class ValidationTarget(BaseModel):

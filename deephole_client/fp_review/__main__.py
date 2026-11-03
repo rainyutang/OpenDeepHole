@@ -28,6 +28,7 @@ def main() -> None:
     )
     parser.add_argument("--invalid-json-retry-count", type=int, default=2)
     parser.add_argument("--task-agent-config")
+    parser.add_argument("--review-notes-dir")
     parser.add_argument("--output-file")
     args = parser.parse_args()
 
@@ -60,6 +61,7 @@ def main() -> None:
         required_capability=args.required_capability,
         invalid_json_retry_count=args.invalid_json_retry_count,
         task_agent_config=args.task_agent_config, output=event_output,
+        review_notes_dir=args.review_notes_dir,
     ))
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output_file:

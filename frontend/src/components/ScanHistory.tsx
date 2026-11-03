@@ -17,6 +17,7 @@ interface Props {
   onManageUsers: () => void;
   onCheckerDashboard: () => void;
   onCheckerCatalog: () => void;
+  onReviewNotes?: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -245,7 +246,7 @@ function NavButton({
   );
 }
 
-export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog, onReviewNotes }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -562,6 +563,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
               description="查看各类 SKILL 的检测范围和使用说明"
               onClick={onCheckerCatalog}
             />
+            {onReviewNotes && <NavButton
+              label="问题判定依据"
+              description="管理扫描复核时参考的判断条件"
+              onClick={onReviewNotes}
+            />}
             <NavButton
               label="客户端"
               description="下载并启动 Agent 客户端"

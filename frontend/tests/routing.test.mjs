@@ -107,7 +107,7 @@ function current(root, label) {
 }
 
 test("route parsing and building retain identities, engine and threat result selections", () => {
-  for (const section of ["overview", "index", "static", "threat", "mining", "validation", "fp-review", "issues"]) {
+  for (const section of ["overview", "index", "static", "threat", "mining", "validation", "fp-review", "issues", "review-notes"]) {
     const state = routing.parseScanRoute(section, "?engine=custom&view=attackTrees");
     assert.ok(state);
     const path = routing.scanPath("id with space", state);
@@ -122,6 +122,30 @@ test("route parsing and building retain identities, engine and threat result sel
   assert.equal(routing.legacyRoute("/", "#/public-scan/s?token=t"), "/public-scan/s?token=t");
   assert.equal(routing.loginDestination({ returnTo: "//outside.test" }), "/");
   assert.equal(routing.loginDestination({ returnTo: "/login" }), "/");
+});
+
+test("review notes have a personal page and independent scan sidebar route with history", async () => {
+  installApi((config) => config.url === "/api/review-notes" ? [] : config.url === "/api/scan/s/review-notes"
+    ? { enabled: false, note_ids: [], revision: 0, entries: [] } : undefined);
+  const { root, router } = await mount();
+  await click(root, "问题判定依据");
+  assert.equal(router.state.location.pathname, "/review-notes");
+  assert.ok(root.root.findByProps({ "aria-label": "问题判定依据管理" }));
+  await go(router, "/scans/s/overview");
+  await select(root, "问题判定依据");
+  assert.equal(router.state.location.pathname, "/scans/s/review-notes");
+  assert.equal(current(root, "问题判定依据"), true);
+  assert.ok(root.root.findByProps({ "aria-label": "启用问题判定依据" }));
+  await go(router, -1);
+  assert.equal(router.state.location.pathname, "/scans/s/overview");
+});
+
+test("shared and public direct review-notes routes are unavailable and never load the personal library", async () => {
+  for (const prefix of ["shared-scan", "public-scan"]) {
+    const { root } = await mount(`/${prefix}/s/review-notes?token=t`);
+    assert.match(content(root.toJSON()), /页面不存在/);
+  }
+  assert.equal(calls.some((call) => call.url.includes("review-notes")), false);
 });
 
 test("homepage scan links open a new tab while ordinary page navigation supports back and forward", async () => {

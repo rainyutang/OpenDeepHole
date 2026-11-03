@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from deephole_client.vulnerability_mining.engine_report import (
@@ -44,6 +45,7 @@ def build_skill_prompt(
     task: str,
     sections: Iterable[tuple[str, str]],
     output_schema: dict[str, Any],
+    review_notes_dir: str | Path | None = None,
 ) -> str:
     """Build ``/skill`` + task + reports + schema + language instruction."""
     normalized_skill = str(skill_name or "").strip().lstrip("/")
@@ -55,6 +57,12 @@ def build_skill_prompt(
     if not isinstance(output_schema, dict) or not output_schema:
         raise ValueError("output_schema must be a non-empty dict")
     parts = [f"/{normalized_skill}", "", f"任务：{normalized_task}"]
+    if review_notes_dir is not None:
+        parts.extend([
+            "",
+            f"复核时请参考并关注 `{review_notes_dir}` 下的问题判定依据文件，"
+            "按当前问题需要查看相关内容。",
+        ])
     for title, content in sections:
         normalized_title = str(title or "").strip()
         normalized_content = str(content or "").strip()

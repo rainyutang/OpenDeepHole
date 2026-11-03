@@ -20,6 +20,7 @@ from task_agent import run_opencode_task
 PROCESS_NAME = "fp_review"
 _ALLOWED_KEYS = {
     "scan_mode",
+    "review_notes_dir",
     "method_id",
     "project_path",
     "code_scan_path",
@@ -261,6 +262,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
                 *report_sections,
             ),
             output_schema=output_schema,
+            review_notes_dir=kwargs.get("review_notes_dir"),
         )
         result = await run_opencode_task(
             task_name=(
@@ -273,6 +275,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             json_repair_output_prompt=FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT,
             invalid_json_retry_count=retry_count,
             config_path=kwargs.get("task_agent_config"),
+            readable_paths=kwargs.get("review_notes_dir"),
             output=None,
             cancel_event=cancel_event,
         )

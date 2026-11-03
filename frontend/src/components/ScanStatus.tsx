@@ -43,6 +43,7 @@ import {
 } from "../miningEngines";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
+import { ReviewNotesManager } from "./ReviewNotes";
 import ScanShareButton from "./ScanShareButton";
 import EditScanMetadataDialog from "./EditScanMetadataDialog";
 import { isSharedScan } from "../api/client";
@@ -2057,6 +2058,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
         onIssues={() => { auditNavigation.cancel(); setActiveTab("issues"); }}
         onNodeClick={handleFlowNodeClick}
         onOpenScanInfo={() => setScanInfoOpen(true)}
+        onReviewNotes={!sharedView && !isPublicScan(scanId) ? () => { auditNavigation.cancel(); setActiveTab("review_notes"); } : undefined}
         onOpenFeedback={sharedView ? undefined : () => setFeedbackOpen(true)}
         onOpenSkill={() => {
           setSkillOpen(true);
@@ -2445,6 +2447,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
           />
         )}
         {activeTab === "issues" && issuesView}
+        {activeTab === "review_notes" && !sharedView && !isPublicScan(scanId) && <ReviewNotesManager scanId={scanId} />}
         </>
         </RuntimeErrorBoundary>
       </div>
@@ -3309,6 +3312,7 @@ interface ScanDetailSidebarProps {
   onIssues: () => void;
   onNodeClick: (node: FlowNodeId) => void;
   onOpenScanInfo: () => void;
+  onReviewNotes?: () => void;
   onOpenFeedback?: () => void;
   onOpenSkill: () => void;
   onOpenModels: () => void;
@@ -3362,6 +3366,7 @@ function ScanSidebarContent({
   onIssues,
   onNodeClick,
   onOpenScanInfo,
+  onReviewNotes,
   onOpenFeedback,
   onOpenSkill,
   onOpenModels,
@@ -3487,6 +3492,12 @@ function ScanSidebarContent({
         </SidebarSection>
 
         <SidebarSection title="其它信息">
+          {onReviewNotes && <SidebarNavigationButton
+            label="问题判定依据"
+            detail="管理本次扫描参考的判断条件"
+            current={activeTab === "review_notes"}
+            onClick={() => select(onReviewNotes)}
+          />}
           <SidebarNavigationButton
             label="扫描信息"
             detail="查看创建扫描时的范围与流程配置"

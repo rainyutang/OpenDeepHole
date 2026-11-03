@@ -21,6 +21,7 @@ import type {
   ThreatAnalysisMethodCatalogItem,
 } from "../types";
 import ScanCodeGraphMcpEditor, { defaultScanCodeGraphMcp } from "./ScanCodeGraphMcpEditor";
+import { ReviewNotesSelector } from "./ReviewNotes";
 import {
   canonicalMiningEngineLabel,
   miningEngineRequiresThreatAnalysis,
@@ -119,6 +120,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [threatAnalysisMethod, setThreatAnalysisMethod] = useState("");
   const [autoFpReview, setAutoFpReview] = useState(true);
   const [fpReviewMethod, setFpReviewMethod] = useState("");
+  const [reviewNotesEnabled, setReviewNotesEnabled] = useState(false);
+  const [reviewNoteIds, setReviewNoteIds] = useState<string[]>([]);
 
   const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
   const selectedAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
@@ -280,6 +283,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         },
         vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
         code_graph_mcp: scanMode !== "multi_version" && codeGraphMcp.enabled ? codeGraphMcp : null,
+        review_notes_enabled: reviewNotesEnabled,
+        review_note_ids: reviewNotesEnabled ? reviewNoteIds : [],
         ...(scanMode === "custom" ? {
           threat_analysis_enabled: threatAnalysisEnabled,
           threat_analysis_method: threatAnalysisMethod,
@@ -348,6 +353,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动去误报</h2><p className="mt-1 text-xs text-slate-500">扫描后自动复核已确认问题。</p></div><Toggle checked={autoFpReview} onChange={() => setAutoFpReview((value) => !value)} label="自动去误报" /></div><div className="mt-4 grid gap-3 md:grid-cols-2">{fpMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${fpReviewMethod === method.method_id ? "border-amber-500 bg-amber-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={fpReviewMethod === method.method_id} onChange={() => setFpReviewMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div></Card>
         </>}
+
+        <ReviewNotesSelector enabled={reviewNotesEnabled} noteIds={reviewNoteIds} onEnabledChange={setReviewNotesEnabled} onSelectionChange={setReviewNoteIds} />
 
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
         <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>

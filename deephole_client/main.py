@@ -29,6 +29,12 @@ import sys
 from pathlib import Path
 
 from task_agent.output_format import with_local_timestamp
+from deephole_client.review_notes import (
+    apply_command_review_notes,
+    review_notes_revisions,
+    sync_review_notes,
+    sync_welcome_review_notes,
+)
 
 
 _WS_MAX_MESSAGE_ENV = "OPENDEEPHOLE_WS_MAX_MESSAGE_MB"
@@ -143,6 +149,7 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
         execution_revision = int(msg.get("execution_revision") or 0)
         if agent_server.scan_command_is_obsolete(msg["scan_id"], execution_revision):
             return
+        apply_command_review_notes(msg)
         await _set_reporter_execution(
             reporter, "set_scan_execution", msg["scan_id"], execution_revision
         )
@@ -239,6 +246,14 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         await _set_reporter_execution(
             reporter, "set_scan_execution", msg["scan_id"], execution_revision
         )
+        try:
+            apply_command_review_notes(msg)
+        except Exception as exc:
+            if reporter is not None:
+                await reporter.report_scan_start_failure(
+                    msg["scan_id"], execution_revision, f"问题判定依据同步失败：{exc}",
+                )
+            raise
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
@@ -314,6 +329,14 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             msg["review_id"],
             execution_revision,
         )
+        try:
+            apply_command_review_notes(msg)
+        except Exception as exc:
+            if reporter is not None:
+                await reporter.finish_fp_review(
+                    msg["scan_id"], msg["review_id"], "error", f"问题判定依据同步失败：{exc}",
+                )
+            raise
         await agent_server.handle_fp_review(
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
@@ -414,6 +437,23 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
         )
+    elif cmd_type == "review_notes_update":
+        payload = msg.get("review_notes", msg)
+        response = {
+            "type": "review_notes_result",
+            "request_id": str(msg.get("request_id") or ""),
+            "scan_id": msg.get("scan_id", ""),
+            "revision": msg.get("revision", 0),
+        }
+        try:
+            if not isinstance(payload, dict) or payload.get("scan_id") != msg.get("scan_id"):
+                raise ValueError("Review notes scan_id does not match command")
+            response["revision"] = sync_review_notes(payload)
+            response["ok"] = True
+        except Exception as exc:
+            response["ok"] = False
+            response["error"] = str(exc)
+        return response
     elif cmd_type == "feedback_selection_update":
         await agent_server.handle_feedback_selection_update(
             scan_id=msg["scan_id"],
@@ -572,6 +612,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         agent_server.active_fp_review_snapshots()
                         + pending_fp_review_snapshots()
                     ),
+                    "review_notes_revisions": review_notes_revisions(),
                     "active_validations": (
                         agent_server.active_validation_snapshots()
                         + pending_validation_snapshots()
@@ -595,6 +636,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 reporter.set_protocol_version(int(welcome.get("protocol_version") or 1))
                 reporter.set_capabilities(welcome.get("capabilities"))
                 reporter.confirm_scan_executions(welcome.get("scan_executions"))
+                for failure in sync_welcome_review_notes(welcome.get("review_notes") or []):
+                    print(
+                        f"问题判定依据同步失败（扫描 {failure['scan_id']}）：{failure['error']}；"
+                        "Agent 将继续处理其他扫描。",
+                        flush=True,
+                    )
 
                 if welcome.get("config"):
                     from deephole_client.config import save_config

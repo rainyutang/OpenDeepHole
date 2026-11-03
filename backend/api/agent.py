@@ -704,6 +704,7 @@ _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _scan_stop_waiters: dict[str, asyncio.Future] = {}
+_review_notes_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
@@ -711,6 +712,7 @@ _AGENT_RESPONSE_WAITERS = {
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
     "scan_stop_result": _scan_stop_waiters,
+    "review_notes_result": _review_notes_waiters,
 }
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
@@ -2435,6 +2437,9 @@ async def agent_websocket(websocket: WebSocket) -> None:
             )
 
         accepted_scan_executions = await _adopt_reported_agent_work(agent_id, agent_info, msg)
+        from backend.review_notes import review_notes_for_agent
+
+        review_notes = await review_notes_for_agent(stable_key, msg.get("review_notes_revisions"), store=store)
         await _send_agent_json(agent_id, {
             "type": "welcome",
             "agent_id": agent_id,
@@ -2442,6 +2447,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             "config": cfg.model_dump(),
             "protocol_version": protocol_version,
             "scan_executions": accepted_scan_executions,
+            "review_notes": review_notes,
             "capabilities": {
                 "candidate_batches": protocol_version >= 2,
                 "event_batches": protocol_version >= 2,

@@ -15,6 +15,7 @@ import RegisterPage from "./components/RegisterPage";
 import UserManagement from "./components/UserManagement";
 import AdminCheckerDashboard from "./components/AdminCheckerDashboard";
 import CheckerCatalogPage from "./components/CheckerCatalogPage";
+import ReviewNotesPage from "./components/ReviewNotes";
 import RuntimeErrorBoundary from "./components/RuntimeErrorBoundary";
 import type { User } from "./types";
 
@@ -57,6 +58,7 @@ function ScanDetailRoute({ access, publicView = false }: { access?: PublicScanAc
     if (to !== location.pathname + location.search) navigate(to);
   }, [scanId, access, location.pathname, location.search, navigate]);
   if (!state) return <NotFound />;
+  if (publicView && state.tab === "review_notes") return <NotFound />;
   if (publicView && !access) return <NotFound message="访问链接无效" />;
   if (!section) return <Navigate to={scanPath(scanId, state, access)} replace />;
   const navigation = { state, onNavigate, locationKey: location.key, action };
@@ -126,7 +128,8 @@ export default function App() {
       <Route index element={<ScanHistory user={user!} onViewScan={viewScan} onLogout={handleLogout}
         onDownloadAgent={() => navigate("/agents/download")} onAgentConfig={() => navigate("/agents/config")}
         onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
-        onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")} />} />
+        onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")}
+        onReviewNotes={() => navigate("/review-notes")} />} />
       <Route path="scans/new" element={<NewScanForm onScanStarted={viewScan} onBack={onBack}
         onConfigureAgent={(agentKey) => navigate(`/agents/config?${new URLSearchParams({ agent: agentKey })}`)} />} />
       <Route path="scans/:scanId/:section?" element={<ScanDetailRoute />} />
@@ -134,6 +137,7 @@ export default function App() {
       <Route path="agents/config" element={<AgentConfigRoute />} />
       <Route path="dashboard" element={<AdminCheckerDashboard user={user!} onBack={onBack} onViewScan={viewScan} />} />
       <Route path="checkers" element={<CheckerCatalogPage onBack={onBack} />} />
+      <Route path="review-notes" element={<ReviewNotesPage onBack={onBack} />} />
       <Route element={<RequireAuth user={user} admin />}>
         <Route path="admin/users" element={<UserManagement user={user!} onBack={onBack} />} />
       </Route>

@@ -25,6 +25,7 @@ def client(tmp_path):
     "/", "/login", "/register", "/scans/new", "/scans/s", "/scans/s/issues",
     "/scans/s/mining?engine=threat_audit", "/scans/s/threat?view=attackTrees",
     "/agents/download", "/agents/config?agent=a", "/checkers", "/dashboard", "/admin/users",
+    "/review-notes", "/scans/s/review-notes",
     "/shared-scan/s/overview?token=share", "/public-scan/s/fp-review?token=integration",
 ])
 def test_page_paths_load_the_application(client, path):
