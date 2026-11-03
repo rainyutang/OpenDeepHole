@@ -5,6 +5,12 @@
 一个方法，扫描创建后会固化方法 ID、名称和说明快照。内置方法 ID 是
 `deephole_threat_analysis`，界面名称是“DeepHole威胁分析”。
 
+`deephole_compact_threat_analysis`，界面名称“DeepHole精简威胁分析”，完整复制 DeepHole
+多阶段方法，保留四类价值资产与五类高风险模块的并行识别、合并和逐资产攻击树分析。
+当前复制阶段仅修改方法名称，以及四个 Skill 的独立名称与调用引用；攻击模式库和分析规则
+仍与原方法一致。四个 Skill 均使用 `deephole-compact-` 前缀，以便在 Agent 的统一 Skill
+目录中与原方法共存。任务 ID、产物路径、五参数入口和新建扫描默认方法保持不变。
+
 仓库还提供三个轻量级方法：
 
 - `codex_goal_threat_analysis`，界面名称“轻量级威胁分析（Codex）”，通过

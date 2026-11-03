@@ -67,6 +67,11 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
             "description": "生成价值资产、高风险模块和攻击树。",
         },
         {
+            "method_id": "deephole_compact_threat_analysis",
+            "label": "DeepHole精简威胁分析",
+            "description": "生成价值资产、高风险模块和攻击树。",
+        },
+        {
             "method_id": "opencode_coverage_guided_lightweight_threat_analysis",
             "label": "覆盖率引导的轻量级威胁分析（OpenCode）",
             "description": "识别资产、模块和攻击树后，对未覆盖路径定向补查并合并结果。",
@@ -117,6 +122,16 @@ def test_backend_resolves_coverage_guided_method() -> None:
     assert selection.method_label == "覆盖率引导的轻量级威胁分析（OpenCode）"
 
 
+def test_backend_resolves_compact_deephole_method() -> None:
+    method_id, selection = _resolve_threat_analysis_method(
+        "deephole_compact_threat_analysis"
+    )
+
+    assert method_id == "deephole_compact_threat_analysis"
+    assert selection.method_id == method_id
+    assert selection.method_label == "DeepHole精简威胁分析"
+
+
 def test_method_discovery_rejects_extra_yaml_and_incomplete_directories(
     tmp_path: Path,
 ) -> None:
@@ -152,6 +167,7 @@ def test_method_discovery_rejects_extra_yaml_and_incomplete_directories(
 
 @pytest.mark.parametrize("method_id", [
     None,
+    "deephole_compact_threat_analysis",
     "codex_goal_threat_analysis",
     "opencode_lightweight_threat_analysis",
     "opencode_coverage_guided_lightweight_threat_analysis",
@@ -241,6 +257,7 @@ def test_method_result_contract_requires_three_paths_or_failure_reason() -> None
 
 @pytest.mark.parametrize(("method_id", "method_label"), [
     ("custom", "Custom analysis"),
+    ("deephole_compact_threat_analysis", "DeepHole精简威胁分析"),
     (
         "opencode_coverage_guided_lightweight_threat_analysis",
         "覆盖率引导的轻量级威胁分析（OpenCode）",
