@@ -324,7 +324,10 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_descri
     assert THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["maxItems"] == 1
     evidence_description = THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["items"]["properties"]["vulnerable_code"]["description"]
     assert "source 到 sink" in evidence_description
-    assert "项目相对路径和起止行号" in evidence_description
+    assert "每块上方标注项目相对路径" in evidence_description
+    assert "带语言标签的代码围栏" in evidence_description
+    assert "原始行号" in evidence_description
+    assert "起止行号" not in evidence_description
     assert "//[deephole]" in evidence_description
     assert (
         THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["items"]["properties"]
