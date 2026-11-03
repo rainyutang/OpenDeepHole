@@ -7,9 +7,16 @@
 
 `deephole_compact_threat_analysis`，界面名称“DeepHole精简威胁分析”，完整复制 DeepHole
 多阶段方法，保留四类价值资产与五类高风险模块的并行识别、合并和逐资产攻击树分析。
-当前复制阶段仅修改方法名称，以及四个 Skill 的独立名称与调用引用；攻击模式库和分析规则
-仍与原方法一致。四个 Skill 均使用 `deephole-compact-` 前缀，以便在 Agent 的统一 Skill
-目录中与原方法共存。任务 ID、产物路径、五参数入口和新建扫描默认方法保持不变。
+攻击树阶段将原方法的 1,355 项攻击模式替换为现有轻量级库的 51 项：C/C++ 11 项、协议 14 项、
+密码学 11 项、系统边界 15 项。完整复制
+`methods/codex_goal_threat_analysis/references/attack_mode.json` 到新方法攻击树 Skill 的
+`references/attack_mode.json`，作为独立随包资源，保留编号、名称、描述和顺序。
+匹配策略沿用 DeepHole：按路径分析实际适用模式，有多少输出多少，不设数量下限或额外排序要求；
+无合理匹配时输出空数组。资产识别与高风险模块识别的提示词正文保持原样，Web 类模块仍参与识别，
+精简库的范围仅限制攻击模式关联。四个 Skill 均使用 `deephole-compact-` 前缀，以便在 Agent 的
+统一 Skill 目录中与原方法共存。任务 ID、产物路径、五参数入口、校验与续扫行为及新建扫描默认
+方法保持不变；`attack_modes` 参数仍保留原 DeepHole 的预留语义，不用于替换候选库。
+上线需更新后端方法目录和 Agent 运行包并重启 Agent，无需前端变更或数据库迁移。
 
 仓库还提供三个轻量级方法：
 

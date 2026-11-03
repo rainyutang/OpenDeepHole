@@ -11,9 +11,11 @@ import pytest
 from deephole_client.skill_catalog import (
     builtin_skill_sources, install_skills, needs_install, skill_source,
 )
+from deephole_client.threat_analysis import resolve_threat_analysis_method
 from task_agent.host import OpenCodeHostBindings, OpenCodeSessionRuntime
 from task_agent.serve_client import OpenCodeServeKey, OpenCodeServeManager, _config_hash
 from task_agent.task_service import _runtime_with_task_skills
+from task_agent.skills import validate_fixed_skills
 
 
 def source(tmp_path, *, name="demo", body="v1", owner="checker:demo"):
@@ -51,6 +53,34 @@ def test_complete_builtin_catalog_and_idempotent_initialization(tmp_path):
         expected = dict(s.files)
         expected.pop("SCENARIOS.md", None)
         assert copied.files == expected
+
+
+def test_compact_method_installs_private_catalog_without_replacing_original(tmp_path):
+    original_owner = "threat-analysis:deephole_threat_analysis"
+    compact_owner = "threat-analysis:deephole_compact_threat_analysis"
+    sources = builtin_skill_sources()
+    original = [source for source in sources if source.owner == original_owner]
+    compact = [source for source in sources if source.owner == compact_owner]
+    assert len(original) == len(compact) == 4
+    workspace = tmp_path / "Agent Workspace"
+    assert install_skills(workspace, original, bundled=True)
+    root = workspace / ".opencode/skills"
+    before = {source.name: skill_source(root / source.name, source.owner).files for source in original}
+
+    assert install_skills(workspace, original + compact, bundled=True)
+    for source in original:
+        assert skill_source(root / source.name, source.owner).files == before[source.name]
+    for source in compact:
+        assert skill_source(root / source.name, source.owner).files == source.files
+    for method_id in ("deephole_threat_analysis", "deephole_compact_threat_analysis"):
+        validate_fixed_skills(root, resolve_threat_analysis_method(method_id).skill_roots())
+
+    reference = "references/attack_mode.json"
+    full = json.loads((root / "attack-tree-by-asset" / reference).read_text(encoding="utf-8"))
+    reduced = json.loads((root / "deephole-compact-attack-tree-by-asset" / reference).read_text(encoding="utf-8"))
+    assert len(full) == 1355
+    assert len(reduced) == 51
+    assert not install_skills(workspace, original + compact, bundled=True)
 
 
 def test_install_excludes_scenarios_and_preserves_runtime_resources(tmp_path):

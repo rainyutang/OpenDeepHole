@@ -1,2 +1,2 @@
 label: DeepHole精简威胁分析
-description: 生成价值资产、高风险模块和攻击树。
+description: 沿用 DeepHole 的资产、模块识别流程，使用 51 种攻击模式生成攻击树。
