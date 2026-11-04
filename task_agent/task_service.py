@@ -3345,6 +3345,7 @@ def _runtime_with_permissions(
         ),
         "bash": {"*": "deny"},
         "skill": {"*": "allow"},
+        "question": "deny",
     })
     config["permission"] = permission
     return dataclasses.replace(

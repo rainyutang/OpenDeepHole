@@ -484,6 +484,7 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             "permission": {
                 "bash": {"*": "allow"},
                 "edit": {"*": "allow"},
+                "question": "allow",
             },
             "plugin": ["global-plugin"],
         }),
@@ -503,6 +504,7 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
     raw_config["serve"]["opencode_config"]["skills"] = {
         "paths": [str(skill_root)],
     }
+    raw_config["serve"]["opencode_config"]["permission"] = {"question": "ask"}
     config_path.write_text(
         yaml.safe_dump(raw_config, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -593,6 +595,8 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             ]
             permission = runtime_config["permission"]
             assert permission["bash"] == {"*": "deny"}
+            assert permission["question"] == "deny"
+            assert json.loads(second_call["config_content"])["permission"]["question"] == "deny"
             assert permission["read"]["*"] == "allow"
             assert permission["external_directory"]["*"] == "allow"
             assert permission["edit"]["*"] == "deny"

@@ -47,6 +47,7 @@ def assert_opencode_read_permissions(
     testcase.assertEqual(permission.get("edit", {}).get("*"), "deny")
     testcase.assertEqual(permission.get("bash"), {"*": "deny"})
     testcase.assertEqual(permission.get("skill"), {"*": "allow"})
+    testcase.assertEqual(permission.get("question"), "deny")
 
     read = permission["read"]
     external = permission["external_directory"]
@@ -612,6 +613,39 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             self.assertNotIn("deephole-code", config["mcp"])
             assert_opencode_read_permissions(self, config, workspace)
+
+    def test_stale_question_permission_triggers_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(enabled=False, name="product-info"),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
+                config_path = managed_opencode_config_path(workspace)
+                for action in (None, "allow", "ask"):
+                    with self.subTest(action=action):
+                        config = json.loads(config_path.read_text(encoding="utf-8"))
+                        if action is None:
+                            config["permission"].pop("question")
+                        else:
+                            config["permission"]["question"] = action
+                        config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                        get_global_opencode_workspace()
+
+                        refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+                        assert_opencode_read_permissions(self, refreshed, workspace)
 
     def test_missing_agent_reference_permissions_trigger_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

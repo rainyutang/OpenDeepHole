@@ -239,7 +239,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 
 当前调用及关联子 Session 中存在 `pending` 工具时，参数生成仅受调用总时限约束；最后一个工具进入 `running` 或结束后，重新开始完整的 `idle_timeout` 计时。此策略适用于 `write`、`edit`、`apply_patch` 等所有工具，避免上游不报告参数流增量时误判长参数生成停滞；该阶段真正卡住也会等到总时限。主动取消始终有效。Agent 在存在待生成参数时每秒查询对应消息以校对状态，消息结束、Session 终止及调用清理均会解除暂停；历史和迟到状态不会重新暂停已进入执行阶段的调用。
 
-`serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash` 和 `skill` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。
+`serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash`、`skill` 和 `question` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。
 
 MCP 直接写在 `serve.opencode_config.mcp` 下。远程 MCP 通常使用 `type: remote`、`url`、`headers` 和 `oauth`；本地 MCP 使用 `type: local`、命令数组 `command` 以及可选的 `environment`。两种 MCP 的 `timeout` 都由 OpenCode 解释，单位为毫秒；这与 `serve.timeout` 的秒不同。扫描级代码图谱 MCP 对外使用 `code_graph_mcp.timeout_seconds`，运行时乘以 `1000` 写入 OpenCode 配置，例如 `300` 秒生成 `"enabled": true, "timeout": 300000`。
 
@@ -399,6 +399,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
 - 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行声明的标准命令。默认策略拒绝变形命令；脚本策略允许引号、空格、Python 名称及参数写法差异，并在原生权限检查前还原标准命令，不扩大原生 shell 白名单。受管 Hook 拒绝未绑定脚本、命令拼接、管道、重定向、变量/命令展开及 `python -c/-m`。只有必需命令会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
+- 自动任务统一禁止 `question`：配置使用 `"question": "deny"`，每次消息发送前还会将禁止规则合入 Session 权限及父子 Session 执行 Hook，即使工具发现失败也生效。此规则覆盖普通分析、续接、纠正、重试和格式修复，避免等待无人回答的问题；不自动选择答案，也不改变其它工具的授权策略。旧受管工作区会自动刷新配置。部署需更新并重启 Agent 及其受管 Serve；已挂起的旧调用需停止后重新运行。
 
 原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限，并合入 MCP、知识库和格式修复的工具选择；消息不发送旧 `tools` 字段，避免 OpenCode 将整份 Session 权限替换成全局工具开关。未知自定义工具默认拒绝，空命令白名单也写入 Shell 拒绝规则和父子 Session 命令 Hook 绑定。续接、纠正及新 Session 重试均重新应用当前权限，避免上一次调用的额外写路径残留。补查不声明 Shell 命令，校验仍由 Task Agent 端 Python 程序执行。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
 

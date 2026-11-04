@@ -7291,6 +7291,10 @@ class OpenCodeServeManager:
                         mcp_overrides.pop(tool_id, None)
                         mcp_overrides[tool_id] = False
 
+            # Unattended tasks have no user to answer questions. Apply this even
+            # when tool discovery fails, to both Session permissions and the
+            # execution Hook inherited by child Sessions.
+            mcp_overrides["question"] = False
             session_permissions = _session_tool_permissions(permissions, tool_ids, mcp_overrides)
             if session_mode == "continued" and permissions is None and session_permissions is not None:
                 existing = await deadline.wait(client.get(

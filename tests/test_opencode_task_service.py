@@ -352,8 +352,10 @@ def test_component_skill_paths_are_merged_into_runtime_config(
     assert runtime.config_content == '{"skills":{"paths":["/existing"]}}'
 
 
+@pytest.mark.parametrize("question_permission", [None, "allow", "ask", "deny"])
 def test_runtime_permissions_are_written_to_global_config(
     tmp_path: Path,
+    question_permission: str | None,
 ) -> None:
     scans_root = tmp_path / ".opendeephole" / "scans"
     work_dir = scans_root / "scan-7"
@@ -372,6 +374,7 @@ def test_runtime_permissions_are_written_to_global_config(
                 "task": {"*": "allow"},
                 "bash": {"*": "allow"},
                 "edit": {"*": "allow"},
+                **({"question": question_permission} if question_permission is not None else {}),
             },
         }),
     )
@@ -389,6 +392,7 @@ def test_runtime_permissions_are_written_to_global_config(
     assert permission["task"] == {"*": "allow"}
     assert permission["bash"] == {"*": "deny"}
     assert permission["skill"] == {"*": "allow"}
+    assert permission["question"] == "deny"
     assert permission["read"]["*"] == "allow"
     assert permission["external_directory"]["*"] == "allow"
     assert permission["edit"]["*"] == "deny"

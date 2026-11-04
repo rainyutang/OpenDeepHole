@@ -489,6 +489,7 @@ def build_opencode_config(
             "edit": edit_permissions,
             "bash": {"*": "deny"},
             "skill": {"*": "allow"},
+            "question": "deny",
         },
     }
     for spec in build_managed_mcp_runtime_specs(get_config()).values():
@@ -534,6 +535,7 @@ def _has_managed_permissions(config_path: Path, workspace: Path) -> bool:
             and edit.get("*") == "deny"
             and permission.get("bash", {}).get("*") == "deny"
             and permission.get("skill", {}).get("*") == "allow"
+            and permission.get("question") == "deny"
             and all(
                 read.get(pattern) == "allow"
                 and external.get(pattern) == "allow"
