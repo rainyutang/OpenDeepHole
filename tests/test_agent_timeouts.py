@@ -32,7 +32,7 @@ def legacy_config(version):
 
 def test_new_defaults_and_all_four_stage_round_trip(tmp_path):
     for payload in (AgentRemoteConfig().model_dump(), remote_config_dict(AgentConfig())):
-        assert payload["schema_version"] == 10
+        assert payload["schema_version"] == 11
         assert [payload["vulnerability_mining"][key] for key in MINING_FIELDS] == [10800, 3600, 1800]
         for policy in policies(payload):
             assert [policy[key] for key in RETRY_FIELDS] == [1800, 1800]
@@ -68,7 +68,7 @@ def test_old_defaults_upgrade_once_on_both_backend_and_client(version, threat):
     client = AgentConfig()
     apply_remote_config(client, raw)
     for exported in (AgentRemoteConfig.model_validate(raw).model_dump(), remote_config_dict(client)):
-        assert exported["schema_version"] == 10
+        assert exported["schema_version"] == 11
         assert [(p["timeout_seconds"], p["idle_timeout_seconds"]) for p in policies(exported)] == [(10800, 1200), (10800, 1200), (3600, 1200), (10800, 1200)]
         assert [p["json_correction_timeout_seconds"] for p in policies(exported)] == [1800] * 4
         assert [p["validation_retry_timeout_seconds"] for p in policies(exported)] == [1800] * 4

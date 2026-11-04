@@ -38,7 +38,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import Literal, NoReturn, Optional
 from urllib.parse import urlsplit
 
 from fastapi import (
@@ -51,7 +51,15 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, model_validator
+
+from task_agent.llm_config import (
+    llm_provider_revision,
+    merge_llm_provider_secrets,
+    normalize_llm_providers,
+    redact_llm_error,
+    redact_llm_providers,
+)
 
 from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
@@ -234,7 +242,7 @@ def _stored_agent_config(record: dict | None) -> AgentRemoteConfig:
         payload = json.loads(str(record.get("config_json") or "{}"))
         return AgentRemoteConfig(**payload)
     except Exception as exc:
-        logger.warning("Ignoring invalid persisted Agent config: %s", exc)
+        logger.warning("Ignoring invalid persisted Agent config: %s", type(exc).__name__)
         return AgentRemoteConfig()
 
 
@@ -602,6 +610,10 @@ def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
 ) -> None:
+    try:
+        config.llm_providers = normalize_llm_providers(config.llm_providers)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     if config.base.tool != "opencode":
         raise HTTPException(status_code=422, detail="基础配置中的工具只能是 opencode")
     if not config.base.executable.strip():
@@ -700,6 +712,8 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
+_opencode_config_status_waiters: dict[str, asyncio.Future] = {}
+_opencode_config_apply_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
@@ -708,6 +722,8 @@ _review_notes_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
+    "opencode_config_status_result": _opencode_config_status_waiters,
+    "opencode_config_apply_result": _opencode_config_apply_waiters,
     "mcp_probe_result": _mcp_probe_waiters,
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
@@ -2324,7 +2340,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             logger.warning(
                 "Ignoring invalid config reported by agent %s: %s",
                 name,
-                exc,
+                type(exc).__name__,
             )
             initial_config = AgentRemoteConfig()
 
@@ -2394,6 +2410,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             runtime_update_error=str(record.get("runtime_update_error") or ""),
             accepting_tasks=_runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING,
             protocol_version=protocol_version,
+            llm_api_config=reported_capabilities.get("llm_api_config") is True,
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
@@ -3125,7 +3142,7 @@ async def get_agent_config(
             await run_store_call(store, "get_agent_record", agent_id),
             current_user,
         )
-        return _stored_agent_config(record)
+        return _public_agent_config(_stored_agent_config(record))
     if current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     record = (
@@ -3133,13 +3150,49 @@ async def get_agent_config(
         if agent.agent_key
         else None
     )
-    return _stored_agent_config(record) if record else _agent_configs.get(agent.name, AgentRemoteConfig())
+    return _public_agent_config(_stored_agent_config(record) if record else _agent_configs.get(agent.name, AgentRemoteConfig()))
+
+
+def _public_agent_config(config: AgentRemoteConfig) -> AgentRemoteConfig:
+    return config.model_copy(update={"llm_providers": redact_llm_providers(config.llm_providers)}, deep=True)
+
+
+def _prepare_managed_config_update(body: AgentRemoteConfig, previous: AgentRemoteConfig) -> AgentRemoteConfig:
+    """Resolve secrets before validation, and reject dangling managed references."""
+    updated = body.model_copy(deep=True)
+    try:
+        incoming = body.llm_providers if "llm_providers" in body.model_fields_set else previous.llm_providers
+        updated.llm_providers = merge_llm_provider_secrets(incoming, previous.llm_providers)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    old_models = {f"{provider_id}/{model_id}" for provider_id, provider in previous.llm_providers.items() for model_id in provider.get("models", {})}
+    new_models = {f"{provider_id}/{model_id}" for provider_id, provider in updated.llm_providers.items() for model_id in provider.get("models", {})}
+    removed = old_models - new_models
+    if any(model.enabled and model.model.strip() in removed for model in updated.model_pool.models):
+        raise HTTPException(status_code=422, detail="删除或重命名 API 模型前，请移除或停用模型池中的对应引用")
+    return updated
+
+
+class _AgentConfigWrite(AgentRemoteConfig):
+    """Keep Pydantic's malformed-input diagnostics from echoing credentials."""
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _safe_validation_errors(cls, value, handler):
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            errors = [
+                {"type": item["type"], "loc": ["body", *item["loc"]], "msg": item["msg"]}
+                for item in exc.errors(include_input=False, include_context=False)
+            ]
+            raise HTTPException(status_code=422, detail=errors) from None
 
 
 @router.put("/{agent_id}/config")
 async def update_agent_config(
     agent_id: str,
-    body: AgentRemoteConfig,
+    body: _AgentConfigWrite,
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Compatibility route for saving the stable Agent-managed config.
@@ -3154,6 +3207,7 @@ async def update_agent_config(
         await run_store_call(store, "get_agent_record", agent_key),
         current_user,
     )
+    body = _prepare_managed_config_update(body, _stored_agent_config(record))
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
@@ -3169,7 +3223,7 @@ async def update_agent_config(
     live = await resolve_agent_connection_async(agent_key)
     if live is not None:
         await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
-    return {"ok": True}
+    return {"ok": True, "saved_revision": llm_provider_revision(body.llm_providers)}
 
 
 @public_router.get("/api/agent-configs/{agent_key}", response_model=AgentRemoteConfig)
@@ -3182,7 +3236,7 @@ async def get_stable_agent_config(
         await run_store_call(store, "get_agent_record", agent_key),
         current_user,
     )
-    return _stored_agent_config(record)
+    return _public_agent_config(_stored_agent_config(record))
 
 
 @public_router.get(
@@ -3211,7 +3265,7 @@ async def get_stable_agent_opencode_usage(
 @public_router.put("/api/agent-configs/{agent_key}")
 async def update_stable_agent_config(
     agent_key: str,
-    body: AgentRemoteConfig,
+    body: _AgentConfigWrite,
     current_user: User = Depends(get_current_user),
 ) -> dict:
     store = get_scan_store()
@@ -3219,6 +3273,7 @@ async def update_stable_agent_config(
         await run_store_call(store, "get_agent_record", agent_key),
         current_user,
     )
+    body = _prepare_managed_config_update(body, _stored_agent_config(record))
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
@@ -3234,7 +3289,82 @@ async def update_stable_agent_config(
     applied = False
     if live is not None:
         applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
-    return {"ok": True, "applied": applied}
+    return {"ok": True, "applied": applied, "saved_revision": llm_provider_revision(body.llm_providers)}
+
+
+class _AgentLLMConfigStatus(BaseModel):
+    desired_revision: str = ""
+    applied_revision: str = ""
+    state: Literal["active", "draining", "applying", "failed", "unsupported", "offline"]
+    active_tasks: int = 0
+    error: str = ""
+
+
+async def _agent_llm_config_status(agent_key: str, current_user: User, *, apply: bool = False) -> _AgentLLMConfigStatus:
+    record = _authorize_agent_record(
+        await run_store_call(get_scan_store(), "get_agent_record", agent_key), current_user,
+    )
+    config = _stored_agent_config(record)
+    revision = llm_provider_revision(config.llm_providers)
+    live = await resolve_agent_connection_async(agent_key)
+    if live is None:
+        return _AgentLLMConfigStatus(desired_revision=revision, state="offline")
+    if live[1].llm_api_config is False:
+        return _AgentLLMConfigStatus(desired_revision=revision, state="unsupported", error="请更新 Agent 后应用 API 配置")
+    request_id = uuid.uuid4().hex
+    waiters = _opencode_config_apply_waiters if apply else _opencode_config_status_waiters
+    waiter = asyncio.get_running_loop().create_future()
+    waiters[request_id] = waiter
+    command = {"type": "opencode_config_apply" if apply else "opencode_config_status", "request_id": request_id}
+    if apply:
+        command["config"] = config.model_dump(mode="json")
+    try:
+        if not await send_agent_command(live[0], command):
+            return _AgentLLMConfigStatus(desired_revision=revision, state="offline")
+        result = await _wait_agent_response(request_id, waiter, timeout=10.0)
+        payload = result.get("status", result) if isinstance(result, dict) else None
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid status")
+        response = _AgentLLMConfigStatus(
+            desired_revision=revision,
+            applied_revision=str(payload.get("applied_revision") or ""),
+            state=payload.get("state", "failed"),
+            active_tasks=_nonnegative_int(payload.get("active_tasks")),
+            error=redact_llm_error(payload.get("error"), config.llm_providers),
+        )
+        if response.state == "active" and response.applied_revision != revision:
+            if str(payload.get("desired_revision") or "") == revision:
+                response.state = "draining"
+            else:
+                response.state = "failed"
+                response.error = "Agent 尚未应用已保存配置，请重试应用"
+        return response
+    except asyncio.TimeoutError:
+        return _AgentLLMConfigStatus(
+            desired_revision=revision,
+            state="unsupported" if live[1].llm_api_config is None else "failed",
+            error="Agent 未返回配置状态，请确认 Agent 已更新并在线",
+        )
+    except (ValueError, TypeError):
+        return _AgentLLMConfigStatus(desired_revision=revision, state="failed", error="Agent 返回的 API 配置状态无效")
+    finally:
+        waiters.pop(request_id, None)
+        if not waiter.done():
+            waiter.cancel()
+
+
+@public_router.get("/api/agent-configs/{agent_key}/opencode-config-status", response_model=_AgentLLMConfigStatus)
+async def get_stable_agent_opencode_config_status(
+    agent_key: str, current_user: User = Depends(get_current_user),
+) -> _AgentLLMConfigStatus:
+    return await _agent_llm_config_status(agent_key, current_user)
+
+
+@public_router.post("/api/agent-configs/{agent_key}/opencode-config-apply", response_model=_AgentLLMConfigStatus)
+async def apply_stable_agent_opencode_config(
+    agent_key: str, current_user: User = Depends(get_current_user),
+) -> _AgentLLMConfigStatus:
+    return await _agent_llm_config_status(agent_key, current_user, apply=True)
 
 
 @public_router.post("/api/agent-configs/{agent_key}/runtime-update")

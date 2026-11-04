@@ -465,17 +465,35 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         return None
     elif cmd_type == "config":
         from deephole_client.config import apply_remote_config, save_config
+        from deephole_client.llm_runtime import initialize
         if msg.get("config"):
+            initialize(config)
             apply_remote_config(config, msg["config"])
             try:
                 await _apply_live_config_update(config)
             except Exception as e:
-                print(f"Config updated from server (warning: live runtime refresh failed: {e})")
+                print(f"Config updated from server (live runtime refresh failed: {type(e).__name__})")
             try:
                 save_config(config)
                 print("Config updated from server and persisted to agent.yaml")
             except Exception as e:
-                print(f"Config updated from server (warning: failed to persist: {e})")
+                print(f"Config updated from server (failed to persist: {type(e).__name__})")
+    elif cmd_type in {"opencode_config_status", "opencode_config_apply"}:
+        from deephole_client.llm_runtime import initialize, retry, status
+        if cmd_type == "opencode_config_apply":
+            if isinstance(msg.get("config"), dict):
+                from deephole_client.config import apply_remote_config, save_config
+                initialize(config)
+                apply_remote_config(config, msg["config"])
+                save_config(config)
+                await _apply_live_config_update(config)
+            retry()
+        return {
+            "type": f"{cmd_type}_result",
+            "request_id": str(msg.get("request_id") or ""),
+            "ok": True,
+            **status(),
+        }
     elif cmd_type == "opencode_models":
         return await agent_server.handle_opencode_models(
             request_id=msg.get("request_id", ""),
@@ -516,6 +534,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
 
 
 async def _apply_live_config_update(config) -> None:
+    from deephole_client.llm_runtime import update
+    await update(config)
+
+
+async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
     """Apply server-managed model/API config to already loaded backend state."""
     from deephole_client.config import apply_network_env
     from deephole_client.platform_runtime import refresh_platform_runtime_config
@@ -542,7 +565,8 @@ async def _apply_live_config_update(config) -> None:
     get_serve_manager().update_managed_mcp_configs(
         build_managed_mcp_runtime_specs(config)
     )
-    mark_serve_config_dirty()
+    if mark_dirty:
+        mark_serve_config_dirty()
     await refresh_configured_model_pool(config.opencode)
     await notify_model_pool_config_changed()
     # Increasing an environment limit should start already queued validations
@@ -597,6 +621,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "type": "hello",
                     "protocol_versions": [2, 1],
                     "capabilities": {
+                        "llm_api_config": True,
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,
@@ -645,15 +670,17 @@ async def _ws_loop(config, task_manager, reporter) -> None:
 
                 if welcome.get("config"):
                     from deephole_client.config import save_config
+                    from deephole_client.llm_runtime import initialize
+                    initialize(config)
                     apply_remote_config(config, welcome["config"])
                     try:
                         await _apply_live_config_update(config)
                     except Exception as e:
-                        print(f"Config received from server (warning: live runtime refresh failed: {e})")
+                        print(f"Config received from server (live runtime refresh failed: {type(e).__name__})")
                     try:
                         save_config(config)
                     except Exception as e:
-                        print(f"Config received from server (warning: failed to persist: {e})")
+                        print(f"Config received from server (failed to persist: {type(e).__name__})")
 
                 reconnect_delay = 2  # reset backoff on successful connect
                 print(f"  Connected. Agent ID: {agent_id}")
@@ -789,6 +816,9 @@ async def _main() -> None:
     # Apply no_proxy early so httpx respects it
     apply_network_env(config)
 
+    from deephole_client.llm_runtime import initialize
+    initialize(config)
+
     name = config.agent_name or socket.gethostname()
 
     print("DeepHole 2.0 Agent Daemon")
@@ -822,6 +852,8 @@ async def _main() -> None:
         await _ws_loop(config, task_manager, reporter)
     finally:
         try:
+            from task_agent.config_reload import get_config_reload_coordinator
+            await get_config_reload_coordinator().shutdown()
             from task_agent import shutdown_opencode
             await shutdown_opencode()
         except Exception as exc:

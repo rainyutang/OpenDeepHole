@@ -1012,8 +1012,39 @@ export interface MiningEngineCatalog {
   updated_at: string;
 }
 
+export interface AgentLlmModelConfig {
+  previous_id?: string;
+  name?: string;
+  limit?: { context?: number; output?: number; input?: number };
+  headers?: Record<string, string | null>;
+}
+
+export interface AgentLlmProviderConfig {
+  previous_id?: string;
+  name?: string;
+  npm: "@ai-sdk/openai-compatible";
+  options: {
+    baseURL: string;
+    apiKey?: string | null;
+    apiKey_set?: boolean;
+    headers?: Record<string, string | null>;
+    timeout?: number | false;
+    chunkTimeout?: number;
+  };
+  models: Record<string, AgentLlmModelConfig>;
+}
+
+export interface AgentOpenCodeConfigStatus {
+  desired_revision: string;
+  applied_revision: string;
+  state: "active" | "draining" | "applying" | "failed" | "unsupported" | "offline";
+  active_tasks: number;
+  error: string;
+}
+
 export interface AgentRemoteConfig {
-  schema_version: 10;
+  schema_version: 11;
+  llm_providers: Record<string, AgentLlmProviderConfig>;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;

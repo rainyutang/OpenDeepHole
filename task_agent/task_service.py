@@ -23,6 +23,7 @@ from uuid import uuid4
 from .api import OpenCodeResult, _normalize_json_repair_output_prompt
 from .bash_commands import command_binding_metadata
 from .config_json import dump_opencode_config, parse_opencode_jsonc
+from .config_reload import get_config_reload_coordinator
 from .deadline import CLEANUP_TIMEOUT_SECONDS, OperationDeadline
 from .host import (
     OpenCodeInvocationMetadata as OutputSource,
@@ -868,11 +869,14 @@ class OpenCodeTaskService:
                     source=OutputSource(), error=f"OpenCode task worker failed: {exc}",
                 )
         finally:
-            if not record.requeue_requested and not record.result_future.done():
-                self._finish_record(
-                    record, status="failure", session_id=record.last_session_id,
-                    source=OutputSource(), error="OpenCode task worker exited without a result",
-                )
+            try:
+                if not record.requeue_requested and not record.result_future.done():
+                    self._finish_record(
+                        record, status="failure", session_id=record.last_session_id,
+                        source=OutputSource(), error="OpenCode task worker exited without a result",
+                    )
+            finally:
+                get_config_reload_coordinator().release_task(record.task_id)
 
     async def _execute_record(self, record: _TaskRecord) -> None:
         spec = record.spec
@@ -954,6 +958,8 @@ class OpenCodeTaskService:
                     avoid_model_identities=set(avoid_model_identities),
                     quota_wait_budget=quota_wait_budget,
                     on_queued=lambda: self._notify_lease_state(record, "queued"),
+                    admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
+                    on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -2020,6 +2026,8 @@ class OpenCodeTaskService:
                 prefer_lowest_capability=True,
                 wait_when_unavailable=False,
                 record_completion_on_failure=False,
+                admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
+                on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
             )
             if formatter_lease is None:
                 raise asyncio.CancelledError()
@@ -2311,6 +2319,8 @@ class OpenCodeTaskService:
                 wait_when_unavailable=not validation_debug,
                 record_completion_on_failure=not has_fresh_retry,
                 quota_wait_budget=quota_wait_budget,
+                admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
+                on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
             )
             if correction_lease is None:
                 raise asyncio.CancelledError()

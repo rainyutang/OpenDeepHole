@@ -17,6 +17,8 @@ from .config import AgentConfig, apply_network_env
 
 
 def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict:
+    from .llm_runtime import active_config
+    config = active_config(config)
     opencode = dataclasses.asdict(config.opencode)
     opencode["mock"] = False
     raw = {
@@ -60,6 +62,8 @@ def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict
 
 def refresh_platform_runtime_config(config: AgentConfig) -> None:
     """Apply live model/runtime changes to an already loaded platform adapter."""
+    from .llm_runtime import active_config
+    config = active_config(config)
     apply_network_env(config)
     import backend.config as backend_config
 
@@ -100,6 +104,8 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
 
 def configure_platform_runtime(config: AgentConfig, work_dir: Path) -> None:
     """Configure the platform's Task Agent host adapter for one operation."""
+    from .llm_runtime import active_config
+    config = active_config(config)
     work_dir = Path(work_dir).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     config_path = work_dir / "config.yaml"

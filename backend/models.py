@@ -1141,6 +1141,7 @@ class AgentInfo(BaseModel):
     accepting_tasks: bool = True
     has_explicit_model: bool = False
     protocol_version: int = 1
+    llm_api_config: bool | None = None
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -1524,8 +1525,11 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: Literal[10] = 10
+    schema_version: Literal[11] = 11
     base: AgentBaseConfig = AgentBaseConfig()
+    # Browser writes contain write-only secret markers; resolve them against the
+    # persisted config before provider validation and Agent delivery.
+    llm_providers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
     # v3 compatibility input only. Code graph MCPs are snapshotted per scan
@@ -1559,7 +1563,12 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        return upgrade_managed_timeouts(cls._upgrade_legacy_v8(value), source=value)
+        upgraded = upgrade_managed_timeouts(cls._upgrade_legacy_v8(value), source=value)
+        if isinstance(upgraded, dict):
+            upgraded["schema_version"] = 11
+            if isinstance(value, dict) and "llm_providers" in value:
+                upgraded["llm_providers"] = copy.deepcopy(value["llm_providers"])
+        return upgraded
 
     @classmethod
     def _upgrade_legacy_v8(cls, value):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import os
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -342,6 +343,8 @@ class AgentConfig:
     no_proxy: str = "10.0.0.0/8"
     checkers: list = field(default_factory=list)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
+    # Credentials belong to the Agent, never to per-scan runtime snapshots.
+    llm_providers: dict = field(default_factory=dict, repr=False)
     fp_review_cli: OpenCodeConfig | None = None
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
@@ -492,7 +495,12 @@ def _upgrade_managed_v8(
 
 
 def _upgrade_managed_remote(remote: dict) -> dict:
-    return upgrade_managed_timeouts(_upgrade_managed_remote_v8(remote), source=remote)
+    migrated = upgrade_managed_timeouts(_upgrade_managed_remote_v8(remote), source=remote)
+    if isinstance(migrated, dict) and (
+        "base" in migrated or "model_pool" in migrated or migrated.get("schema_version", 0) >= 2
+    ):
+        migrated["schema_version"] = 11
+    return migrated
 
 
 def _upgrade_managed_remote_v8(remote: dict) -> dict:
@@ -694,6 +702,9 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     are never overwritten because they are local-only settings.
     """
     remote = _upgrade_managed_remote(remote)
+    if "llm_providers" in remote:
+        from task_agent.llm_config import normalize_llm_providers
+        config.llm_providers = normalize_llm_providers(remote["llm_providers"])
     if isinstance(remote.get("base"), dict) or isinstance(remote.get("model_pool"), dict):
         base = remote.get("base") if isinstance(remote.get("base"), dict) else {}
         model_pool = remote.get("model_pool") if isinstance(remote.get("model_pool"), dict) else {}
@@ -850,7 +861,8 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 10,
+        "schema_version": 11,
+        "llm_providers": copy.deepcopy(config.llm_providers),
         "base": {
             "tool": "opencode",
             "executable": config.opencode.executable,
@@ -987,6 +999,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         no_proxy=raw.get("no_proxy", "10.0.0.0/8"),
         checkers=raw.get("checkers", []),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
+        llm_providers=copy.deepcopy(raw.get("llm_providers") or {}),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         git_history=GitHistoryConfig(**git_history_raw),
@@ -1020,7 +1033,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v10 remotely-managed fields while preserving local bootstrap fields."""
+    """Atomically persist managed fields, including credentials, privately."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return
@@ -1053,5 +1066,16 @@ def save_config(config: AgentConfig) -> None:
     ):
         raw.pop(key, None)
     raw.update(remote_config_dict(config))
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f, allow_unicode=True, default_flow_style=False)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

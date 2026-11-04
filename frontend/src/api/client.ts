@@ -1048,7 +1048,7 @@ export async function getCheckerScansPage(checker: string, product?: string, cur
 
 export async function getAgentConfig(agentKey: string): Promise<AgentRemoteConfig> {
   const { data } = await api.get<AgentRemoteConfig>(`/api/agent-configs/${agentKey}`);
-  return data;
+  return { ...data, schema_version: 11, llm_providers: data.llm_providers || {} };
 }
 
 export async function getAgentOpenCodePool(agentId: string): Promise<AgentOpenCodePoolStatus> {
@@ -1064,8 +1064,23 @@ export async function getAgentOpenCodeModels(agentKey: string, refresh = false):
   return data;
 }
 
-export async function updateAgentConfig(agentKey: string, config: AgentRemoteConfig): Promise<void> {
-  await api.put(`/api/agent-configs/${agentKey}`, config);
+export async function updateAgentConfig(agentKey: string, config: AgentRemoteConfig): Promise<{ saved_revision?: string }> {
+  const { data } = await api.put(`/api/agent-configs/${agentKey}`, config);
+  return data;
+}
+
+export async function getAgentOpenCodeConfigStatus(agentKey: string): Promise<import("../types").AgentOpenCodeConfigStatus> {
+  const { data } = await api.get<import("../types").AgentOpenCodeConfigStatus>(
+    `/api/agent-configs/${encodeURIComponent(agentKey)}/opencode-config-status`,
+  );
+  return data;
+}
+
+export async function applyAgentOpenCodeConfig(agentKey: string): Promise<import("../types").AgentOpenCodeConfigStatus> {
+  const { data } = await api.post<import("../types").AgentOpenCodeConfigStatus>(
+    `/api/agent-configs/${encodeURIComponent(agentKey)}/opencode-config-apply`,
+  );
+  return data;
 }
 
 export async function getAgentMcpStatus(agentKey: string): Promise<AgentMcpStatusResponse> {

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   getAgentConfig,
+  getAgentOpenCodeConfigStatus,
+  applyAgentOpenCodeConfig,
   getAgentOpenCodeModels,
   getAgentOpenCodePool,
   getAgents,
@@ -15,12 +17,15 @@ import type {
   AgentOpenCodeModelConfig,
   AgentOpenCodeModelListItem,
   AgentOpenCodePoolStatus,
+  AgentOpenCodeConfigStatus,
   AgentRemoteConfig,
   AgentValidatorCatalog,
   CheckerInfo,
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
 import { agentOwnerLabel } from "../agentPresentation";
+import LlmApiEditor from "./LlmApiEditor";
+import { savedLlmConfig, validateLlmProviders } from "../llmApiConfig";
 
 interface Props {
   onBack: () => void;
@@ -49,7 +54,8 @@ const policy = (
   json_correction_timeout_seconds: 1800, validation_retry_timeout_seconds: 1800,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 10,
+  schema_version: 11,
+  llm_providers: {},
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { models: [] },
   threat_analysis: {
@@ -92,6 +98,8 @@ function configuredWeekdays(window: AgentModelTimeWindow): number[] {
 }
 
 function validateAgentConfig(config: AgentRemoteConfig): string {
+  const providerError = validateLlmProviders(config);
+  if (providerError) return providerError;
   const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
   const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds, policy.json_correction_timeout_seconds, policy.validation_retry_timeout_seconds]);
   timeouts.push(config.vulnerability_mining.threat_audit_timeout_seconds, config.vulnerability_mining.candidate_audit_timeout_seconds, config.vulnerability_mining.vulnerability_dedup_timeout_seconds);
@@ -183,6 +191,12 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ methods: [], errors: [], updated_at: "" });
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
+  const [llmStatus, setLlmStatus] = useState<AgentOpenCodeConfigStatus | null>(null);
+  const [retryingLlm, setRetryingLlm] = useState(false);
+  const [savedVersion, setSavedVersion] = useState(0);
+  const llmStatusRequest = useRef(0);
+  const editRevision = useRef(0);
+  const savedProviders = useRef("{}");
   const configRequest = useRef(0);
   const poolRequest = useRef(0);
   const [dirty, setDirty] = useState(false);
@@ -199,7 +213,17 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   } | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.agent_key === agentKey);
-  const setCfg = (next: AgentRemoteConfig) => { setConfig(next); setDirty(true); setMessage(""); };
+  const setCfg = (next: AgentRemoteConfig) => { editRevision.current += 1; setConfig(next); setDirty(true); setMessage(""); };
+
+  const refreshLlmStatus = async (targetAgentKey: string) => {
+    const requestId = ++llmStatusRequest.current;
+    try {
+      const next = await getAgentOpenCodeConfigStatus(targetAgentKey);
+      if (requestId === llmStatusRequest.current) setLlmStatus(next);
+    } catch {
+      // A transient status error must not replace an unsaved form or assert success.
+    }
+  };
 
   const refreshModelPool = async (targetAgentId: string) => {
     const requestId = ++poolRequest.current;
@@ -235,6 +259,8 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     ]).then(([next, nextCatalog, nextCheckers]) => {
       if (requestId !== configRequest.current) return;
       setConfig(next); setCatalog(nextCatalog); setCheckers(nextCheckers); setDirty(false); setMessage("");
+      savedProviders.current = JSON.stringify(next.llm_providers || {});
+      editRevision.current += 1;
     }).catch(() => {
       if (requestId === configRequest.current) setMessage("加载客户端配置失败");
     }).finally(() => {
@@ -264,6 +290,40 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     };
   }, [agentKey, section, selectedAgent?.agent_id, selectedAgent?.online]);
 
+  useEffect(() => {
+    llmStatusRequest.current += 1;
+    setLlmStatus(null);
+    if (!agentKey || section !== "basic") return;
+    if (!selectedAgent?.online) {
+      setLlmStatus({ state: "offline", desired_revision: "", applied_revision: "", active_tasks: 0, error: "" });
+      return;
+    }
+    let disposed = false;
+    let timer = 0;
+    const refresh = async () => {
+      await refreshLlmStatus(agentKey);
+      if (!disposed) timer = window.setTimeout(refresh, 3000);
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      llmStatusRequest.current += 1;
+    };
+  }, [agentKey, section, selectedAgent?.online]);
+
+  const retryLlm = async () => {
+    const target = agentKey;
+    const requestId = ++llmStatusRequest.current;
+    setRetryingLlm(true);
+    try {
+      const status = await applyAgentOpenCodeConfig(target);
+      if (requestId === llmStatusRequest.current) setLlmStatus(status);
+    } catch {
+      if (requestId === llmStatusRequest.current) setMessage("重试应用失败，请稍后重试");
+    } finally { setRetryingLlm(false); }
+  };
+
   const switchAgent = (next: string) => {
     if (saving) return;
     if (dirty && !window.confirm("当前客户端的修改尚未保存，确定切换吗？")) return;
@@ -274,13 +334,27 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     const configError = validateAgentConfig(config);
     if (configError) { setMessage(configError); return; }
     setSaving(true); setMessage("");
+    const submittedRevision = editRevision.current;
+    const providersChanged = JSON.stringify(config.llm_providers || {}) !== savedProviders.current;
     try {
-      await updateAgentConfig(agentKey, config);
-      setDirty(false);
+      const result = await updateAgentConfig(agentKey, config);
+      const saved = savedLlmConfig(config);
+      savedProviders.current = JSON.stringify(saved.llm_providers);
+      if (submittedRevision === editRevision.current) {
+        setConfig(saved);
+        setDirty(false);
+        setSavedVersion((value) => value + 1);
+      }
+      if (providersChanged) {
+        llmStatusRequest.current += 1;
+        setLlmStatus((current) => ({ desired_revision: result.saved_revision || "", applied_revision: current?.applied_revision || "",
+          state: selectedAgent?.online ? "applying" : "offline", active_tasks: current?.active_tasks || 0, error: "" }));
+        if (selectedAgent?.online) void refreshLlmStatus(agentKey);
+      }
       if (section === "basic" && selectedAgent?.online) {
         void refreshModelPool(selectedAgent.agent_id);
       }
-      setMessage(selectedAgent?.online
+      setMessage(providersChanged ? "配置已保存" : selectedAgent?.online
         ? "配置已保存并推送到客户端；新建扫描会使用更新后的快照"
         : "配置已保存，将在客户端重连后生效");
     }
@@ -466,6 +540,10 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
                 <Field label="OpenCode Serve 端口" hint="留空时，本次客户端进程自动选择一个空闲端口"><input className={input} type="number" min={1} max={65535} value={config.base.opencode_serve_port ?? ""} onChange={(e) => setCfg({ ...config, base: { ...config.base, opencode_serve_port: e.target.value === "" ? null : Number(e.target.value) } })} /></Field>
                 <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
               </div>
+            </div>
+            <div className="border-t border-slate-700 pt-6">
+              <LlmApiEditor key={agentKey} config={config} onChange={setCfg} status={llmStatus}
+                onRetry={() => void retryLlm()} retrying={retryingLlm} saving={saving} savedVersion={savedVersion} />
             </div>
             <div className="border-t border-slate-700 pt-6">
               <h3 className="mb-4 text-sm font-semibold text-slate-200">模型配置</h3>

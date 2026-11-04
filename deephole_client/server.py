@@ -1578,12 +1578,22 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
 
         if _config is None:
             raise RuntimeError("Agent config is not initialized")
-        tool = str(getattr(_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
+        from deephole_client.llm_runtime import active_config, status as llm_status
+        reload_status = llm_status()
+        if reload_status["state"] in {"applying", "failed"}:
+            return {
+                "type": "opencode_models_result", "request_id": request_id,
+                "ok": True, "models": [],
+                "message": "API 配置正在应用，请稍后刷新" if reload_status["state"] == "applying"
+                else "API 配置应用失败，请先重试应用",
+            }
+        runtime_config = active_config(_config)
+        tool = str(getattr(runtime_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
         if tool != "opencode":
             raise RuntimeError(f"{tool} does not support serve model listing")
         stage = "解析 OpenCode Serve 运行配置"
         runtime = build_opencode_session_runtime(
-            _config.opencode,
+            runtime_config.opencode,
             directory=Path.cwd(),
         )
         print(with_local_timestamp(
@@ -1616,7 +1626,10 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             "type": "opencode_models_result",
             "request_id": request_id,
             "ok": True,
-            "message": model_result.message,
+            "message": (
+                "等待已有任务完成后应用 API 配置；当前显示旧模型目录"
+                if reload_status["state"] == "draining" else model_result.message
+            ),
             "models": [
                 {
                     "id": item.id,

@@ -177,6 +177,8 @@ class _PendingLeaseRequest:
     quota_wait_deadline: float | None = None
     quota_wait_budget: ModelQuotaWaitBudget | None = None
     quota_wait_logged: bool = False
+    admission_allowed: Callable[[], bool] | None = None
+    on_admitted: Callable[[], None] | None = None
 
 
 @dataclass
@@ -797,6 +799,8 @@ def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
     eligible, all_options = _eligible_options_for_request_locked(request)
+    if request.admission_allowed is not None and not request.admission_allowed():
+        return None, all_options
     now = time.monotonic()
     circuit_available = [
         option
@@ -1130,6 +1134,10 @@ def _grant_lease_locked(
 ) -> ModelLease:
     global _global_running, _global_updated_at
 
+    # Admission and the lease grant share one non-yielding critical section.
+    # A config save cannot strand an unregistered running business task.
+    if request.on_admitted is not None:
+        request.on_admitted()
     _consume_planned_task_locked(request)
     _global_running += 1
     _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
@@ -1281,6 +1289,8 @@ async def acquire_model_lease(
     quota_wait_deadline: float | None = None,
     quota_wait_budget: ModelQuotaWaitBudget | None = None,
     on_queued: Callable[[], Any] | None = None,
+    admission_allowed: Callable[[], bool] | None = None,
+    on_admitted: Callable[[], None] | None = None,
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
@@ -1345,9 +1355,12 @@ async def acquire_model_lease(
                             else None
                         ),
                         quota_wait_budget=quota_wait_budget,
+                        admission_allowed=admission_allowed,
+                        on_admitted=on_admitted,
                     )
                     option, all_options = _choose_available_for_request_locked(request)
-                    if not all_options and not request.wait_when_unavailable:
+                    admission_open = admission_allowed is None or admission_allowed()
+                    if admission_open and not all_options and not request.wait_when_unavailable:
                         _fail_no_available_model_locked(request)
                         raise NoAvailableModelError()
                     if option is not None and not _pending_requests:
@@ -1358,11 +1371,16 @@ async def acquire_model_lease(
                     notify_queued = True
                 else:
                     all_options, _, _ = _request_options_locked(request)
-                    if not all_options and not request.wait_when_unavailable:
+                    admission_open = admission_allowed is None or admission_allowed()
+                    if admission_open and not all_options and not request.wait_when_unavailable:
                         _fail_no_available_model_locked(request)
                         raise NoAvailableModelError()
 
-                if notify_queued:
+                if not admission_open:
+                    if request.quota_wait_budget is not None:
+                        request.quota_wait_budget.pause(time.monotonic())
+                    changed = _register_change_waiter_locked()
+                elif notify_queued:
                     # This request can only grant itself on its next loop, so it is
                     # safe to notify outside the pool lock before execution starts.
                     pass

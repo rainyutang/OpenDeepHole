@@ -383,7 +383,7 @@ def get_global_opencode_workspace() -> Path:
     return workspace
 
 
-def refresh_global_opencode_config() -> Path:
+def refresh_global_opencode_config(*, providers: dict | None = None) -> Path:
     """Rewrite the Agent-owned OpenCode configuration and managed MCP entries."""
     workspace = get_global_opencode_workspace()
     config_path = managed_opencode_config_path(workspace)
@@ -394,6 +394,7 @@ def refresh_global_opencode_config() -> Path:
             json.dumps(build_opencode_config(
                 skills_paths=[str(skills_dir)],
                 readable_paths=[str(workspace / ".opencode")],
+                providers=providers,
             ), indent=2),
             mode=0o600,
         )
@@ -439,6 +440,7 @@ def build_opencode_config(
     skills_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     readable_paths: list[str] | None = None,
+    providers: dict | None = None,
 ) -> dict:
     """Build the canonical opencode.json content for DeepHole 2.0 workspaces."""
     read_permissions = {"*": "allow"}
@@ -492,6 +494,12 @@ def build_opencode_config(
             "question": "deny",
         },
     }
+    if providers is None:
+        from .llm_runtime import active_providers
+        providers = active_providers()
+    if providers:
+        from task_agent.llm_config import normalize_llm_providers
+        data["provider"] = normalize_llm_providers(providers)
     for spec in build_managed_mcp_runtime_specs(get_config()).values():
         entry = spec.get("config")
         if spec.get("enabled") and isinstance(entry, dict) and not spec.get("error"):

@@ -5486,6 +5486,9 @@ class OpenCodeServeManager:
             tuple[tuple[OpenCodeServeKey, str], bool],
             asyncio.Task[OpenCodeModelListResult],
         ] = {}
+        self._seen_provider_fingerprints: set[str] = set()
+        self._retired_provider_fingerprints: set[str] = set()
+        self._applied_provider_key: OpenCodeServeKey | None = None
         self._managed_mcp_specs: dict[str, dict[str, Any]] = {}
         self._process_generation = 0
         self._event_generation = 0
@@ -5535,6 +5538,89 @@ class OpenCodeServeManager:
             "runtime_state": state,
             "active_sessions": self._active_sessions,
         }
+
+    @staticmethod
+    def _provider_fingerprint(key: OpenCodeServeKey) -> str:
+        try:
+            config = json.loads(key.config_content or "{}")
+            providers = config.get("provider", {}) if isinstance(config, dict) else {}
+        except (TypeError, ValueError):
+            providers = {}
+        return hashlib.sha256(json.dumps(
+            providers, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+
+    def _current_provider_key(self, key: OpenCodeServeKey) -> OpenCodeServeKey:
+        """Refresh stale callers without pinning future ambient config edits."""
+        fingerprint = self._provider_fingerprint(key)
+        self._seen_provider_fingerprints.add(fingerprint)
+        anchor = self._applied_provider_key
+        if anchor is None or fingerprint not in self._retired_provider_fingerprints:
+            return key
+        config = json.loads(key.config_content or "{}")
+        current = json.loads(anchor.config_content or "{}")
+        if "provider" in current:
+            config["provider"] = current["provider"]
+        else:
+            config.pop("provider", None)
+        content = json.dumps(config, ensure_ascii=False, sort_keys=True)
+        return replace(key, config_content=content, config_hash=_config_hash(content))
+
+    async def reload_runtime(
+        self,
+        *,
+        tool: str,
+        executable: str,
+        directory: Path,
+        config_workspace: Path | None = None,
+        config_content: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+        serve_port_auto: bool = False,
+    ) -> OpenCodeModelListResult:
+        """Apply a Provider update after the host has drained logical tasks.
+
+        The coordinator must not hold this lock while business tasks drain:
+        those tasks can still need replacement Sessions and formatters.
+        """
+        normalized_env = _normalized_env_overrides(env_overrides)
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            env_hash=_env_hash(normalized_env),
+            config_hash=_config_hash(config_content),
+            config_content=config_content or "",
+            env_overrides=normalized_env,
+            serve_port_auto=bool(serve_port_auto),
+        )
+        async with self._lock:
+            await self._wait_until_idle_locked()
+            if self._key is not None:
+                self._seen_provider_fingerprints.add(self._provider_fingerprint(self._key))
+            self._invalidate_model_cache()
+            self._model_inflight.clear()
+            generation = self._serve_config_generation
+            failure_generation = self._serve_failure_generation
+            try:
+                await self._stop_locked(reason="Provider configuration updated", requested_key=key)
+                await self._start_locked(key, startup_cwd=config_workspace)
+                health = await self._probe_model_listing_health()
+                if not health.healthy:
+                    raise RuntimeError("OpenCode Serve 配置应用后的健康检查失败")
+                models = await self._fetch_models(directory)
+            except BaseException:
+                self._dirty = True
+                self._restart_required = True
+                self._invalidate_model_cache()
+                raise
+            self._retired_provider_fingerprints.update(self._seen_provider_fingerprints)
+            self._retired_provider_fingerprints.discard(self._provider_fingerprint(key))
+            self._applied_provider_key = key
+            if generation == self._serve_config_generation:
+                self._dirty = False
+            if failure_generation == self._serve_failure_generation:
+                self._restart_required = False
+            self._model_cache[(key, str(directory.resolve()))] = tuple(models)
+            return OpenCodeModelListResult(models=models)
 
     def _mark_serve_unhealthy(self, operation: str, status_code: int) -> None:
         """Require the next Session acquisition to replace a broken Serve."""
@@ -6798,6 +6884,7 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
+        key = self._current_provider_key(key)
         if show_serve_status and on_line:
             port_label = (
                 "auto"
@@ -7726,6 +7813,10 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
+        if self._applied_provider_key is not None:
+            # Session history snapshots are not a source of current runtime
+            # configuration. Reuse the active/last applied process settings.
+            key = self._key or self._applied_provider_key
         await self._acquire_session(key, startup_cwd=config_workspace)
         try:
             await self.ensure_managed_mcp(directory)
@@ -8237,6 +8328,7 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
+        key = self._current_provider_key(key)
         directory_key = str(directory.resolve()) if directory is not None else ""
         cache_key = (key, directory_key)
         if not refresh:
@@ -8545,6 +8637,7 @@ class OpenCodeServeManager:
     ) -> bool:
         """Acquire a short-lived serve operation and report a deferred reload."""
         async with self._lock:
+            key = self._current_provider_key(key)
             if self._proc is not None and self._proc.poll() is not None:
                 if not await self._try_adopt_owned_listener_locked():
                     _unregister_owned_serve_process(getattr(self._proc, "pid", None))
@@ -8886,6 +8979,7 @@ class OpenCodeServeManager:
         key: OpenCodeServeKey,
         startup_cwd: Path | None = None,
     ) -> str:
+        key = self._current_provider_key(key)
         had_process = self._proc is not None
         if self._proc is not None and self._proc.poll() is not None:
             if not await self._try_adopt_owned_listener_locked():
