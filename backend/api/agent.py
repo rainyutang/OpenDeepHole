@@ -347,6 +347,7 @@ def _agent_info_from_shared_session(session: dict) -> AgentInfo:
         agent_session_id=str(session.get("agent_session_id") or agent_id),
         accepting_tasks=bool(session.get("accepting_tasks", 1)),
         protocol_version=int(session["protocol_version"] or 1),
+        scan_code_graph_updates=bool(session.get("scan_code_graph_updates", 0)),
     )
 
 
@@ -719,6 +720,7 @@ _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _scan_stop_waiters: dict[str, asyncio.Future] = {}
 _review_notes_waiters: dict[str, asyncio.Future] = {}
+_code_graph_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
@@ -729,6 +731,7 @@ _AGENT_RESPONSE_WAITERS = {
     "mcp_reload_result": _mcp_reload_waiters,
     "scan_stop_result": _scan_stop_waiters,
     "review_notes_result": _review_notes_waiters,
+    "code_graph_result": _code_graph_waiters,
 }
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
@@ -2410,6 +2413,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             runtime_update_error=str(record.get("runtime_update_error") or ""),
             accepting_tasks=_runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING,
             protocol_version=protocol_version,
+            scan_code_graph_updates=reported_capabilities.get("scan_code_graph_updates") is True,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
         )
         _registered_agents[agent_id] = agent_info
@@ -2457,6 +2461,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
         from backend.review_notes import review_notes_for_agent
 
         review_notes = await review_notes_for_agent(stable_key, msg.get("review_notes_revisions"), store=store)
+        from backend.code_graph import code_graph_for_agent
+
+        code_graph_updates = (
+            await code_graph_for_agent(stable_key, msg.get("code_graph_mcp_revisions"), store=store)
+            if agent_info.scan_code_graph_updates else []
+        )
         await _send_agent_json(agent_id, {
             "type": "welcome",
             "agent_id": agent_id,
@@ -2465,6 +2475,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             "protocol_version": protocol_version,
             "scan_executions": accepted_scan_executions,
             "review_notes": review_notes,
+            "code_graph_updates": code_graph_updates,
             "capabilities": {
                 "candidate_batches": protocol_version >= 2,
                 "event_batches": protocol_version >= 2,
@@ -2517,6 +2528,10 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 else None
             )
             if response_waiters is not None:
+                if incoming.get("type") == "code_graph_result":
+                    from backend.code_graph import accept_code_graph_result
+
+                    await accept_code_graph_result(incoming, agent_info)
                 await _complete_agent_response(incoming, response_waiters)
                 continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":

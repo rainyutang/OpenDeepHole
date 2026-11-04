@@ -60,6 +60,7 @@ from backend.models import (
     ScanEventPage,
     ScanMeta,
     ScanMetadataResponse,
+    ScanCodeGraphResponse,
     ScanConfigMemoryResponse,
     ScanKnowledgeBaseRequest,
     ScanOverview,
@@ -82,6 +83,7 @@ from backend.models import (
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
     UpdateScanMetadataRequest,
+    UpdateScanCodeGraphRequest,
     User,
     Vulnerability,
     VulnerabilityPage,
@@ -795,6 +797,18 @@ def _apply_scan_metadata(
         scan.scan_name = metadata.scan_name
         scan.product = metadata.product
         scan.metadata_revision = metadata.metadata_revision
+    if isinstance(metadata, ScanMeta) and metadata.code_graph_mcp_revision >= scan.code_graph_mcp_revision:
+        from backend.code_graph import code_graph_response
+
+        state = code_graph_response(scan.scan_id, metadata)
+        scan.code_graph_mcp_enabled = state.code_graph_mcp_enabled
+        scan.code_graph_mcp_revision = state.code_graph_mcp_revision
+        scan.code_graph_mcp_applied_revision = max(
+            scan.code_graph_mcp_applied_revision, state.code_graph_mcp_applied_revision,
+        )
+        scan.code_graph_mcp_sync_status = (
+            "synced" if scan.code_graph_mcp_applied_revision >= scan.code_graph_mcp_revision else "pending"
+        )
 
 
 def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
@@ -1878,6 +1892,7 @@ async def create_agent_scan(
             for item in mining_engine_selections
         ],
         "codex_model_ids": agent_explicit_model_ids(managed_config),
+        "code_graph_mcp_revision": meta.code_graph_mcp_revision,
         "code_graph_mcp": (
             code_graph_mcp.model_dump(mode="json")
             if code_graph_mcp is not None
@@ -2658,6 +2673,38 @@ async def update_scan_metadata(
     return metadata
 
 
+@router.put("/api/scan/{scan_id}/code-graph", response_model=ScanCodeGraphResponse)
+async def update_scan_code_graph(
+    scan_id: str,
+    body: UpdateScanCodeGraphRequest,
+    current_user: User = Depends(get_current_user),
+) -> ScanCodeGraphResponse:
+    from backend.code_graph import code_graph_response, sync_scan_code_graph
+
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    await _check_scan_owner(scan_id, current_user)
+    default_config = _scan_code_graph_mcp(AgentMcpConfig(enabled=True, transport="local"))
+    try:
+        meta = await run_store_call(store, "update_scan_code_graph", scan_id, body.enabled, default_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    cached = _running_scans.get(scan_id)
+    if cached is not None:
+        _apply_scan_metadata(cached, meta)
+    publish_scan_event(scan_id, "resource_changed", {"resource": "code-graph"})
+    message = await sync_scan_code_graph(scan_id)
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if cached is not None:
+        _apply_scan_metadata(cached, meta)
+    return code_graph_response(scan_id, meta, message)
+
+
 @router.put("/api/scan/{scan_id}/validation-target")
 async def update_scan_validation_target(
     scan_id: str,
@@ -3178,6 +3225,7 @@ async def _continue_scan(
         "retry_mining_engine_ids": retry_mining_engine_ids,
         "retry_threat_audit_task_ids": threat_task_ids,
         "codex_model_ids": agent_explicit_model_ids(managed_config),
+        "code_graph_mcp_revision": meta.code_graph_mcp_revision,
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
@@ -4060,6 +4108,7 @@ async def _trigger_vulnerability_validation(
             fp_map.get(idx),
             fp_review_stage_titles=_fp_review_stage_titles(scan_id),
         ),
+        "code_graph_mcp_revision": meta.code_graph_mcp_revision,
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
@@ -4680,6 +4729,7 @@ async def _start_fp_review(
             "vulnerabilities": confirmed,
             "feedback_entries": feedback_entries,
             "processed_offset": int(fp_job_info.get("processed") or 0),
+            "code_graph_mcp_revision": meta.code_graph_mcp_revision,
             "code_graph_mcp": (
                 meta.code_graph_mcp.model_dump(mode="json")
                 if meta.code_graph_mcp is not None

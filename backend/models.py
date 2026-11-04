@@ -862,6 +862,9 @@ class ScanStatus(BaseModel):
     product: str = ""
     validation_environment: str = ""
     code_graph_mcp_enabled: bool = False
+    code_graph_mcp_revision: int = 0
+    code_graph_mcp_applied_revision: int = 0
+    code_graph_mcp_sync_status: Literal["synced", "pending"] = "synced"
     knowledge_base_enabled: bool = False
     vulnerability_validation_enabled: bool = False
     validation_method_id: str = ""
@@ -1142,6 +1145,7 @@ class AgentInfo(BaseModel):
     has_explicit_model: bool = False
     protocol_version: int = 1
     llm_api_config: bool | None = None
+    scan_code_graph_updates: bool = False
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -1874,6 +1878,20 @@ class ScanMetadataResponse(BaseModel):
     metadata_revision: int
 
 
+class UpdateScanCodeGraphRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)
+
+
+class ScanCodeGraphResponse(BaseModel):
+    scan_id: str
+    code_graph_mcp_enabled: bool
+    code_graph_mcp_revision: int
+    code_graph_mcp_applied_revision: int
+    code_graph_mcp_sync_status: Literal["synced", "pending"]
+    sync_message: str = ""
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
@@ -1894,6 +1912,8 @@ class ScanMeta(BaseModel):
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_name: str = ""
     metadata_revision: int = 0
+    code_graph_mcp_revision: int = 0
+    code_graph_mcp_applied_revision: int = 0
     auto_fp_review: bool = True
     fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
     fp_review_method_selection: FpReviewMethodSelection | None = None

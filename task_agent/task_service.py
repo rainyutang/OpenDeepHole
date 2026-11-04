@@ -906,6 +906,7 @@ class OpenCodeTaskService:
         avoid_model_identities: set[tuple[str, bool, str, str]] = set()
         quota_wait_budget = ModelQuotaWaitBudget()
         session_events: list[dict[str, Any]] = []
+        code_graph_resolved = False
 
         session_attempt = 1
         while session_attempt <= total_session_attempts:
@@ -982,6 +983,26 @@ class OpenCodeTaskService:
                         lease,
                         {"token_usage": task_token_usage.as_dict()},
                     )
+
+                if not code_graph_resolved:
+                    resolver = (
+                        getattr(get_host_bindings(), "resolve_scan_code_graph", None)
+                        if context.scan_id else None
+                    )
+                    if resolver is not None:
+                        latest_graph = await OperationDeadline(
+                            300 + CLEANUP_TIMEOUT_SECONDS,
+                            cancel_event=combined_cancel,
+                        ).wait(resolver(
+                            scan_id=context.scan_id,
+                            project_path=_required_project_dir(context),
+                            fallback=context.code_graph_mcp,
+                            scan_mode=str(context.task_metadata.get("scan_mode") or "custom"),
+                            emit=context.on_output,
+                        ), phase="code_graph_preparation")
+                        context = dataclasses.replace(context, code_graph_mcp=latest_graph)
+                        record.execution_context = context
+                    code_graph_resolved = True
 
                 await self._notify_lease_state(record, "running")
 

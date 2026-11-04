@@ -38,7 +38,7 @@ Agent 扫描不要求向 Web 服务上传整个代码仓，但模型需要通过
 | 能力 | 用途 | 启用条件 |
 | --- | --- | --- |
 | `code_index.db` | Ctags/tree-sitter 构建的本地 SQLite 索引，供静态规则读取函数、结构体和调用关系 | 本轮运行 `static_candidate` 或 `multi_version` 的静态分析时构建或复用 |
-| CodeGraph MCP | 向模型提供可选代码查询工具 | 创建扫描时显式启用，本地 CLI 或远端 MCP |
+| CodeGraph MCP | 向模型提供可选代码查询工具 | 创建扫描时或扫描信息页显式启用，本地 CLI 或远端 MCP；切换对后续任务生效 |
 
 关闭 CodeGraph MCP 不会关闭静态规则需要的 `code_index.db`。仓库的 `mcp_server/` 是独立源码查询实现，未启用 MCP 的扫描不会自动回退到它。
 

@@ -32,6 +32,7 @@ from .code_graph_build import run_code_graph_build
 from .file_inventory import file_inventory_lifecycle, prepare_coverage_inventory
 from .codex_runtime import (
     CodexRuntimeState,
+    ScanCodexConfigResult,
     get_codex_runtime_state,
     prepare_scan_codex_access_async,
     sync_scan_codex_mcp_async,
@@ -978,31 +979,23 @@ async def _run_scan_pipeline(
                 "will be used",
             )
 
-    if isinstance(code_graph_mcp, dict):
-        code_graph_mcp = copy.deepcopy(code_graph_mcp)
-        if bool(code_graph_mcp.get("enabled")):
-            from .codegraph import prepare_scan_codegraph
+    from .scan_code_graph import resolve_scan_code_graph
 
-            graph_ready = await prepare_scan_codegraph(
-                code_graph_mcp,
-                project,
-                emit=lambda message: emit(
-                    "code_graph_mcp",
-                    str(message),
-                ),
-            )
-            if not graph_ready:
-                code_graph_mcp["enabled"] = False
-                await emit(
-                    "code_graph_mcp",
-                    "Scan code graph MCP preparation failed; continuing with file tools only",
-                )
-
-    scan_mcp_result = await sync_scan_codex_mcp_async(
+    code_graph_mcp = await resolve_scan_code_graph(
+        scan_id=scan_id,
         project_path=project,
-        scan_dir=scan_dir,
-        code_graph_mcp=code_graph_mcp,
+        fallback=code_graph_mcp,
+        scan_mode=runtime_scan_mode,
+        emit=lambda message: emit("code_graph_mcp", str(message)),
     )
+
+    scan_mcp_result = ScanCodexConfigResult()
+    if not codex_threat_selected:
+        scan_mcp_result = await sync_scan_codex_mcp_async(
+            project_path=project,
+            scan_dir=scan_dir,
+            code_graph_mcp=code_graph_mcp,
+        )
     for warning in scan_mcp_result.warnings:
         await emit("codex", f"Codex CodeGraph MCP warning: {warning}")
     if scan_mcp_result.error:
@@ -1201,6 +1194,31 @@ async def _run_scan_pipeline(
             resume: bool,
         ) -> dict[str, Any]:
             async def invoke() -> dict[str, Any]:
+                if method_id == CODEX_THREAT_ANALYSIS_METHOD_ID:
+                    # A running Codex Goal (including its internal reconnects)
+                    # owns this config until it returns. Updates only alter the
+                    # registry; write the latest snapshot at the next launch.
+                    graph = await resolve_scan_code_graph(
+                        scan_id=scan_id,
+                        project_path=project,
+                        fallback=code_graph_mcp,
+                        scan_mode=runtime_scan_mode,
+                        emit=lambda message: emit("code_graph_mcp", str(message)),
+                    )
+                    mcp_result = await sync_scan_codex_mcp_async(
+                        project_path=project,
+                        scan_dir=scan_dir,
+                        code_graph_mcp=graph,
+                    )
+                    for warning in mcp_result.warnings:
+                        await emit("codex", f"Codex CodeGraph MCP warning: {warning}")
+                    if mcp_result.error:
+                        # A failed write could leave a previously enabled MCP
+                        # in place. Do not launch Codex with stale settings.
+                        raise RuntimeError(
+                            "Codex CodeGraph MCP configuration failed: "
+                            + mcp_result.error
+                        )
                 if method_id == OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID:
                     await prepare_coverage_inventory(
                         project=project, scan_root=scan_root, output_path=output_path,

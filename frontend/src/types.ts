@@ -575,6 +575,15 @@ export interface ScanReviewNotes {
   sync_status?: "synced" | "pending" | "error";
 }
 
+export interface ScanCodeGraphState {
+  scan_id: string;
+  code_graph_mcp_enabled: boolean;
+  code_graph_mcp_revision: number;
+  code_graph_mcp_applied_revision: number;
+  code_graph_mcp_sync_status: "synced" | "pending";
+  sync_message?: string;
+}
+
 export interface ScanStatus {
   scan_id: string;
   execution_revision?: number;
@@ -595,6 +604,9 @@ export interface ScanStatus {
   product: string;
   validation_environment: string;
   code_graph_mcp_enabled: boolean;
+  code_graph_mcp_revision?: number;
+  code_graph_mcp_applied_revision?: number;
+  code_graph_mcp_sync_status?: "synced" | "pending";
   knowledge_base_enabled: boolean;
   vulnerability_validation_enabled: boolean;
   validation_method_id: string;

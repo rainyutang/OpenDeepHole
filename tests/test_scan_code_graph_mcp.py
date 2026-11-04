@@ -637,6 +637,49 @@ def test_failed_scan_mcp_shared_leases_release_without_blocking_next_scan(
     asyncio.run(run())
 
 
+def test_disabling_waits_for_active_scan_leases_and_preserves_other_directory(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(add_outcomes=["connected", "connected"])
+        disconnected = []
+
+        async def disconnect(_client, directory, spec):
+            disconnected.append((directory, spec["name"]))
+
+        async def clean_stale(_client, _directory):
+            pass
+
+        manager._disconnect_managed_mcp = disconnect
+        manager._disconnect_source_graph_mcps = clean_stale
+        project = tmp_path / "first"
+        other = tmp_path / "other"
+        config = _remote_mcp("http://localhost:9000/mcp", name="codegraph").model_dump(mode="json")
+        first = await manager._acquire_scan_mcp(client, project, "scan-one", config)
+        second = await manager._acquire_scan_mcp(client, project, "scan-one", config)
+        unrelated = await manager._acquire_scan_mcp(client, other, "scan-two", config)
+        disabling = asyncio.create_task(manager._acquire_scan_mcp(
+            client, project, "scan-one", {"enabled": False},
+        ))
+        await asyncio.sleep(0)
+        assert not disabling.done()
+        await manager._release_scan_mcp(project, first)
+        assert not disconnected
+        assert not disabling.done()
+        await manager._release_scan_mcp(project, second)
+        disabled = await asyncio.wait_for(disabling, 1)
+        assert disabled.connected is False
+        assert disconnected == [(project.resolve(), "codegraph")]
+        assert manager._scan_mcp_states[unrelated.state_key]["connected"] is True
+        await manager._release_scan_mcp(project, disabled)
+        await manager._release_scan_mcp(other, unrelated)
+        assert disconnected[-1] == (other.resolve(), "codegraph")
+
+    asyncio.run(run())
+
+
 def test_connected_scan_mcp_reconnects_after_live_connection_failure(
     tmp_path: Path,
 ) -> None:

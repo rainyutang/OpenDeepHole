@@ -118,6 +118,16 @@ class ScanStoreBase(ABC):
         """Atomically rename display labels and preserve execution configuration."""
         raise NotImplementedError
 
+    def update_scan_code_graph(self, scan_id: str, enabled: bool, default_config):
+        """Atomically change the desired scan CodeGraph configuration."""
+        raise NotImplementedError
+
+    def acknowledge_scan_code_graph(self, scan_id: str, revision: int, agent_key: str = "") -> bool:
+        raise NotImplementedError
+
+    def list_agent_code_graph_configs(self, agent_key: str) -> list:
+        raise NotImplementedError
+
     @abstractmethod
     def update_scan_validation_target(
         self,

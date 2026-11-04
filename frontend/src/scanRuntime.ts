@@ -9,6 +9,7 @@ import type {
   OpenCodePoolStatus,
   OpenCodeTokenUsage,
   ScanCandidate,
+  ScanCodeGraphState,
   ScanEvent,
   ScanItemStatus,
   ScanStatus,
@@ -412,6 +413,33 @@ export function mergeScanMetadata<T extends ScanMetadataState>(
   };
 }
 
+type CodeGraphSnapshot = Pick<ScanCodeGraphState, "scan_id"> & Partial<ScanCodeGraphState>;
+
+/** CodeGraph changes and acknowledgements advance independently of scan execution. */
+export function mergeScanCodeGraph<T extends CodeGraphSnapshot>(
+  previous: CodeGraphSnapshot | null | undefined,
+  incoming: T,
+): T {
+  if (previous?.scan_id !== incoming.scan_id) return incoming;
+  if (previous.code_graph_mcp_revision == null && incoming.code_graph_mcp_revision == null) return incoming;
+  const selected = (previous.code_graph_mcp_revision ?? 0) > (incoming.code_graph_mcp_revision ?? 0)
+    ? previous : incoming;
+  const revision = selected.code_graph_mcp_revision ?? 0;
+  const applied = Math.max(previous.code_graph_mcp_applied_revision ?? 0, incoming.code_graph_mcp_applied_revision ?? 0);
+  const syncStatus = applied >= revision ? "synced" : "pending";
+  if (incoming.code_graph_mcp_enabled === selected.code_graph_mcp_enabled
+    && incoming.code_graph_mcp_revision === revision
+    && incoming.code_graph_mcp_applied_revision === applied
+    && incoming.code_graph_mcp_sync_status === syncStatus) return incoming;
+  return {
+    ...incoming,
+    code_graph_mcp_enabled: selected.code_graph_mcp_enabled,
+    code_graph_mcp_revision: revision,
+    code_graph_mcp_applied_revision: applied,
+    code_graph_mcp_sync_status: syncStatus,
+  };
+}
+
 /** Merge a GET without letting a response started before a live update undo it. */
 export function mergeScanSnapshot(
   previous: ScanStatus | null,
@@ -419,7 +447,7 @@ export function mergeScanSnapshot(
   requestedFrom?: ScanStatus | null,
 ): ScanStatus {
   if (previous?.scan_id !== incoming.scan_id) return incoming;
-  if (isOlderScanExecution(previous, incoming)) return mergeScanMetadata(incoming, previous);
+  if (isOlderScanExecution(previous, incoming)) return mergeScanCodeGraph(incoming, mergeScanMetadata(incoming, previous));
   const newerExecution = (scanExecutionRevision(incoming) ?? 0) > (scanExecutionRevision(previous) ?? 0);
   const updatedDuringRequest = requestedFrom !== undefined && !newerExecution && (
     requestedFrom?.scan_id !== previous.scan_id
@@ -427,7 +455,7 @@ export function mergeScanSnapshot(
     || progressFields.some((key) => previous[key] !== requestedFrom?.[key])
   );
   const runtime = updatedDuringRequest ? previous : incoming;
-  return mergeScanMetadata(previous, {
+  return mergeScanCodeGraph(previous, mergeScanMetadata(previous, {
     ...incoming,
     ...Object.fromEntries(progressFields.map((key) => [key, runtime[key]])),
     execution_revision: scanExecutionRevision(runtime) ?? scanExecutionRevision(previous),
@@ -447,7 +475,7 @@ export function mergeScanSnapshot(
     // Overview snapshots omit artifacts; null does not delete a loaded result.
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
     threat_pattern_audit_tasks: mergePatternTasks(previous.threat_pattern_audit_tasks ?? [], incoming.threat_pattern_audit_tasks ?? []),
-  });
+  }));
 }
 
 export function mergeScanOverview(
@@ -509,6 +537,10 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     product: text(value.product),
     validation_environment: text(value.validation_environment),
     code_graph_mcp_enabled: value.code_graph_mcp_enabled === true,
+    code_graph_mcp_revision: Math.max(0, finiteNumber(value.code_graph_mcp_revision)),
+    code_graph_mcp_applied_revision: Math.max(0, finiteNumber(value.code_graph_mcp_applied_revision)),
+    code_graph_mcp_sync_status: finiteNumber(value.code_graph_mcp_applied_revision) < finiteNumber(value.code_graph_mcp_revision)
+      ? "pending" : "synced",
     knowledge_base_enabled: value.knowledge_base_enabled === true,
     vulnerability_validation_enabled: value.vulnerability_validation_enabled === true,
     validation_method_id: text(value.validation_method_id),

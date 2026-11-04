@@ -2681,6 +2681,77 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_scan_code_graph_refreshes_after_queue_and_freezes_for_running_retries(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from deephole_client import scan_code_graph
+
+    monkeypatch.setattr(scan_code_graph, "_states", {})
+    monkeypatch.setattr(scan_code_graph.codegraph, "prepare_scan_codegraph", AsyncMock(return_value=True))
+
+    def update(revision: int, enabled: bool) -> None:
+        scan_code_graph.apply_code_graph_update({
+            "scan_id": "changing-graph", "revision": revision,
+            "project_path": str(tmp_path),
+            "code_graph_mcp": {"enabled": enabled, "name": "codegraph"},
+        })
+
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        queued, released = asyncio.Event(), asyncio.Event()
+        acquired = 0
+        prompted: list[bool] = []
+        resolver = AsyncMock(wraps=scan_code_graph.resolve_scan_code_graph)
+
+        async def acquire(*_args, **kwargs):
+            nonlocal acquired
+            acquired += 1
+            if acquired == 1:
+                queued.set()
+                await released.wait()
+            return _lease(kwargs["task_id"])
+
+        async def run_prompt(**kwargs):
+            enabled = kwargs["code_graph_mcp"]["enabled"]
+            prompted.append(enabled)
+            assert ("扫描代码图谱" in kwargs["system_prompt"]) == enabled
+            if len(prompted) == 1:
+                update(3, False)
+                raise RuntimeError("retry this already running task")
+            return OpenCodePromptResult(
+                session_id=f"session-{len(prompted)}", message_id="message",
+                lines=["done"], text="done", model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        patches = _service_patches(manager)
+        with (
+            patches[0], patches[2], patches[3], patches[4], patches[5] as host,
+            patch("task_agent.task_service.acquire_model_lease", side_effect=acquire),
+            _task_context(tmp_path, scan_id="changing-graph", code_graph_mcp=None),
+        ):
+            host.return_value.resolve_scan_code_graph = resolver
+            update(1, False)
+            handle = service.submit_task(OpenCodeTaskSpec(
+                task_name="queued before enable", prompt="run", directory=tmp_path, attempt=1,
+            ))
+            await asyncio.wait_for(queued.wait(), 1)
+            update(2, True)
+            released.set()
+            result = await asyncio.wait_for(handle.result(), 3)
+            assert result.status == "success", result.error
+            later = await service.run_task(OpenCodeTaskSpec(
+                task_name="created after disable", prompt="run", directory=tmp_path, attempt=0,
+            ))
+            assert later.status == "success", later.error
+
+        assert prompted == [True, True, False]
+        assert resolver.await_count == 2
+
+    asyncio.run(run())
+
+
 def test_required_command_failure_requeues_without_model_health_penalty(
     tmp_path: Path,
 ) -> None:

@@ -136,6 +136,11 @@ async def prepare_scan_codegraph(
             await proc.wait()
             await _notify(emit, "CodeGraph 初始化超时")
             return False
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
         if proc.returncode != 0:
             detail = stdout.decode("utf-8", errors="replace").strip()
             await _notify(emit, f"CodeGraph 初始化失败：{detail}")

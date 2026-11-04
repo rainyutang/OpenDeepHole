@@ -1608,6 +1608,80 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         analysis.assert_awaited_once()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
+    async def test_codex_launch_refreshes_graph_and_running_goal_keeps_snapshot(self) -> None:
+        from deephole_client import scan_code_graph
+        from deephole_client.codex_scan_config import scan_codex_workspace, sync_scan_codex_mcp
+
+        prepared = CodexRuntimeState(
+            available=True, command=("codex",), executable="codex",
+            models=(CodexModelConfig(id="provider/model", provider_id="provider", model_id="model"),),
+        )
+        reporter = _reporter()
+        revisions = iter(range(1, 20))
+        observed = []
+        launches = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            scan_dir = root / ".opendeephole" / "scans" / "changing-codex"
+            config_path = scan_codex_workspace(scan_dir) / ".codex" / "config.toml"
+
+            def update(enabled):
+                scan_code_graph.apply_code_graph_update({
+                    "scan_id": "changing-codex", "revision": next(revisions),
+                    "project_path": str(project),
+                    "code_graph_mcp": {
+                        "enabled": enabled, "name": "codegraph", "transport": "remote",
+                        "remote": {"url": "http://localhost:9000/mcp"},
+                    },
+                })
+
+            async def before_method(*_args, **_kwargs):
+                # Enable after the scanner's initial snapshot, before launch.
+                if launches == 0:
+                    update(True)
+
+            async def run_analysis(**kwargs):
+                nonlocal launches
+                launches += 1
+                observed.append(config_path.exists())
+                before = config_path.read_bytes() if config_path.exists() else None
+                update(not config_path.exists())
+                self.assertEqual(config_path.read_bytes() if config_path.exists() else None, before)
+                return {
+                    "result": True, "attack_tree_path": str(root / "attack.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            async def sync_mcp(**kwargs):
+                return sync_scan_codex_mcp(**kwargs)
+
+            self.codex_mcp.side_effect = sync_mcp
+            reporter.report_threat_analysis_run.side_effect = before_method
+            with (
+                patch.object(scan_code_graph, "_states", {}),
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch("deephole_client.scanner.opencode_task_context", return_value=nullcontext()),
+                patch("deephole_client.scanner.get_codex_runtime_state", return_value=prepared),
+                patch("deephole_client.scanner.run_threat_analysis", new=AsyncMock(side_effect=run_analysis)),
+                patch("deephole_client.scanner.collect_json_artifacts", return_value={"artifacts": {}}),
+            ):
+                update(False)
+                for _ in range(3):
+                    await run_scan(
+                        config=AgentConfig(), project_path=project, code_scan_path=project,
+                        reporter=reporter, scan_name="changing-codex", product="",
+                        validation_environment="", checker_names=[], scan_id="changing-codex",
+                        cancel_event=threading.Event(), threat_analysis_enabled=True,
+                        threat_analysis_method="codex_goal_threat_analysis", mining_engines=[],
+                    )
+
+        self.assertEqual(observed, [True, False, True])
+        self.assertEqual(self.codex_mcp.await_count, 3)
+
     async def test_unavailable_codex_runs_deephole_without_codex_attempt(
         self,
     ) -> None:

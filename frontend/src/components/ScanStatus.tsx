@@ -1,7 +1,7 @@
 import { ScanTokenUsagePanel } from "./ScanTokenUsagePanel";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefCallback } from "react";
-import { isInvalidTaskCursorError } from "../api/client";
+import { isInvalidTaskCursorError, updateScanCodeGraph } from "../api/client";
 import { compareTaskHistory, shouldMergeTaskHistory, taskHistorySortTime } from "../taskOrder";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -24,7 +24,7 @@ import { useAuditNavigation, useListFocus } from "../auditNavigation";
 import type { AuditTarget, ListFocusRequest } from "../auditNavigation";
 import { DEFAULT_SCAN_ROUTE } from "../routing";
 import type { ScanNavigation, ScanRouteState, ScanTab } from "../routing";
-import type { CandidateAuditTaskResult, ScanMetadata } from "../types";
+import type { CandidateAuditTaskResult, ScanMetadata, ScanCodeGraphState } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -54,6 +54,7 @@ import {
   scanExecutionRevision,
   mergeScanOverview,
   mergeScanMetadata,
+  mergeScanCodeGraph,
   mergeIndexedVulnerabilities,
   mergePatternTasks,
   mergeScanSnapshot,
@@ -2455,6 +2456,7 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
 
       {scanInfoOpen && (
         <ScanInformationPanel
+          key={scan.scan_id}
           scan={scan}
           onClose={() => setScanInfoOpen(false)}
           onEdit={!sharedView && !isPublicScan(scanId) ? () => setEditingScan({
@@ -2462,6 +2464,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             scan_name: scan.scan_name || scan.project_id,
             product: scan.product,
           }) : undefined}
+          onCodeGraphSaved={!sharedView && !isPublicScan(scanId) ? (state) => setScan((previous) => previous?.scan_id === state.scan_id
+            ? mergeScanCodeGraph(previous, { ...previous, ...state }) : previous) : undefined}
         />
       )}
       {editingScan && (
@@ -3632,11 +3636,36 @@ function ScanInformationPanel({
   scan,
   onClose,
   onEdit,
+  onCodeGraphSaved,
 }: {
   scan: ScanStatusType;
   onClose: () => void;
   onEdit?: () => void;
+  onCodeGraphSaved?: (state: ScanCodeGraphState) => void;
 }) {
+  const [codeGraphSaving, setCodeGraphSaving] = useState(false);
+  const codeGraphSavingRef = useRef(false);
+  const [codeGraphError, setCodeGraphError] = useState("");
+  const [codeGraphNotice, setCodeGraphNotice] = useState<{ revision: number; message: string } | null>(null);
+  const multiVersion = scan.scan_mode === "multi_version";
+  const codeGraphPending = scan.code_graph_mcp_sync_status === "pending";
+  const toggleCodeGraph = async () => {
+    if (codeGraphSavingRef.current || !onCodeGraphSaved || multiVersion) return;
+    codeGraphSavingRef.current = true;
+    setCodeGraphSaving(true);
+    setCodeGraphError("");
+    try {
+      const state = await updateScanCodeGraph(scan.scan_id, !scan.code_graph_mcp_enabled);
+      onCodeGraphSaved(state);
+      setCodeGraphNotice({ revision: state.code_graph_mcp_revision, message: state.sync_message || "" });
+    } catch (caught: unknown) {
+      const detail = (caught as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setCodeGraphError(typeof detail === "string" ? detail : "CodeGraph 配置保存失败，请稍后重试");
+    } finally {
+      codeGraphSavingRef.current = false;
+      setCodeGraphSaving(false);
+    }
+  };
   const engines = effectiveMiningEngines(scan);
   const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
   const threatAnalysisSelected = isThreatAnalysisSelected(scan);
@@ -3658,7 +3687,7 @@ function ScanInformationPanel({
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200">扫描信息</h3>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              {onEdit ? "产品名和扫描名称可编辑；" : "本页展示最新的产品名和扫描名称；"}流程配置保留创建扫描时的快照，不随当前 Agent 配置变化。
+              {onEdit ? "产品名和扫描名称可编辑；" : "本页展示最新的产品名和扫描名称；"}CodeGraph 展示当前设置，其他流程配置保留创建扫描时的快照。
             </p>
           </div>
           <button
@@ -3707,8 +3736,26 @@ function ScanInformationPanel({
               <ScanInformationToggle
                 label="CodeGraph MCP"
                 enabled={scan.code_graph_mcp_enabled}
-                detail="创建扫描时的代码图谱工具开关"
-              />
+                detail={multiVersion ? "多版本扫描不支持 CodeGraph" : "切换后对尚未开始的任务生效，正在运行的任务继续使用原设置。"}
+              >
+                {onCodeGraphSaved && (
+                  <button
+                    type="button"
+                    disabled={codeGraphSaving || multiVersion}
+                    onClick={toggleCodeGraph}
+                    className="mt-3 rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {codeGraphSaving ? "保存中..." : scan.code_graph_mcp_enabled ? "停用 CodeGraph" : "启用 CodeGraph"}
+                  </button>
+                )}
+                {codeGraphPending && (
+                  <p role="status" className="mt-2 text-xs leading-5 text-amber-400">
+                    {codeGraphNotice && codeGraphNotice.revision === scan.code_graph_mcp_revision && codeGraphNotice.message
+                      ? codeGraphNotice.message : "待同步：配置已保存，等待 Agent 应用。"}
+                  </p>
+                )}
+                {codeGraphError && <p role="alert" className="mt-2 text-xs leading-5 text-red-400">{codeGraphError}</p>}
+              </ScanInformationToggle>
             </div>
           </ScanInformationSection>
 
@@ -3828,10 +3875,12 @@ function ScanInformationToggle({
   label,
   enabled,
   detail,
+  children,
 }: {
   label: string;
   enabled: boolean;
   detail: string;
+  children?: ReactNode;
 }) {
   return (
     <div className="rounded-xl border border-slate-700 bg-slate-950/50 p-4">
@@ -3844,6 +3893,7 @@ function ScanInformationToggle({
         </span>
       </div>
       <p className="mt-2 text-xs leading-5 text-slate-500">{detail}</p>
+      {children}
     </div>
   );
 }

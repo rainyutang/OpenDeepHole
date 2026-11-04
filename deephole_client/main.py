@@ -35,6 +35,11 @@ from deephole_client.review_notes import (
     sync_review_notes,
     sync_welcome_review_notes,
 )
+from deephole_client.scan_code_graph import (
+    apply_code_graph_update,
+    apply_command_code_graph,
+    code_graph_mcp_revisions,
+)
 
 
 _WS_MAX_MESSAGE_ENV = "OPENDEEPHOLE_WS_MAX_MESSAGE_MB"
@@ -150,6 +155,7 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
         if agent_server.scan_command_is_obsolete(msg["scan_id"], execution_revision):
             return
         apply_command_review_notes(msg)
+        apply_command_code_graph(msg)
         await _set_reporter_execution(
             reporter, "set_scan_execution", msg["scan_id"], execution_revision
         )
@@ -248,6 +254,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         )
         try:
             apply_command_review_notes(msg)
+            apply_command_code_graph(msg)
         except Exception as exc:
             if reporter is not None:
                 await reporter.report_scan_start_failure(
@@ -331,6 +338,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         )
         try:
             apply_command_review_notes(msg)
+            apply_command_code_graph(msg)
         except Exception as exc:
             if reporter is not None:
                 await reporter.finish_fp_review(
@@ -386,6 +394,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 ),
             )
             return None
+        apply_command_code_graph(msg)
         execution_revision = int(msg.get("execution_revision") or 0)
         await _set_reporter_execution(
             reporter,
@@ -437,6 +446,20 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
         )
+    elif cmd_type == "code_graph_update":
+        response = {
+            "type": "code_graph_result",
+            "request_id": str(msg.get("request_id") or ""),
+            "scan_id": msg.get("scan_id", ""),
+            "revision": msg.get("revision", 0),
+        }
+        try:
+            response["revision"] = apply_code_graph_update(msg)
+            response["ok"] = True
+        except Exception as exc:
+            response["ok"] = False
+            response["error"] = str(exc)
+        return response
     elif cmd_type == "review_notes_update":
         payload = msg.get("review_notes", msg)
         response = {
@@ -625,6 +648,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,
+                        "scan_code_graph_updates": True,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),
@@ -638,6 +662,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         + pending_fp_review_snapshots()
                     ),
                     "review_notes_revisions": review_notes_revisions(),
+                    "code_graph_mcp_revisions": code_graph_mcp_revisions(),
                     "active_validations": (
                         agent_server.active_validation_snapshots()
                         + pending_validation_snapshots()
@@ -661,6 +686,15 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 reporter.set_protocol_version(int(welcome.get("protocol_version") or 1))
                 reporter.set_capabilities(welcome.get("capabilities"))
                 reporter.confirm_scan_executions(welcome.get("scan_executions"))
+                for payload in welcome.get("code_graph_updates") or []:
+                    if not isinstance(payload, dict):
+                        continue
+                    response = await _handle_command(
+                        {**payload, "type": "code_graph_update"},
+                        config, task_manager, reporter,
+                    )
+                    if response:
+                        await _send_ws_json(ws, ws_send_lock, response)
                 for failure in sync_welcome_review_notes(welcome.get("review_notes") or []):
                     print(
                         f"问题判定依据同步失败（扫描 {failure['scan_id']}）：{failure['error']}；"
