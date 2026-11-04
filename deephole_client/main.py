@@ -84,6 +84,50 @@ async def _send_ws_json(ws, lock: asyncio.Lock, payload: dict) -> None:
         await ws.send(message)
 
 
+async def _run_command_worker(command_queue, ws, ws_send_lock, config, task_manager, reporter) -> None:
+    """Keep API probes independent of serialized business commands and connection-scoped."""
+    probes: set[asyncio.Task] = set()
+    ordinary_commands: asyncio.Queue[dict | None] = asyncio.Queue()
+
+    async def execute(msg: dict) -> None:
+        try:
+            response = await _handle_command(msg, config, task_manager, reporter)
+            if response:
+                await _send_ws_json(ws, ws_send_lock, response)
+        except Exception as exc:
+            # Probe drafts may contain credentials; never log their exception text.
+            detail = type(exc).__name__ if msg.get("type") == "opencode_api_test" else str(exc)
+            print(f"Error handling command: {detail}")
+
+    async def ordinary_worker() -> None:
+        while True:
+            msg = await ordinary_commands.get()
+            if msg is None:
+                return
+            await execute(msg)
+
+    ordinary_task = asyncio.create_task(ordinary_worker())
+    try:
+        while True:
+            msg = await command_queue.get()
+            if msg is None:
+                await ordinary_commands.put(None)
+                await ordinary_task
+                return
+            if msg.get("type") == "opencode_api_test":
+                task = asyncio.create_task(execute(msg))
+                probes.add(task)
+                task.add_done_callback(probes.discard)
+            else:
+                await ordinary_commands.put(msg)
+    finally:
+        # Disconnect/reconnect must not leave requests or responses on the old socket.
+        ordinary_task.cancel()
+        for task in probes:
+            task.cancel()
+        await asyncio.gather(ordinary_task, *probes, return_exceptions=True)
+
+
 async def _ensure_runtime_updated_safely(update: dict | None, command: dict) -> bool:
     """Never replace the Agent process while local business work is in flight."""
     import deephole_client.server as agent_server
@@ -519,6 +563,27 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             "ok": True,
             **status(),
         }
+    elif cmd_type == "opencode_api_test":
+        from deephole_client.llm_api_probe import probe_llm_api
+        try:
+            result = await probe_llm_api(
+                str(msg.get("provider_id") or ""),
+                msg.get("provider") if isinstance(msg.get("provider"), dict) else {},
+                str(msg.get("model_id") or ""),
+            )
+        except Exception:
+            result = {
+                "success": False,
+                "elapsed_ms": 0,
+                "http_status": None,
+                "category": "internal_error",
+                "error": "Agent API 测试失败，请更新 Agent 后重试。",
+            }
+        return {
+            "type": "opencode_api_test_result",
+            "request_id": str(msg.get("request_id") or ""),
+            **result,
+        }
     elif cmd_type == "opencode_models":
         return await agent_server.handle_opencode_models(
             request_id=msg.get("request_id", ""),
@@ -652,6 +717,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "protocol_versions": [2, 1],
                     "capabilities": {
                         "llm_api_config": True,
+                        "llm_api_test": True,
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,
@@ -772,22 +838,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                             await ws.close(code=4001, reason="agent heartbeat watchdog timeout")
                             return
 
-                async def _command_worker() -> None:
-                    while True:
-                        msg = await command_queue.get()
-                        if msg is None:
-                            return
-                        try:
-                            response = await _handle_command(msg, config, task_manager, reporter)
-                            if response:
-                                await _send_ws_json(ws, ws_send_lock, response)
-                        except Exception as e:
-                            print(f"Error handling command: {e}")
-
                 pool_status_stop = asyncio.Event()
                 heartbeat_task = asyncio.create_task(_heartbeat())
                 watchdog_task = asyncio.create_task(_watchdog())
-                worker_task = asyncio.create_task(_command_worker())
+                worker_task = asyncio.create_task(_run_command_worker(
+                    command_queue, ws, ws_send_lock, config, task_manager, reporter,
+                ))
                 pool_status_task = asyncio.create_task(
                     reporter.publish_agent_opencode_pool_until(pool_status_stop)
                 )
@@ -813,11 +869,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     pool_status_task.cancel()
                     await command_queue.put(None)
                     worker_task.cancel()
-                    for task in (heartbeat_task, watchdog_task, worker_task, pool_status_task):
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
+                    stopped = await asyncio.gather(
+                        heartbeat_task, watchdog_task, worker_task, pool_status_task,
+                        return_exceptions=True,
+                    )
+                    for error in stopped:
+                        if isinstance(error, Exception):
+                            raise error
 
         except Exception as e:
             message = f"Connection lost: {e}."

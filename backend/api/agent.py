@@ -51,7 +51,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import Response
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from task_agent.llm_config import (
     llm_provider_revision,
@@ -349,6 +349,7 @@ def _agent_info_from_shared_session(session: dict) -> AgentInfo:
         protocol_version=int(session["protocol_version"] or 1),
         scan_code_graph_updates=bool(session.get("scan_code_graph_updates", 0)),
         scan_paths_probe=bool(session.get("scan_paths_probe", 0)),
+        llm_api_test=session.get("llm_api_test"),
     )
 
 
@@ -716,6 +717,7 @@ _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
 _opencode_config_status_waiters: dict[str, asyncio.Future] = {}
 _opencode_config_apply_waiters: dict[str, asyncio.Future] = {}
+_opencode_api_test_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
@@ -728,6 +730,7 @@ _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
     "opencode_config_status_result": _opencode_config_status_waiters,
     "opencode_config_apply_result": _opencode_config_apply_waiters,
+    "opencode_api_test_result": _opencode_api_test_waiters,
     "mcp_probe_result": _mcp_probe_waiters,
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
@@ -756,6 +759,7 @@ _RUNTIME_UPDATE_ACTIVE_STATUSES = {
 _RUNTIME_UPDATE_POLL_SECONDS = 2
 _RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
 _OPENCODE_MODEL_RPC_TIMEOUT_SECONDS = 120.0
+_OPENCODE_API_TEST_RPC_TIMEOUT_SECONDS = 40.0
 _SCAN_STOP_RPC_TIMEOUT_SECONDS = 10.0
 _FINAL_VULNERABILITY_CALLBACKS_CAPABILITY = "final_vulnerability_callbacks"
 _INCREMENTAL_OPENCODE_TASK_REPORTS_CAPABILITY = "incremental_opencode_task_reports"
@@ -2419,6 +2423,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             scan_code_graph_updates=reported_capabilities.get("scan_code_graph_updates") is True,
             scan_paths_probe=reported_capabilities.get("scan_paths_probe") is True,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
+            llm_api_test=reported_capabilities.get("llm_api_test") is True,
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
@@ -3428,6 +3433,103 @@ async def apply_stable_agent_opencode_config(
     agent_key: str, current_user: User = Depends(get_current_user),
 ) -> _AgentLLMConfigStatus:
     return await _agent_llm_config_status(agent_key, current_user, apply=True)
+
+
+class _AgentApiTestRequest(BaseModel):
+    provider_id: str
+    provider: dict[str, object]
+    model_id: str
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _safe_validation_errors(cls, value, handler):
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            errors = [
+                {"type": item["type"], "loc": ["body", *item["loc"]], "msg": item["msg"]}
+                for item in exc.errors(include_input=False, include_context=False)
+            ]
+            raise HTTPException(status_code=422, detail=errors) from None
+
+
+class _AgentApiTestResponse(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    success: bool
+    elapsed_ms: float = Field(ge=0, allow_inf_nan=False)
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    category: str
+    error: str = ""
+
+
+@public_router.post("/api/agent-configs/{agent_key}/opencode-api-test", response_model=_AgentApiTestResponse)
+async def test_stable_agent_opencode_api(
+    agent_key: str,
+    body: _AgentApiTestRequest,
+    current_user: User = Depends(get_current_user),
+) -> _AgentApiTestResponse:
+    """Resolve a draft's credentials, then ask its Agent to make the request."""
+    record = _authorize_agent_record(
+        await run_store_call(get_scan_store(), "get_agent_record", agent_key), current_user,
+    )
+    provider = copy.deepcopy(body.provider)
+    models = provider.get("models")
+    if not isinstance(models, dict) or body.model_id not in models:
+        raise HTTPException(status_code=422, detail="请选择当前 API 中的有效模型进行测试")
+    # Only the selected model is validated. An unfinished sibling draft must
+    # not prevent checking an otherwise complete API/model configuration.
+    provider["models"] = {body.model_id: models[body.model_id]}
+    try:
+        resolved = merge_llm_provider_secrets(
+            {body.provider_id: provider}, _stored_agent_config(record).llm_providers,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    live = await resolve_agent_connection_async(agent_key)
+    if live is None:
+        raise HTTPException(status_code=409, detail="Agent 当前离线，无法测试 API")
+    if live[1].llm_api_test is False:
+        raise HTTPException(status_code=501, detail="当前 Agent 不支持 API 测试，请先更新 Agent")
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _opencode_api_test_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(live[0], {
+            "type": "opencode_api_test", "request_id": request_id,
+            "provider_id": body.provider_id, "provider": resolved[body.provider_id],
+            "model_id": body.model_id,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="无法向 Agent 发送 API 测试请求，请确认 Agent 在线")
+        result = await _wait_agent_response(
+            request_id, waiter, timeout=_OPENCODE_API_TEST_RPC_TIMEOUT_SECONDS,
+        )
+        if not isinstance(result, dict):
+            raise ValueError("Invalid API test response")
+        category = redact_llm_error(result.get("category"), resolved)
+        response = _AgentApiTestResponse(
+            success=result.get("success"), elapsed_ms=result.get("elapsed_ms"),
+            http_status=result.get("http_status"),
+            category=category if re.fullmatch(r"[a-z_]{1,40}", category) else "unknown",
+            error=redact_llm_error(result.get("error"), resolved),
+        )
+        if response.success:
+            response.error = ""
+        return response
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="等待 Agent API 测试结果超时，请确认 Agent 已更新并在线") from None
+    except HTTPException:
+        raise
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=502, detail="Agent 返回的 API 测试结果无效") from None
+    except Exception:
+        # Transport errors may include the full command or request headers.
+        raise HTTPException(status_code=502, detail="Agent API 测试通信失败，请确认 Agent 在线") from None
+    finally:
+        _opencode_api_test_waiters.pop(request_id, None)
+        if not waiter.done():
+            waiter.cancel()
 
 
 @public_router.post("/api/agent-configs/{agent_key}/runtime-update")

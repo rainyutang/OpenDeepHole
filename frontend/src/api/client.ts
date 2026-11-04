@@ -1091,6 +1091,16 @@ export async function applyAgentOpenCodeConfig(agentKey: string): Promise<import
   return data;
 }
 
+export async function testAgentOpenCodeApi(
+  agentKey: string,
+  body: import("../types").AgentOpenCodeApiTestRequest,
+): Promise<import("../types").AgentOpenCodeApiTestResult> {
+  const { data } = await api.post<import("../types").AgentOpenCodeApiTestResult>(
+    `/api/agent-configs/${encodeURIComponent(agentKey)}/opencode-api-test`, body, { timeout: 45000 },
+  );
+  return data;
+}
+
 export async function getAgentMcpStatus(agentKey: string): Promise<AgentMcpStatusResponse> {
   const { data } = await api.get<AgentMcpStatusResponse>(
     `/api/agent-configs/${agentKey}/mcp-status`,

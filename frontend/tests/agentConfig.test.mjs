@@ -38,121 +38,245 @@ function emptyConfig() {
   };
 }
 
-test("API provider edits share model pool settings, preserve aliases and discard submitted credentials", () => {
-  const provider = { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://api.example.com/v1", apiKey_set: true, headers: { Authorization: null } }, models: { "org/model": { headers: { "x-model-key": null } } } };
+function provider(models = { "org/model": {} }) {
+  return { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://api.example.com/v1", apiKey_set: true, headers: { Authorization: null } }, models };
+}
+
+test("unified model joins preserve scheduling aliases, stable keys, shared renames and disabled orphans", () => {
   let config = emptyConfig();
-  config.model_pool.models.push({ id: "imported", model: "custom/org/model", enabled: true, capability: "low", weight: 3, max_concurrency: 2 });
-  config = llmConfig.replaceLlmProvider(config, "custom", "custom", provider);
-  assert.equal(config.model_pool.models.length, 1);
-  assert.equal(config.model_pool.models[0].id, "imported");
-  assert.equal(config.model_pool.models[0].weight, 3);
-  config = llmConfig.updateLlmModelPool(config, "custom", "org/model", { max_concurrency: 4 });
-  assert.equal(config.model_pool.models[0].max_concurrency, 4);
-  config = llmConfig.replaceLlmProvider(config, "custom", "renamed", { ...provider, previous_id: "custom", models: { replacement: { ...provider.models["org/model"], previous_id: "org/model" } } }, { "org/model": "replacement" });
-  assert.equal(config.model_pool.models[0].model, "renamed/replacement");
-  assert.equal(config.model_pool.models[0].id, "imported");
-  assert.equal(config.model_pool.models[0].max_concurrency, 4);
+  config.llm_providers.custom = provider({ "org/model": { headers: { "x-model": null } }, sibling: {} });
+  config.model_pool.models = [
+    { id: "first", model: "custom/org/model", enabled: true, capability: "low", weight: 2, max_concurrency: 3 },
+    { id: "alias", model: "custom/org/model", enabled: true, capability: "high", weight: 4, max_concurrency: 5 },
+  ];
+  config = llmConfig.includeUnscheduledLlmModels(config);
+  assert.equal(config.model_pool.models.length, 3);
+  assert.equal(config.model_pool.models[2].enabled, false);
+  assert.equal(config.model_pool.models[2].model, "custom/sibling");
+  const keys = config.model_pool.models.map(llmConfig.modelRowKey);
+  assert.equal(JSON.stringify(config).includes("model-row-"), false);
+  assert.deepEqual(llmConfig.findLlmBinding(config, "custom/org/model"), { providerId: "custom", modelId: "org/model" });
+  const draft = llmConfig.selectedLlmDraft(config, config.model_pool.models[0]);
+  assert.deepEqual(Object.keys(draft.provider.models), ["org/model"]);
+  assert.equal(draft.provider.options.headers.Authorization, null);
+  config = llmConfig.editLlmProvider(config, "custom", "renamed", {
+    ...config.llm_providers.custom, previous_id: "custom", models: { replacement: { previous_id: "org/model", headers: { "x-model": null } }, sibling: {} },
+  }, { "org/model": "replacement" });
+  assert.deepEqual(config.model_pool.models.map((item) => item.model), ["renamed/replacement", "renamed/replacement", "renamed/sibling"]);
+  assert.deepEqual(config.model_pool.models.map(llmConfig.modelRowKey), keys);
+  assert.deepEqual(config.model_pool.models.slice(0, 2).map((item) => [item.id, item.max_concurrency]), [["first", 3], ["alias", 5]]);
   config.llm_providers.renamed.options.apiKey = "private-key";
   config.llm_providers.renamed.options.headers.Authorization = "private-header";
   const saved = llmConfig.savedLlmConfig(config);
   assert.equal(JSON.stringify(saved).includes("private-"), false);
-  assert.equal(saved.llm_providers.renamed.options.apiKey_set, true);
   assert.equal("apiKey" in saved.llm_providers.renamed.options, false);
-  assert.equal(saved.llm_providers.renamed.options.headers.Authorization, null);
-  assert.equal("previous_id" in saved.llm_providers.renamed, false);
+  assert.equal(saved.llm_providers.renamed.options.apiKey_set, true);
   assert.equal("previous_id" in saved.llm_providers.renamed.models.replacement, false);
-  assert.equal(llmConfig.removeLlmProvider(saved, "renamed").model_pool.models.length, 0);
-  const collision = { ...config, model_pool: { models: [...config.model_pool.models,
-    { id: "target-imported", model: "target/replacement", capability: "medium", max_concurrency: 8, weight: 5, enabled: true }] } };
-  const deduped = llmConfig.replaceLlmProvider(collision, "renamed", "target", collision.llm_providers.renamed);
-  assert.equal(deduped.model_pool.models.length, 1);
-  assert.equal(deduped.model_pool.models[0].id, "target-imported");
-  assert.equal(deduped.model_pool.models[0].max_concurrency, 8);
+  config = llmConfig.removeModelRow(saved, 0);
+  assert.ok(config.llm_providers.renamed.models.replacement); // The remaining alias owns the definition.
+  config = llmConfig.removeModelRow(config, 0);
+  assert.deepEqual(Object.keys(config.llm_providers.renamed.models), ["sibling"]);
+  config = llmConfig.removeModelRow(config, 0);
+  assert.deepEqual(config.llm_providers, {});
+  for (const modelId of ["constructor", "toString", "__proto__"]) {
+    let special = emptyConfig();
+    special.llm_providers.custom = provider({ [modelId]: {} });
+    special = llmConfig.includeUnscheduledLlmModels(special);
+    special = llmConfig.editLlmProvider(special, "custom", "custom", { ...special.llm_providers.custom, options: { baseURL: "https://changed.example/v1" } });
+    assert.equal(special.model_pool.models[0].model, `custom/${modelId}`);
+  }
 });
 
-test("compact API form validates limits, automatically adds models, uses hover hints and preserves Serve import", async () => {
-  const config = emptyConfig();
+async function mountPage({ config = emptyConfig(), online = true, testApi } = {}) {
   let saved = null;
-  let root;
-  let retries = 0;
   let status = { state: "active", desired_revision: "old", applied_revision: "old", active_tasks: 0, error: "" };
+  let retries = 0;
+  const probes = [];
   globalThis.window.confirm = () => true;
   client.api.defaults.adapter = async (request) => {
     let data;
-    if (request.url === "/api/agents") data = [{ agent_key: "api-agent", agent_id: "session", name: "API Agent", online: true }];
+    if (request.url === "/api/agents") data = [{ agent_key: "api-agent", agent_id: "session", name: "API Agent", online }];
     else if (request.url === "/api/checkers") data = [];
     else if (request.url.endsWith("/validator-catalog")) data = { methods: [], errors: [], updated_at: "" };
     else if (request.url.endsWith("/opencode-pool")) data = { models: [], global_running: 0, global_queued: 0 };
     else if (request.url.endsWith("/opencode-config-status")) data = status;
     else if (request.url.endsWith("/opencode-config-apply")) { retries += 1; data = { ...status, state: "applying", error: "" }; }
-    else if (request.url.endsWith("/opencode-models")) data = { ok: true, message: "", models: [{ id: "external/model", provider: "external", model: "external/model", name: "External" }, { id: "custom/llm", provider: "custom", model: "custom/llm", name: "Custom" }] };
+    else if (request.url.endsWith("/opencode-api-test")) {
+      const body = JSON.parse(request.data); probes.push(body);
+      assert.equal(request.timeout, 45000);
+      data = testApi ? await testApi(body) : { success: true, elapsed_ms: 123, http_status: 200, category: "success", error: "" };
+    }
+    else if (request.url.endsWith("/opencode-models")) data = { ok: true, message: "", models: [
+      { id: "external/model", provider: "external", model: "external/model", name: "External" },
+      { id: "custom/llm", provider: "custom", model: "custom/llm", name: "Custom" },
+    ] };
     else if (request.url === "/api/agent-configs/api-agent") {
       if (request.method === "put") { saved = JSON.parse(request.data); status = { ...status, state: "failed", desired_revision: "next", error: "Serve 启动失败" }; data = { ok: true, saved_revision: "next" }; }
       else data = structuredClone(config);
     } else throw new Error(`Unexpected request: ${request.url}`);
     return { data, status: 200, statusText: "OK", headers: {}, config: request };
   };
+  let root;
+  await act(async () => { root = create(createElement(ThemeProvider, null, createElement(AgentConfigPage, { onBack() {} }))); });
+  const section = () => root.root.findByProps({ "aria-label": "模型配置" });
+  const toggles = () => section().findAllByType("button").filter((item) => item.props["data-model-toggle"]);
+  const button = (name) => root.root.findAllByType("button").find((item) => text(item) === name);
+  const control = (name) => {
+    const label = section().findAllByType("label").find((item) => text(item).replace("*", "") === name);
+    assert.ok(label, name);
+    return section().findAll((item) => item.props.id === label.props.htmlFor)[0];
+  };
+  const change = async (name, value) => { await act(async () => { control(name).props.onChange({ target: { value } }); }); };
+  const click = async (name) => { assert.ok(button(name), name); await act(async () => { button(name).props.onClick(); }); };
+  const open = async (index) => { if (!toggles()[index].props["aria-expanded"]) await act(async () => { toggles()[index].props.onClick(); }); };
+  return { root, section, toggles, button, control, change, click, open, probes,
+    get saved() { return saved; }, get retries() { return retries; },
+    async dispose() { await act(async () => { root.unmount(); }); delete globalThis.window.confirm; },
+  };
+}
+
+test("single model list adds API drafts, keeps compact headers, validates limits and preserves import", async () => {
+  const page = await mountPage();
   try {
-    await act(async () => { root = create(createElement(ThemeProvider, null, createElement(AgentConfigPage, { onBack() {} }))); });
-    const button = (name) => root.root.findAllByType("button").find((item) => text(item) === name);
-    const apiSection = () => root.root.findByProps({ "aria-label": "LLM API 配置" });
-    const control = (name) => {
-      const label = apiSection().findAllByType("label").find((item) => text(item).replace("*", "") === name);
-      assert.ok(label, name);
-      return apiSection().findAll((item) => item.props.id === label.props.htmlFor)[0];
-    };
-    const change = async (name, value) => { await act(async () => { control(name).props.onChange({ target: { value } }); }); };
-    assert.equal(root.root.findAllByProps({ role: "tooltip" }).length, 0);
-    await act(async () => { button("添加 API").props.onClick(); });
-    assert.equal(apiSection().findByType("details").props.open, undefined);
-    assert.equal(apiSection().findAllByProps({ role: "tooltip" }).length, 0);
-    const hint = () => apiSection().findByProps({ "aria-label": "URL说明" });
+    for (const label of ["从 opencode 读取", "手动添加 opencode 模型", "添加 LLM API"]) assert.ok(page.button(label));
+    assert.equal(page.root.root.findAllByProps({ "aria-label": "LLM API 配置" }).length, 0);
+    await page.click("添加 LLM API");
+    assert.equal(page.toggles().length, 1);
+    assert.equal(page.toggles()[0].children.length, 4);
+    assert.equal(page.toggles()[0].findAllByType("input").length, 0);
+    assert.match(text(page.toggles()[0]), /LLM API/);
+    const rowKey = page.toggles()[0].props["data-model-toggle"];
+    assert.equal(page.section().findByType("details").props.open, undefined);
+    const hint = () => page.section().findByProps({ "aria-label": "URL说明" });
+    assert.equal(page.root.root.findAllByProps({ role: "tooltip" }).length, 0);
     await act(async () => { hint().props.onMouseEnter(); });
-    assert.match(text(apiSection().findByProps({ role: "tooltip" })), /不自动补/);
+    assert.match(text(page.section().findByProps({ role: "tooltip" })), /请勿填写 \/chat\/completions/);
     await act(async () => { hint().props.onKeyDown({ key: "Escape" }); });
-    assert.equal(root.root.findAllByProps({ role: "tooltip" }).length, 0);
+    assert.equal(page.root.root.findAllByProps({ role: "tooltip" }).length, 0);
     await act(async () => { hint().props.onFocus(); });
     assert.ok(hint().props["aria-describedby"]);
     await act(async () => { hint().props.onBlur(); });
-    await change("Provider ID", "custom");
-    await change("URL", "https://api.example.com/v1");
-    await change("模型 ID", "llm");
-    assert.equal(control("能力").props.value, "high");
-    assert.equal(control("并发").props.value, 1);
-    assert.equal(control("权重").props.value, 1);
-    await change("并发", "3");
-    await change("权重", "2");
-    await change("Context", "128000");
-    await act(async () => { button("保存配置").props.onClick(); });
-    assert.equal(saved, null);
-    assert.match(text(root.toJSON()), /context 和 output/);
-    await change("Output", "8192");
-    await act(async () => { apiSection().findByProps({ "aria-label": "API Key" }).props.onChange({ target: { value: "secret-example" } }); });
-    await act(async () => { button("保存配置").props.onClick(); });
-    assert.equal(saved.schema_version, 11);
-    assert.equal(saved.llm_providers.custom.options.apiKey, "secret-example");
-    assert.equal(saved.model_pool.models.length, 1);
-    assert.deepEqual([saved.model_pool.models[0].capability, saved.model_pool.models[0].max_concurrency, saved.model_pool.models[0].weight], ["high", 3, 2]);
-    assert.equal(apiSection().findAllByType("details").length, 0); // Successful save collapses the editor.
-    assert.match(text(root.toJSON()), /Serve 启动失败/);
-    await act(async () => { button("重试应用").props.onClick(); });
-    assert.equal(retries, 1);
-    await act(async () => { button("编辑").props.onClick(); });
-    assert.equal(apiSection().findByProps({ "aria-label": "API Key" }).props.value, "");
-    assert.match(apiSection().findByProps({ "aria-label": "API Key" }).props.placeholder, /已设置/);
-    await change("API 名称", "Named API");
-    await act(async () => { button("保存配置").props.onClick(); });
-    assert.equal("apiKey" in saved.llm_providers.custom.options, false);
-    await act(async () => { button("从 serve 读取").props.onClick(); });
-    const picker = root.root.findByProps({ role: "dialog" });
+    await page.change("Provider ID", "custom");
+    await page.change("URL", "https://api.example.com/v1");
+    await page.change("API 模型 ID", "llm");
+    await page.change("模型 ID", "stable-user-id");
+    assert.equal(page.toggles()[0].props["data-model-toggle"], rowKey);
+    assert.equal(page.toggles()[0].props["aria-expanded"], true);
+    assert.equal(page.control("模型能力").props.value, "high");
+    assert.equal(page.control("模型可用并发").props.value, 1);
+    assert.equal(page.control("权重").props.value, 1);
+    await page.change("模型可用并发", "3");
+    await page.change("权重", "2");
+    await page.change("Context", "128000");
+    await page.click("保存配置");
+    assert.equal(page.saved, null);
+    assert.match(text(page.root.toJSON()), /context 和 output/);
+    await page.change("Output", "8192");
+    await act(async () => { page.section().findByProps({ "aria-label": "API Key" }).props.onChange({ target: { value: "secret-example" } }); });
+    await page.click("测试连接");
+    assert.equal(page.saved, null); // Draft testing must never save configuration.
+    assert.equal(page.probes[0].provider.options.apiKey, "secret-example");
+    assert.match(text(page.section()), /连接成功/);
+    await page.change("权重", "4");
+    assert.match(text(page.section()), /连接成功/); // Scheduling changes do not invalidate API connectivity.
+    await page.change("URL", "https://changed.example.com/v1");
+    assert.doesNotMatch(text(page.section()), /连接成功/);
+    await page.click("保存配置");
+    assert.equal(page.saved.model_pool.models.length, 1);
+    assert.deepEqual([page.saved.model_pool.models[0].id, page.saved.model_pool.models[0].max_concurrency, page.saved.model_pool.models[0].weight], ["stable-user-id", 3, 4]);
+    assert.equal(page.toggles()[0].props["aria-expanded"], false);
+    assert.match(text(page.root.toJSON()), /Serve 启动失败/);
+    await page.click("重试应用");
+    assert.equal(page.retries, 1);
+    await page.open(0);
+    assert.equal(page.section().findByProps({ "aria-label": "API Key" }).props.value, "");
+    assert.match(page.section().findByProps({ "aria-label": "API Key" }).props.placeholder, /已设置/);
+    await page.change("API 名称", "Named API");
+    await page.click("保存配置");
+    assert.equal("apiKey" in page.saved.llm_providers.custom.options, false);
+    await page.click("从 opencode 读取");
+    const picker = page.root.root.findByProps({ role: "dialog" });
+    assert.match(text(picker), /从 opencode 读取模型/);
     for (const box of picker.findAllByType("input").filter((item) => item.props.type === "checkbox")) await act(async () => { box.props.onChange(); });
-    await act(async () => { button("导入").props.onClick(); });
-    await act(async () => { button("保存配置").props.onClick(); });
-    assert.deepEqual(saved.model_pool.models.map((item) => item.model), ["custom/llm", "external/model"]);
-  } finally {
-    if (root) await act(async () => { root.unmount(); });
-    delete globalThis.window.confirm;
-  }
+    await page.click("导入");
+    await page.click("保存配置");
+    assert.deepEqual(page.saved.model_pool.models.map((item) => item.model), ["custom/llm", "external/model"]);
+    assert.match(text(page.toggles()[1]), /OpenCode 模型/);
+  } finally { await page.dispose(); }
+});
+
+test("shared provider edits invalidate late tests while sibling models and disabled orphans remain usable", async () => {
+  const config = emptyConfig();
+  config.llm_providers.shared = provider({ first: {}, second: {} });
+  config.model_pool.models = [{ id: "first", model: "shared/first", enabled: true, capability: "high", weight: 1, max_concurrency: 1 }];
+  let resolveProbe;
+  const page = await mountPage({ config, testApi: () => new Promise((resolve) => { resolveProbe = resolve; }) });
+  try {
+    assert.equal(page.toggles().length, 2);
+    assert.ok(page.toggles().every((item) => !item.props["aria-expanded"]));
+    await page.open(1);
+    assert.equal(page.section().findAllByType("input").find((item) => item.props.type === "checkbox").props.checked, false);
+    await page.open(0);
+    await page.click("测试连接");
+    assert.equal(page.probes.length, 1);
+    assert.equal(page.probes[0].provider.options.headers.Authorization, null);
+    assert.deepEqual(Object.keys(page.probes[0].provider.models), ["first"]);
+    await page.open(1);
+    assert.equal(page.button("测试连接").props.disabled, true);
+    await page.change("URL", "https://changed.example/v1");
+    await page.open(0);
+    assert.equal(page.control("URL").props.value, "https://changed.example/v1");
+    await page.change("URL", "https://api.example.com/v1"); // Even reverting cannot revive the pending result.
+    await act(async () => { resolveProbe({ success: true, elapsed_ms: 50, http_status: 200, category: "success", error: "" }); });
+    assert.doesNotMatch(text(page.section()), /连接成功/);
+    await page.change("API 模型 ID", "renamed/first");
+    await page.change("Provider ID", "renamed-provider");
+    await page.click("删除模型");
+    assert.equal(page.toggles().length, 1);
+    assert.match(text(page.toggles()[0]), /renamed-provider\/second/);
+    await page.open(0);
+    await page.click("添加同 API 模型");
+    assert.equal(page.toggles().length, 2);
+    assert.equal(page.control("API 模型 ID").props.value, "");
+    assert.equal(page.control("URL").props.value, "https://api.example.com/v1");
+    await page.change("API 模型 ID", "new-model");
+    await page.click("保存配置");
+    assert.deepEqual(Object.keys(page.saved.llm_providers["renamed-provider"].models), ["second", "new-model"]);
+    assert.equal(page.saved.model_pool.models[0].enabled, false);
+    assert.equal(page.saved.model_pool.models[1].enabled, true);
+  } finally { await page.dispose(); }
+});
+
+test("offline API rows can be edited but cannot test", async () => {
+  const config = emptyConfig(); config.llm_providers.local = provider();
+  const page = await mountPage({ config, online: false });
+  try {
+    await page.open(0);
+    assert.equal(page.button("测试连接").props.disabled, true);
+    assert.equal(page.button("从 opencode 读取").props.disabled, true);
+    await page.change("URL", "http://127.0.0.1:8000/v1");
+    assert.equal(page.probes.length, 0);
+  } finally { await page.dispose(); }
+});
+
+test("adding an API matching an existing OpenCode model reuses its scheduling row", async () => {
+  const config = emptyConfig();
+  config.model_pool.models = [{ id: "existing", model: "api-1/foo", enabled: false, capability: "low", weight: 7, max_concurrency: 9 }];
+  const page = await mountPage({ config });
+  try {
+    const originalKey = page.toggles()[0].props["data-model-toggle"];
+    await page.click("添加 LLM API");
+    assert.equal(page.toggles().length, 2);
+    await page.change("URL", "https://api.example.com/v1");
+    for (const value of ["f", "fo", "foo"]) await page.change("API 模型 ID", value);
+    assert.equal(page.toggles().length, 1);
+    assert.equal(page.toggles()[0].props["data-model-toggle"], originalKey);
+    assert.equal(page.toggles()[0].props["aria-expanded"], true);
+    assert.equal(page.control("模型 ID").props.value, "existing");
+    assert.equal(page.control("模型能力").props.value, "low");
+    assert.equal(page.control("模型可用并发").props.value, 9);
+    assert.equal(page.control("权重").props.value, 7);
+  } finally { await page.dispose(); }
 });
 
 test("model capacity follows edits, enabled rows, additions and deletions and saves only model limits", async () => {
@@ -186,30 +310,37 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
   try {
     await act(async () => { root = create(createElement(ThemeProvider, null, createElement(AgentConfigPage, { onBack() {} }))); });
     const fields = (name, kind = "input") => root.root.findAllByType("label")
-      .filter((label) => text(label.children[0]) === name).map((label) => label.findByType(kind));
+      .filter((label) => label.props.htmlFor ? text(label).replace("*", "") === name : text(label.children[0]) === name)
+      .map((label) => label.props.htmlFor ? root.root.findAll((item) => item.props.id === label.props.htmlFor)[0] : label.findByType(kind));
+    const openRow = async (index) => {
+      const toggle = root.root.findAllByType("button").filter((item) => item.props["data-model-toggle"])[index];
+      if (!toggle.props["aria-expanded"]) await act(async () => { toggle.props.onClick(); });
+    };
     const button = (name) => root.root.findAllByType("button").find((item) => text(item) === name);
     const capacity = () => Number(text(root.root.findByType("output")));
     const enableBoxes = () => root.root.findAllByType("label").filter((label) => text(label) === "启用")
       .map((label) => label.findByType("input"));
     assert.equal(capacity(), 9);
+    assert.equal(fields("模型 ID").length, 0);
+    await openRow(0);
     for (const name of ["模型 ID", "模型名称", "权重", "模型可用并发", "Session 超时覆盖（秒）", "无新内容超时覆盖（秒）", "重试次数覆盖", "开始时间", "结束时间"]) {
-      assert.equal(fields(name).length, 3, name);
+      assert.equal(fields(name).length, 1, name);
     }
-    assert.equal(fields("模型能力", "select").length, 3);
-    await act(async () => { fields("模型可用并发")[1].props.onChange({ target: { value: "6" } }); });
+    assert.equal(fields("模型能力", "select").length, 1);
+    await openRow(1);
+    await act(async () => { fields("模型可用并发")[0].props.onChange({ target: { value: "6" } }); });
     assert.equal(capacity(), 10);
+    await openRow(0);
     await act(async () => { enableBoxes()[0].props.onChange({ target: { checked: false } }); });
     assert.equal(capacity(), 6);
-    await act(async () => { enableBoxes()[2].props.onChange({ target: { checked: true } }); });
+    await openRow(2);
+    await act(async () => { enableBoxes()[0].props.onChange({ target: { checked: true } }); });
     assert.equal(capacity(), 16);
-    await act(async () => { button("添加模型").props.onClick(); });
-    assert.equal(capacity(), 16); // A new row needs a model name before contributing capacity.
-    await act(async () => { fields("模型名称")[3].props.onChange({ target: { value: "provider/new" } }); });
+    await act(async () => { button("手动添加 opencode 模型").props.onClick(); });
+    assert.equal(capacity(), 16);
+    await act(async () => { fields("模型名称")[0].props.onChange({ target: { value: "provider/new" } }); });
     assert.equal(capacity(), 17);
-    let newCard = fields("模型 ID")[3];
-    while (newCard && !(newCard.type === "div" && newCard.props.className?.includes("rounded-xl"))) newCard = newCard.parent;
-    assert.ok(newCard);
-    await act(async () => { newCard.findAllByType("button").find((item) => text(item) === "删除").props.onClick(); });
+    await act(async () => { button("删除模型").props.onClick(); });
     assert.equal(capacity(), 16);
     await act(async () => { button("保存配置").props.onClick(); });
     assert.ok(saved);

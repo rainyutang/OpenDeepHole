@@ -1042,7 +1042,7 @@ export interface AgentLlmProviderConfig {
     apiKey?: string | null;
     apiKey_set?: boolean;
     headers?: Record<string, string | null>;
-    timeout?: number | false;
+    timeout?: number;
     chunkTimeout?: number;
   };
   models: Record<string, AgentLlmModelConfig>;
@@ -1053,6 +1053,20 @@ export interface AgentOpenCodeConfigStatus {
   applied_revision: string;
   state: "active" | "draining" | "applying" | "failed" | "unsupported" | "offline";
   active_tasks: number;
+  error: string;
+}
+
+export interface AgentOpenCodeApiTestRequest {
+  provider_id: string;
+  provider: AgentLlmProviderConfig;
+  model_id: string;
+}
+
+export interface AgentOpenCodeApiTestResult {
+  success: boolean;
+  elapsed_ms: number;
+  http_status: number | null;
+  category: string;
   error: string;
 }
 

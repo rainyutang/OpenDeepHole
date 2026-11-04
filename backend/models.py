@@ -1147,6 +1147,7 @@ class AgentInfo(BaseModel):
     has_explicit_model: bool = False
     protocol_version: int = 1
     llm_api_config: bool | None = None
+    llm_api_test: bool | None = None
     scan_code_graph_updates: bool = False
     scan_paths_probe: bool = False
 

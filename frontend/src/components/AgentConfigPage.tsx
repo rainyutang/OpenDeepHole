@@ -24,8 +24,8 @@ import type {
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
 import { agentOwnerLabel } from "../agentPresentation";
-import LlmApiEditor from "./LlmApiEditor";
-import { savedLlmConfig, validateLlmProviders } from "../llmApiConfig";
+import ModelEditor from "./ModelEditor";
+import { includeUnscheduledLlmModels, savedLlmConfig, validateLlmProviders } from "../llmApiConfig";
 
 interface Props {
   onBack: () => void;
@@ -129,12 +129,6 @@ function PolicyEditor({ value, onChange, timeoutLabel = "Session 超时（秒）
   </div>;
 }
 
-function probeTime(value: string): string {
-  if (!value) return "";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
-}
-
 function formatModelPickerError(error: unknown): string {
   const candidate = error as {
     message?: unknown;
@@ -146,7 +140,7 @@ function formatModelPickerError(error: unknown): string {
     };
   };
   const response = candidate?.response;
-  const lines = ["从 OpenCode Serve 读取模型失败"];
+  const lines = ["从 opencode 读取模型失败"];
   let hasResponseDetail = false;
   if (response) {
     const status = typeof response.status === "number" ? response.status : null;
@@ -258,7 +252,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       getCheckers(),
     ]).then(([next, nextCatalog, nextCheckers]) => {
       if (requestId !== configRequest.current) return;
-      setConfig(next); setCatalog(nextCatalog); setCheckers(nextCheckers); setDirty(false); setMessage("");
+      setConfig(includeUnscheduledLlmModels(next)); setCatalog(nextCatalog); setCheckers(nextCheckers); setDirty(false); setMessage("");
       savedProviders.current = JSON.stringify(next.llm_providers || {});
       editRevision.current += 1;
     }).catch(() => {
@@ -430,7 +424,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       });
     }
     setCfg({ ...config, model_pool: { ...config.model_pool, models: [...config.model_pool.models, ...added] } });
-    setMessage(`从 serve 添加了 ${added.length} 个模型`);
+    setMessage(`从 opencode 添加了 ${added.length} 个模型`);
     setModelPicker(null);
   };
 
@@ -542,12 +536,10 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
               </div>
             </div>
             <div className="border-t border-slate-700 pt-6">
-              <LlmApiEditor key={agentKey} config={config} onChange={setCfg} status={llmStatus}
-                onRetry={() => void retryLlm()} retrying={retryingLlm} saving={saving} savedVersion={savedVersion} />
-            </div>
-            <div className="border-t border-slate-700 pt-6">
-              <h3 className="mb-4 text-sm font-semibold text-slate-200">模型配置</h3>
-              <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker(true)} pool={pool} />
+              <ModelEditor key={agentKey} agentKey={agentKey} config={config} setCfg={setCfg}
+                online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker(true)} pool={pool}
+                status={llmStatus} onRetry={() => void retryLlm()} retrying={retryingLlm}
+                saving={saving} savedVersion={savedVersion} />
             </div>
           </div> : <div className="space-y-3">
             {advancedSections.map((item) => {
@@ -572,14 +564,14 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     {modelPicker && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div role="dialog" aria-modal="true" aria-labelledby="model-picker-title" className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 id="model-picker-title" className="text-sm font-semibold text-white">从 serve 导入模型</h3>
+          <h3 id="model-picker-title" className="text-sm font-semibold text-white">从 opencode 读取模型</h3>
           <button type="button" onClick={() => setModelPicker(null)} className="px-2 py-1 text-xs text-slate-300 hover:text-white">关闭</button>
         </div>
         {modelPicker.message && <div className="mb-3 whitespace-pre-wrap break-all rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
         <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
           {modelPicker.loading ? <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>
             : modelPicker.error ? <pre className="whitespace-pre-wrap break-all px-3 py-4 text-left font-mono text-xs leading-5 text-red-300">{modelPicker.error}</pre>
-              : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">serve 未返回可用模型</div>
+              : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">opencode 未返回可用模型</div>
                 : <div className="divide-y divide-slate-700">{modelPicker.models.map((model) => <label key={model.id} className="flex items-center gap-3 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
                   <input type="checkbox" checked={modelPicker.selected.includes(model.id)} onChange={() => togglePickedModel(model.id)} className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500" />
                   <span className="min-w-0 flex-1">
@@ -597,110 +589,5 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
         </div>
       </div>
     </div>}
-  </div>;
-}
-
-function ModelEditor({ config, setCfg, online, onImport, pool }: { config: AgentRemoteConfig; setCfg: (value: AgentRemoteConfig) => void; online: boolean; onImport: () => void; pool: AgentOpenCodePoolStatus | null }) {
-  const models = config.model_pool.models;
-  const update = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.map((item, current) => current === index ? { ...item, ...patch } : item) } });
-  const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, timeout: null, idle_timeout: null, max_retries: null, time_windows: [] }] } });
-  const addWindow = (modelIndex: number) => update(modelIndex, {
-    time_windows: [...(models[modelIndex].time_windows || []), { weekdays: [...allWeekdays], start: "09:00", end: "18:00" }],
-  });
-  const updateWindow = (modelIndex: number, windowIndex: number, next: AgentModelTimeWindow) => update(modelIndex, {
-    time_windows: (models[modelIndex].time_windows || []).map((window, current) => current === windowIndex ? next : window),
-  });
-  const removeWindow = (modelIndex: number, windowIndex: number) => update(modelIndex, {
-    time_windows: (models[modelIndex].time_windows || []).filter((_, current) => current !== windowIndex),
-  });
-  const ready = models.some((item) => item.enabled && item.model.trim());
-  const capacity = models.reduce((total, model) => (
-    model.enabled && model.model.trim() && Number.isInteger(model.max_concurrency) && model.max_concurrency > 0
-      ? total + model.max_concurrency
-      : total
-  ), 0);
-  return <div className="space-y-5">
-    <div className="flex flex-wrap items-end gap-3">
-      <Field label="总并发容量（自动计算）" hint="已启用模型的并发之和"><output className="block py-2 text-lg font-semibold tabular-nums text-slate-100">{capacity}</output></Field>
-      <button onClick={onImport} disabled={!online} className="rounded bg-slate-700 px-3 py-2 text-sm disabled:opacity-40">从 serve 读取</button>
-      <button onClick={add} className="rounded bg-blue-600 px-3 py-2 text-sm">添加模型</button>
-      {pool && <span className="pb-2 text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
-    </div>
-    {!ready && <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">必须手动配置并启用至少一个有明确模型名的模型，才能启动或恢复扫描。</div>}
-    <div className="space-y-4">{models.map((model, index) => {
-      const observedRuntime = pool?.models.find((item) => item.id === model.id);
-      const runtime = observedRuntime?.enabled ? observedRuntime : undefined;
-      const effectiveWeight = runtime?.effective_weight ?? runtime?.weight ?? model.weight;
-      const penaltyLevel = runtime?.health_penalty_level ?? 0;
-      return <div key={index} className="rounded-xl border border-slate-700 p-4">
-      <div className="grid items-end gap-3 md:grid-cols-6">
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={model.enabled} onChange={(e) => update(index, { enabled: e.target.checked })} />启用</label>
-        <Field label="模型 ID"><input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} /></Field>
-        <div className="md:col-span-2"><Field label="模型名称"><input className={input} value={model.model} placeholder="provider/model" onChange={(e) => update(index, { model: e.target.value })} /></Field></div>
-        <Field label="模型能力"><select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select></Field>
-        <button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 py-2 text-sm text-red-300">删除</button>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-4">
-        <Field label="权重"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} onChange={(e) => update(index, { weight: Number(e.target.value) })} /></Field>
-        <Field label="模型可用并发"><input className={input} type="number" min={1} value={model.max_concurrency} onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} /></Field>
-        <Field label="Session 超时覆盖（秒）"><input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
-        <Field label="无新内容超时覆盖（秒）"><input className={input} type="number" min={1} value={model.idle_timeout ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { idle_timeout: e.target.value ? Number(e.target.value) : null })} /></Field>
-        <Field label="重试次数覆盖"><input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="留空时继承任务配置" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} /></Field>
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs">
-        <span className="text-slate-300">
-          配置权重 <span className="font-mono text-slate-100">{model.weight}</span>
-          <span className="px-1.5 text-slate-600">/</span>
-          有效权重 <span className={`font-mono ${penaltyLevel > 0 ? "text-amber-300" : "text-slate-100"}`}>{effectiveWeight}</span>
-        </span>
-        {!runtime
-          ? <span className="text-slate-500">暂无当前运行状态</span>
-          : penaltyLevel > 0
-            ? <span className="text-amber-300">健康降级 {penaltyLevel} 级</span>
-            : <span className="text-green-300">健康状态正常</span>}
-        {runtime?.last_health_failure_at && <span className="text-slate-500">
-          最近健康失败：{runtime.last_health_failure_kind === "timeout" ? "超时" : "请求失败"} · {probeTime(runtime.last_health_failure_at)}
-        </span>}
-      </div>
-      <div className="mt-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium text-slate-300">使用时间</p>
-            <p className="mt-1 text-xs text-slate-500">按 Agent 本地时间；跨夜时间按当前星期判断</p>
-          </div>
-          <button type="button" onClick={() => addWindow(index)} className="rounded-md bg-slate-700 px-2.5 py-1.5 text-xs text-slate-100 hover:bg-slate-600">添加时间段</button>
-        </div>
-        {(model.time_windows || []).length === 0 ? <p className="text-xs text-slate-500">全天可用</p> : <div className="space-y-3">
-          {(model.time_windows || []).map((window, windowIndex) => {
-            const selectedWeekdays = configuredWeekdays(window);
-            return <div key={windowIndex} className="space-y-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
-              <div className="flex flex-wrap gap-2">{weekdays.map((day) => {
-                const selected = selectedWeekdays.includes(day.value);
-                return <button
-                  key={day.value}
-                  type="button"
-                  aria-pressed={selected}
-                  onClick={() => updateWindow(index, windowIndex, {
-                    ...window,
-                    weekdays: selected
-                      ? selectedWeekdays.filter((value) => value !== day.value)
-                      : [...selectedWeekdays, day.value].sort((left, right) => left - right),
-                  })}
-                  className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors ${selected ? "border-blue-500 bg-blue-600 text-white" : "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
-                >{day.label}</button>;
-              })}</div>
-              {selectedWeekdays.length === 0 && <p className="text-xs text-red-300">请至少选择一天，或删除该时间段。</p>}
-              <div className="flex flex-wrap items-end gap-2">
-                <Field label="开始时间"><input type="time" className={`${input} w-auto min-w-36`} value={window.start} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, start: e.target.value })} /></Field>
-                <span className="py-2 text-xs text-slate-500">至</span>
-                <Field label="结束时间"><input type="time" className={`${input} w-auto min-w-36`} value={window.end} onChange={(e) => updateWindow(index, windowIndex, { ...window, weekdays: selectedWeekdays, end: e.target.value })} /></Field>
-                <button type="button" onClick={() => removeWindow(index, windowIndex)} className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-xs text-red-200 hover:bg-red-500/20">删除</button>
-              </div>
-            </div>;
-          })}
-        </div>}
-      </div>
-    </div>;
-    })}</div>
   </div>;
 }
