@@ -285,6 +285,7 @@ def test_method_runs_one_goal_and_returns_schema_valid_artifacts(
     )
     assert context["source"] == {
         "root": str(code_root.resolve()),
+        "paths": [str(code_root.resolve())],
         "access": "read_only",
     }
     assert context["optional_inputs"] == {

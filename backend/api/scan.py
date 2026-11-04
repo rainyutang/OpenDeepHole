@@ -225,6 +225,17 @@ def _validate_absolute_scan_path(value: str, label: str) -> None:
         )
 
 
+def _normalized_code_scan_paths(
+    project_path: str, code_scan_path: str, code_scan_paths: list[str], *, prefix: str = "",
+) -> list[str]:
+    paths = list(dict.fromkeys(path.strip() for path in code_scan_paths if path.strip()))
+    if not paths:
+        paths = [code_scan_path.strip() or project_path]
+    for path in paths:
+        _validate_absolute_scan_path(path, f"{prefix}扫描模块路径")
+    return paths
+
+
 def _validated_multi_versions(
     values: list[MultiVersionTarget],
 ) -> list[MultiVersionTarget]:
@@ -246,7 +257,9 @@ def _validated_multi_versions(
                 detail="每个版本都必须填写版本名称和项目总路径",
             )
         _validate_absolute_scan_path(project_path, f"版本「{name}」的项目总路径")
-        _validate_absolute_scan_path(code_scan_path, f"版本「{name}」的扫描模块路径")
+        code_scan_paths = _normalized_code_scan_paths(
+            project_path, code_scan_path, value.code_scan_paths, prefix=f"版本「{name}」的",
+        )
         key = name.casefold()
         if key in seen_names:
             raise HTTPException(
@@ -258,6 +271,7 @@ def _validated_multi_versions(
             version_name=name,
             project_path=project_path,
             code_scan_path=code_scan_path,
+            code_scan_paths=code_scan_paths,
         ))
     return normalized
 
@@ -1514,6 +1528,7 @@ async def create_agent_scan(
         get_scan_agent_config_async,
         resolve_agent_connection_async,
         resolve_agent_id_connection_async,
+        request_agent_scan_paths,
     )
 
     selected_agent_key = body.agent_key.strip()
@@ -1581,7 +1596,10 @@ async def create_agent_scan(
         else body.code_scan_path.strip() or project_path
     )
     _validate_absolute_scan_path(project_path, "项目总路径")
-    _validate_absolute_scan_path(code_scan_path, "扫描模块路径")
+    code_scan_paths = (
+        list(multi_versions[0].code_scan_paths) if multi_versions else
+        _normalized_code_scan_paths(project_path, code_scan_path, body.code_scan_paths)
+    )
     fixed_profile = requested_scan_mode in {
         SCAN_MODE_QUICK,
         SCAN_MODE_STANDARD,
@@ -1720,12 +1738,27 @@ async def create_agent_scan(
         policy=managed_config.vulnerability_validation,
     )
 
+    # Resolve Agent-local files before persisting any scan or execution state.
+    targets = [item.model_dump(mode="json") for item in multi_versions] if multi_versions else [{
+        "project_path": project_path, "code_scan_path": code_scan_path,
+        "code_scan_paths": code_scan_paths,
+    }]
+    checked_targets = await request_agent_scan_paths(agent_id, agent, targets)
+    if multi_versions:
+        multi_versions = [MultiVersionTarget(
+            version_name=version.version_name, **checked,
+        ) for version, checked in zip(multi_versions, checked_targets)]
+    project_path = checked_targets[0]["project_path"]
+    code_scan_path = checked_targets[0]["code_scan_path"]
+    code_scan_paths = checked_targets[0]["code_scan_paths"]
+
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
         scan_name=scan_name,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        code_scan_paths=code_scan_paths,
         multi_versions=multi_versions,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
@@ -1782,6 +1815,7 @@ async def create_agent_scan(
         agent_name=agent.name,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        code_scan_paths=code_scan_paths,
         multi_versions=multi_versions,
         scan_name=scan_name,
         product=product,
@@ -1870,6 +1904,7 @@ async def create_agent_scan(
         "execution_revision": execution_revision,
         "project_path": project_path,
         "code_scan_path": code_scan_path,
+        "code_scan_paths": code_scan_paths,
         "multi_versions": [
             item.model_dump(mode="json") for item in multi_versions
         ],
@@ -3062,6 +3097,12 @@ async def _continue_scan(
             detail="扫描关联的客户端尚未配置启用的显式模型，请先完成客户端模型配置",
         )
 
+    if not agent.scan_paths_probe and any(
+        scope.code_scan_paths and scope.code_scan_paths != [scope.code_scan_path or scope.project_path]
+        for scope in (meta, *meta.multi_versions)
+    ):
+        raise HTTPException(status_code=409, detail="请先更新 Agent 后续扫（当前 Agent 不支持多路径和单文件扫描范围）")
+
     # Confirm local quiescence before changing progress/checkpoints or reserving
     # a new identity. The revision bound protects a competing newer resume from
     # a delayed stop RPC issued by this request.
@@ -3165,6 +3206,7 @@ async def _continue_scan(
         "review_notes": await scan_review_notes_payload(scan_id, store=store),
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
+        "code_scan_paths": meta.code_scan_paths or [meta.code_scan_path or meta.project_path],
         "multi_versions": [
             item.model_dump(mode="json") for item in meta.multi_versions
         ],

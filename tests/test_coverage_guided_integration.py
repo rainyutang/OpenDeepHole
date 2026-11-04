@@ -21,6 +21,8 @@ def _snapshot(root: Path, *, status: str = "complete") -> dict:
     return {
         "schema_version": 1, "snapshot_id": "shared-snapshot", "status": status,
         "project_path": str(root), "scan_root": str(root),
+        "code_scan_paths": [str(root)], "code_scan_path_kinds": {str(root): "directory"},
+        "inventory_policy_version": 2,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "entries": [{"path": ".", "kind": "directory"}, {"path": "a.c", "kind": "file"}],
         "issues": [], "issue_count": 0, "excluded_paths": [], "error_message": "",

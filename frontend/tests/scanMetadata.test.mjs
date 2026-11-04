@@ -259,6 +259,15 @@ for (const kind of ["shared", "integration"]) {
   });
 }
 
+test("scan information lists selected files and directories instead of only the common root", async () => {
+  const api = installDetailApi();
+  api.setSnapshot({ code_scan_path: "/repo", code_scan_paths: ["/repo/src", "/repo/lib/file.c"] });
+  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const information = await openInformation(root);
+  assert.match(content(information), /代码扫描路径（绝对路径）\/repo\/src/);
+  assert.match(content(information), /代码扫描路径（绝对路径）\/repo\/lib\/file\.c/);
+});
+
 test("a coalesced overview started before save preserves renamed labels and accepts task completion", async () => {
   const pending = deferred();
   let holdOverview = false;

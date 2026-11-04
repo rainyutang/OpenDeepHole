@@ -7,6 +7,7 @@ import json
 import shutil
 from importlib import import_module
 from pathlib import Path
+from deephole_client.threat_analysis.scope import prepare_method_scope
 from typing import Any, Awaitable, Mapping
 
 _lightweight_contract = import_module(
@@ -38,12 +39,14 @@ def run_threat_analysis(
     is_resume: bool = False,
     product_mcp: str | None = None,
     attack_modes: Mapping[str, Any] | None = None,
+    code_paths: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Analyze a source tree through one retry-managed OpenCode task."""
 
     try:
         code_root = _required_directory(code_path, "code_path")
         artifact_root = _output_directory(output_path)
+        selected_paths, is_resume = prepare_method_scope(code_root, artifact_root, code_paths, is_resume)
         paths = _artifact_paths(artifact_root)
         guidance_path, schema_paths = _reference_paths()
 
@@ -67,6 +70,7 @@ def run_threat_analysis(
                 "context_version": 1,
                 "source": {
                     "root": str(code_root),
+                    "paths": [str(path) for path in selected_paths],
                     "access": "read_only",
                 },
                 "artifacts": {

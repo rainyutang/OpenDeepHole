@@ -9,6 +9,68 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 MAX_INVENTORY_ENTRIES = 200_000
+INVENTORY_POLICY_VERSION = 2
+
+
+def hidden_inventory_path(path: str) -> bool:
+    return any(part.startswith(".") for part in path.split("/") if part not in {"", "."})
+
+
+def inventory_path_is_hidden(path: str, inventory: dict) -> bool:
+    from backend.threat_paths import ModulePathResolver
+    resolver = ModulePathResolver(str(inventory.get("project_path") or inventory.get("scan_root") or ""),
+                                  str(inventory.get("scan_root") or ""))
+    prefix = resolver.project_prefix or "."
+    return hidden_inventory_path(prefix + "/" + path)
+
+
+def inventory_scope_key(inventory: dict) -> tuple:
+    """Compare Agent paths without using the server's filesystem semantics."""
+    from backend.threat_paths import ModulePathResolver
+    root = str(inventory.get("scan_root") or "")
+    resolver = ModulePathResolver(str(inventory.get("project_path") or root), root)
+    paths = inventory.get("code_scan_paths") or [root]
+    kinds = inventory.get("code_scan_path_kinds") or {}
+    entries = {resolver.canonical(entry["path"]): entry["kind"] for entry in inventory.get("entries", [])}
+    def kind(path: str) -> str:
+        relative = resolver.resolve(path, base="scan").scan_relative
+        return kinds.get(path) or entries.get(resolver.canonical(relative or "."), "directory")
+    return (resolver.canonical(resolver.project), resolver.canonical(root),
+            tuple(sorted({(resolver.canonical(str(path)), kind(str(path))) for path in paths})),
+            inventory.get("inventory_policy_version", 1))
+
+
+def inventory_selected_paths(inventory: dict) -> list[str]:
+    from backend.threat_paths import ModulePathResolver
+    root = str(inventory.get("scan_root") or "")
+    resolver = ModulePathResolver(str(inventory.get("project_path") or root), root)
+    return [relative for path in inventory.get("code_scan_paths") or [root]
+            if (relative := resolver.resolve(str(path), base="scan").scan_relative) is not None]
+
+
+def project_file_inventory(inventory: dict | None) -> dict | None:
+    """Apply the current visibility rules to new and historical snapshots."""
+    if inventory is None:
+        return None
+    from backend.threat_paths import ModulePathResolver
+    resolver = ModulePathResolver(str(inventory.get("project_path") or ""), str(inventory.get("scan_root") or ""))
+    prefix = resolver.project_prefix or "."
+    selected = [resolver.canonical(path) for path in inventory_selected_paths(inventory)
+                if not hidden_inventory_path(prefix + "/" + path)]
+    files = {resolver.canonical(entry["path"]) for entry in inventory.get("entries", []) if entry["kind"] == "file"}
+    for path, kind in (inventory.get("code_scan_path_kinds") or {}).items():
+        if kind == "file" and (relative := resolver.resolve(path, base="scan").scan_relative) is not None:
+            files.add(resolver.canonical(relative))
+    def visible(entry: dict) -> bool:
+        path = entry["path"]
+        if path == ".":
+            return True
+        if hidden_inventory_path(prefix + "/" + path):
+            return False
+        key = resolver.canonical(path)
+        return any(scope == "." or key == scope or (scope not in files and key.startswith(scope + "/"))
+                   or (entry["kind"] == "directory" and scope.startswith(key + "/")) for scope in selected)
+    return {**inventory, "entries": [entry for entry in inventory.get("entries", []) if visible(entry)]}
 
 
 class FileInventoryEntry(BaseModel):
@@ -37,6 +99,9 @@ class ScanFileInventory(BaseModel):
     status: Literal["collecting", "complete", "partial", "failed", "cancelled"]
     project_path: str = Field(min_length=1, max_length=4096)
     scan_root: str = Field(min_length=1, max_length=4096)
+    code_scan_paths: list[str] = Field(default_factory=list)
+    code_scan_path_kinds: dict[str, Literal["file", "directory"]] = Field(default_factory=dict)
+    inventory_policy_version: int = Field(default=1, ge=1)
     captured_at: str
     entries: list[FileInventoryEntry] = Field(default_factory=list, max_length=MAX_INVENTORY_ENTRIES)
     issues: list[FileInventoryIssue] = Field(default_factory=list, max_length=100)

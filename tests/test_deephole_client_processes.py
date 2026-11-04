@@ -1096,8 +1096,8 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert "Audit the candidate." not in prompt
         assert "candidate" not in prompt
         assert "使用 `product-info` 提供的工具获取产品知识" in prompt
-        assert "## call_chain" in prompt
-        assert "## trigger_conditions" in prompt
+        assert '"call_chain"' in prompt
+        assert '"remediation"' in prompt
         assert "JSON Schema" in prompt
         assert '"vulnerable_code"' in prompt
         assert '"markdown_reports"' not in prompt

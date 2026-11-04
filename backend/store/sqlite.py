@@ -94,6 +94,7 @@ STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
     "execution_product": "TEXT",
+    "code_scan_paths_json": "TEXT NOT NULL DEFAULT '[]'",
     "metadata_revision": "INTEGER NOT NULL DEFAULT 0",
     "code_graph_mcp_revision": "INTEGER NOT NULL DEFAULT 0",
     "code_graph_mcp_applied_revision": "INTEGER NOT NULL DEFAULT 0",
@@ -2031,6 +2032,10 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                 if row["code_scan_path"] is not None
                 else ""
             ),
+            code_scan_paths=(
+                json.loads(row["code_scan_paths_json"] or "[]")
+                or ([row["code_scan_path"] or row["project_path"]] if row["code_scan_path"] or row["project_path"] else [])
+            ),
             multi_versions=_json_model_list(
                 row["multi_versions_json"]
                 if "multi_versions_json" in row.keys()
@@ -2162,6 +2167,10 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
             ),
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
+            code_scan_paths=(
+                json.loads(row["code_scan_paths_json"] or "[]")
+                or ([row["code_scan_path"] or row["project_path"]] if row["code_scan_path"] or row["project_path"] else [])
+            ),
             multi_versions=_json_model_list(
                 row["multi_versions_json"]
                 if "multi_versions_json" in row.keys()
@@ -2218,7 +2227,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
+                     user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, code_scan_paths_json, scan_name,
                      scan_mode, threat_analysis_enabled, threat_analysis_method,
                      threat_analysis_method_selection_json,
                      threat_analysis_run_json,
@@ -2232,7 +2241,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                      vulnerability_validation_json, mining_engines_json,
                      mining_engine_runs_json, multi_versions_json,
                      execution_product, metadata_revision, code_graph_mcp_revision, code_graph_mcp_applied_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2253,6 +2262,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                     agent_key = excluded.agent_key,
                     project_path = excluded.project_path,
                     code_scan_path = excluded.code_scan_path,
+                    code_scan_paths_json = excluded.code_scan_paths_json,
                     scan_name = CASE WHEN scans.metadata_revision > excluded.metadata_revision
                         THEN scans.scan_name ELSE excluded.scan_name END,
                     scan_mode = excluded.scan_mode,
@@ -2306,6 +2316,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                     meta.agent_key,
                     meta.project_path,
                     meta.code_scan_path,
+                    json.dumps(meta.code_scan_paths, ensure_ascii=False),
                     meta.scan_name,
                     meta.scan_mode,
                     int(meta.threat_analysis_enabled),
@@ -2488,7 +2499,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
     def load_scan_runtime(self, scan_id: str):
         with self._lock:
             row = self._conn.execute(
-                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
             ).fetchone()
             return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
 
@@ -2511,7 +2522,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)

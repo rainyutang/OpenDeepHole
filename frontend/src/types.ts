@@ -592,6 +592,7 @@ export interface ScanStatus {
   project_id: string;
   project_path: string;
   code_scan_path: string;
+  code_scan_paths?: string[];
   multi_versions?: ScanVersionTarget[];
   scan_mode?: string;
   threat_analysis_enabled: boolean;
@@ -655,6 +656,7 @@ export interface ScanVersionTarget {
   version_name: string;
   project_path: string;
   code_scan_path: string;
+  code_scan_paths?: string[];
 }
 
 export interface ScanDetailCounts {

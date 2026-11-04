@@ -569,3 +569,41 @@ await hooks["tool.execute.after"]({ ...input, args }, {
 })
 ''', {"command": command, "script": str(Path(supplement.__file__))})
     _validate_required_command_audit(audit, (command,))
+
+
+def test_selected_files_do_not_promote_structural_parent_to_supplement_target(sample):
+    sample["inventory"]["code_scan_paths"] = [str(sample["source"] / "src/storage/store.c"),
+                                               str(sample["source"] / "src/tools/tool.c")]
+    assert supplement.select_targets(sample["inventory"], native_paths(sample), [], []) == [
+        "src/storage/store.c", "src/tools/tool.c"]
+    assert supplement.coverage_counts(sample["inventory"], native_paths(sample))["total_files"] == 2
+    with pytest.raises(supplement.Error, match="用户选择"):
+        merge(sample)
+
+
+def test_supplement_ignores_hidden_legacy_inventory_entries(sample):
+    sample["inventory"]["entries"].extend([
+        {"path": ".hidden", "kind": "file"}, {"path": ".cache", "kind": "directory"},
+        {"path": ".cache/a.c", "kind": "file"}])
+    assert supplement.select_targets(sample["inventory"], native_paths(sample), [], []) == ["src/storage", "src/tools"]
+    assert supplement.coverage_counts(sample["inventory"], native_paths(sample))["total_files"] == 3
+    (sample["source"] / ".hidden").write_text("code\n", encoding="utf-8")
+    sample["delta"]["path_results"][0]["evidence"].append({"file": ".hidden", "line_start": 1, "line_end": 1})
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(supplement.Error, match="隐藏"):
+        merge(sample)
+
+
+def test_ancestor_judgment_needs_selected_evidence_but_can_include_dependencies(sample):
+    sample["inventory"]["code_scan_paths"] = [str(sample["source"] / "src/storage")]
+    judgment = sample["delta"]["path_results"][0]
+    judgment["path"] = "src"
+    judgment["evidence"] = [{"file": "src/tools/tool.c", "line_start": 1, "line_end": 1}]
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    with pytest.raises(supplement.Error, match="有效证据"):
+        merge(sample)
+    judgment["evidence"].append({"file": "src/storage/store.c", "line_start": 1, "line_end": 1})
+    write(sample["round_root"] / "delta.json", sample["delta"])
+    result = merge(sample)
+    assert len(result["path_results"][0]["evidence"]) == 2
+    assert supplement.coverage_counts(sample["inventory"], native_paths(sample), result["non_high_risk_paths"])["non_high_risk_files"] == 1

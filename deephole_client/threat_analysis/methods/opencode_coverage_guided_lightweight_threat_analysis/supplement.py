@@ -22,6 +22,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from backend.threat_paths import ModulePathResolver
+from backend.file_inventory import (hidden_inventory_path, inventory_path_is_hidden,
+                                    inventory_selected_paths, project_file_inventory)
 from task_agent.config_json import strip_jsonc_trailing_commas
 from deephole_client.threat_analysis.methods.codex_goal_threat_analysis import schema_validation as native
 
@@ -94,6 +96,7 @@ def _covered(path: str, scopes: set[str]) -> bool:
 def _inventory(inventory: Mapping[str, Any]) -> tuple[dict[str, str], ModulePathResolver]:
     if inventory.get("status") != "complete":
         raise Error("补查需要完整的文件清单")
+    inventory = project_file_inventory(dict(inventory))
     entries = {entry["path"]: entry["kind"] for entry in inventory.get("entries", [])}
     if entries.get(".") != "directory":
         raise Error("文件清单缺少扫描根目录")
@@ -104,6 +107,12 @@ def _inventory(inventory: Mapping[str, Any]) -> tuple[dict[str, str], ModulePath
     )
     known = {resolver.canonical(path): path for path in entries}
     return entries, resolver
+
+
+def _selected(path: str, inventory: Mapping[str, Any], resolver: ModulePathResolver) -> bool:
+    key = resolver.canonical(path)
+    return not inventory_path_is_hidden(path, dict(inventory)) and any(
+        _under(key, resolver.canonical(root)) for root in inventory_selected_paths(dict(inventory)))
 
 
 def _module_paths(module: Mapping[str, Any]) -> list[str]:
@@ -135,6 +144,7 @@ def select_targets(
     excluded = _module_scopes(modules, resolver)
     excluded.update(resolver.canonical(_relative(path)) for path in non_high_risk_paths)
     attempted = {resolver.canonical(_relative(path)) for path in attempted_paths}
+    selected = [resolver.canonical(path) for path in inventory_selected_paths(inventory)]
     totals: dict[str, int] = defaultdict(int)
     remaining: dict[str, int] = defaultdict(int)
     for path, kind in entries.items():
@@ -147,6 +157,7 @@ def select_targets(
             if unresolved:
                 remaining[ancestor] += 1
     candidates = [path for path in entries if path != "."
+                  and any(_under(resolver.canonical(path), root) for root in selected)
                   and resolver.canonical(path) not in attempted
                   and totals[resolver.canonical(path)] > 0
                   and totals[resolver.canonical(path)] == remaining[resolver.canonical(path)]]
@@ -187,6 +198,8 @@ def coverage_counts(
 
 def _source_path(value: str, code_root: Path, *, label: str) -> Path:
     path = _relative(value, label=label)
+    if hidden_inventory_path(path):
+        raise Error(f"{label}: 补充威胁分析排除隐藏文件和隐藏目录：{path!r}")
     source = code_root / path
     current = code_root
     for part in PurePosixPath(path).parts:
@@ -307,7 +320,7 @@ def _source_line_count(source: Path, *, label: str) -> int:
 
 def _evidence(
     result: dict, *, label: str, code_root: Path,
-    line_counts: dict[Path, int], warnings: list[str],
+    line_counts: dict[Path, int], warnings: list[str], inventory: dict | None = None,
 ) -> None:
     if result["status"] != "complete":
         return
@@ -330,7 +343,9 @@ def _evidence(
             warnings.append(f"{pointer}.line_end: 已收敛到文件末行（共 {line_counts[source]} 行）")
             item["line_end"] = line_counts[source]
         valid_evidence.append(item)
-        has_local_evidence = has_local_evidence or _under(item["file"], result["path"])
+        in_selection = inventory is None or any(_under(item["file"], root)
+                                                 for root in inventory_selected_paths(inventory))
+        has_local_evidence = has_local_evidence or (in_selection and _under(item["file"], result["path"]))
     if not has_local_evidence:
         raise Error(f"{label}.evidence: 至少一条有效证据必须位于实际判定范围 {result['path']!r} 内")
     result["evidence"] = valid_evidence
@@ -363,6 +378,8 @@ def validate_and_merge(
         raise Error("本轮目标必须非空且不能重复")
     for target in targets:
         _source_path(target, code_root, label="targets")
+        if not _selected(target, inventory, resolver):
+            raise Error(f"targets: 补查目标不在用户选择的扫描范围内：{target!r}")
     if (round_root / "delta.json").is_symlink():
         raise Error("delta.json: 不允许符号链接")
     warnings: list[str] = []
@@ -444,7 +461,7 @@ def validate_and_merge(
         if "classification" not in result:
             raise Error(f"{pointer}.classification: 已完成判定必须填写分类")
         _evidence(result, label=pointer, code_root=code_root,
-                  line_counts=line_counts, warnings=warnings)
+                  line_counts=line_counts, warnings=warnings, inventory=inventory)
         reviewed.append(path)
         files = _files_in(path, entries)
         kind = result["classification"]

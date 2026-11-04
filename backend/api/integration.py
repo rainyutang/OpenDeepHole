@@ -119,6 +119,7 @@ class IntegrationScanRequest(BaseModel):
     agent_name: str
     project_path: str
     code_scan_path: str = ""
+    code_scan_paths: list[str] = Field(default_factory=list)
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""
@@ -384,6 +385,7 @@ async def create_integration_scan(
             agent_id=agent_id,
             project_path=body.project_path,
             code_scan_path=body.code_scan_path,
+            code_scan_paths=body.code_scan_paths,
             scan_name=body.scan_name,
             product=body.product,
             validation_environment=body.validation_environment,

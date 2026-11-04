@@ -172,7 +172,7 @@ def test_method_discovery_rejects_extra_yaml_and_incomplete_directories(
     "opencode_lightweight_threat_analysis",
     "opencode_coverage_guided_lightweight_threat_analysis",
 ])
-def test_method_entry_has_the_documented_five_parameter_contract(method_id) -> None:
+def test_method_entry_has_the_documented_optional_scope_contract(method_id) -> None:
     manifest = resolve_threat_analysis_method(method_id)
     module = _load_implementation(manifest.method_id)
 
@@ -184,12 +184,14 @@ def test_method_entry_has_the_documented_five_parameter_contract(method_id) -> N
         "is_resume",
         "product_mcp",
         "attack_modes",
+        "code_paths",
     ]
     assert signature.parameters["code_path"].default is inspect.Parameter.empty
     assert signature.parameters["output_path"].default is inspect.Parameter.empty
     assert signature.parameters["is_resume"].default is False
     assert signature.parameters["product_mcp"].default is None
     assert signature.parameters["attack_modes"].default is None
+    assert signature.parameters["code_paths"].default is None
 
 
 def test_copied_source_harness_loads_without_rewriting_native_imports(

@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     agent_session_id TEXT NOT NULL DEFAULT '',
     accepting_tasks INTEGER NOT NULL DEFAULT 1,
     scan_code_graph_updates INTEGER NOT NULL DEFAULT 0,
+    scan_paths_probe INTEGER NOT NULL DEFAULT 0,
     connected_at     TEXT NOT NULL,
     last_seen        TEXT NOT NULL,
     disconnected_at  TEXT
@@ -500,6 +501,7 @@ class PostgresScanStore(SqliteScanStore):
                 connection.execute(statement)
             connection.execute("ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS finished_at TEXT")
             connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS scan_code_graph_updates INTEGER NOT NULL DEFAULT 0")
+            connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS scan_paths_probe INTEGER NOT NULL DEFAULT 0")
             # Safe for databases initialized by an earlier pre-release build.
             connection.execute(
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
@@ -816,8 +818,8 @@ class PostgresScanStore(SqliteScanStore):
                 INSERT INTO agent_sessions (
                     agent_id, agent_key, worker_id, name, machine_name, user_id,
                     protocol_version, runtime_hash, agent_session_id,
-                    accepting_tasks, connected_at, last_seen, disconnected_at, scan_code_graph_updates
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                    accepting_tasks, connected_at, last_seen, disconnected_at, scan_code_graph_updates, scan_paths_probe
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     agent_key = excluded.agent_key,
                     worker_id = excluded.worker_id,
@@ -829,6 +831,7 @@ class PostgresScanStore(SqliteScanStore):
                     agent_session_id = excluded.agent_session_id,
                     accepting_tasks = excluded.accepting_tasks,
                     scan_code_graph_updates = excluded.scan_code_graph_updates,
+                    scan_paths_probe = excluded.scan_paths_probe,
                     last_seen = excluded.last_seen,
                     disconnected_at = NULL
                 """,
@@ -846,6 +849,7 @@ class PostgresScanStore(SqliteScanStore):
                     now,
                     agent.last_seen or now,
                     int(agent.scan_code_graph_updates),
+                    int(agent.scan_paths_probe),
                 ),
             )
             # A reconnect can move command ownership to another worker.  Only

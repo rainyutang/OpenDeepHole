@@ -348,6 +348,7 @@ def _agent_info_from_shared_session(session: dict) -> AgentInfo:
         accepting_tasks=bool(session.get("accepting_tasks", 1)),
         protocol_version=int(session["protocol_version"] or 1),
         scan_code_graph_updates=bool(session.get("scan_code_graph_updates", 0)),
+        scan_paths_probe=bool(session.get("scan_paths_probe", 0)),
     )
 
 
@@ -719,6 +720,7 @@ _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _scan_stop_waiters: dict[str, asyncio.Future] = {}
+_scan_paths_probe_waiters: dict[str, asyncio.Future] = {}
 _review_notes_waiters: dict[str, asyncio.Future] = {}
 _code_graph_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
@@ -730,6 +732,7 @@ _AGENT_RESPONSE_WAITERS = {
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
     "scan_stop_result": _scan_stop_waiters,
+    "scan_paths_probe_result": _scan_paths_probe_waiters,
     "review_notes_result": _review_notes_waiters,
     "code_graph_result": _code_graph_waiters,
 }
@@ -2414,6 +2417,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             accepting_tasks=_runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING,
             protocol_version=protocol_version,
             scan_code_graph_updates=reported_capabilities.get("scan_code_graph_updates") is True,
+            scan_paths_probe=reported_capabilities.get("scan_paths_probe") is True,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
         )
         _registered_agents[agent_id] = agent_info
@@ -2599,6 +2603,50 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
         _agent_ws_locks.pop(agent_id, None)
         _registered_agents.pop(agent_id, None)
         return False
+
+
+async def request_agent_scan_paths(
+    agent_id: str, agent: AgentInfo, targets: list[dict],
+) -> list[dict]:
+    """Validate all Agent-local scan scopes before creating the scan record."""
+    if not agent.scan_paths_probe:
+        raise HTTPException(status_code=409, detail="请先更新 Agent 后创建扫描（当前 Agent 不支持扫描路径检查）")
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _scan_paths_probe_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(agent_id, {
+            "type": "scan_paths_probe", "request_id": request_id, "targets": targets,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="Agent 连接已断开，未创建扫描")
+        incoming = await _wait_agent_response(request_id, waiter, timeout=10.0)
+        if not isinstance(incoming, dict):
+            raise HTTPException(status_code=502, detail="Agent 返回的扫描路径检查结果无效，未创建扫描")
+        if incoming.get("ok") is not True:
+            errors = incoming.get("errors")
+            if not isinstance(errors, list) or not errors or not all(isinstance(error, str) for error in errors):
+                raise HTTPException(status_code=502, detail="Agent 返回的扫描路径检查结果无效，未创建扫描")
+            raise HTTPException(status_code=422, detail="扫描路径检查失败，未创建扫描：\n" + "\n".join(errors))
+        checked = incoming.get("targets")
+        if not isinstance(checked, list) or len(checked) != len(targets):
+            raise HTTPException(status_code=502, detail="Agent 返回的扫描路径检查结果无效，未创建扫描")
+        normalized = []
+        for target in checked:
+            if (not isinstance(target, dict)
+                or not all(isinstance(target.get(key), str) and target[key] for key in ("project_path", "code_scan_path"))
+                or not isinstance(target.get("code_scan_paths"), list)
+                or not target["code_scan_paths"]
+                or not all(isinstance(path, str) and path for path in target["code_scan_paths"])):
+                raise HTTPException(status_code=502, detail="Agent 返回的扫描路径检查结果无效，未创建扫描")
+            normalized.append({key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")})
+        return normalized
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="等待 Agent 扫描路径检查结果超时（10 秒），未创建扫描") from None
+    finally:
+        _scan_paths_probe_waiters.pop(request_id, None)
+        if not waiter.done():
+            waiter.cancel()
 
 
 async def request_agent_scan_stop(

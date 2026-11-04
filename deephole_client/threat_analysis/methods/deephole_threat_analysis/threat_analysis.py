@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from deephole_client.threat_analysis.scope import prepare_method_scope
 from typing import Any, Mapping
 
 from threat_analysis_harness.artifacts import ThreatAnalysisLayout
@@ -16,6 +17,7 @@ def run_threat_analysis(
     is_resume: bool = False,
     product_mcp: str | None = None,
     attack_modes: Mapping[str, Any] | None = None,
+    code_paths: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Run threat analysis and return a JSON-serializable result object.
 
@@ -28,13 +30,14 @@ def run_threat_analysis(
         code_root = _required_path(code_path, "code_path")
         artifact_root = _required_path(output_path, "output_path")
 
+        selected_paths, is_resume = prepare_method_scope(code_root, artifact_root, code_paths, is_resume)
         layout = ThreatAnalysisLayout(artifact_root)
         submitter = TaskAgentSubmitter()
         pipeline = ThreatAnalysisPipeline(
             submit_tasks=submitter.submit_tasks,
             layout=layout,
         )
-        pipeline.run(input_files=[code_root], resume=bool(is_resume))
+        pipeline.run(input_files=list(selected_paths), resume=bool(is_resume))
 
         return {
             "result": True,

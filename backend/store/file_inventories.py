@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from backend.file_inventory import FileInventoryUpload
+from backend.file_inventory import FileInventoryUpload, inventory_scope_key
 
 
 FILE_INVENTORY_SCHEMA = """
@@ -47,7 +47,7 @@ class ScanFileInventoriesMixin:
             ).fetchone()
             if previous:
                 old = json.loads(previous["content"])
-                same_scope = all(old.get(key) == inventory[key] for key in ("project_path", "scan_root"))
+                same_scope = inventory_scope_key(old) == inventory_scope_key(inventory)
                 # The first complete denominator remains frozen on resume.
                 if old["status"] == "complete" and same_scope:
                     return False

@@ -86,6 +86,9 @@ def setup_scan(tmp_path: Path):
         inventory = {
             "schema_version": 1,
             "snapshot_id": "coverage-workflow-test",
+            "code_scan_paths": [str(code_root)],
+            "code_scan_path_kinds": {str(code_root): "directory"},
+            "inventory_policy_version": 2,
             "status": "complete",
             "project_path": str(code_root),
             "scan_root": str(code_root),

@@ -164,7 +164,8 @@ def _validate_native_entry(value: Any) -> Callable[..., dict[str, Any]]:
     if not callable(value):
         raise TypeError("__init__.py must export run_threat_analysis")
     parameters = list(inspect.signature(value).parameters.values())
-    if tuple(parameter.name for parameter in parameters) != _NATIVE_ENTRY_PARAMETERS:
+    names = tuple(parameter.name for parameter in parameters)
+    if names not in (_NATIVE_ENTRY_PARAMETERS, (*_NATIVE_ENTRY_PARAMETERS, "code_paths")):
         raise TypeError(
             "run_threat_analysis must accept exactly: "
             + ", ".join(_NATIVE_ENTRY_PARAMETERS)
@@ -180,7 +181,7 @@ def _validate_native_entry(value: Any) -> Callable[..., dict[str, Any]]:
         raise TypeError("code_path must be required")
     if parameters[1].default is not inspect.Parameter.empty:
         raise TypeError("output_path must be required")
-    expected_defaults = (False, None, None)
+    expected_defaults = (False, None, None) + ((None,) if len(parameters) == 6 else ())
     actual_defaults = tuple(parameter.default for parameter in parameters[2:])
     if actual_defaults != expected_defaults:
         raise TypeError(

@@ -41,6 +41,7 @@ from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
 from .process_artifacts import collect_json_artifacts, restore_json_artifacts
 from .reporter import Reporter
+from .scan_paths import resolve_scan_scope, scope_identity_matches
 from .scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
@@ -79,11 +80,9 @@ LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS = frozenset({
 def _threat_analysis_scan_scope(
     project_path: Path,
     code_scan_path: Path,
-) -> dict[str, str]:
-    return {
-        "project_path": str(Path(project_path).expanduser().resolve()),
-        "code_scan_path": str(Path(code_scan_path).expanduser().resolve()),
-    }
+    code_scan_paths: list[Path] | None = None,
+) -> dict[str, Any]:
+    return resolve_scan_scope(project_path, code_scan_path, code_scan_paths).identity()
 
 
 def _stored_threat_analysis_matches_scope(
@@ -91,24 +90,17 @@ def _stored_threat_analysis_matches_scope(
     *,
     project_path: Path,
     code_scan_path: Path,
+    code_scan_paths: list[Path] | None = None,
 ) -> bool:
+    expected = resolve_scan_scope(project_path, code_scan_path, code_scan_paths)
     scope = bundle.get("scan_scope")
     if scope is None:
         # Historical opaque bundles are already scoped by their immutable
         # scan_id, so absence of optional metadata remains compatible.
-        return True
+        return expected.is_legacy_directory
     if not isinstance(scope, dict):
         return False
-    stored_project = str(scope.get("project_path") or "").strip()
-    stored_code = str(scope.get("code_scan_path") or "").strip()
-    if not stored_project or not stored_code:
-        return False
-    return (
-        Path(stored_project).expanduser().resolve()
-        == Path(project_path).expanduser().resolve()
-        and Path(stored_code).expanduser().resolve()
-        == Path(code_scan_path).expanduser().resolve()
-    )
+    return scope_identity_matches(scope, expected)
 
 
 def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
@@ -203,26 +195,8 @@ def _resolve_scan_paths(
     project_path: Path,
     code_scan_path: Path | None,
 ) -> tuple[Path, Path]:
-    project = Path(project_path).expanduser().resolve()
-    raw_scan_root = Path(code_scan_path).expanduser() if code_scan_path else project
-    scan_root = (
-        raw_scan_root.resolve()
-        if raw_scan_root.is_absolute()
-        else (project / raw_scan_root).resolve()
-    )
-    if not project.is_dir():
-        raise FileNotFoundError(f"Project directory does not exist: {project}")
-    if not scan_root.is_dir():
-        raise FileNotFoundError(
-            f"Code scan directory does not exist: {scan_root}",
-        )
-    try:
-        scan_root.relative_to(project)
-    except ValueError as exc:
-        raise ValueError(
-            "code_scan_path must be inside project_path",
-        ) from exc
-    return project, scan_root
+    scope = resolve_scan_scope(project_path, code_scan_path)
+    return scope.project, scope.root
 
 
 def _update_static_analysis_errors(run: MiningEngineRun, event: dict[str, Any]) -> bool:
@@ -662,15 +636,19 @@ async def run_scan(
     mining_engines: list[dict[str, Any]] | None = None,
     codex_model_ids: list[str] | None = None,
     multi_versions: list[dict[str, Any]] | None = None,
+    code_scan_paths: list[str | Path] | None = None,
 ) -> None:
     """Run the selected directory-discovered mining engines."""
     scan_dir = (
         Path.home() / ".opendeephole" / "scans" / str(scan_id)
     ).expanduser().resolve()
-    project, scan_root = _resolve_scan_paths(project_path, code_scan_path)
+    scope = resolve_scan_scope(project_path, code_scan_path, code_scan_paths)
+    project, scan_root = scope.project, scope.root
+    selected_paths = list(scope.paths)
     async with file_inventory_lifecycle(
         project=project, scan_root=scan_root, scan_dir=scan_dir, scan_id=scan_id,
         reporter=reporter, cancel_event=cancel_event, is_resume=is_resume,
+        code_scan_paths=selected_paths,
     ) as start_file_inventory:
         if is_resume and (
             threat_analysis_enabled
@@ -682,6 +660,7 @@ async def run_scan(
         scan_dir.mkdir(parents=True, exist_ok=True)
         await _run_scan_pipeline(
             config=config, project=project, scan_root=scan_root,
+            code_scan_paths=selected_paths,
             scan_dir=scan_dir, start_file_inventory=start_file_inventory,
             reporter=reporter, scan_name=scan_name, product=product,
             validation_environment=validation_environment,
@@ -707,6 +686,7 @@ async def _run_scan_pipeline(
     config: AgentConfig,
     project: Path,
     scan_root: Path,
+    code_scan_paths: list[Path],
     scan_dir: Path,
     start_file_inventory: Callable[[], asyncio.Task[dict] | None],
     reporter: Reporter,
@@ -1155,6 +1135,7 @@ async def _run_scan_pipeline(
                         stored,
                         project_path=project,
                         code_scan_path=scan_root,
+                        code_scan_paths=code_scan_paths,
                     ):
                         raise ValueError("stored scan scope does not match resume paths")
                     restored = restore_json_artifacts(
@@ -1223,12 +1204,14 @@ async def _run_scan_pipeline(
                     await prepare_coverage_inventory(
                         project=project, scan_root=scan_root, output_path=output_path,
                         start=start_file_inventory, cancel_event=cancel_event,
+                        code_scan_paths=code_scan_paths,
                     )
                 return await run_threat_analysis(
                     scan_mode=runtime_scan_mode,
                     method_id=method_id,
                     project_path=project,
                     code_path=scan_root,
+                    code_paths=code_scan_paths,
                     output_path=output_path,
                     is_resume=resume,
                     product_mcp=(
@@ -1407,6 +1390,7 @@ async def _run_scan_pipeline(
             artifact_bundle["scan_scope"] = _threat_analysis_scan_scope(
                 project,
                 scan_root,
+                code_scan_paths,
             )
             await reporter.push_threat_analysis(scan_id, artifact_bundle)
             run.status = "success"
@@ -1594,6 +1578,7 @@ async def _run_scan_pipeline(
             "scan_id": scan_id,
             "project_path": project,
             "code_scan_path": scan_root,
+            "code_scan_paths": code_scan_paths,
             "scan_dir": scan_dir,
             "work_dir": engine_work_dir,
             "index_db_path": index_path,

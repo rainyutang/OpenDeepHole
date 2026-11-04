@@ -143,6 +143,7 @@ def run_threat_analysis(
     is_resume=False,
     product_mcp=None,
     attack_modes=None,
+    code_paths=None,
 ) -> dict:
     ...
 ```
@@ -153,7 +154,7 @@ def run_threat_analysis(
 异常或失败原因会保存到 `ThreatAnalysisRunStatus.error_message`，通过 SSE 和刷新继续显示；
 取消使用独立状态。
 
-平台外层入口额外接收 `project_path`，并继续把本次 `code_path` 扫描目录传给原生五参数入口。
+平台外层入口额外接收 `project_path`，将公共启动目录传给 `code_path`，将实际目录/文件列表传给可选参数 `code_paths`。旧五参数方法仅兼容单目录扫描，不能静默扩大多路径或单文件范围。
 威胁分析内部的 Task Agent 上下文以 `code_path` 启动 OpenCode Session；其它过程仍继承扫描器
 以 `project_path` 绑定的项目总路径。子目录扫描的最终高风险模块由外层转换为项目根相对
 `代码目录`，转换副本与原生续扫产物分离。
@@ -173,7 +174,7 @@ def run_threat_analysis(
 | 分类 | 参数 | 说明 |
 | --- | --- | --- |
 | 身份 | `engine_id`、`engine_label`、`scan_id`、`scan_mode` | 本次扫描固化的引擎身份、扫描标识和模式 |
-| 目录 | `project_path`、`code_scan_path`、`scan_dir`、`work_dir`、`index_db_path` | 只读源码范围、扫描工作目录、引擎可写目录和代码索引 |
+| 目录 | `project_path`、`code_scan_path`、`code_scan_paths`、`scan_dir`、`work_dir`、`index_db_path` | 公共启动目录、实际路径列表、扫描工作目录、引擎可写目录和代码索引 |
 | 扫描数据 | `checker_names`、`checker_packages`、`product`、`vulnerability_validation`、`feedback_entries` | 本次扫描的规则、产品、漏洞验证配置和历史反馈快照 |
 | 运行状态 | `is_resume`、候选重试参数、威胁审计重试参数 | 续扫和定向重试上下文 |
 | 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command`、`codex_models` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的裸 argv 前缀和无密钥默认模型元数据 |
@@ -183,7 +184,7 @@ def run_threat_analysis(
 `output` 和 `report_vulnerabilities`。`threat_analysis_result` 只传给内置的
 `threat_audit` 与 `threat_pattern_audit`，普通扩展引擎不应假设该 key 存在。
 `index_db_path` 只有在本轮运行 `static_candidate` 或 `multi_version` 时保证对应文件存在；
-其默认位置是 `<code_scan_path>/code_index.db`，内容及缓存复用范围也只覆盖该扫描路径。
+其默认位置是 `<code_scan_path>/code_index.db`，完整覆盖公共启动目录并供该目录下不同路径列表的扫描复用。`code_scan_paths` 指定实际目录或文件范围；静态规则仍基于公共目录执行，在候选计数、保存和审计前按列表筛选。单目录的公共启动目录就是该目录，单文件则使用其父目录。
 
 服务端续扫命令中的 `retry_mining_engine_ids` 由 Agent 扫描协调器消费，用来筛选本轮实际启动
 的引擎，不属于单个引擎的 `kwargs`。因此第三方引擎仍只需通过 `is_resume` 和自己的细粒度

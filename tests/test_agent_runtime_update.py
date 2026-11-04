@@ -604,7 +604,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             ):
                 updater._install_update_archive(archive, manifest["runtime_hash"], manifest)
             installed = builtin_skill_sources(root)
-            self.assertEqual(len(installed), 28)
+            self.assertTrue(installed)
             self.assertEqual(
                 {s.name: s.files for s in installed},
                 {s.name: s.files for s in builtin_skill_sources()},
@@ -1100,6 +1100,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 "execution_revision": 2,
                 "project_path": "",
                 "code_scan_path": "",
+                "code_scan_paths": [],
+                "multi_versions": [],
                 "checkers": [],
                 "scan_name": "",
             }])

@@ -14,7 +14,7 @@
 匹配策略沿用 DeepHole：按路径分析实际适用模式，有多少输出多少，不设数量下限或额外排序要求；
 无合理匹配时输出空数组。资产识别与高风险模块识别的提示词正文保持原样，Web 类模块仍参与识别，
 精简库的范围仅限制攻击模式关联。四个 Skill 均使用 `deephole-compact-` 前缀，以便在 Agent 的
-统一 Skill 目录中与原方法共存。任务 ID、产物路径、五参数入口、校验与续扫行为及新建扫描默认
+统一 Skill 目录中与原方法共存。任务 ID、产物路径、原有五个入口参数、校验与续扫行为及新建扫描默认
 方法保持不变；`attack_modes` 参数仍保留原 DeepHole 的预留语义，不用于替换候选库。
 上线需更新后端方法目录和 Agent 运行包并重启 Agent，无需前端变更或数据库迁移。
 
@@ -100,6 +100,7 @@ def run_threat_analysis(
     is_resume=False,
     product_mcp=None,
     attack_modes=None,
+    code_paths=None,
 ) -> dict:
     ...
 ```
@@ -111,6 +112,7 @@ def run_threat_analysis(
 | `is_resume` | `False` | 是否允许方法复用自己在 `output_path` 中保存的阶段产物 |
 | `product_mcp` | `None` | 本次扫描启用的知识库 MCP 名称；方法不使用时可以忽略 |
 | `attack_modes` | `None` | 预留的攻击模式映射；方法不使用时可以忽略 |
+| `code_paths` | `None` | 可选的绝对文件/目录列表；目录包含子树，文件仅包含自身。工作目录 `code_path` 为这些目标的最小公共父目录，所有产物相对路径以该目录为基准 |
 
 `project_path`、`scan_mode`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
 不会传给原生入口。
@@ -234,3 +236,5 @@ Task Agent 上下文、转发事件与取消信号；它不会把平台参数混
 页面的高风险模块表格与覆盖图共用独立覆盖接口的扫描相对路径投影（扫描根目录为 `.`），
 不改变这些内部产物及审计路径的基准。历史产物只读兼容，重复前缀必须能够通过完整文件
 清单唯一确认才会纠正；不能定位的路径保留诊断，不计入覆盖。
+
+所有内置方法支持 `code_paths`。历史五参数方法仍可用于单目录；选择单文件或多个路径时，框架拒绝不支持列表的方法，避免静默扩大扫描范围。轻量级方法在 `scan-context.json.source.paths` 记录列表，多阶段方法通过 `input_files` 传入列表。

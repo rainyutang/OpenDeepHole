@@ -236,6 +236,7 @@ def test_method_runs_one_task_with_read_only_references_and_exact_command(
     )
     assert context["source"] == {
         "root": str(code_root.resolve()),
+        "paths": [str(code_root.resolve())],
         "access": "read_only",
     }
     assert context["optional_inputs"] == {

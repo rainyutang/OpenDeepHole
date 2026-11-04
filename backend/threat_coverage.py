@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from backend.threat_paths import ModulePathResolver
+from backend.file_inventory import project_file_inventory
 
 
 def _text(value: Any) -> str:
@@ -82,6 +83,7 @@ def analysis_targets(attack_tree: dict, modules: list, fallback: str) -> list[di
 
 
 def build_threat_coverage(inventory: dict | None, analysis: dict | None, *, scan_scope: dict | None = None) -> dict:
+    inventory = project_file_inventory(inventory)
     analysis = _record(analysis)
     artifacts = _record(analysis.get("artifacts"))
     raw_modules = _record(artifacts.get("high_risk_modules_path")).get("content")
@@ -125,7 +127,7 @@ def build_threat_coverage(inventory: dict | None, analysis: dict | None, *, scan
 
 def build_coverage_issues(inventory: dict | None, findings: list[dict]) -> dict:
     """Sparse final-TP overlay. Never expand a finding into a directory scope."""
-    snapshot = inventory or {}
+    snapshot = project_file_inventory(inventory) or {}
     entries = snapshot.get("entries") or []
     resolver = ModulePathResolver(
         snapshot.get("project_path", ""), snapshot.get("scan_root", ""),

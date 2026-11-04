@@ -109,6 +109,33 @@ def test_resume_cleanup_failure_preserves_terminal_scan_and_revision(resume_env,
     env.send.assert_not_awaited()
 
 
+def test_multi_path_resume_rejects_old_agent_before_stopping_or_claiming(resume_env):
+    env = resume_env
+    scan, meta = env.store.load_scan("resume-scan")
+    scan.code_scan_paths = meta.code_scan_paths = ["/repo/src", "/repo/file.c"]
+    env.store.save_scan(scan, meta)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(env.resume())
+    assert error.value.status_code == 409
+    assert "更新" in error.value.detail
+    env.stop.assert_not_awaited()
+    env.send.assert_not_awaited()
+    assert env.store.get_scan_meta("resume-scan").execution_revision == 8
+
+
+def test_multi_path_resume_preserves_full_list_for_capable_agent(resume_env):
+    env = resume_env
+    env.agent.scan_paths_probe = True
+    scan, meta = env.store.load_scan("resume-scan")
+    scan.code_scan_paths = meta.code_scan_paths = ["/repo/src", "/repo/file.c"]
+    env.store.save_scan(scan, meta)
+    asyncio.run(env.resume())
+    command = env.send.await_args.args[1]
+    token = command["resume_manifest_url"].rsplit("/", 1)[-1]
+    manifest = asyncio.run(agent_api.agent_get_resume_manifest_v2(token))
+    assert json.loads(manifest.body)["code_scan_paths"] == ["/repo/src", "/repo/file.c"]
+
+
 def test_resume_claim_preserves_history_and_rejects_old_manifest(resume_env):
     env = resume_env
     asyncio.run(env.resume())

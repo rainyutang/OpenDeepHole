@@ -57,6 +57,12 @@ def _record(
 
 class ScanNameUniquenessTests(unittest.TestCase):
     def setUp(self) -> None:
+        async def probe(_agent_id, _agent, targets):
+            return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
+                    for target in targets]
+        probe_patch = patch("backend.api.agent.request_agent_scan_paths", side_effect=probe)
+        probe_patch.start()
+        self.addCleanup(probe_patch.stop)
         scan_api._running_scans.clear()
         scan_api._scan_owners.clear()
 

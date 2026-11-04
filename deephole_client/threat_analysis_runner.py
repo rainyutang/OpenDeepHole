@@ -27,6 +27,7 @@ _ALLOWED_KEYS = {
     "method_id",
     "project_path",
     "code_path",
+    "code_paths",
     "output_path",
     "is_resume",
     "product_mcp",
@@ -261,6 +262,9 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
     )
     if not _path_is_within(scan_path, project_path):
         raise ValueError("code_path must be inside project_path")
+    from .scan_paths import resolve_scan_scope
+    scope = resolve_scan_scope(project_path, scan_path, kwargs.get("code_paths"))
+    scan_path = scope.root
     output_path = _directory(
         kwargs["output_path"],
         "output_path",
@@ -305,6 +309,7 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
         method_label=manifest.label,
         project_path=str(project_path),
         code_path=str(scan_path),
+        code_paths=[str(path) for path in scope.paths],
         output_path=str(output_path),
     )
 
@@ -316,6 +321,10 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
                 raise RuntimeError(
                     "threat_analysis_harness does not export run_threat_analysis"
                 )
+            if "code_paths" not in inspect.signature(native_entry).parameters:
+                if scope.paths != (scan_path,):
+                    raise ValueError(f"threat-analysis method {manifest.method_id} does not support explicit file or multi-path inputs")
+                native_kwargs.pop("code_paths", None)
             return native_entry(**native_kwargs)
 
     try:
@@ -336,6 +345,7 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
             result = await run_sync_component(
                 invoke_native,
                 code_path=scan_path,
+                code_paths=list(scope.paths),
                 output_path=output_path,
                 is_resume=bool(kwargs.get("is_resume", False)),
                 product_mcp=kwargs.get("product_mcp"),

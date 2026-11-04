@@ -173,7 +173,7 @@ def test_invalid_inventory_is_rejected(entries):
         ScanFileInventory.model_validate(inventory(entries=entries))
 
 
-def test_filesystem_inventory_includes_hidden_files_and_reports_omissions(tmp_path):
+def test_filesystem_inventory_excludes_hidden_files_and_reports_omissions(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     (root / ".hidden").write_text("secret", encoding="utf-8")
@@ -187,7 +187,7 @@ def test_filesystem_inventory_includes_hidden_files_and_reports_omissions(tmp_pa
     result = collector.collect_file_inventory(inventory(project_path=str(root), scan_root=str(root)),
         excluded=(work,), cancel_event=threading.Event(), stop_event=threading.Event())
     ScanFileInventory.model_validate(result)
-    assert {entry["path"] for entry in result["entries"]} == {".", ".hidden", "README", "src", "src/a.c"}
+    assert {entry["path"] for entry in result["entries"]} == {".", "README", "src", "src/a.c"}
     assert result["status"] == "partial"
     assert result["issues"] == [{"path": "loop", "reason": "symlink"}]
     assert result["excluded_paths"] == ["work"]
@@ -467,3 +467,63 @@ def test_resume_inventory_is_frozen_and_transport_does_not_queue_behind_analysis
         finally:
             await reporter.close()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("selected,expected", [
+    (["src/a.c"], {".", "src", "src/a.c"}),
+    (["src/a.c", "lib"], {".", "src", "src/a.c", "lib", "lib/b.c"}),
+    (["src", "src/a.c", "src"], {".", "src", "src/a.c", "src/other.c"}),
+])
+def test_inventory_collects_only_selected_file_directory_union(tmp_path, selected, expected):
+    for name in ["src/a.c", "src/other.c", "src/.hidden.c", "lib/b.c", "lib/.cache/no.c", "sibling/no.c", "README"]:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("code", encoding="utf-8")
+    snapshot = collector.collect_file_inventory(inventory(
+        project_path=str(tmp_path), scan_root=str(tmp_path),
+        code_scan_paths=[str(tmp_path / path) for path in selected], inventory_policy_version=2,
+    ), excluded=(), cancel_event=threading.Event(), stop_event=threading.Event())
+    ScanFileInventory.model_validate(snapshot)
+    assert snapshot["status"] == "complete"
+    assert {entry["path"] for entry in snapshot["entries"]} == expected
+
+
+def test_selected_hidden_root_and_legacy_projection_are_excluded(tmp_path):
+    root = tmp_path / ".hidden"
+    root.mkdir()
+    (root / "source.c").write_text("code", encoding="utf-8")
+    snapshot = inventory(project_path=str(tmp_path), scan_root=str(root),
+                         entries=[{"path": ".", "kind": "directory"}, {"path": "source.c", "kind": "file"}])
+    assert build_threat_coverage(snapshot, None)["inventory"]["entries"] == [{"path": ".", "kind": "directory"}]
+    current = collector.collect_file_inventory(snapshot, excluded=(), cancel_event=threading.Event(), stop_event=threading.Event())
+    assert current["status"] == "complete" and len(current["entries"]) == 1
+    ordinary = inventory(entries=[{"path": ".", "kind": "directory"}, {"path": ".cache", "kind": "directory"},
+                                  {"path": ".cache/source.c", "kind": "file"}, {"path": ".hidden", "kind": "file"},
+                                  {"path": "visible.c", "kind": "file"}])
+    assert [entry["path"] for entry in build_threat_coverage(ordinary, None)["inventory"]["entries"]] == [".", "visible.c"]
+    assert build_coverage_issues(ordinary, [overlay_finding(0, ".cache/source.c")])["files"] == []
+
+
+def test_inventory_reuse_requires_selection_and_current_policy(tmp_path):
+    selected = [tmp_path / "a.c", tmp_path / "b.c"]
+    snapshot = inventory(project_path=str(tmp_path), scan_root=str(tmp_path),
+                         code_scan_paths=[str(path) for path in selected], inventory_policy_version=2,
+                         code_scan_path_kinds={str(path): "file" for path in selected})
+    assert collector._reusable(snapshot, tmp_path, tmp_path, selected)
+    assert collector._reusable(snapshot, tmp_path, tmp_path, list(reversed(selected)))
+    assert not collector._reusable(snapshot, tmp_path, tmp_path, [selected[0]])
+    assert not collector._reusable({**snapshot, "inventory_policy_version": 1}, tmp_path, tmp_path, selected)
+
+
+def test_frozen_inventory_is_replaced_when_selection_or_filter_policy_changes(coverage_env):
+    env = coverage_env
+    def upload(snapshot):
+        return env.store.replace_file_inventory(env.scan_id, FileInventoryUpload(
+            inventory=snapshot, execution_revision=env.revision, agent_session_id="session-1"))
+    assert upload(inventory())
+    current = inventory(inventory_policy_version=2, code_scan_paths=["/project/src"])
+    assert upload(current)
+    assert not upload({**current, "snapshot_id": "later-same-scope"})
+    narrowed = {**current, "snapshot_id": "selected-file", "code_scan_paths": ["/project/src/auth/a.c"]}
+    assert upload(narrowed)
+    assert [entry["path"] for entry in env.store.get_threat_coverage(env.scan_id)["inventory"]["entries"]] == [".", "auth", "auth/a.c"]

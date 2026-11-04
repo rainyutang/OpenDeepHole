@@ -28,6 +28,7 @@ import {
 } from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
 import { agentOwnerLabel } from "../agentPresentation";
+import ScanPathList from "./ScanPathList";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -36,7 +37,7 @@ interface Props {
 }
 
 interface MiningEngineFormValue { selected: boolean }
-interface VersionInput { version_name: string; project_path: string; code_scan_path: string }
+interface VersionInput { version_name: string; project_path: string; code_scan_paths: string[] }
 type ScanMode = "standard" | "custom" | "multi_version";
 type ScanModeOption =
   | { id: ScanMode; label: string; selectable: true }
@@ -49,8 +50,8 @@ function agentAcceptsTasks(agent: AgentInfo) {
   return agent.online && agent.accepting_tasks !== false;
 }
 
-function scanPathError(projectPath: string, codeScanPath: string, prefix = ""): string | null {
-  for (const [value, label] of [[projectPath, "项目总路径"], [codeScanPath, "扫描模块路径"]]) {
+function scanPathError(projectPath: string, codeScanPaths: string[], prefix = ""): string | null {
+  for (const [value, label] of [[projectPath, "项目总路径"], ...codeScanPaths.map((path) => [path, "扫描模块路径"])]) {
     const path = value.trim();
     // Accept POSIX paths, Windows drive roots, and complete UNC share paths.
     if (path && !path.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(path) && !/^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(path)) {
@@ -97,10 +98,10 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [selectedAgent, setSelectedAgent] = useState("");
   const [scanName, setScanName] = useState("");
   const [projectPath, setProjectPath] = useState("");
-  const [codeScanPath, setCodeScanPath] = useState("");
+  const [codeScanPaths, setCodeScanPaths] = useState<string[]>([""]);
   const [multiVersions, setMultiVersions] = useState<VersionInput[]>([
-    { version_name: "", project_path: "", code_scan_path: "" },
-    { version_name: "", project_path: "", code_scan_path: "" },
+    { version_name: "", project_path: "", code_scan_paths: [""] },
+    { version_name: "", project_path: "", code_scan_paths: [""] },
   ]);
   const [product, setProduct] = useState("");
   const [scanMode, setScanMode] = useState<ScanMode>("standard");
@@ -229,7 +230,9 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault(); setError(null);
+    event.preventDefault();
+    if (submitting) return;
+    setError(null);
     if (!selectedAgent) return setError("请选择一个客户端");
     if (!selectedAgentReady) return setError("所选客户端尚未配置模型，请先前往客户端配置添加并启用模型");
     if (scanMode === "multi_version") {
@@ -237,14 +240,14 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       const invalid = multiVersions.find((version) => !version.version_name.trim() || !version.project_path.trim());
       if (invalid) return setError("请填写每个版本的名称和项目总路径");
       for (const version of multiVersions) {
-        const pathError = scanPathError(version.project_path, version.code_scan_path, `版本「${version.version_name.trim()}」的`);
+        const pathError = scanPathError(version.project_path, version.code_scan_paths, `版本「${version.version_name.trim()}」的`);
         if (pathError) return setError(pathError);
       }
       const names = multiVersions.map((version) => version.version_name.trim().toLocaleLowerCase());
       if (new Set(names).size !== names.length) return setError("版本名称不能重复");
     } else {
       if (!projectPath.trim()) return setError("请输入项目总路径");
-      const pathError = scanPathError(projectPath, codeScanPath);
+      const pathError = scanPathError(projectPath, codeScanPaths);
       if (pathError) return setError(pathError);
     }
     if (!product.trim()) return setError("请输入产品名称");
@@ -266,14 +269,14 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         agent_key: selectedAgent,
         scan_name: scanName.trim(),
         project_path: scanMode === "multi_version" ? multiVersions[0].project_path.trim() : projectPath.trim(),
-        code_scan_path: scanMode === "multi_version" ? multiVersions[0].code_scan_path.trim() : codeScanPath.trim(),
+        code_scan_paths: (scanMode === "multi_version" ? multiVersions[0].code_scan_paths : codeScanPaths).map((path) => path.trim()).filter(Boolean),
         product: product.trim(),
         scan_mode: scanMode,
         ...(scanMode === "multi_version" ? {
           multi_versions: multiVersions.map((version) => ({
             version_name: version.version_name.trim(),
             project_path: version.project_path.trim(),
-            code_scan_path: version.code_scan_path.trim(),
+            code_scan_paths: version.code_scan_paths.map((path) => path.trim()).filter(Boolean),
           })),
         } : {}),
         knowledge_base: {
@@ -305,7 +308,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : <form onSubmit={handleSubmit} className="space-y-6">
         <Card><h2 className="mb-3 text-sm font-medium text-slate-300">选择客户端</h2>{agents.length === 0 ? <p className="text-sm text-slate-500">暂无客户端，请先运行 ./run_agent.sh</p> : <div className="space-y-2">{agents.map((agent) => <label key={agent.agent_key || agent.agent_id} className={`flex items-center gap-3 rounded-lg border p-3 ${agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${selectedAgent === agent.agent_key ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="sr-only" type="radio" checked={selectedAgent === agent.agent_key} disabled={!agentAcceptsTasks(agent)} onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="block text-xs text-slate-400">{agent.ip}</span><span className="block truncate text-xs text-slate-400" title={agentOwnerLabel(agent)}>{agentOwnerLabel(agent)}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? "更新中" : "在线" : "离线"}</span>{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button type="button" onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)} className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}</Card>
 
-        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field>{scanMode !== "multi_version" ? <><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="扫描模块路径" hint="可选，填写绝对路径；留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录的绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field></> : <div className="space-y-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-medium text-cyan-100">项目版本</h3><p className="mt-1 text-xs text-slate-400">列表首项作为基准版本；所有版本均使用你填写的名称，并在各自模块路径内扫描。</p></div><button type="button" disabled={multiVersions.length >= 5} onClick={() => setMultiVersions((current) => [...current, { version_name: "", project_path: "", code_scan_path: "" }])} className="shrink-0 rounded border border-cyan-400/40 px-3 py-1.5 text-xs text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40">添加版本</button></div>{multiVersions.map((version, index) => <div key={index} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3"><div className="mb-3 flex items-center justify-between"><span className="text-sm font-medium text-slate-200">{version.version_name.trim() || "未命名版本"}{index === 0 ? "（基准）" : "（对照）"}</span>{multiVersions.length > 2 && <button type="button" onClick={() => setMultiVersions((current) => current.filter((_, currentIndex) => currentIndex !== index))} className="text-xs text-red-300 hover:text-red-200">移除</button>}</div><div className="grid gap-3"><Field label="版本名称"><input className={input} required value={version.version_name} placeholder="例如 release-2026.09" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, version_name: event.target.value } : item))} /></Field><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={version.project_path} placeholder="/path/to/project-version" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, project_path: event.target.value } : item))} /></Field><Field label="扫描模块路径" hint="可选，填写绝对路径；留空扫描该版本项目总路径"><input className={input} value={version.code_scan_path} placeholder="子目录的绝对路径" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, code_scan_path: event.target.value } : item))} /></Field></div></div>)}</div>}<Field label="产品"><input className={input} value={product} placeholder="请输入产品名称" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /></Field></div></Card>
+        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field>{scanMode !== "multi_version" ? <><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><ScanPathList paths={codeScanPaths} onChange={setCodeScanPaths} /></> : <div className="space-y-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-medium text-cyan-100">项目版本</h3><p className="mt-1 text-xs text-slate-400">列表首项作为基准版本；所有版本均使用你填写的名称，并在各自模块路径内扫描。</p></div><button type="button" disabled={multiVersions.length >= 5} onClick={() => setMultiVersions((current) => [...current, { version_name: "", project_path: "", code_scan_paths: [""] }])} className="shrink-0 rounded border border-cyan-400/40 px-3 py-1.5 text-xs text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40">添加版本</button></div>{multiVersions.map((version, index) => <div key={index} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3"><div className="mb-3 flex items-center justify-between"><span className="text-sm font-medium text-slate-200">{version.version_name.trim() || "未命名版本"}{index === 0 ? "（基准）" : "（对照）"}</span>{multiVersions.length > 2 && <button type="button" onClick={() => setMultiVersions((current) => current.filter((_, currentIndex) => currentIndex !== index))} className="text-xs text-red-300 hover:text-red-200">移除</button>}</div><div className="grid gap-3"><Field label="版本名称"><input className={input} required value={version.version_name} placeholder="例如 release-2026.09" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, version_name: event.target.value } : item))} /></Field><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={version.project_path} placeholder="/path/to/project-version" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, project_path: event.target.value } : item))} /></Field><ScanPathList paths={version.code_scan_paths} onChange={(paths) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, code_scan_paths: paths } : item))} /></div></div>)}</div>}<Field label="产品"><input className={input} value={product} placeholder="请输入产品名称" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /></Field></div></Card>
 
         <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2></div><div className="mt-4 grid gap-3 md:grid-cols-4">{([
           { id: "standard", label: "标准模式", selectable: true },
@@ -356,8 +359,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <ReviewNotesSelector enabled={reviewNotesEnabled} noteIds={reviewNoteIds} onEnabledChange={setReviewNotesEnabled} onSelectionChange={setReviewNoteIds} />
 
-        {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
-        <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>
+        {error && <div role="alert" className="whitespace-pre-line rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
+        <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "检查路径并创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>
       </form>}
     </main>
   </div>;

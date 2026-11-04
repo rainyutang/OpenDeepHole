@@ -551,8 +551,8 @@ def test_codepoint_prompt_uses_checker_skill_and_plain_multi_version_guidance() 
     assert "是否可以触发" not in prompt
     assert "静态定位信息只用于指出审计起点，不代表漏洞真实存在" in prompt
     assert "## 审计版本" in prompt
-    assert "- release-2025.12：项目路径 /repo/legacy；扫描路径 /repo/legacy/src" in prompt
-    assert "- 安全修订版：项目路径 /repo/patched；扫描路径 /repo/patched/src" in prompt
+    assert '- release-2025.12：项目路径 /repo/legacy；扫描路径（绝对路径）["/repo/legacy/src"]' in prompt
+    assert '- 安全修订版：项目路径 /repo/patched；扫描路径（绝对路径）["/repo/patched/src"]' in prompt
     assert "## 已有静态候选位置" in prompt
     assert "### 版本：release-2025.12" in prompt
     assert prompt.count("### 版本：") == 1

@@ -218,7 +218,8 @@ def test_stop_during_resume_setup_or_inventory_cleanup_stops_collection(resume_s
 def test_resume_uses_remote_complete_inventory_or_recollects_unfinished_inventory(resume_scan, tmp_path, monkeypatch, previous):
     run = resume_scan
     scan_dir = tmp_path / "work"
-    saved = inventory(project_path=str(run.project), scan_root=str(run.root), status=previous)
+    saved = inventory(project_path=str(run.project), scan_root=str(run.root), status=previous,
+                      inventory_policy_version=2, code_scan_paths=[str(run.root)])
     run.reporter.get_file_inventory.return_value = saved
     collect = Mock(wraps=collector.collect_file_inventory)
     monkeypatch.setattr(collector, "collect_file_inventory", collect)

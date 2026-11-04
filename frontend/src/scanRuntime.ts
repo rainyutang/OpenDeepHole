@@ -1,3 +1,4 @@
+import { selectedScanPaths } from "./scanPaths";
 import type {
   Candidate,
   FpReviewJob,
@@ -526,10 +527,12 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     project_id: text(value.project_id),
     project_path: text(value.project_path),
     code_scan_path: text(value.code_scan_path),
+    code_scan_paths: selectedScanPaths(value),
     multi_versions: recordArray(value.multi_versions).map((item) => ({
       version_name: text(item.version_name),
       project_path: text(item.project_path),
       code_scan_path: text(item.code_scan_path),
+      code_scan_paths: selectedScanPaths(item),
     })),
     scan_mode: text(value.scan_mode) || "full",
     threat_analysis_enabled: value.threat_analysis_enabled === true,

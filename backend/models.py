@@ -835,6 +835,7 @@ class MultiVersionTarget(BaseModel):
     version_name: str = Field(min_length=1, max_length=120)
     project_path: str = Field(min_length=1, max_length=4096)
     code_scan_path: str = Field(default="", max_length=4096)
+    code_scan_paths: list[str] = Field(default_factory=list)
 
     @field_validator("version_name", "project_path", "code_scan_path", mode="before")
     @classmethod
@@ -850,6 +851,7 @@ class ScanStatus(BaseModel):
     metadata_revision: int = 0
     project_path: str = ""
     code_scan_path: str = ""
+    code_scan_paths: list[str] = Field(default_factory=list)
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
@@ -1146,6 +1148,7 @@ class AgentInfo(BaseModel):
     protocol_version: int = 1
     llm_api_config: bool | None = None
     scan_code_graph_updates: bool = False
+    scan_paths_probe: bool = False
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -1786,6 +1789,7 @@ class CreateScanRequest(BaseModel):
     # Multi-version mode derives the legacy primary path from the named baseline.
     project_path: str = ""
     code_scan_path: str = ""
+    code_scan_paths: list[str] = Field(default_factory=list)
     scan_name: str = ""
     scan_mode: str = "custom"
     threat_analysis_enabled: bool | None = None
@@ -1909,6 +1913,7 @@ class ScanMeta(BaseModel):
     execution_revision: int = Field(default=0, exclude=True)
     project_path: str = ""
     code_scan_path: str = ""
+    code_scan_paths: list[str] = Field(default_factory=list)
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_name: str = ""
     metadata_revision: int = 0

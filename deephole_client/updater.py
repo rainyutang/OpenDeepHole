@@ -121,6 +121,11 @@ def pending_scan_snapshots() -> list[dict[str, Any]]:
             ),
             "project_path": command.get("project_path") or "",
             "code_scan_path": command.get("code_scan_path") or command.get("project_path") or "",
+            "code_scan_paths": command.get("code_scan_paths") or (
+                [command.get("code_scan_path") or command.get("project_path")]
+                if command.get("code_scan_path") or command.get("project_path") else []
+            ),
+            "multi_versions": command.get("multi_versions") or [],
             "checkers": command.get("checkers") or [],
             "scan_name": command.get("scan_name") or "",
         })

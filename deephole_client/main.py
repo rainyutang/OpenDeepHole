@@ -163,6 +163,7 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
             scan_id=msg["scan_id"],
             project_path=msg.get("project_path"),
             code_scan_path=msg.get("code_scan_path"),
+            code_scan_paths=msg.get("code_scan_paths"),
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
             scan_mode=msg.get("scan_mode"),
@@ -265,6 +266,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
             code_scan_path=msg.get("code_scan_path"),
+            code_scan_paths=msg.get("code_scan_paths"),
             multi_versions=(
                 msg.get("multi_versions")
                 if isinstance(msg.get("multi_versions"), list)
@@ -522,6 +524,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=msg.get("request_id", ""),
             refresh=bool(msg.get("refresh")),
         )
+    elif cmd_type == "scan_paths_probe":
+        return await agent_server.handle_scan_paths_probe(
+            request_id=str(msg.get("request_id") or ""),
+            targets=msg.get("targets"),
+        )
     elif cmd_type == "mcp_probe":
         return await agent_server.handle_mcp_probe(
             request_id=str(msg.get("request_id") or ""),
@@ -649,6 +656,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,
                         "scan_code_graph_updates": True,
+                        "scan_paths_probe": True,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),

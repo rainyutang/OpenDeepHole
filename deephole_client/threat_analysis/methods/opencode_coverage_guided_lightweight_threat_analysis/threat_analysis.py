@@ -7,6 +7,7 @@ import json
 import shutil
 from importlib import import_module
 from pathlib import Path
+from deephole_client.threat_analysis.scope import prepare_method_scope
 from typing import Any, Awaitable, Mapping
 
 from .workflow import build_supplement_prompt, _run_supplement_task, run_coverage
@@ -40,12 +41,14 @@ def run_threat_analysis(
     is_resume: bool = False,
     product_mcp: str | None = None,
     attack_modes: Mapping[str, Any] | None = None,
+    code_paths: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Analyze a source tree through one retry-managed OpenCode task."""
 
     try:
         code_root = _required_directory(code_path, "code_path")
         artifact_root = _output_directory(output_path)
+        selected_paths, is_resume = prepare_method_scope(code_root, artifact_root, code_paths, is_resume)
         paths = _artifact_paths(artifact_root)
         guidance_path, schema_paths = _reference_paths()
 
@@ -59,7 +62,7 @@ def run_threat_analysis(
                     return run_coverage(
                         code_root=code_root, artifact_root=artifact_root,
                         initial_paths=resume_paths, is_resume=True,
-                        run_task=_run_supplement_task,
+                        run_task=_run_supplement_task, code_paths=selected_paths,
                     )
                 return _success(resume_paths)
         # A completed Session is reused through its validated artifacts. Any
@@ -75,6 +78,7 @@ def run_threat_analysis(
                 "context_version": 1,
                 "source": {
                     "root": str(code_root),
+                    "paths": [str(path) for path in selected_paths],
                     "access": "read_only",
                 },
                 "artifacts": {
@@ -133,7 +137,7 @@ def run_threat_analysis(
         return run_coverage(
             code_root=code_root, artifact_root=artifact_root,
             initial_paths=paths, is_resume=False,
-            run_task=_run_supplement_task,
+            run_task=_run_supplement_task, code_paths=selected_paths,
         )
     except Exception as exc:
         return {

@@ -346,6 +346,7 @@ export async function createScan(body: {
   agent_key: string;
   project_path: string;
   code_scan_path?: string;
+  code_scan_paths?: string[];
   scan_name: string;
   scan_mode?: string;
   threat_analysis_enabled?: boolean;
@@ -364,7 +365,8 @@ export async function createScan(body: {
   multi_versions?: Array<{
     version_name: string;
     project_path: string;
-    code_scan_path: string;
+    code_scan_path?: string;
+    code_scan_paths?: string[];
   }>;
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);

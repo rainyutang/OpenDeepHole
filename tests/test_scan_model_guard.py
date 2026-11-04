@@ -21,6 +21,15 @@ from backend.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def successful_path_probe(monkeypatch):
+    # These tests exercise model/profile policy; path RPC has dedicated tests.
+    async def probe(_agent_id, _agent, targets):
+        return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
+                for target in targets]
+    monkeypatch.setattr("backend.api.agent.request_agent_scan_paths", probe)
+
+
 def test_model_readiness_requires_enabled_explicit_model() -> None:
     assert not agent_api.agent_config_has_explicit_model(AgentRemoteConfig())
     assert not agent_api.agent_config_has_explicit_model(AgentRemoteConfig(

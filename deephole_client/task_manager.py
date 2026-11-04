@@ -23,6 +23,7 @@ class ScanTask:
     code_scan_path: Path
     checkers: list[str]
     scan_name: str
+    code_scan_paths: list[Path] = field(default_factory=list)
     multi_versions: list[dict] = field(default_factory=list)
     scan_mode: str = "custom"
     threat_analysis_enabled: bool = False
@@ -87,11 +88,13 @@ class TaskManager:
         retry_mining_engine_ids: list[str] | None = None,
         retry_threat_audit_task_ids: list[str] | None = None,
         execution_revision: int = 0,
+        code_scan_paths: list[str] | None = None,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
             project_path=Path(project_path),
             code_scan_path=Path(code_scan_path or project_path),
+            code_scan_paths=[Path(path) for path in (code_scan_paths or [code_scan_path or project_path])],
             multi_versions=(
                 copy.deepcopy(multi_versions)
                 if isinstance(multi_versions, list)
@@ -181,6 +184,7 @@ class TaskManager:
                 "execution_revision": task.execution_revision,
                 "project_path": str(task.project_path),
                 "code_scan_path": str(task.code_scan_path),
+                "code_scan_paths": [str(path) for path in task.code_scan_paths],
                 "multi_versions": copy.deepcopy(task.multi_versions),
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,

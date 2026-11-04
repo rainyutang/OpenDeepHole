@@ -166,6 +166,7 @@ async def _run_scan(task, is_resume: bool) -> None:
             config=_config,
             project_path=task.project_path,
             code_scan_path=task.code_scan_path,
+            code_scan_paths=getattr(task, "code_scan_paths", None),
             reporter=_reporter,
             scan_name=task.scan_name,
             scan_mode=task.scan_mode,
@@ -217,6 +218,7 @@ async def handle_task(
     checker_packages: list[dict] | None = None,
     mining_engines: list[dict] | None = None,
     codex_model_ids: list[str] | None = None,
+    code_scan_paths: list[str] | None = None,
 ) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
@@ -232,6 +234,7 @@ async def handle_task(
         scan_id=scan_id,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        code_scan_paths=code_scan_paths,
         multi_versions=multi_versions,
         checkers=checkers,
         scan_name=scan_name,
@@ -380,6 +383,7 @@ async def handle_resume(
     codex_model_ids: Optional[list[str]] = None,
     multi_versions: Optional[list[dict]] = None,
     execution_revision: int = 0,
+    code_scan_paths: list[str] | None = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -405,6 +409,11 @@ async def handle_resume(
         resolved_code_scan_path = str(
             previous_value("code_scan_path", resolved_project_path)
         )
+    resolved_code_scan_paths = (
+        code_scan_paths if code_scan_paths is not None else
+        [resolved_code_scan_path] if code_scan_path is not None or project_path is not None else
+        [str(path) for path in previous_value("code_scan_paths", [])]
+    )
     resolved_checkers = (
         checkers
         if checkers is not None
@@ -479,6 +488,7 @@ async def handle_resume(
         scan_id=scan_id,
         project_path=resolved_project_path,
         code_scan_path=resolved_code_scan_path,
+        code_scan_paths=resolved_code_scan_paths,
         checkers=resolved_checkers,
         scan_name=resolved_scan_name,
         scan_mode=resolved_scan_mode,
@@ -1662,6 +1672,40 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             "message": diagnostic,
             "models": [],
         }
+
+
+def _probe_scan_paths(targets: Any) -> dict:
+    from deephole_client.scan_paths import ScanPathValidationError, resolve_scan_scope
+
+    checked: list[dict] = []
+    errors: list[str] = []
+    if not isinstance(targets, list) or not targets:
+        return {"ok": False, "targets": [], "errors": ["缺少扫描路径"]}
+    for index, target in enumerate(targets):
+        if not isinstance(target, dict):
+            errors.append(f"第 {index + 1} 项扫描路径配置无效")
+            continue
+        version = str(target.get("version_name") or "")
+        prefix = f"版本「{version}」：" if version else ""
+        try:
+            scope = resolve_scan_scope(
+                target.get("project_path") or "",
+                target.get("code_scan_path"), target.get("code_scan_paths"),
+            )
+            checked.append({
+                "project_path": str(scope.project), "code_scan_path": str(scope.root),
+                "code_scan_paths": [str(path) for path in scope.paths],
+            })
+        except ScanPathValidationError as exc:
+            errors.extend(prefix + message for message in exc.errors)
+        except (ValueError, TypeError, OSError) as exc:
+            errors.append(prefix + str(exc))
+    return {"ok": not errors, "targets": checked if not errors else [], "errors": errors}
+
+
+async def handle_scan_paths_probe(request_id: str, targets: Any) -> dict:
+    result = await asyncio.to_thread(_probe_scan_paths, targets)
+    return {"type": "scan_paths_probe_result", "request_id": request_id, **result}
 
 
 async def handle_mcp_probe(

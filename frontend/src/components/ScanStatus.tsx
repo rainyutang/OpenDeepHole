@@ -1,3 +1,4 @@
+import { selectedScanPaths } from "../scanPaths";
 import { ScanTokenUsagePanel } from "./ScanTokenUsagePanel";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefCallback } from "react";
@@ -3722,7 +3723,10 @@ function ScanInformationPanel({
           <ScanInformationSection title="扫描范围">
             <div className="space-y-3">
               <ScanInformationField label="项目路径" value={scan.project_path || "未记录"} mono wide />
-              <ScanInformationField label="代码扫描路径" value={scan.code_scan_path || scan.project_path || "未记录"} mono wide />
+              {(scan.multi_versions?.length ? scan.multi_versions : [scan]).map((scope, index) => <div key={index} className="space-y-2">
+                {"version_name" in scope && <p className="text-sm text-slate-300">{scope.version_name}</p>}
+                {selectedScanPaths(scope).map((path) => <ScanInformationField key={path} label="代码扫描路径（绝对路径）" value={path} mono wide />)}
+              </div>)}
             </div>
           </ScanInformationSection>
 

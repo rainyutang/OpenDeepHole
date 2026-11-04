@@ -42,6 +42,12 @@ async def _direct_store_call(store, operation, *args, **kwargs):
 
 class ExternalIntegrationApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        async def probe(_agent_id, _agent, targets):
+            return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
+                    for target in targets]
+        probe_patch = patch("backend.api.agent.request_agent_scan_paths", side_effect=probe)
+        probe_patch.start()
+        self.addCleanup(probe_patch.stop)
         agent_api._registered_agents.clear()
         agent_api._agent_ws.clear()
         agent_api._agent_ws_locks.clear()

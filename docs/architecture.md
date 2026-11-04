@@ -48,7 +48,7 @@ Agent 扫描不要求向 Web 服务上传整个代码仓，但模型需要通过
 
 | 位置 | 内容与生命周期 |
 | --- | --- |
-| `<code_scan_path>/code_index.db` | 静态索引；按扫描范围构建或复用，删除后需要重新构建 |
+| `<code_scan_path>/code_index.db` | 静态索引；覆盖公共启动目录，同目录扫描共享，删除后需要重新构建 |
 | `~/.opendeephole/scans/<scan_id>/` | 扫描产物、`candidates.json`、规则包、威胁分析与多版本检查点；当前扫描收尾不统一删除该目录 |
 | `~/.opendeephole/fp_reviews/<review_id>/<vuln_index>/` | 单项复核工作目录；当前复核收尾不统一删除该目录 |
 | `~/.opendeephole/vulnerability_validation/` | 验证工作目录及产物 |
@@ -56,7 +56,19 @@ Agent 扫描不要求向 Web 服务上传整个代码仓，但模型需要通过
 | `~/.opendeephole/opencode_workspace/` | Agent 的受管 OpenCode 配置、Skill 与 Hook |
 | `$CODEX_HOME` 或 `~/.codex/` | Codex 用户配置及 OpenDeepHole 托管区，见[配置参考](configuration.md#codex-运行配置) |
 
-索引只覆盖本次 `code_scan_path`。扫描子目录不会读取或删除项目根目录遗留的索引。扫描目录及复核目录会保留用于恢复与证据查询，需要按实际任务状态管理保留周期。
+扫描范围由 `code_scan_paths` 绝对路径列表表示，可混合目录和文件；留空时使用项目总路径。创建扫描前，服务端请求所选 Agent 检查全部路径及多版本目标，存在无效路径、检查超时或客户端不支持检查时不创建扫描。运行与续扫会再次校验路径。
+
+`code_scan_path` 是公共启动目录：目录取自身，文件取父目录，再计算最深公共祖先。索引完整覆盖该目录，不因所选列表不同而拆分；静态候选在计数、保存和审计之前按所选列表筛选。代码索引中的额外文件不进入覆盖图分母。索引位置示例：
+
+| 输入 | 索引位置 |
+| --- | --- |
+| 目录 `/repo/src/a`、`/repo/src/b` | `/repo/src/code_index.db` |
+| 仅目录 `/repo/src/a` | `/repo/src/a/code_index.db` |
+| 仅文件 `/repo/src/main.c` | `/repo/src/code_index.db` |
+| 文件 `/repo/src/main.c` 和目录 `/repo/lib` | `/repo/code_index.db` |
+| 列表留空、项目路径 `/repo` | `/repo/code_index.db` |
+
+不同列表可共享同一公共目录的完整索引，候选及分析检查点仍按各自范围校验。扫描子目录不会读取或删除更上层目录遗留的索引。扫描目录及复核目录会保留用于恢复与证据查询，需要按实际任务状态管理保留周期。
 
 ### 服务端
 

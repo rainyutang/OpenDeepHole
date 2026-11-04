@@ -133,6 +133,10 @@ def test_create_scan_persists_and_dispatches_selected_notes(notes_env, monkeypat
         model_pool={"models": [{"id": "ready", "model": "provider/model", "enabled": True}]},
     )))
     monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
+    async def successful_path_probe(_agent_id, _agent, targets):
+        return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
+                for target in targets]
+    monkeypatch.setattr(agent_api, "request_agent_scan_paths", successful_path_probe)
     send = AsyncMock(return_value=True)
     monkeypatch.setattr(agent_api, "send_agent_command", send)
     body = CreateScanRequest(agent_key=agent.agent_key, project_path="/repo/project", scan_name="notes-create",

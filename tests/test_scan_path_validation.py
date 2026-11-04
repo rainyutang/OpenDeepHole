@@ -20,6 +20,7 @@ def scan_api_env(tmp_path, monkeypatch):
     agent = AgentInfo(
         agent_id="session-1", agent_key="client-1", name="client-1",
         ip="127.0.0.1", last_seen="2026-09-18T00:00:00+00:00", user_id=user.user_id,
+        scan_paths_probe=True,
     )
     ready = AgentRemoteConfig(model_pool={"models": [{
         "id": "ready", "model": "provider/model", "enabled": True,
@@ -27,6 +28,10 @@ def scan_api_env(tmp_path, monkeypatch):
     store = SqliteScanStore(tmp_path / "scan.db")
     save = Mock(wraps=store.save_scan)
     send = AsyncMock(return_value=True)
+    probe = AsyncMock(side_effect=lambda _agent_id, _agent, targets: [
+        {key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
+        for target in targets
+    ])
 
     async def store_call(store, operation, *args, **kwargs):
         function = getattr(store, operation) if isinstance(operation, str) else operation
@@ -43,6 +48,7 @@ def scan_api_env(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_api, "get_scan_agent_config_async", AsyncMock(return_value=ready))
     monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
     monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(agent_api, "request_agent_scan_paths", probe)
     app = FastAPI()
     app.include_router(scan_api.router)
 
@@ -50,7 +56,7 @@ def scan_api_env(tmp_path, monkeypatch):
         return user
 
     app.dependency_overrides[scan_api.get_current_user] = current_user
-    yield SimpleNamespace(app=app, store=store, save=save, send=send)
+    yield SimpleNamespace(app=app, store=store, save=save, send=send, probe=probe, agent=agent)
     store.close()
 
 
@@ -126,5 +132,70 @@ def test_multi_version_paths_use_absolute_baseline_and_optional_module_fallback(
     assert command["project_path"] == versions[0]["project_path"]
     assert command["code_scan_path"] == versions[0]["project_path"]
     assert command["multi_versions"] == [
-        {**versions[0], "code_scan_path": versions[0]["project_path"]}, versions[1],
+        {**versions[0], "code_scan_path": versions[0]["project_path"], "code_scan_paths": [versions[0]["project_path"]]},
+        {**versions[1], "code_scan_paths": [versions[1]["code_scan_path"]]},
     ]
+
+
+def test_path_list_is_normalized_and_persisted(scan_api_env):
+    paths = [" /repo/project/src ", "/repo/project/include/a.h", "/repo/project/src", " "]
+    response = post_scan(scan_api_env, code_scan_paths=paths)
+    assert response.status_code == 200, response.text
+    expected = ["/repo/project/src", "/repo/project/include/a.h"]
+    scan_id = response.json()["scan_id"]
+    for record in scan_api_env.store.load_scan(scan_id):
+        assert record.code_scan_paths == expected
+    for record in scan_api_env.store.load_scan_runtime(scan_id):
+        assert record.code_scan_paths == expected
+    assert scan_api_env.store.get_scan_meta(scan_id).code_scan_paths == expected
+    assert scan_api_env.send.await_args.args[1]["code_scan_paths"] == expected
+
+
+def test_relative_list_member_rejected_before_probe(scan_api_env):
+    response = post_scan(scan_api_env, code_scan_paths=["/repo/project/src", "relative.c"])
+    assert response.status_code == 422
+    scan_api_env.probe.assert_not_awaited()
+    scan_api_env.save.assert_not_called()
+    scan_api_env.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status,message", [
+    (422, "missing.c"), (409, "请先更新 Agent"), (502, "Agent 连接已断开"), (504, "路径检查超时"),
+])
+def test_probe_failure_leaves_no_scan(scan_api_env, status, message):
+    from fastapi import HTTPException
+    scan_api_env.probe.side_effect = HTTPException(status_code=status, detail=message)
+    response = post_scan(scan_api_env, code_scan_paths=["/repo/project/missing.c"])
+    assert response.status_code == status
+    assert message in response.json()["detail"]
+    scan_api_env.save.assert_not_called()
+    scan_api_env.send.assert_not_awaited()
+    assert not scan_api._running_scans
+    assert scan_api_env.store._conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
+
+
+def test_create_stores_agent_resolved_file_parent(scan_api_env, tmp_path):
+    from deephole_client.server import _probe_scan_paths
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "a.c"
+    source.write_text("int a;\n")
+    scan_api_env.probe.side_effect = lambda _id, _agent, targets: _probe_scan_paths(targets)["targets"]
+    response = post_scan(scan_api_env, project_path=str(project), code_scan_paths=[str(source)])
+    assert response.status_code == 200, response.text
+    scan, meta = scan_api_env.store.load_scan(response.json()["scan_id"])
+    assert meta.code_scan_path == scan.code_scan_path == str(project)
+    assert meta.code_scan_paths == scan.code_scan_paths == [str(source)]
+    command = scan_api_env.send.await_args.args[1]
+    assert command["code_scan_path"] == str(project)
+    assert command["code_scan_paths"] == [str(source)]
+
+
+def test_legacy_storage_scope_falls_back_after_reopen(scan_api_env):
+    response = post_scan(scan_api_env, code_scan_path="/repo/project/src")
+    assert response.status_code == 200
+    scan_id = response.json()["scan_id"]
+    scan_api_env.store._conn.execute("UPDATE scans SET code_scan_paths_json = '[]' WHERE scan_id = ?", (scan_id,))
+    scan_api_env.store._conn.commit()
+    assert scan_api_env.store.get_scan_meta(scan_id).code_scan_paths == ["/repo/project/src"]
+    assert scan_api_env.store.load_scan_runtime(scan_id)[0].code_scan_paths == ["/repo/project/src"]

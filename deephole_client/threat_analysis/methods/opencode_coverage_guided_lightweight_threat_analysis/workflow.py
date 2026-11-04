@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from deephole_client.threat_analysis import lightweight_contract
+from backend.file_inventory import INVENTORY_POLICY_VERSION, inventory_scope_key, project_file_inventory
 
 METHOD_ROOT = Path(__file__).resolve().parent
 STATE_FILE = "coverage-workflow-state.json"
@@ -100,24 +101,43 @@ def build_supplement_prompt(*, code_root: Path, targets: list[str],
 
 增量结果写入 {round_root / 'delta.json'}，独立攻击树写入 {round_root / 'attack-trees'}。
 源码和已有结果只读，仅写本次输出。
-所有代码路径均相对于源码根目录。"""
+所有代码路径均相对于源码根目录。排除所有点开头的隐藏文件、隐藏目录及其子树，不能作为补查目标或有效证据。
+公共源码根目录仅用于路径定位，实际检查范围仅为上述目标；可以读取普通依赖文件作为上下文，但不能扩展判定范围。"""
 
 
-def _inventory(code_root: Path, artifact_root: Path) -> tuple[dict, Path]:
+def _inventory(code_root: Path, artifact_root: Path, code_paths=None) -> tuple[dict, Path]:
     path = _owned(artifact_root, "coverage-input/file-inventory.json")
+    selected = [str(Path(item).resolve()) for item in code_paths or [code_root]]
+    kinds = {item: "directory" if Path(item).is_dir() else "file" for item in selected}
+    project = str(code_root)
     if path.is_file():
         value = _read(path)
         if not isinstance(value, dict):
             raise ValueError("文件清单不是 JSON 对象")
         from backend.file_inventory import ScanFileInventory
-        return ScanFileInventory.model_validate(value).model_dump(mode="json"), path
+        parsed = ScanFileInventory.model_validate(value).model_dump(mode="json")
+        expected = sorted(selected)
+        actual = sorted(str(Path(item).resolve()) for item in parsed.get("code_scan_paths") or [parsed["scan_root"]])
+        if actual != expected or Path(parsed["scan_root"]).resolve() != code_root.resolve():
+            raise ValueError("文件清单的选择路径与本次分析不一致")
+        if parsed["status"] != "complete":
+            return project_file_inventory(parsed), path
+        expected_scope = {**parsed, "scan_root": str(code_root), "code_scan_paths": selected,
+                          "code_scan_path_kinds": kinds, "inventory_policy_version": INVENTORY_POLICY_VERSION}
+        if inventory_scope_key(parsed) == inventory_scope_key(expected_scope):
+            return project_file_inventory(parsed), path
+        # Direct callers can reuse output_path without the scanner refreshing
+        # this file. A changed file kind or collection policy needs a new tree.
+        project = parsed["project_path"]
     # Direct method callers have no scanner lifecycle. Use the same collector.
     from deephole_client.file_inventory import collect_file_inventory
     from task_agent.task_service import get_opencode_execution_context
     event = get_opencode_execution_context().cancel_event or threading.Event()
     base = {"schema_version": 1, "snapshot_id": uuid.uuid4().hex,
-            "status": "collecting", "project_path": str(code_root),
-            "scan_root": str(code_root), "captured_at": datetime.now(timezone.utc).isoformat(),
+            "status": "collecting", "project_path": project,
+            "scan_root": str(code_root), "code_scan_paths": selected,
+            "code_scan_path_kinds": kinds,
+            "inventory_policy_version": INVENTORY_POLICY_VERSION, "captured_at": datetime.now(timezone.utc).isoformat(),
             "entries": [], "issues": [], "issue_count": 0, "excluded_paths": []}
     value = collect_file_inventory(base, excluded=(artifact_root,),
                                    cancel_event=event, stop_event=threading.Event())
@@ -133,13 +153,17 @@ def _result(paths: Mapping[str, Path], report_path: Path) -> dict:
 
 def run_coverage(*, code_root: Path, artifact_root: Path,
                  initial_paths: Mapping[str, Path], is_resume: bool,
-                 run_task: Callable[..., Any]) -> dict:
+                 run_task: Callable[..., Any], code_paths=None) -> dict:
     from .supplement import coverage_counts, select_targets, validate_and_merge, validate_merged_snapshot
 
+    selected_paths = sorted(str(Path(path).resolve()) for path in code_paths or [code_root])
+    selected_kinds = {path: "directory" if Path(path).is_dir() else "file" for path in selected_paths}
     state_path = artifact_root / STATE_FILE
     report_path = artifact_root / REPORT_FILE
     initial_directory = initial_paths["high_risk_modules_path"].parent
     state = {"schema_version": 1, "code_root": str(code_root),
+             "code_paths": selected_paths, "code_path_kinds": selected_kinds,
+             "inventory_policy_version": INVENTORY_POLICY_VERSION,
              "active_directory": initial_directory.relative_to(artifact_root).as_posix(),
              "rounds": [], "attempted_paths": [], "non_high_risk_paths": [],
              "status": "running"}
@@ -150,6 +174,9 @@ def run_coverage(*, code_root: Path, artifact_root: Path,
             restored = _read(state_path)
             if (not isinstance(restored, dict) or restored.get("code_root") != str(code_root)
                     or restored.get("schema_version") != 1
+                    or restored.get("code_paths", [str(code_root)]) != selected_paths
+                    or restored.get("code_path_kinds") != selected_kinds
+                    or restored.get("inventory_policy_version", 1) != INVENTORY_POLICY_VERSION
                     or restored.get("status") not in {"running", "complete"}
                     or not isinstance(restored.get("rounds"), list)
                     or not isinstance(restored.get("attempted_paths"), list)
@@ -188,7 +215,7 @@ def run_coverage(*, code_root: Path, artifact_root: Path,
     warning = ""
     stop_reason = "round_limit"
     try:
-        inventory, inventory_path = _inventory(code_root, artifact_root)
+        inventory, inventory_path = _inventory(code_root, artifact_root, code_paths)
         _check_cancelled()
         if checkpoint_warning:
             stop_reason = "checkpoint_unavailable"
