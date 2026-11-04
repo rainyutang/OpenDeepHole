@@ -107,11 +107,11 @@ checker_selection:
 
 ### 网页配置 LLM API
 
-在客户端的「基础配置 → 模型配置」中统一管理模型，使用页面顶部的「保存配置」统一保存。列表默认只显示模型 ID、名称和来源标记（OpenCode 模型 / LLM API），点击箭头展开连接参数及调度设置；字段说明通过鼠标悬停、键盘聚焦或触屏点击查看。顶部提供「从 opencode 读取」「手动添加 opencode 模型」「添加 LLM API」三个入口，读取已有模型后仍可勾选导入。
+在客户端的「基础配置 → 模型配置」中统一管理模型，使用页面顶部的「保存配置」统一保存。每行最左侧提供「启用」复选框，折叠时即可切换，不会触发展开或收起；总并发随草稿实时更新，启停状态在保存后生效。OpenCode 模型展示 ID、名称；LLM API 展示 `Provider ID/模型名称`，两者均带来源标记。点击箭头展开连接参数及调度设置，字段说明通过鼠标悬停、键盘聚焦或触屏点击查看。顶部提供「从 opencode 读取」「手动添加 opencode 模型」「添加 LLM API」三个入口，读取已有模型后仍可勾选导入。
 
-第一版固定使用 Chat Completions 兼容协议（`@ai-sdk/openai-compatible`）。每个 API 必须提供唯一的 Provider ID、完整 HTTP(S) Base URL 和至少一个模型 ID；Base URL 不自动补 `/v1`，调用时由协议追加 `/chat/completions`。API Key 选填。新添加的 API 模型自动加入模型池，默认启用、高能力、并发 1、权重 1；已有但未加入模型池的 API 模型以禁用状态展示，不会自动增加容量。
+第一版固定使用 Chat Completions 兼容协议（`@ai-sdk/openai-compatible`）。每个 API 必须提供唯一的 Provider ID、完整 HTTP(S) Base URL 和至少一个模型名称；这里的模型名称就是接口请求中 `model` 字段的实际值，例如 `qwen3-coder`，可包含斜杠。Base URL 不自动补 `/v1`，调用时由协议追加 `/chat/completions`。API Key 选填。新添加的 API 模型自动加入模型池，默认启用、高能力、并发 1、权重 1；已有但未加入模型池的 API 模型以禁用状态展示，不会自动增加容量。
 
-同一 Provider 下的模型共享 URL、API Key、Provider 请求头和超时，通过「添加同 API 模型」继续添加。每个模型保留独立的 Token 上限、模型请求头和调度设置；Provider / 模型 ID 修改会同步已有引用，模型池 ID 可独立修改。删除模型池中的一行只移除该行；最后一个引用删除后才移除相应 API 模型，最后一个模型删除后才移除 Provider。
+同一 Provider 下的模型共享 URL、API Key、Provider 请求头和超时，通过「添加同 API 模型」继续添加。每个模型保留独立的 Token 上限、模型请求头和调度设置；修改 Provider ID 或模型名称会自动更新完整引用，无需重复填写调度 ID 或完整模型名称。内部调度 ID 自动分配，已有 ID 保持不变；旧的显示别名数据保留，但不再提供编辑入口。OpenCode 模型仍可独立编辑模型池 ID 和完整模型名称。删除模型池中的一行只移除该行；最后一个引用删除后才移除相应 API 模型，最后一个模型删除后才移除 Provider。
 
 模型的 `limit` 整组可选；填写时必须同时填写正整数 `context` 和 `output`，`input` 选填。不填写则沿用配置合并及下文的默认上限规则。Provider/模型 headers、请求超时和流式间隔超时位于「更多选项」。超时单位是毫秒，区别于任务的 Session 超时秒数。API Key 和请求头值保存后不回显，未修改会保留，替换或显式删除才更新。
 

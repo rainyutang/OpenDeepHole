@@ -105,7 +105,7 @@ export function validateLlmProviders(config: AgentRemoteConfig): string {
     } catch { return `API ${id} 的 URL 必须是有效的 HTTP(S) Base URL`; }
     if (!Object.keys(provider.models).length) return `API ${id} 至少需要一个模型`;
     for (const [modelId, model] of Object.entries(provider.models)) {
-      if (!modelId || modelId.length > 256 || /[\s\x00-\x1f]/.test(modelId)) return `API ${id} 的模型 ID 必须填写且不能包含空白字符，最多 256 个字符`;
+      if (!modelId || modelId.length > 256 || /[\s\x00-\x1f]/.test(modelId)) return `API ${id} 的模型名称必须填写且不能包含空白字符，最多 256 个字符`;
       if (model.limit && (!positive(model.limit.context) || !positive(model.limit.output)
         || (model.limit.input !== undefined && !positive(model.limit.input)))) {
         return `${id}/${modelId} 的 context 和 output 上限必须同时填写正整数，input 选填`;

@@ -94,7 +94,7 @@ export default function LlmModelFields({ config, binding, onChange, onAddModel, 
     onChange(editLlmProvider(config, providerId, id, { ...provider, previous_id: provider.previous_id ?? providerId }));
   };
   const renameModel = (id: string) => {
-    if (id !== modelId && hasOwn(provider.models, id)) { setError("同一 API 的模型 ID 不能重复"); return; }
+    if (id !== modelId && hasOwn(provider.models, id)) { setError("同一 API 的模型名称不能重复"); return; }
     setError("");
     const models = Object.fromEntries(Object.entries(provider.models).map(([key, value]) => key === modelId
       ? [id, { ...value, previous_id: value.previous_id ?? modelId }] : [key, value]));
@@ -115,7 +115,7 @@ export default function LlmModelFields({ config, binding, onChange, onAddModel, 
       <ApiField label="Provider ID" required hint={`此 API 的唯一标识。URL、Key、API Headers 和超时由 ${siblings} 个模型共用；修改会同时生效。修改 ID 会同步更新这些模型的引用。`}><input className={input} value={providerId} onChange={(event) => renameProvider(event.target.value)} /></ApiField>
       <ApiField label="URL" required hint="完整 Base URL，例如 https://api.example.com/v1。不自动补 /v1；请勿填写 /chat/completions，客户端会添加该请求路径。"><input className={input} type="url" placeholder="https://api.example.com/v1" value={provider.options.baseURL} onChange={(event) => changeProvider({ ...provider, options: { ...provider.options, baseURL: event.target.value } })} /></ApiField>
       <ApiField label="API Key" hint="选填。已保存的密钥不回显，未修改则保留；填写新值替换，点击清空删除。无需认证的接口可留空。"><span className="flex items-center gap-1"><input className={input} aria-label="API Key" type="password" autoComplete="new-password" placeholder={provider.options.apiKey_set && provider.options.apiKey === undefined ? "已设置，留空保留" : "选填"} value={provider.options.apiKey ?? ""} onChange={(event) => changeProvider({ ...provider, options: { ...provider.options, apiKey: event.target.value || undefined } })} /><button type="button" className={button} onClick={() => changeProvider({ ...provider, options: { ...provider.options, apiKey: null } })}>清空</button></span></ApiField>
-      <ApiField label="API 模型 ID" required hint="接口实际接收的模型名称，可包含斜杠。修改后同步更新引用此模型的调度行。"><input className={input} value={modelId} placeholder="例如 qwen3-coder" onChange={(event) => renameModel(event.target.value)} /></ApiField>
+      <ApiField label="模型名称" required hint="接口请求中 model 字段的实际值，例如 qwen3-coder，可包含斜杠。与 Provider ID 一起标识模型，修改后自动更新模型引用。"><input className={input} value={modelId} placeholder="例如 qwen3-coder" onChange={(event) => renameModel(event.target.value)} /></ApiField>
       <ApiField label="Context" required={Boolean(model.limit)} hint="上下文 Token 上限。limit 可整组留空；填写时 Context、Output 必须同时填写正整数。缺省值沿用现有规则，通常为 131072。"><input className={input} type="number" min={1} placeholder="默认" value={model.limit?.context ?? ""} onChange={(event) => setLimit("context", event.target.value)} /></ApiField>
       <ApiField label="Output" required={Boolean(model.limit)} hint="输出 Token 上限，与 Context 一起填写。缺省值沿用现有规则，通常为 32768。"><input className={input} type="number" min={1} placeholder="默认" value={model.limit?.output ?? ""} onChange={(event) => setLimit("output", event.target.value)} /></ApiField>
     </div>
@@ -124,7 +124,6 @@ export default function LlmModelFields({ config, binding, onChange, onAddModel, 
       <div className="mt-3 space-y-4">
         <div className="grid gap-3 md:grid-cols-3">
           <ApiField label="API 名称"><input className={input} placeholder="选填" value={provider.name || ""} onChange={(event) => changeProvider({ ...provider, name: event.target.value || undefined })} /></ApiField>
-          <ApiField label="模型显示名称"><input className={input} placeholder="选填" value={model.name || ""} onChange={(event) => changeModel({ ...model, name: event.target.value || undefined })} /></ApiField>
           <ApiField label="Input" hint="输入 Token 上限，选填。填写后 Context 和 Output 也必须填写。"><input className={input} type="number" min={1} placeholder="选填" value={model.limit?.input ?? ""} onChange={(event) => setLimit("input", event.target.value)} /></ApiField>
           <ApiField label="请求超时" hint="选填，正整数毫秒；留空使用 OpenCode 默认值。"><input className={input} type="number" min={1} placeholder="默认" value={provider.options.timeout ?? ""} onChange={(event) => changeProvider({ ...provider, options: { ...provider.options, timeout: event.target.value === "" ? undefined : Number(event.target.value) } })} /></ApiField>
           <ApiField label="流式间隔超时" hint="两次流式响应之间允许的最大间隔，正整数毫秒；留空使用 OpenCode 默认值。"><input className={input} type="number" min={1} placeholder="默认" value={provider.options.chunkTimeout ?? ""} onChange={(event) => changeProvider({ ...provider, options: { ...provider.options, chunkTimeout: event.target.value === "" ? undefined : Number(event.target.value) } })} /></ApiField>

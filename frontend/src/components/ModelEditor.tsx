@@ -146,13 +146,20 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
       const savedResult = results[key];
       const result = savedResult?.generation === revisions.current.get(key)?.generation ? savedResult.result : undefined;
       return <div key={key} data-model-row={key} className="rounded-lg border border-slate-700">
-        <button type="button" aria-expanded={opened} data-model-toggle={key} onClick={() => setExpanded(opened ? null : key)}
-          className="flex w-full items-center gap-3 px-3 py-3 text-left hover:bg-slate-700/30">
-          <span className="min-w-0 w-1/3 truncate font-mono text-xs text-slate-200" title={model.id}>{model.id || "未命名 ID"}</span>
-          <span className="min-w-0 flex-1 truncate text-sm text-slate-300" title={model.model}>{model.model || "未填写模型名称"}</span>
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${binding ? "bg-blue-500/15 text-blue-200" : "bg-slate-700 text-slate-300"}`}>{binding ? "LLM API" : "OpenCode 模型"}</span>
-          <span aria-hidden="true" className="text-slate-500">{opened ? "▾" : "▸"}</span>
-        </button>
+        <div className="flex items-center gap-3 px-3 hover:bg-slate-700/30">
+          <label className="flex shrink-0 cursor-pointer items-center gap-1.5 py-3 text-xs text-slate-300">
+            <input type="checkbox" className="h-4 w-4 accent-blue-500" data-model-enabled={key}
+              aria-label={`启用 ${model.model || model.id}`} checked={model.enabled}
+              onChange={(event) => update(index, { enabled: event.target.checked })} />启用
+          </label>
+          <button type="button" aria-expanded={opened} data-model-toggle={key} onClick={() => setExpanded(opened ? null : key)}
+            className="flex min-w-0 flex-1 items-center gap-3 py-3 text-left">
+            {!binding && <span className="min-w-0 w-1/3 truncate font-mono text-xs text-slate-200" title={model.id}>{model.id || "未命名 ID"}</span>}
+            <span className="min-w-0 flex-1 truncate text-sm text-slate-300" title={model.model}>{model.model || "未填写模型名称"}</span>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${binding ? "bg-blue-500/15 text-blue-200" : "bg-slate-700 text-slate-300"}`}>{binding ? "LLM API" : "OpenCode 模型"}</span>
+            <span aria-hidden="true" className="text-slate-500">{opened ? "▾" : "▸"}</span>
+          </button>
+        </div>
         {opened && <div className="space-y-4 border-t border-slate-700 p-3" data-model-editor={key}>
           {binding && <>
             <LlmModelFields config={config} binding={binding} onChange={setCfg} onAddModel={() => addApi(binding.providerId)} onFocusModel={(item) => setExpanded(modelRowKey(item))} />
@@ -185,9 +192,10 @@ function SchedulingFields({ model, apiBound, runtime, onChange }: {
   const penaltyLevel = runtime?.health_penalty_level ?? 0;
   return <div className="space-y-3" aria-label="模型调度">
     <div className="grid items-end gap-3 md:grid-cols-4">
-      <ApiField label="模型 ID" required hint="平台内唯一的调度 ID；修改不会改变 API 模型名称。"><input className={input} value={model.id} onChange={(event) => onChange({ id: event.target.value })} /></ApiField>
-      <div className="md:col-span-2"><ApiField label="模型名称" required hint={apiBound ? "由 Provider ID 和 API 模型 ID 组成，请在上方 API 参数中修改。" : "OpenCode 中的 provider/model 完整名称。"}><input className={input} readOnly={apiBound} value={model.model} placeholder="provider/model" onChange={(event) => onChange({ model: event.target.value })} /></ApiField></div>
-      <label className="flex items-center gap-2 py-2 text-sm text-slate-300"><input type="checkbox" checked={model.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />启用</label>
+      {!apiBound && <>
+        <ApiField label="模型 ID" required hint="平台内唯一的调度 ID。"><input className={input} value={model.id} onChange={(event) => onChange({ id: event.target.value })} /></ApiField>
+        <div className="md:col-span-2"><ApiField label="模型名称" required hint="OpenCode 中的 provider/model 完整名称。"><input className={input} value={model.model} placeholder="provider/model" onChange={(event) => onChange({ model: event.target.value })} /></ApiField></div>
+      </>}
       <ApiField label="模型能力"><select className={input} value={model.capability} onChange={(event) => onChange({ capability: event.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select></ApiField>
       <ApiField label="模型可用并发" hint="该模型允许同时运行的任务数，默认 1。"><input className={input} type="number" min={1} value={model.max_concurrency} onChange={(event) => onChange({ max_concurrency: Number(event.target.value) })} /></ApiField>
       <ApiField label="权重" hint="选择模型时的调度权重，默认 1。"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} onChange={(event) => onChange({ weight: Number(event.target.value) })} /></ApiField>
