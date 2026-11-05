@@ -103,6 +103,53 @@ test("keeps historical audit records compatible", () => {
   })), "success");
 });
 
+test("candidate flow uses aggregate unfinished counts even when detail pages are absent", () => {
+  const run = { status: "success" };
+  const scan = {
+    status: "complete", static_analysis_done: true, total_candidates: 125, processed_candidates: 123,
+    candidates: [], detail_counts: { candidates: 125, candidate_audit_success: 123,
+      candidate_audit_failed: 0, candidate_audit_pending: 0, candidate_audit_queued: 2, candidate_audit_running: 0 },
+  };
+  for (const status of ["complete", "cancelled", "error"]) {
+    assert.equal(audit.staticCandidateAuditFlowStatus({ ...scan, status }, run), "incomplete");
+  }
+  assert.equal(audit.staticCandidateAuditFlowStatus({ ...scan, status: "auditing" }, { status: "pending" }), "queued");
+  for (const status of ["success", "error"]) {
+    assert.equal(audit.staticCandidateAuditFlowStatus({ ...scan, status: "auditing" }, { status }), "incomplete");
+  }
+  const resumed = { ...scan, status: "auditing", detail_counts: {
+    ...scan.detail_counts, candidate_audit_queued: 1, candidate_audit_running: 1,
+  } };
+  assert.equal(audit.staticCandidateAuditFlowStatus(resumed, { status: "running" }), "running");
+  const finished = { ...scan, processed_candidates: 125, detail_counts: {
+    ...scan.detail_counts, candidate_audit_failed: 2, candidate_audit_queued: 0,
+  } };
+  assert.equal(audit.staticCandidateAuditFlowStatus(finished, run), "warning");
+  assert.equal(audit.staticCandidateAuditFlowStatus(finished, { status: "error" }), "error");
+  assert.equal(audit.staticCandidateAuditFlowStatus({ ...finished, detail_counts: {
+    ...finished.detail_counts, candidate_audit_success: 125, candidate_audit_failed: 0,
+  } }, run), "done");
+});
+
+test("legacy incomplete progress cannot become done and terminal waiting states become resumable", () => {
+  const legacyScan = {
+    status: "complete", static_analysis_done: true, total_candidates: 125, processed_candidates: 123,
+  };
+  assert.equal(audit.staticCandidateAuditFlowStatus(legacyScan, { status: "success" }), "incomplete");
+  assert.equal(audit.staticCandidateAuditFlowStatus({
+    ...legacyScan, detail_counts: { candidates: 0 },
+  }, { status: "success" }), "incomplete");
+  for (const status of ["pending", "queued", "running"]) {
+    const displayed = audit.staticAuditDisplayStatus(status, true);
+    assert.equal(displayed, "pending");
+    assert.equal(audit.staticAuditStatusLabel(displayed, true), "待续扫");
+    assert.equal(audit.staticAuditDisplayStatus(status, false), status);
+  }
+  for (const status of ["success", "failed"]) {
+    assert.equal(audit.staticAuditDisplayStatus(status, true), status);
+  }
+});
+
 test("shows descriptions for successful vulnerability and non-problem conclusions", () => {
   assert.equal(audit.staticAuditConclusion(vulnerability({
     ai_verdict: "confirmed",

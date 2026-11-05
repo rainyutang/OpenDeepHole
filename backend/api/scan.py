@@ -1332,7 +1332,7 @@ def _continuable_candidates(
     for candidate in scan.candidates:
         if not _is_static_scan_candidate(candidate):
             continue
-        if candidate.audit_state in {"pending", "running"}:
+        if candidate.audit_state in {"pending", "queued", "running"}:
             candidates.append(candidate)
             continue
         if (
@@ -2325,6 +2325,7 @@ async def get_scan_overview_v2(
             int(counts.get(key, 0) or 0)
             for key in (
                 "candidate_audit_pending",
+                "candidate_audit_queued",
                 "candidate_audit_running",
                 "candidate_audit_failed",
             )

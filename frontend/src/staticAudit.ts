@@ -1,4 +1,4 @@
-import type { Candidate, ScanCandidate, ScanStatus, StaticAnalysisError, Vulnerability } from "./types";
+import type { Candidate, MiningEngineRunStatus, ScanCandidate, ScanStatus, StaticAnalysisError, Vulnerability } from "./types";
 
 export function staticAnalysisFailures(scan: Pick<ScanStatus, "mining_engine_runs">): Array<StaticAnalysisError & { engine_id: string }> {
   return (scan.mining_engine_runs ?? []).flatMap((run) => (
@@ -41,6 +41,66 @@ export const STATIC_AUDIT_STATUS_LABELS: Record<StaticAuditStatus, string> = {
   queued: "排队中",
   running: "审计中",
 };
+
+export function staticAuditExecutionEnded(
+  scan: Pick<ScanStatus, "status" | "mining_engine_runs">,
+  run = scan.mining_engine_runs?.find((item) => item.engine_id === "static_candidate"),
+): boolean {
+  return ["complete", "error", "cancelled"].includes(scan.status)
+    || ["success", "error", "cancelled", "skipped"].includes(run?.status ?? "");
+}
+
+export function staticAuditDisplayStatus(status: StaticAuditStatus, ended: boolean): StaticAuditStatus {
+  return ended && ["pending", "queued", "running"].includes(status) ? "pending" : status;
+}
+
+export function staticAuditStatusLabel(status: StaticAuditStatus, ended = false): string {
+  return ended && status === "pending" ? "待续扫" : STATIC_AUDIT_STATUS_LABELS[status];
+}
+
+export function staticCandidateAuditCounts(scan: ScanStatus): Record<StaticAuditStatus, number> {
+  const counts = { success: 0, failed: 0, pending: 0, queued: 0, running: 0 };
+  for (const candidate of scan.candidates ?? []) {
+    if (String(candidate.vuln_type || "").toLowerCase() === "threat_audit"
+      || String(candidate.metadata?.source || "").toLowerCase() === "threat_analysis") continue;
+    counts[candidate.audit_state ?? staticAuditStatus(candidate.audit_result ?? undefined)] += 1;
+  }
+  // Detail pages may contain only a small subset of the scan's candidates.
+  for (const status of STATIC_AUDIT_STATUS_ORDER) {
+    const aggregate = scan.detail_counts?.[`candidate_audit_${status}`];
+    if (aggregate !== undefined) counts[status] = aggregate;
+  }
+  return counts;
+}
+
+export function staticCandidateAuditFlowStatus(
+  scan: ScanStatus,
+  run: MiningEngineRunStatus | null,
+): "pending" | "queued" | "running" | "done" | "warning" | "incomplete" | "error" | "cancelled" | "skipped" | "unknown" {
+  const counts = staticCandidateAuditCounts(scan);
+  const total = Math.max(scan.detail_counts?.candidates ?? 0, scan.total_candidates);
+  const unfinished = Math.max(
+    counts.pending + counts.queued + counts.running,
+    total - scan.processed_candidates,
+  );
+  if (staticAuditExecutionEnded(scan, run ?? undefined) && unfinished > 0) return "incomplete";
+  if (run?.status === "error") return "error";
+  if (run?.status === "cancelled") return "cancelled";
+  if (run?.status === "skipped") return "skipped";
+  if (counts.running > 0) return "running";
+  if (counts.queued > 0) return "queued";
+  if (unfinished > 0) {
+    return !scan.static_analysis_done && run?.status === "running" ? "running" : "pending";
+  }
+  if (total > 0 && scan.static_analysis_done) {
+    return counts.failed > 0 || run?.static_analysis_errors?.length ? "warning" : "done";
+  }
+  if (run?.status === "success") return run.static_analysis_errors?.length ? "warning" : "done";
+  if (scan.status === "cancelled") return "cancelled";
+  if (run?.status === "running" || scan.status === "auditing") return "running";
+  if (scan.status === "complete" && scan.static_analysis_done) return "done";
+  return "pending";
+}
 
 const FAILED_AI_VERDICTS = new Set(["failed", "timeout", "no_result"]);
 export const SAME_PATTERN_AUDIT_CONCLUSION =

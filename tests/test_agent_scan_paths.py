@@ -617,6 +617,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             project = root / "project"
             source = project / "src"
             source.mkdir(parents=True)
+            # Confirmed results must reference a real file inside the scan scope.
+            (source / "a.c").write_text("\n" * 9 + "void parse(void) {}\n")
             index_path = root / "index.db"
             index_path.touch()
 

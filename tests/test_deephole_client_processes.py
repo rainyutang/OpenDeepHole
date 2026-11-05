@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from deephole_client.code_graph_build.code_database import CodeDatabase
 from task_agent import OpenCodeResult
 
@@ -1973,6 +1975,8 @@ def test_candidate_audit_cancellation_does_not_drain_the_backlog() -> None:
         assert candidate_results == []
         assert audited["processed_candidate_indexes"] == []
         assert audited["completed_candidates"] == 5
+        from task_agent.model_pool import model_pool_snapshot
+        assert model_pool_snapshot("scan-cancel-backlog")["planned_tasks"] == []
         assert sum(
             event["message"].startswith("Auditing candidate")
             for event in events
@@ -2101,6 +2105,8 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         assert project_call.kwargs["output_schema"]["type"] == "object"
         assert "本任务只返回一个 JSON 对象" in project_call.kwargs["prompt"]
         assert len(audited["processed_candidate_indexes"]) == 5
+        from task_agent.model_pool import model_pool_snapshot
+        assert model_pool_snapshot("scan-terminal")["planned_tasks"] == []
         assert [
             item["completed_candidates"]
             for item in candidate_results
@@ -2108,6 +2114,169 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
+
+
+def _resume_audit_kwargs(root: Path) -> dict:
+    project = root / "project"
+    project.mkdir()
+    index = project / "code_index.db"
+    index.touch()
+    rules = root / "rules"
+    _write_candidate_audit_rule(rules)
+    return {
+        "project_path": project, "work_dir": root / "audit", "scan_id": "planned-candidates",
+        "index_db_path": index, "checker_dirs": [rules], "concurrency": 1,
+        "audit_index_offset": 123,
+        "candidates": [{
+            "idx": index, "file": f"{index}.c", "line": 1, "function": f"f{index}",
+            "description": "candidate", "vuln_type": "demo",
+        } for index in (123, 124)],
+    }
+
+
+def test_candidate_backlog_is_planned_with_execution_and_skill_context(tmp_path, monkeypatch):
+    from task_agent.model_pool import model_pool_snapshot
+    from task_agent.task_service import bind_opencode_execution_context, get_opencode_execution_context
+    from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import runner
+
+    kwargs = _resume_audit_kwargs(tmp_path)
+    config_path = tmp_path / "task-agent.yaml"
+    kwargs["task_agent_config"] = config_path
+    seen = []
+
+    async def run_task(**task):
+        context = get_opencode_execution_context()
+        plans = model_pool_snapshot(kwargs["scan_id"])["planned_tasks"]
+        index = int(task["task_name"].rsplit("-", 1)[-1])
+        seen.append(index)
+        assert {row["candidate_idx"] for row in plans} == ({123, 124} if index == 123 else {124})
+        own = next(row for row in plans if row["candidate_idx"] == index)
+        assert context.task_metadata["planned_task_id"] == own["planned_task_id"]
+        assert own["execution_revision"] == 7
+        assert own["mining_engine_id"] == "static_candidate"
+        assert (own["execution_kind"], own["execution_id"]) == ("scan", kwargs["scan_id"])
+        assert context.config_path == config_path
+        assert context.skill_paths == (tmp_path / "rules" / "demo" / "skills",)
+        return _task_result(_audit_item(
+            confirmed=False, file=f"{index}.c", line=1, function=f"f{index}", description="guarded",
+        ))
+
+    monkeypatch.setattr(runner, "run_opencode_task", run_task)
+
+    async def scenario():
+        with bind_opencode_execution_context(
+            execution_kind="scan", execution_id=kwargs["scan_id"],
+            task_metadata={"execution_revision": 7, "mining_engine_id": "static_candidate"},
+        ):
+            result = await run_candidate_audit(**kwargs)
+        assert result["status"] == "success"
+        assert result["completed_candidates"] == 125
+        assert seen == [123, 124]
+        assert model_pool_snapshot(kwargs["scan_id"])["planned_tasks"] == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("all_cancelled", [False, True])
+def test_candidate_local_cancellation_reports_incomplete_batch(tmp_path, monkeypatch, all_cancelled):
+    from task_agent.model_pool import model_pool_snapshot
+    from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import runner
+
+    kwargs = _resume_audit_kwargs(tmp_path)
+    reported = []
+    states = {}
+
+    def report_state(index, state):
+        states[index] = state
+
+    async def run_task(**task):
+        if all_cancelled or task["task_name"].endswith("-124"):
+            await task["lease_state_callback"]("queued")
+            return SimpleNamespace(status="cancelled", text="Session stopped independently")
+        return _task_result([])
+
+    monkeypatch.setattr(runner, "run_opencode_task", run_task)
+    result = asyncio.run(run_candidate_audit(
+        **kwargs, on_candidate_result=reported.append, on_candidate_state=report_state,
+    ))
+    assert result["status"] == "error"
+    assert "candidate 124" in result["error"]
+    assert "Session stopped independently" in result["error"]
+    expected_completed = [] if all_cancelled else [123]
+    assert result["completed_candidates"] == 123 + len(expected_completed)
+    assert result["processed_candidate_indexes"] == expected_completed
+    assert [item["candidate_idx"] for item in reported] == expected_completed
+    assert states[124] == "queued"
+    if all_cancelled:
+        assert states == {123: "queued", 124: "queued"}
+        assert "candidate 123" in result["error"]
+    assert model_pool_snapshot(kwargs["scan_id"])["planned_tasks"] == []
+
+
+@pytest.mark.parametrize("failure", ["registration", "model", "callback", "cancel", "model_cancel"])
+def test_candidate_plans_are_cleaned_on_partial_registration_or_failure(tmp_path, monkeypatch, failure):
+    from task_agent.model_pool import clear_planned_task, model_pool_snapshot, register_planned_task
+    from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import runner
+
+    kwargs = _resume_audit_kwargs(tmp_path)
+    registrations = 0
+
+    async def register(*args, **options):
+        nonlocal registrations
+        registrations += 1
+        if failure == "registration" and registrations == 2:
+            raise RuntimeError("registration failed")
+        return await register_planned_task(*args, **options)
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def run_task(**_task):
+            started.set()
+            if failure == "model":
+                raise RuntimeError("model failed")
+            if failure == "model_cancel":
+                raise asyncio.CancelledError("Model task cancelled")
+            if failure == "cancel":
+                await asyncio.Event().wait()
+            return _task_result([])
+
+        async def report(_result):
+            if failure == "callback":
+                raise RuntimeError("callback failed")
+
+        other = await register_planned_task(kwargs["scan_id"], {"task_type": "threat_analysis"})
+        monkeypatch.setattr(runner, "register_planned_task", register)
+        monkeypatch.setattr(runner, "run_opencode_task", run_task)
+        try:
+            task = asyncio.create_task(run_candidate_audit(**kwargs, on_candidate_result=report))
+            if failure == "cancel":
+                await asyncio.wait_for(started.wait(), 1)
+                task.cancel()
+            if failure in {"cancel", "model_cancel"}:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(RuntimeError, match=f"{failure} failed"):
+                    await task
+            plans = model_pool_snapshot(kwargs["scan_id"])["planned_tasks"]
+            assert [row["planned_task_id"] for row in plans] == [other]
+        finally:
+            await clear_planned_task(other)
+
+    asyncio.run(scenario())
+
+
+def test_candidate_checker_selection_keeps_standalone_filter_contract(tmp_path, monkeypatch):
+    from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import runner
+    kwargs = _resume_audit_kwargs(tmp_path)
+    kwargs["candidates"][1]["vuln_type"] = "unselected-checker"
+    run_task = AsyncMock(return_value=_task_result([]))
+    monkeypatch.setattr(runner, "run_opencode_task", run_task)
+    result = asyncio.run(run_candidate_audit(**kwargs, checker_names=["demo"]))
+    assert result["status"] == "success"
+    assert result["processed_candidate_indexes"] == [123]
+    run_task.assert_awaited_once()
 
 
 def test_fp_review_and_validation_processes_run_per_vulnerability() -> None:

@@ -164,6 +164,40 @@ test("static prompt distinguishes not-yet-generated, missing history and unsaved
   }
 });
 
+test("terminal candidate pages show resumable work while active pages keep queued and running states", async () => {
+  client.api.defaults.adapter = async (config) => response(config,
+    config.params.getAll("candidate_indexes").map((index) => ({
+      candidate_index: Number(index), findings: [], confirmed_issue_count: 0, association_complete: true,
+    })));
+  const candidates = ["pending", "queued", "running"].map((audit_state, index) =>
+    candidate(index, { audit_state, audit_result: null, vulnerability_idx: null }));
+  const value = scan({ candidates, total_candidates: 125, processed_candidates: 122,
+    detail_counts: { candidates: 125, candidate_audit_success: 122, candidate_audit_failed: 0,
+      candidate_audit_pending: 1, candidate_audit_queued: 1, candidate_audit_running: 1 } });
+  const root = await mount(StaticTaskPanel, staticProps(value));
+  assert.equal(staticRows(root).length, 3);
+  assert.ok(staticRows(root).every((row) => textContent(row).includes("待续扫")));
+  assert.ok(staticRows(root).every((row) => !/排队中|审计中/.test(textContent(row))));
+  const metric = (label) => root.root.findAll((node) => typeof node.type === "function"
+    && node.type.name === "MiniMetric" && node.props.label === label)[0];
+  assert.equal(metric("待续扫").props.value, 3);
+  assert.equal(metric("排队中").props.value, 0);
+  assert.equal(metric("审计中").props.value, 0);
+  await act(async () => root.update(createElement(StaticTaskPanel, staticProps({ ...value, status: "auditing" }))));
+  assert.match(textContent(staticRows(root)[0]), /待审计/);
+  assert.match(textContent(staticRows(root)[1]), /排队中/);
+  assert.match(textContent(staticRows(root)[2]), /审计中/);
+  assert.equal(metric("排队中").props.value, 1);
+  assert.equal(metric("审计中").props.value, 1);
+  const otherEngineRunning = { ...value, status: "auditing", mining_engine_runs: [
+    { engine_id: "static_candidate", status: "error" }, { engine_id: "threat_audit", status: "running" },
+  ] };
+  await act(async () => root.update(createElement(StaticTaskPanel, staticProps(otherEngineRunning))));
+  assert.ok(staticRows(root).every((row) => textContent(row).includes("待续扫")));
+  assert.equal(metric("待续扫").props.value, 3);
+  assert.equal(metric("排队中").props.value, 0);
+});
+
 for (const publicAccess of [false, true]) {
   test(`stored audit prompts load the latest matching history body and retry (${publicAccess ? "public" : "authenticated"})`, async () => {
     if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });

@@ -16,7 +16,7 @@ from backend import report_routes, sse
 from backend.api import agent as agent_api, scan as scan_api
 from backend.models import (
     AgentInfo, Candidate, MiningEngineRunStatus, MiningEngineSelection,
-    OpenCodePoolStatus, ScanEvent, ScanItemStatus, ScanMeta, ScanStatus, User, Vulnerability,
+    OpenCodePoolStatus, ScanCandidate, ScanEvent, ScanItemStatus, ScanMeta, ScanStatus, User, Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
 
@@ -150,6 +150,68 @@ def test_completed_scan_retry_counts_results_and_ignores_pool_cache(progress_env
         resumed = env.store.load_scan(env.sid)[0]
         assert (resumed.processed_candidates, resumed.total_candidates) == (2, 3)
         assert resumed.execution_revision == 3
+
+    asyncio.run(run())
+
+
+def test_completed_scan_resumes_queued_candidates_with_original_indexes(progress_env):
+    env = progress_env
+    candidates = [
+        ScanCandidate(
+            idx=index, file=f"{index}.c", line=1, function="f",
+            vuln_type="npd", description="candidate",
+            audit_state="success" if index < 123 else "queued",
+            audit_result=result(index) if index < 123 else None,
+        )
+        for index in range(125)
+    ]
+    env.store.replace_scan_candidates(env.sid, candidates)
+    env.store.update_scan_progress(
+        env.sid, total_candidates=125, processed_candidates=123, progress=123 / 125,
+    )
+
+    async def run():
+        # Both the persisted overview and worker-local detail must expose the
+        # same unfinished work, even when the old engine run says success.
+        for cached in (False, True):
+            env.cache.clear()
+            if cached:
+                env.cache[env.sid] = env.store.load_scan(env.sid)[0]
+            overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
+            detail = await scan_api.get_scan_status(env.sid, current_user=env.user)
+            for snapshot in (overview, detail):
+                assert snapshot.can_continue
+                assert snapshot.continuable_task_count == 2
+                assert (snapshot.processed_candidates, snapshot.total_candidates) == (123, 125)
+            assert overview.detail_counts.candidate_audit_queued == 2
+
+        await env.resume()
+        command = agent_api.send_agent_command.await_args.args[1]
+        assert command["retry_mining_engine_ids"] == ["static_candidate"]
+        assert [item["idx"] for item in command["retry_candidates"]] == [123, 124]
+        assert command["retry_total_candidates"] == 125
+        assert command["retry_processed_offset"] == 123
+        resumed = env.store.load_scan(env.sid)[0]
+        assert resumed.status == ScanItemStatus.PENDING
+        assert (resumed.processed_candidates, resumed.total_candidates) == (123, 125)
+        assert resumed.mining_engine_runs[0].status == "pending"
+        assert resumed.candidates[:123] == candidates[:123]
+        assert [item.audit_state for item in resumed.candidates[123:]] == ["pending", "pending"]
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.app), base_url="http://server") as client:
+            for index in (123, 124):
+                response = await client.post(f"/api/agent/scan/{env.sid}/candidate-audit", json={
+                    "candidate_idx": index, "state": "success",
+                    "result": result(index).model_dump(mode="json"),
+                    "completed_candidates": index + 1, "total_candidates": 125,
+                    "agent_session_id": "session", "execution_revision": 2,
+                })
+                assert response.status_code == 200, response.text
+                assert response.json()["processed"] == index + 1
+        env.cache.clear()
+        overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
+        assert overview.processed_candidates == overview.total_candidates == 125
+        assert overview.detail_counts.candidate_audit_queued == 0
 
     asyncio.run(run())
 

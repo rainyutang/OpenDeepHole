@@ -38,15 +38,30 @@ def test_resume_replays_failure_without_rerunning_rules_or_renumbering_candidate
         "status": "partial", "candidates": candidates,
         "stats": {"checkers": {"npd": 2, "memleak": 1}}, "checker_errors": [ERROR],
     })
-    audit = AsyncMock(side_effect=[
-        {"status": "cancelled", "completed_candidates": 1},
-        {"status": "success", "completed_candidates": 3},
-        {"status": "success", "completed_candidates": 3},
-    ])
+    audit_calls = 0
+
+    async def audit_batch(**kwargs):
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 1:
+            return {"status": "cancelled", "completed_candidates": 1}
+        for candidate in kwargs["candidates"]:
+            await kwargs["on_candidate_result"]({
+                "candidate_idx": candidate["idx"],
+                "vulnerabilities": [{
+                    **candidate, "audit_index": candidate["idx"], "severity": "low",
+                    "confirmed": False, "ai_verdict": "not_confirmed", "ai_analysis": "guarded",
+                }],
+                "completed_candidates": 3,
+            })
+        return {"status": "success", "completed_candidates": 3}
+
+    audit = AsyncMock(side_effect=audit_batch)
     monkeypatch.setattr(engine, "run_static_analysis", static)
     monkeypatch.setattr(engine, "run_candidate_audit", audit)
     reporter = SimpleNamespace(
         report_candidates=AsyncMock(), send_static_progress=AsyncMock(),
+        report_candidate_audit=AsyncMock(),
         get_processed_candidate_indexes=AsyncMock(return_value={0}),
     )
     events = []
@@ -83,6 +98,77 @@ def test_resume_replays_failure_without_rerunning_rules_or_renumbering_candidate
     assert reporter.report_candidates.await_count == 2
     assert json.loads((tmp_path / "candidates.json").read_text()) == candidates
     assert events[0]["data"]["checker_errors"] == [ERROR]
+
+
+def _retry_engine_kwargs(tmp_path):
+    return dict(
+        project_path=tmp_path, code_scan_path=tmp_path, scan_dir=tmp_path,
+        work_dir=tmp_path / "work", index_db_path=tmp_path / "index.db", scan_id="scan",
+        config=AgentConfig(), reporter=SimpleNamespace(
+            report_candidates=AsyncMock(), send_static_progress=AsyncMock(),
+            report_candidate_audit=AsyncMock(), replace_skill_reports=AsyncMock(),
+        ), checker_names=["npd"], checker_packages=[], product="", feedback_entries=[],
+        is_resume=True, retry_candidates=[{
+            "idx": index, "file": "a.c", "line": index, "function": "f",
+            "description": "candidate", "vuln_type": "npd",
+        } for index in (123, 124)], retry_total_candidates=125, retry_processed_offset=123,
+        output=AsyncMock(), cancel_event=threading.Event(), report_vulnerabilities=AsyncMock(),
+    )
+
+
+@pytest.mark.parametrize("checkers", [[], ["memleak"]])
+def test_retry_rejects_missing_selected_checker_without_replacing_candidates(tmp_path, monkeypatch, checkers):
+    kwargs = _retry_engine_kwargs(tmp_path)
+    kwargs["checker_names"] = checkers
+    audit = AsyncMock()
+    monkeypatch.setattr(engine, "run_candidate_audit", audit)
+    result = asyncio.run(engine.run(**kwargs))
+    assert result["status"] == "error"
+    assert "checker" in result["error_message"]
+    assert (result["processed_candidates"], result["total_candidates"]) == (123, 125)
+    kwargs["reporter"].report_candidates.assert_not_awaited()
+    audit.assert_not_awaited()
+
+
+def test_retry_engine_rejects_success_without_terminal_candidate_results(tmp_path, monkeypatch):
+    kwargs = _retry_engine_kwargs(tmp_path)
+    # A process may claim 125/125 while returning a result for only one retry.
+    monkeypatch.setattr(engine, "run_candidate_audit", AsyncMock(return_value={
+        "status": "success", "completed_candidates": 125, "processed_candidate_indexes": [123, 124],
+        "vulnerabilities": [{
+            **kwargs["retry_candidates"][0], "audit_index": 123, "severity": "low",
+            "confirmed": False, "ai_verdict": "failed", "ai_analysis": "model failed",
+        }],
+    }))
+    result = asyncio.run(engine.run(**kwargs))
+    assert result["status"] == "error"
+    assert "124" in result["error_message"]
+    assert (result["processed_candidates"], result["total_candidates"]) == (124, 125)
+    report = kwargs["reporter"].report_candidate_audit
+    report.assert_awaited_once()
+    assert report.await_args.args[1] == 123
+    assert report.await_args.kwargs["state"] == "failed"
+    kwargs["reporter"].report_candidates.assert_not_awaited()
+
+
+@pytest.mark.parametrize("invalid_index", [123, 999])
+def test_retry_engine_rejects_duplicate_or_unknown_result_identity(tmp_path, monkeypatch, invalid_index):
+    kwargs = _retry_engine_kwargs(tmp_path)
+
+    async def audit(**options):
+        for index in (123, invalid_index):
+            await options["on_candidate_result"]({
+                "candidate_idx": index,
+                "vulnerabilities": [{
+                    **kwargs["retry_candidates"][0], "audit_index": index, "severity": "low",
+                    "confirmed": False, "ai_verdict": "not_confirmed", "ai_analysis": "guarded",
+                }],
+            })
+
+    monkeypatch.setattr(engine, "run_candidate_audit", audit)
+    with pytest.raises(RuntimeError, match="(Duplicate|Unexpected) candidate result index"):
+        asyncio.run(engine.run(**kwargs))
+    kwargs["reporter"].report_candidate_audit.assert_awaited_once()
 
 
 def test_legacy_candidate_cache_and_interrupted_replacement(tmp_path):

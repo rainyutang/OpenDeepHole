@@ -65,8 +65,12 @@ import {
   sameOpenCodePoolSnapshot,
 } from "../scanRuntime";
 import {
-  STATIC_AUDIT_STATUS_LABELS,
   STATIC_AUDIT_STATUS_ORDER,
+  staticAuditDisplayStatus,
+  staticAuditExecutionEnded,
+  staticAuditStatusLabel,
+  staticCandidateAuditCounts,
+  staticCandidateAuditFlowStatus,
   staticAuditConclusion,
   staticAuditStatus,
   staticCandidateRelatedVariable,
@@ -104,7 +108,7 @@ const ISSUE_DETAIL_RESOURCES: DetailResource[] = ["vulnerabilities", "validation
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | "issues" | `engine:${string}` | `threat_result:${ThreatAnalysisResultTab}`;
-type FlowNodeStatus = "pending" | "queued" | "running" | "done" | "warning" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
+type FlowNodeStatus = "pending" | "queued" | "running" | "done" | "warning" | "incomplete" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
 type ReportExportFormat = "zip" | "csv";
 type CheckerDisplayMetadata = Pick<CheckerInfo, "name" | "label">;
 
@@ -2954,13 +2958,6 @@ function buildProcessFlowModel({
 
   const engineNode = (engine: MiningEngineSelection): FlowNodeView => {
     const run = miningEngineRun(scan, engine.engine_id);
-    const legacyStaticStatus: FlowNodeStatus = scan.status === "auditing"
-      ? "running"
-      : scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates
-        ? "done"
-        : staticNodeStatus === "error" || staticNodeStatus === "cancelled"
-          ? staticNodeStatus
-          : "pending";
     const threatRunStatus = engine.engine_id === THREAT_ENGINE_ID
       ? threatAuditFlowStatus(scan, run)
       : null;
@@ -2987,7 +2984,9 @@ function buildProcessFlowModel({
       id: `engine:${engine.engine_id}`,
       label,
       detail,
-      status: threatRunStatus ?? (run ? engineFlowStatus(run) : engine.engine_id === STATIC_ENGINE_ID ? legacyStaticStatus : "unknown"),
+      status: engine.engine_id === STATIC_ENGINE_ID
+        ? staticCandidateAuditFlowStatus(scan, run)
+        : threatRunStatus ?? engineFlowStatus(run),
       active: activeTab === "mining" && activeEngineId === engine.engine_id,
       tone: engine.engine_id === THREAT_ENGINE_ID ? "green" : engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
     };
@@ -3907,6 +3906,7 @@ function sidebarStatusDotClass(status: FlowNodeStatus): string {
   if (status === "queued") return "bg-amber-400";
   if (status === "done") return "bg-emerald-400";
   if (status === "warning") return "bg-amber-400";
+  if (status === "incomplete") return "bg-amber-400";
   if (status === "error") return "bg-red-400";
   if (status === "cancelled") return "bg-orange-400";
   if (status === "disabled") return "bg-slate-600";
@@ -3920,6 +3920,7 @@ function flowStatusLabel(status: FlowNodeStatus): string {
   if (status === "queued") return "排队中";
   if (status === "done") return "执行完毕";
   if (status === "warning") return "完成但有失败";
+  if (status === "incomplete") return "未完成，可续扫";
   if (status === "error") return "执行失败";
   if (status === "cancelled") return "已取消";
   if (status === "disabled") return "未启用";
@@ -3933,6 +3934,7 @@ function flowStatusTone(status: FlowNodeStatus, doneTone: TaskTone): TaskTone {
   if (status === "queued") return "amber";
   if (status === "done") return doneTone;
   if (status === "warning") return "amber";
+  if (status === "incomplete") return "amber";
   if (status === "error" || status === "cancelled") return "red";
   return "slate";
 }
@@ -4727,11 +4729,9 @@ function ScanOverview({
                   </Fragment>
                 );
               }
-              const status = run
-                ? engineFlowStatus(run)
-                : engine.engine_id === STATIC_ENGINE_ID && scan.static_analysis_done
-                  ? "done"
-                  : "pending";
+              const status = engine.engine_id === STATIC_ENGINE_ID
+                ? staticCandidateAuditFlowStatus(scan, run)
+                : engineFlowStatus(run);
               return (
                 <TaskSummaryRow
                   key={engine.engine_id}
@@ -5683,6 +5683,7 @@ export function StaticTaskPanel({
   );
   const running = !failed && scan.status === "analyzing" && !scan.static_analysis_done;
   const partialStatic = scan.static_analysis_done && staticAnalysisFailures(scan).length > 0;
+  const auditExecutionEnded = staticAuditExecutionEnded(scan);
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
   const scannedFiles = seen ? (scan.static_scanned_files || indexProgress.current) : 0;
   const totalFiles = seen ? (scan.static_total_files || indexProgress.total) : 0;
@@ -5715,18 +5716,20 @@ export function StaticTaskPanel({
           candidate,
           vulnerability: candidate.audit_result ?? undefined,
           vulnerabilityIndex: candidate.vulnerability_idx ?? undefined,
-          auditStatus: candidate.audit_state ?? staticAuditStatus(candidate.audit_result ?? undefined),
+          auditStatus: staticAuditDisplayStatus(
+            candidate.audit_state ?? staticAuditStatus(candidate.audit_result ?? undefined), auditExecutionEnded,
+          ),
         };
       }),
-    [displayedCandidates],
+    [displayedCandidates, auditExecutionEnded],
   );
   const typeOptions = useMemo(
     () => valueOptions(displayedCandidates.map((candidate) => candidate.vuln_type), (value) => value.toUpperCase()),
     [displayedCandidates],
   );
   const auditOptions = useMemo(
-    () => countStaticAuditOptions(annotated.map((item) => item.auditStatus)),
-    [annotated],
+    () => countStaticAuditOptions(annotated.map((item) => item.auditStatus), auditExecutionEnded),
+    [annotated, auditExecutionEnded],
   );
   const matchingCandidates = useMemo(() => {
     let list = annotated;
@@ -5778,7 +5781,7 @@ export function StaticTaskPanel({
       running: 0,
     };
     annotated.forEach((item) => {
-      counts[item.auditStatus] += 1;
+      counts[item.candidate.audit_state ?? staticAuditStatus(item.candidate.audit_result ?? undefined)] += 1;
     });
     return counts;
   }, [annotated]);
@@ -5788,7 +5791,12 @@ export function StaticTaskPanel({
     pending: scan.detail_counts.candidate_audit_pending ?? auditCounts.pending,
     queued: scan.detail_counts.candidate_audit_queued ?? auditCounts.queued,
     running: scan.detail_counts.candidate_audit_running ?? auditCounts.running,
-  } : auditCounts;
+  } : { ...auditCounts };
+  if (auditExecutionEnded) {
+    completeAuditCounts.pending += completeAuditCounts.queued + completeAuditCounts.running;
+    completeAuditCounts.queued = 0;
+    completeAuditCounts.running = 0;
+  }
   const completeCandidateCount = scan.detail_counts?.candidates
     ?? scan.total_candidates
     ?? displayedCandidates.length;
@@ -5796,6 +5804,10 @@ export function StaticTaskPanel({
   useEffect(() => {
     setCurrentPage(1);
   }, [auditFilter, typeFilter, findingFilter]);
+
+  useEffect(() => {
+    if (auditExecutionEnded && ["queued", "running"].includes(auditFilter)) setAuditFilter("pending");
+  }, [auditExecutionEnded, auditFilter]);
 
   const listFocus = useListFocus(focusRequest, visible.map((item) => item.candidate.idx), STATIC_CANDIDATE_PAGE_SIZE,
     setSelectedIndex, setCurrentPage, () => {
@@ -5831,7 +5843,7 @@ export function StaticTaskPanel({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         <MiniMetric label="审计成功" value={completeAuditCounts.success} tone="green" />
         <MiniMetric label="审计失败" value={completeAuditCounts.failed} tone="red" />
-        <MiniMetric label="待审计" value={completeAuditCounts.pending} />
+        <MiniMetric label={auditExecutionEnded ? "待续扫" : "待审计"} value={completeAuditCounts.pending} />
         <MiniMetric label="排队中" value={completeAuditCounts.queued} tone="amber" />
         <MiniMetric label="审计中" value={completeAuditCounts.running} tone="blue" />
       </div>
@@ -5863,6 +5875,7 @@ export function StaticTaskPanel({
                   <StaticCandidateListItem
                     key={item.candidate.idx}
                     item={item}
+                    auditExecutionEnded={auditExecutionEnded}
                     result={auditResults.results.get(item.candidate.idx)}
                     focusRef={listFocus.pinned === item.candidate.idx ? listFocus.targetRef : undefined}
                     active={selectedIndex === item.candidate.idx}
@@ -6000,12 +6013,12 @@ function valueOptions(
     .map(([value, count]) => ({ value, label: formatLabel(value), count }));
 }
 
-function countStaticAuditOptions(values: StaticAuditStatus[]): StaticFilterOption[] {
+function countStaticAuditOptions(values: StaticAuditStatus[], ended = false): StaticFilterOption[] {
   const counts = new Map<string, number>();
   values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
-  return STATIC_AUDIT_STATUS_ORDER.map((value) => ({
+  return STATIC_AUDIT_STATUS_ORDER.filter((value) => !ended || !["queued", "running"].includes(value)).map((value) => ({
     value,
-    label: STATIC_AUDIT_STATUS_LABELS[value],
+    label: staticAuditStatusLabel(value, ended),
     count: counts.get(value) ?? 0,
   }));
 }
@@ -6050,12 +6063,14 @@ function StaticFilterSelect({
 
 function StaticCandidateListItem({
   item,
+  auditExecutionEnded,
   result,
   active,
   onClick,
   focusRef,
 }: {
   item: StaticCandidateItem;
+  auditExecutionEnded: boolean;
   result?: CandidateAuditTaskResult;
   active: boolean;
   onClick: () => void;
@@ -6086,7 +6101,7 @@ function StaticCandidateListItem({
           <span className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400">
             {item.candidate.vuln_type}
           </span>
-          <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+          <StatusPill label={staticAuditStatusLabel(item.auditStatus, auditExecutionEnded)} tone={staticAuditTone(item.auditStatus)} />
           <AuditFindingBadge result={result} />
         </div>
         {item.candidate.function && (
@@ -6129,7 +6144,7 @@ function StaticCandidateDetail({ scan, item, runtime, result, resultLoading, res
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+            <StatusPill label={staticAuditStatusLabel(item.auditStatus, staticAuditExecutionEnded(scan))} tone={staticAuditTone(item.auditStatus)} />
             <AuditFindingBadge result={result} />
           </div>
         </div>
@@ -6184,6 +6199,9 @@ function AuditTaskPanel({
   pool: OpenCodePoolStatus | null;
   onOpenStaticAnalysis: () => void;
 }) {
+  const status = staticCandidateAuditFlowStatus(scan, miningEngineRun(scan, STATIC_ENGINE_ID));
+  const ended = staticAuditExecutionEnded(scan);
+  const counts = staticCandidateAuditCounts(scan);
   const runningAudits = (pool?.models ?? []).reduce(
     (count, model) => count + model.active_tasks.filter(
       (task) => isCandidateAuditPoolTask(task),
@@ -6196,8 +6214,8 @@ function AuditTaskPanel({
   return (
     <TaskPanel
       title={STATIC_CANDIDATE_ENGINE_LABEL}
-      status={scan.status === "auditing" ? "进行中" : scan.status === "complete" ? "完成" : scan.status === "error" ? "异常" : "等待"}
-      tone={scan.status === "auditing" ? "blue" : scan.status === "complete" ? "green" : scan.status === "error" ? "red" : "slate"}
+      status={flowStatusLabel(status)}
+      tone={flowStatusTone(status, "green")}
       summary="先通过静态分析生成代码风险候选点，再逐项执行模型审计并确认真实问题。"
     >
       <div className="flex flex-col gap-3 rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -6216,11 +6234,13 @@ function AuditTaskPanel({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
         <MiniMetric label="已审计" value={scan.processed_candidates} tone="blue" />
         <MiniMetric label="总候选" value={scan.total_candidates} />
-        <MiniMetric label="运行中" value={runningAudits} tone="cyan" />
-        <MiniMetric label="排队中" value={queuedAudits} tone="amber" />
+        <MiniMetric label={ended ? "审计失败" : "运行中"} value={ended ? counts.failed : runningAudits} tone={ended ? "red" : "cyan"} />
+        <MiniMetric label={ended ? "待续扫" : "排队中"} value={ended ? Math.max(
+          counts.pending + counts.queued + counts.running, scan.total_candidates - scan.processed_candidates,
+        ) : queuedAudits} tone="amber" />
       </div>
       <ProgressBlock label="AI 审计" current={scan.processed_candidates} total={scan.total_candidates} percentOverride={scan.static_analysis_done ? pct : undefined} fallback="等待审计候选点" />
-      {currentCandidate && (
+      {!ended && currentCandidate && (
         <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
           <div className="text-xs font-semibold uppercase text-blue-200">正在审计</div>
           <div className="mt-1 font-mono text-xs text-slate-200">{currentCandidate.file}:{currentCandidate.line}</div>

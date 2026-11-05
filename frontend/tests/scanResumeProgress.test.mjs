@@ -228,6 +228,47 @@ test("completed scan resumes and both flow views advance despite pool and old ex
   assertProgress(root, 82);
 });
 
+for (const remaining of ["pending", "queued", "running", "failed"]) {
+  test(`candidate engine completion agrees across flow, task progress and detail (${remaining})`, async () => {
+    const processed = remaining === "failed" ? 125 : 123;
+    const label = remaining === "failed" ? "完成但有失败" : "未完成，可续扫";
+    const value = { ...overview(), total_candidates: 125, processed_candidates: processed, progress: processed / 125,
+      detail_counts: { candidates: 125, candidate_audit_success: 123, candidate_audit_failed: 0,
+        candidate_audit_pending: 0, candidate_audit_queued: 0, candidate_audit_running: 0,
+        [`candidate_audit_${remaining}`]: 2 } };
+    installApi(value);
+    const root = await mount();
+    const flowButtons = root.root.findAllByType("button").filter((node) =>
+      text(node).includes(`${processed}/125 候选点已审计`));
+    assert.ok(flowButtons.length >= 2, "Sidebar and diagram must both expose candidate audit progress");
+    assert.ok(flowButtons.every((node) => text(node).includes(label)));
+    const row = summaryRow(root, "DeepHole基于代码风险点的漏洞挖掘引擎");
+    assert.match(text(row), new RegExp(label));
+    assert.match(text(row), new RegExp(`${processed}/125 候选点已审计`));
+    await act(async () => flowButtons[0].props.onClick());
+    const panel = root.root.findAll((node) => typeof node.type === "function"
+      && node.type.name === "TaskPanel" && node.props.title === "DeepHole基于代码风险点的漏洞挖掘引擎")[0];
+    assert.ok(panel);
+    assert.equal(panel.props.status, label);
+    assert.match(text(panel), new RegExp(`AI 审计: ${processed}/125`));
+    if (remaining !== "failed") assert.match(text(panel), /待续扫2/);
+  });
+}
+
+test("a terminal candidate engine stays resumable while another engine is still running", async () => {
+  const value = { ...overview(123, 2), total_candidates: 125, progress: 123 / 125,
+    mining_engine_runs: [{ engine_id: "static_candidate", status: "error" },
+      { engine_id: "threat_audit", status: "running" }],
+    detail_counts: { candidates: 125, candidate_audit_success: 123, candidate_audit_failed: 0,
+      candidate_audit_pending: 0, candidate_audit_queued: 2, candidate_audit_running: 0 } };
+  installApi(value);
+  const root = await mount();
+  const nodes = root.root.findAllByType("button").filter((node) => text(node).includes("123/125 候选点已审计"));
+  assert.ok(nodes.length >= 2);
+  assert.ok(nodes.every((node) => text(node).includes("未完成，可续扫")));
+  assert.match(text(summaryRow(root, "DeepHole基于代码风险点的漏洞挖掘引擎")), /未完成，可续扫/);
+});
+
 test("late overview from the current execution cannot roll back a newer SSE count", async () => {
   const state = installApi(overview(80, 2));
   const root = await mount();
