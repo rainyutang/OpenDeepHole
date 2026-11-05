@@ -4,7 +4,8 @@ import shlex
 import subprocess
 import sys
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -13,10 +14,18 @@ from task_agent import run_opencode_task
 from task_agent.bash_commands import command_binding_metadata
 from task_agent.serve_client import (
     _managed_file_write_plugin_path,
+    _session_tool_permissions,
     _validate_required_command_audit,
     _write_command_binding,
 )
-from task_agent.task_service import OpenCodeTaskService, OpenCodeTaskSpec
+from task_agent.task_service import (
+    OpenCodeExecutionContext,
+    OpenCodeTaskService,
+    OpenCodeTaskSpec,
+    _SessionRuntime,
+    _runtime_with_permissions,
+    _writable_path_permissions,
+)
 
 
 def _run_hook(runtime: Path, script: str, data: dict) -> str:
@@ -27,6 +36,87 @@ def _run_hook(runtime: Path, script: str, data: dict) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout
+
+
+@pytest.mark.parametrize("worktree", [r"D:\source\product", "/"])
+def test_scan_config_allows_parent_and_child_writes_across_windows_drives(
+    tmp_path: Path, worktree: str,
+) -> None:
+    scans = PureWindowsPath(r"C:\Users\demo\.opendeephole\scans")
+    work = scans / "scan-1" / "mining_engines" / "threat_pattern_audit"
+    context = OpenCodeExecutionContext(project_dir=tmp_path, work_dir=tmp_path / "work")
+    with patch("task_agent.task_service.get_host_bindings", return_value=SimpleNamespace(
+        writable_roots=lambda: (scans,), readable_roots=lambda: (),
+    )):
+        runtime = _runtime_with_permissions(
+            _SessionRuntime(directory=tmp_path, tool="opencode", executable="opencode", config_content="{}"),
+            context,
+        )
+    tool_ids = ["write", "edit", "apply_patch", "question", "bash"]
+    session = _session_tool_permissions(
+        _writable_path_permissions((work,)), tool_ids, {"question": False},
+    )
+    formatter = _session_tool_permissions([], tool_ids, {name: False for name in tool_ids})
+    _write_command_binding(
+        tmp_path, session_id="parent", required_commands=(),
+        tool_rules={name: name != "question" for name in tool_ids},
+    )
+    # Run the real managed Hook with OpenCode 1.18.4/1.19.5's Windows path,
+    # wildcard, config precedence and subagent inheritance semantics. This
+    # exercises permission decisions, not a mock that writes the result itself.
+    _run_hook(tmp_path, r'''
+import assert from "node:assert/strict"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const data = JSON.parse(process.argv[2])
+process.cwd = () => "C:\\Users\\demo\\.opendeephole\\opencode_workspace"
+const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: "D:\\source\\product" })
+await hooks.event({ event: {
+  type: "session.created", properties: { info: { id: "child", parentID: "parent" } },
+} })
+const config = Object.entries(data.config).flatMap(([permission, value]) =>
+  typeof value === "string" ? [{ permission, pattern: "*", action: value }]
+    : Object.entries(value).map(([pattern, action]) => ({ permission, pattern, action })))
+const child = data.session.filter(rule => rule.permission === "external_directory" || rule.action === "deny")
+function match(input, pattern) {
+  const normalized = input.replaceAll("\\", "/")
+  let escaped = pattern.replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")
+  if (escaped.endsWith(" .*")) escaped = escaped.slice(0, -3) + "( .*)?"
+  return new RegExp("^" + escaped + "$", "si").test(normalized)
+}
+function action(permission, pattern, session) {
+  return [...config, ...session].findLast(rule =>
+    match(permission, rule.permission) && match(pattern, rule.pattern))?.action || "ask"
+}
+const requested = path.win32.relative(data.worktree, data.artifact)
+assert.equal(path.win32.isAbsolute(requested), data.worktree !== "/")
+for (const [sessionID, rules] of [["parent", data.session], ["child", child]]) {
+  for (const tool of ["write", "edit", "apply_patch"]) {
+    await hooks["tool.execute.before"]({ sessionID, tool }, { args: {} })
+    assert.equal(action("edit", requested, rules), "allow", `${sessionID}: ${tool}: ${requested}`)
+  }
+  // An Agent may use the stable output root outside its current task, as
+  // allowed by opencode.json. Source and adjacent directories stay denied.
+  assert.equal(action("edit", path.win32.relative(data.worktree, data.otherArtifact), rules), "allow")
+  for (const file of ["D:\\source\\product\\main.c", data.neighbor]) {
+    assert.equal(action("edit", path.win32.relative(data.worktree, file), rules), "deny")
+  }
+  assert.equal(action("bash", "echo overwrite", rules), "deny")
+  assert.equal(action("question", "*", rules), "deny")
+  await assert.rejects(hooks["tool.execute.before"]({ sessionID, tool: "question" }, { args: {} }), /Permission denied/)
+}
+assert.equal(action("edit", requested, data.formatter), "deny")
+''', {
+        "config": json.loads(runtime.config_content)["permission"],
+        "session": session,
+        "formatter": formatter,
+        "worktree": worktree,
+        "artifact": str(work / "task-results" / "result.json"),
+        "otherArtifact": str(scans / "scan-2" / "result.json"),
+        "neighbor": str(scans.parent / "scans-other" / "result.json"),
+    })
 
 
 @pytest.mark.parametrize(("task_type", "commands_enabled", "shell_enabled", "legacy", "hint"), [

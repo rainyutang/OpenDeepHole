@@ -9,7 +9,7 @@ import shutil
 import sys
 import threading
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -416,13 +416,30 @@ def _write_text_atomic(path: Path, content: str, *, mode: int | None = None) -> 
 
 def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
     normalized = str(path)
-    variants = [normalized]
-    slash_normalized = normalized.replace("\\", "/")
-    if slash_normalized not in variants:
-        variants.append(slash_normalized)
-    backslash_normalized = normalized.replace("/", "\\")
-    if backslash_normalized not in variants:
-        variants.append(backslash_normalized)
+    roots = [normalized]
+    windows_path = PureWindowsPath(normalized)
+    relative = ""
+    # OpenCode's non-Git worktree is "/". Its edit requests therefore use
+    # paths relative to the filesystem root (the Serve drive on Windows).
+    # Keep this an exact alias, never an unanchored **/ suffix match.
+    if (
+        windows_path.is_absolute()
+        and len(windows_path.drive) == 2
+        and windows_path.drive[0].isalpha()
+        and windows_path.drive[1] == ":"
+    ):
+        relative = str(windows_path.relative_to(windows_path.anchor))
+    elif normalized.startswith("/") and not normalized.startswith("//"):
+        posix_path = PurePosixPath(normalized)
+        relative = str(posix_path.relative_to(posix_path.anchor))
+    if relative and relative != ".":
+        roots.append(relative)
+
+    variants: list[str] = []
+    for root in roots:
+        for variant in (root, root.replace("\\", "/"), root.replace("/", "\\")):
+            if variant not in variants:
+                variants.append(variant)
 
     patterns: list[str] = []
     for variant in variants:

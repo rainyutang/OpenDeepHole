@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -3234,6 +3234,17 @@ def _task_system_prompt(record: _TaskRecord) -> str:
 def _permission_path_patterns(path: Path | PurePath) -> list[str]:
     normalized = str(path.resolve() if isinstance(path, Path) else path)
     roots = [normalized]
+    # Non-Git OpenCode projects use worktree="/". Native edit tools then ask
+    # about a root-relative path, e.g. Users/demo/... rather than C:/Users/demo/...
+    windows_path = PureWindowsPath(normalized)
+    if windows_path.is_absolute() and len(windows_path.drive) == 2:
+        relative = str(windows_path.relative_to(windows_path.anchor))
+    elif normalized.startswith("/") and not normalized.startswith("//"):
+        relative = normalized[1:]
+    else:
+        relative = ""
+    if relative and relative != ".":
+        roots.append(relative)
     if isinstance(path, Path):
         try:
             relative_to_home = path.resolve().relative_to(Path.home().resolve())
@@ -3279,12 +3290,9 @@ def _writable_path_permissions(
     write_paths = paths or ()
     read_paths = tuple(dict.fromkeys((*readable_paths, *write_paths)))
     for permission in ("read", "external_directory", "edit"):
-        if permission == "edit":
-            rules.append({
-                "permission": "edit",
-                "pattern": "*",
-                "action": "deny",
-            })
+        # The generated config owns the default edit deny and stable output
+        # roots. A Session-wide deny would override those roots and propagate
+        # to child Sessions without the corresponding allow rules.
         seen: set[str] = set()
         roots = write_paths if permission == "edit" else read_paths
         for root in roots:

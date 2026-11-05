@@ -5,7 +5,7 @@ import dataclasses
 import inspect
 import json
 import threading
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, patch
@@ -74,6 +74,7 @@ def test_permission_path_patterns_include_native_windows_descendants() -> None:
         "C:/Users/26388/.opendeephole/scans/scan-1/threat_analysis/**"
         in patterns
     )
+    assert "Users/26388/.opendeephole/scans/scan-1/threat_analysis/**" in patterns
     assert f"{work_dir}/**" not in patterns
 
 
@@ -86,6 +87,17 @@ def test_permission_path_patterns_include_home_aliases() -> None:
     assert "~/.opendeephole/scans/**" in patterns
     assert r"~\.opendeephole\scans" in patterns
     assert r"~\.opendeephole\scans\**" in patterns
+
+
+def test_permission_path_patterns_root_relative_aliases_are_bounded() -> None:
+    assert "home/demo/.opendeephole/scans/**" in _permission_path_patterns(
+        PurePosixPath("/home/demo/.opendeephole/scans")
+    )
+    for root in (PureWindowsPath("C:/"), PurePosixPath("/")):
+        assert "**" not in _permission_path_patterns(root)
+    unc = _permission_path_patterns(PureWindowsPath(r"\\server\share\scans"))
+    assert "scans/**" not in unc
+    assert "server/share/scans/**" not in unc
 
 
 def test_writable_path_permissions_allow_read_external_access_and_edits(
@@ -106,20 +118,14 @@ def test_writable_path_permissions_allow_read_external_access_and_edits(
     edit_rules = [
         rule for rule in permissions if rule["permission"] == "edit"
     ]
-    assert edit_rules[0] == {
-        "permission": "edit",
-        "pattern": "*",
-        "action": "deny",
-    }
-    assert [rule["pattern"] for rule in edit_rules[1:]] == expected_patterns
+    assert [rule["pattern"] for rule in edit_rules] == expected_patterns
     assert all(rule["action"] == "allow" for rule in permissions
-               if rule["permission"] not in {"edit", "bash"})
+               if rule["permission"] != "bash")
     assert [rule for rule in permissions if rule["permission"] == "bash"] == [
         {"permission": "bash", "pattern": "*", "action": "deny"},
     ]
     for empty_paths in (None, ()):
         assert _writable_path_permissions(empty_paths) == [
-            {"permission": "edit", "pattern": "*", "action": "deny"},
             {"permission": "bash", "pattern": "*", "action": "deny"},
         ]
 

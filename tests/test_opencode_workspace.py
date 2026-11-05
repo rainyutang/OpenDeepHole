@@ -391,6 +391,41 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             "C:/Users/demo/.opendeephole/fp_reviews/review/artifacts/1/**",
             patterns,
         )
+        self.assertIn(
+            "Users/demo/.opendeephole/fp_reviews/review/artifacts/1/**",
+            patterns,
+        )
+        self.assertIn(
+            r"Users\demo\.opendeephole\fp_reviews\review\artifacts\1\**",
+            patterns,
+        )
+
+    def test_writable_edit_patterns_include_posix_root_relative_alias(self) -> None:
+        patterns = writable_edit_patterns("/home/demo/.opendeephole/scans")
+        self.assertIn("/home/demo/.opendeephole/scans/**", patterns)
+        self.assertIn("home/demo/.opendeephole/scans", patterns)
+        self.assertIn("home/demo/.opendeephole/scans/**", patterns)
+        self.assertFalse(any(pattern.startswith("**") for pattern in patterns))
+
+    def test_writable_edit_patterns_do_not_strip_nonlocal_roots(self) -> None:
+        for root in (
+            r"\\server\share\scans",
+            "//server/share/scans",
+            "~/.opendeephole/scans",
+            "relative/scans",
+            r"C:relative\scans",
+            r"\rooted\scans",
+        ):
+            with self.subTest(root=root):
+                prefix = root.replace("\\", "/")
+                patterns = writable_edit_patterns(root)
+                self.assertTrue(all(
+                    pattern.replace("\\", "/") in (prefix, prefix + "/**")
+                    for pattern in patterns
+                ))
+        for root in ("/", "C:/"):
+            with self.subTest(root=root):
+                self.assertNotIn("**", writable_edit_patterns(root))
 
     def test_build_opencode_config_allows_explicit_writable_path(self) -> None:
         path = PureWindowsPath(
@@ -411,6 +446,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         self.assertEqual(edit["*"], "deny")
         self.assertEqual(
             edit["C:/Users/demo/.opendeephole/work/review/**"],
+            "allow",
+        )
+        self.assertEqual(
+            edit["Users/demo/.opendeephole/work/review/**"],
             "allow",
         )
         self.assertGreater(
@@ -646,6 +685,41 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
                         refreshed = json.loads(config_path.read_text(encoding="utf-8"))
                         assert_opencode_read_permissions(self, refreshed, workspace)
+
+    def test_missing_scan_root_relative_permissions_trigger_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(enabled=False, name="product-info"),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
+                config_path = managed_opencode_config_path(workspace)
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                scan_root = (Path.home() / ".opendeephole" / "scans").resolve()
+                alias = str(scan_root.relative_to(scan_root.anchor))
+                aliases = writable_edit_patterns(alias)
+                for permission in ("read", "external_directory", "edit"):
+                    for pattern in aliases:
+                        self.assertEqual(config["permission"][permission].pop(pattern), "allow")
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                get_global_opencode_workspace()
+
+                refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+                for pattern in aliases:
+                    self.assertEqual(refreshed["permission"]["edit"][pattern], "allow")
+                assert_opencode_read_permissions(self, refreshed, workspace)
 
     def test_missing_agent_reference_permissions_trigger_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

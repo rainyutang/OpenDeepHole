@@ -212,7 +212,7 @@ model_pool:
 
 v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
 
-嵌入完整 Agent 时，Task Agent 在 Serve 启动前把 `read`、`list`、`glob`、`grep` 和 `external_directory` 的全局允许规则写入最终 `opencode.json`，OpenCode 因而可以读取运行账户有权访问的全部本地路径，包括扫描工作区之外的项目、隐藏文件和配置文件。写入边界独立保持收敛：`edit` 先全局拒绝，再为 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation`、`skill_create` 四个稳定根、当前 `work_dir` 及显式动态白名单追加原有允许规则；全局 `bash` 保持拒绝。`OpenCodeHostBindings.readable_roots` 和 `readable_paths` 继续作为只读意图及兼容声明，不授予编辑权限；显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`allowed_bash_commands` 或 `required_bash_commands` 时，动态权限仍通过 Session 覆盖下发，不进入 Serve 配置哈希。
+嵌入完整 Agent 时，Task Agent 在 Serve 启动前把 `read`、`list`、`glob`、`grep` 和 `external_directory` 的全局允许规则写入最终 `opencode.json`，OpenCode 因而可以读取运行账户有权访问的全部本地路径，包括扫描工作区之外的项目、隐藏文件和配置文件。写入边界由配置管理：`edit` 先全局拒绝，再允许 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation`、`skill_create` 四个稳定根及未被这些根覆盖的 `work_dir`；全局 `bash` 保持拒绝。普通 Session 只补充目录允许规则，不再追加全局 `edit` 拒绝，主、子 Agent 因而都能使用配置中的稳定产物目录。`OpenCodeHostBindings.readable_roots` 和 `readable_paths` 继续作为只读意图及兼容声明，不授予编辑权限；显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`allowed_bash_commands` 或 `required_bash_commands` 时，动态权限仍通过 Session 下发，不进入 Serve 配置哈希。
 
 `workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入/精确命令 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；文件写入 Hook 同时按 Session 私有绑定约束父、子 Session 的精确命令，记录执行顺序、完整命令、退出状态及末尾最多 16 KiB 输出。这些诊断通常不写入 Prompt；只有调用方启用必需命令同 Session 纠正且校验失败时，才会追加到同一 Session。绑定和命令审计在每次消息返回后即删除。
 
@@ -379,7 +379,7 @@ else:
 Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定运行上下文：
 
 - `project_dir`：真实项目目录，只允许 `read`、`list`、`glob`、`grep`。
-- `work_dir`：当前任务所属的 `.opendeephole` 隔离工作目录，允许文件编辑工具写入。
+- `work_dir`：当前任务所属的 `.opendeephole` 产物目录，允许文件编辑工具写入；实际写权限以配置中的稳定可写根为边界，不隔离不同扫描任务。
 - `file_write_allowlist` / `writable_paths`：调用方显式授权的额外文件或目录；两者合并后同时获得写权限和默认保留语义。相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
 - `readable_paths`：保留的兼容参数，用于显式声明调用方希望读取的文件或目录；最终全局配置已允许读取全部本地路径，该参数不获得 `edit`，也不参与保留。
 - `allowed_bash_commands`：调用方声明的可选精确命令；先拒绝 `*`，再按声明顺序逐条放行。模型可以不执行，执行失败或之后继续写文件也不参与任务完成审计。
@@ -401,7 +401,11 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 - 自动任务统一禁止 `question`：配置使用 `"question": "deny"`，每次消息发送前还会将禁止规则合入 Session 权限及父子 Session 执行 Hook，即使工具发现失败也生效。此规则覆盖普通分析、续接、纠正、重试和格式修复，避免等待无人回答的问题；不自动选择答案，也不改变其它工具的授权策略。旧受管工作区会自动刷新配置。部署需更新并重启 Agent 及其受管 Serve；已挂起的旧调用需停止后重新运行。
 
-原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限，并合入 MCP、知识库和格式修复的工具选择；消息不发送旧 `tools` 字段，避免 OpenCode 将整份 Session 权限替换成全局工具开关。未知自定义工具默认拒绝，空命令白名单也写入 Shell 拒绝规则和父子 Session 命令 Hook 绑定。续接、纠正及新 Session 重试均重新应用当前权限，避免上一次调用的额外写路径残留。补查不声明 Shell 命令，校验仍由 Task Agent 端 Python 程序执行。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。普通 Session 以 `work_dir` 加当前调用显式路径生成额外允许规则，不追加 `edit * deny`，并合入 MCP、知识库和格式修复的工具选择；消息不发送旧 `tools` 字段，避免 OpenCode 将整份 Session 权限替换成全局工具开关。未知自定义工具默认拒绝，空命令白名单也写入 Shell 拒绝规则和父子 Session 命令 Hook 绑定。续接、纠正及新 Session 重试均重新应用当前工具策略；独立格式匹配 Session 继续禁用全部工具。宿主产物校验仍由 Task Agent 端 Python 程序执行。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+
+主、子 Agent 的产物写入依赖配置中的稳定可写根。完整 Agent 允许写扫描根内的产物，不承诺不同扫描或补查轮次之间的写权限隔离；源码只读边界由稳定根及显式授权路径之外的默认拒绝维持。稳定根之外的动态 `file_write_allowlist` / `writable_paths` 仍只为当前 Session 增加权限，此次不扩展动态白名单的子 Session 继承。
+
+目录规则同时覆盖绝对路径、两种分隔符、Windows 无盘符路径及 POSIX 根相对路径，以兼容 OpenCode 在非 Git 项目中使用文件系统根计算编辑路径。此次覆盖 D 盘源码、C 盘扫描产物的场景，不增加任意同盘 Git 根的相对路径适配。部署时需更新并重启 Agent 及其受管 Serve，以新 Session 重新运行失败任务；本地验证或提交不代表目标环境已部署。Shell、MCP 和 `question` 的既有策略保持不变。
 
 子任务只能复用本次绑定内创建的 Session；续接或纠正重新绑定后需新建子任务，以免恢复旧子任务未更新的权限。
 

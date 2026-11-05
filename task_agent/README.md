@@ -97,14 +97,25 @@ result = await run_opencode_task(
 `skill_paths` 及其它运行账户可访问路径中的 `references/`、`assets/`、`scripts/` 都可读。
 standalone 默认仍只允许写 `work_dir`；嵌入宿主可通过
 `OpenCodeHostBindings.readable_roots` 保留稳定只读根声明，通过
-`OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读声明不会获得 `edit`。每次调用都会把
-`work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
-`permission` 覆盖；兼容参数 `readable_paths` 继续显式记录只读路径，但全局读取不依赖该参数。
-调用方不能传原生权限规则，所有非白名单路径仍不可编辑，`bash` 始终先全局拒绝。工具选择与
+`OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读声明不会获得 `edit`。
+最终配置先拒绝所有 `edit`，再允许稳定可写根及未被这些根覆盖的 `work_dir`。
+普通 Session 只为 `work_dir`、`file_write_allowlist` 和兼容参数 `writable_paths` 追加允许规则，
+不再设置 `edit * deny`，使主、子 Agent 都能沿用配置中的稳定目录写权限。
+完整 Agent 的扫描产物位于全局可写的 `~/.opendeephole/scans` 根内，此边界不隔离不同扫描任务；
+稳定根之外的动态额外白名单仍只授权当前 Session，此次不扩展其子 Session 继承。
+兼容参数 `readable_paths` 继续显式记录只读路径，但全局读取不依赖该参数。
+调用方不能传原生权限规则，稳定根及显式授权路径之外的源码保持只读，`bash` 始终先全局拒绝。工具选择与
 目录规则合入同一份 Session 权限，不发送会覆盖权限的旧版消息 `tools` 字段；未知自定义工具默认拒绝。
 显式传入 `allowed_bash_commands` 或 `required_bash_commands` 时，Task Agent 才按
 完整字符串放行；受管 Session 绑定 Hook 对父、子 Session 再做一次精确检查，空白名单也明确拒绝。
 子任务只能复用本次绑定内创建的 Session；续接或纠正重新绑定后需新建子任务。
+
+目录规则保留绝对路径和两种分隔符，并补充 Windows 无盘符路径及 POSIX 根相对路径，
+兼容 OpenCode 在非 Git 项目中以文件系统根计算编辑路径的行为，覆盖 D 盘源码、C 盘产物。
+此次不增加任意同盘 Git 根的相对路径适配。更新后须重启 Agent 及其受管 Serve，并以新 Session
+重新运行失败任务；本地测试或提交不表示目标环境已完成更新。Shell、MCP、`question` 禁用及
+独立格式匹配 Session 禁用工具的策略保持不变。
+
 可选命令只提供执行权限，不会因为缺失或失败阻止 Session 完成；必需命令还记录退出码和文件写入顺序，并要求每条必需
 命令必须在最后一次受管文件写入后完成：正常以退出码 0 判定；调用方显式配置成功标记时，若
 OpenCode 没有暴露退出码，也可由输出中的完全匹配行判定。失败审计会保留至多末尾 16 KiB 命令输出。
