@@ -75,7 +75,13 @@ def test_legacy_artifact_is_read_only_compatible_and_still_requires_completion(t
         engine._load_completed_result(**paths, completion_path=completion, allow_legacy_result=False)
 
 
-def _artifacts(tmp_path: Path, *, pattern: dict | None = None) -> tuple[Path, Path]:
+def _artifacts(
+    tmp_path: Path, *, pattern: dict | None = None, project_path: Path | None = None,
+) -> tuple[Path, Path]:
+    project = project_path or tmp_path
+    (project / "src/auth").mkdir(parents=True, exist_ok=True)
+    (project / "src/shared").mkdir(parents=True, exist_ok=True)
+    (project / "src/auth/session.c").write_text("void restore_session(void) {}\n", encoding="utf-8")
     attack_tree_path = tmp_path / "attack-trees.json"
     modules_path = tmp_path / "high-risk-modules.json"
     attack_tree_path.write_text(
@@ -247,7 +253,7 @@ def test_task_lifecycle_and_cached_resume(tmp_path, monkeypatch, outcome, direct
     assert [item.status for item in reporter.updates] == ["pending", "queued", "running", final]
     stored = list(reporter.tasks.values())[0]
     assert stored.module_name == "认证模块" and stored.pattern_name == "会话伪造"
-    assert [item.path for item in stored.code_paths] == ["src/auth", "src/shared"]
+    assert [item.path for item in stored.code_paths] == [str(tmp_path / "src/auth"), str(tmp_path / "src/shared")]
     assert stored.started_at and stored.finished_at
     assert stored.result_vuln_indexes == ([207] if outcome == "finding" else [])
     if outcome in {"failure", "timeout"}:
@@ -301,6 +307,8 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_descri
         schema_path="/work/threat-pattern-result.schema.json",
         result_path="/work/result.json",
         validation_command="python validate_result.py schema.json result.json",
+        project_path="/project",
+        scan_paths="/project/src/auth、/project/src/shared",
     )
 
     assert (
@@ -318,6 +326,10 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_descri
     assert "python validate_result.py schema.json result.json" in prompt
     assert "问题要求：" in prompt
     assert "输出要求：" in prompt
+    assert "结果以指定 JSON 文件为唯一验收来源" in prompt
+    assert "不得仅在聊天回复中给出修正" in prompt
+    assert "项目根目录：/project" in prompt
+    assert "不得将范围内入口冒充实际问题点" in prompt
     assert AUDIT_FIELD_INSTRUCTIONS in prompt
     assert '"minItems"' not in prompt
     assert THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA["minItems"] == 0
@@ -381,7 +393,7 @@ def test_targets_are_deduplicated_by_module_and_pattern(tmp_path: Path) -> None:
 
     assert targets == [{
         "module_name": "认证模块",
-        "code_paths": ["src/auth", "src/shared"],
+        "code_paths": [str(tmp_path / "src/auth"), str(tmp_path / "src/shared")],
         "pattern_id": "SYS-AUTH-02",
         "pattern_name": "会话伪造",
         "pattern_description": "",
@@ -407,13 +419,15 @@ def test_baselines_bind_one_module_and_deduplicate_against_ai_and_other_trees(tm
                                                 _module_baseline("未知模块", "fixed")]}
     modules = [{"模块名称": name, "代码目录": f"src/{index}"}
                for index, name in enumerate(["内部模块", "入口", "孤立模块"])]
+    for module in modules:
+        (tmp_path / module["代码目录"]).mkdir(parents=True)
     targets = engine._build_targets(data, modules, fallback_code_path=tmp_path)
     by_pair = {(target["module_name"], target["pattern_id"]): target for target in targets}
     assert set(by_pair) == {("内部模块", "existing"), ("入口", "existing"),
                             ("内部模块", "fixed"), ("孤立模块", "fixed")}
     assert len(targets) == len(by_pair)
     assert by_pair["内部模块", "existing"]["pattern_name"] == "AI已有"
-    assert by_pair["内部模块", "fixed"]["code_paths"] == ["src/0"]
+    assert by_pair["内部模块", "fixed"]["code_paths"] == [str(tmp_path / "src/0")]
     assert engine._task_id("scan", by_pair["内部模块", "existing"]) == engine._task_id(
         "scan", {"module_name": "内部模块", "pattern_id": "existing", "pattern_name": "renamed"})
 
@@ -433,9 +447,44 @@ def test_baselines_with_empty_trees_intersect_scope_and_ignore_unknown_modules(t
     data = {"attack_trees": [], "unassigned_module_pattern_baselines": [
         _module_baseline(name, "fixed") for name in ["包含模块", "排除模块", "空路径模块", "未知模块"]]}
     targets = engine._build_targets(data, modules, fallback_code_path=tmp_path, scan_scope=scope)
-    assert {target["module_name"] for target in targets} == {"包含模块", "空路径模块"}
+    assert {target["module_name"] for target in targets} == {"包含模块"}
     assert all(target["code_paths"] == [str(selected)] for target in targets)
     assert engine._build_targets(data, [], fallback_code_path=tmp_path) == []
+
+
+def test_missing_invalid_and_excluded_module_paths_never_expand_audit_scope(tmp_path):
+    from deephole_client.scan_paths import resolve_scan_scope
+
+    selected = tmp_path / "src/selected.c"
+    selected.parent.mkdir()
+    selected.write_text("int selected;\n")
+    other = tmp_path / "src/other.c"
+    other.write_text("int other;\n")
+    scope = resolve_scan_scope(tmp_path, code_scan_paths=[selected])
+    modules = [
+        {"模块名称": "missing_path", "代码目录": "src/missing.c"},
+        {"模块名称": "empty", "代码目录": []},
+        {"模块名称": "excluded", "代码目录": "src/other.c"},
+        {"模块名称": "mixed", "代码目录": ["src/missing.c", "src/other.c", "src"]},
+    ]
+    names = [item["模块名称"] for item in modules] + ["unknown"]
+    data = {"attack_trees": [{"attack_paths": [{
+        "related_high_risk_modules": [{"module_name": name} for name in names],
+        "attack_patterns": [{"pattern_id": "AI", "pattern_name": "AI"}],
+    }]}], "unassigned_module_pattern_baselines": [_module_baseline(name, "fixed") for name in names]}
+    exclusions = []
+    targets = engine._build_targets(data, modules, fallback_code_path=tmp_path,
+                                    scan_scope=scope, exclusions=exclusions)
+    assert [(item["module_name"], item["pattern_id"], item["code_paths"]) for item in targets] == [
+        ("mixed", "AI", [str(selected)]), ("mixed", "fixed", [str(selected)]),
+    ]
+    assert {(item["module_name"], item["reason"]) for item in exclusions} == {
+        ("missing_path", "invalid_module_paths"), ("empty", "empty_module_paths"),
+        ("excluded", "outside_scan_scope"), ("mixed", "invalid_module_paths"),
+        ("mixed", "outside_scan_scope"), ("unknown", "missing_module"),
+    }
+    # Module paths are resolved once even when both AI paths and fixed audits refer to them.
+    assert len(exclusions) == 6
 
 
 def test_baseline_only_tasks_execute_once_and_reuse_successful_results(tmp_path, monkeypatch):
@@ -482,7 +531,7 @@ def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, r
         }], ensure_ascii=False),
         encoding="utf-8",
     )
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     captured: dict = {}
     reported: list[dict] = []
     events: list[dict] = []
@@ -619,7 +668,7 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path, catalog_descrip
     work_dir = tmp_path / "work"
     project_path.mkdir()
     pattern, expected_description = catalog_description_case
-    attack_tree_path, modules_path = _artifacts(tmp_path, pattern=pattern)
+    attack_tree_path, modules_path = _artifacts(tmp_path, pattern=pattern, project_path=project_path)
     captured: dict = {}
     reporter = TaskReporter()
 
@@ -701,7 +750,7 @@ def test_session_success_at_stop_boundary_is_reused_on_resume(
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     stop_event = threading.Event()
 
     async def complete_while_stopping(**task):
@@ -778,7 +827,7 @@ def test_resume_reuses_completed_module_pattern_result_without_new_session(
     work_dir = tmp_path / "work"
     project_path.mkdir()
     work_dir.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     target = engine._build_targets(
         json.loads(attack_tree_path.read_text(encoding="utf-8")),
         json.loads(modules_path.read_text(encoding="utf-8")),
@@ -846,7 +895,7 @@ def test_resume_reruns_untrusted_module_pattern_result_in_fresh_session(
     work_dir = tmp_path / "work"
     project_path.mkdir()
     work_dir.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     target = engine._build_targets(
         json.loads(attack_tree_path.read_text(encoding="utf-8")),
         json.loads(modules_path.read_text(encoding="utf-8")),
@@ -911,7 +960,7 @@ def test_failed_audit_advances_processed_progress(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     events: list[dict] = []
 
     async def fake_run_opencode_task(**_kwargs):
@@ -957,13 +1006,181 @@ def test_failed_audit_advances_processed_progress(tmp_path: Path) -> None:
     ] == [(0, 1), (1, 1)]
 
 
+def _scoped_audit(tmp_path: Path, *, legacy_scalar: bool = False, single_file: bool = False):
+    tree, modules = _artifacts(tmp_path)
+    outside = tmp_path / "src/shared/outside.c"
+    outside.write_text("int outside;\n", encoding="utf-8")
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    report = AsyncMock(return_value=[])
+    kwargs = dict(
+        engine_id="threat_pattern_audit", scan_id="scoped-audit", project_path=tmp_path,
+        code_scan_path=tmp_path / "src/auth", work_dir=work, reporter=reporter,
+        config=SimpleNamespace(opencode_concurrency=1), cancel_event=threading.Event(),
+        report_vulnerabilities=report,
+        threat_analysis_result={"result": True, "attack_tree_path": tree, "high_risk_modules_path": modules},
+    )
+    if not legacy_scalar:
+        kwargs["code_scan_paths"] = [str(tmp_path / ("src/auth/session.c" if single_file else "src/auth"))]
+    return kwargs, work, reporter, report
+
+
+@pytest.mark.parametrize("selection", ["directory", "file", "legacy"])
+@pytest.mark.parametrize("correction", ["finding", "empty", "invalid"])
+def test_scope_file_validation_requests_correction_before_completion(
+    tmp_path, monkeypatch, selection, correction,
+):
+    kwargs, work, reporter, report = _scoped_audit(
+        tmp_path, legacy_scalar=selection == "legacy", single_file=selection == "file",
+    )
+    bad = [{**_finding(), "file": "src/shared/outside.c"}]
+    feedbacks = []
+
+    async def invoke(**task):
+        assert task["output_schema"] is None
+        assert task["post_session_validation_retry_count"] == 1
+        assert "--project-path" in task["allowed_bash_commands"][0]
+        flag = "--scan-file" if selection == "file" else "--scan-directory"
+        assert flag in task["allowed_bash_commands"][0]
+        path = work / "task-results" / f"{task['task_name']}.json"
+        path.write_text(json.dumps(bad), encoding="utf-8")
+        feedback = await task["post_session_validator"]()
+        assert feedback and str(path) in feedback and "src/shared/outside.c" in feedback
+        feedbacks.append(feedback)
+        assert not list((work / ".completed-task-results").glob("*.json"))
+        if correction == "invalid":
+            # A valid-looking chat response cannot override the invalid on-disk artifact.
+            return OpenCodeResult(status="success", text=json.dumps([_finding()]), session_id="same",
+                                  structured=[_finding()], model="test/model")
+        value = [_finding()] if correction == "finding" else []
+        path.write_text(json.dumps(value), encoding="utf-8")
+        assert await task["post_session_validator"]() is None
+        return OpenCodeResult(status="success", text="已修正同一个结果文件。", session_id="same",
+                              structured=None, model="test/model", output_source={"serve_session_id": "same"})
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(**kwargs))
+    assert len(feedbacks) == 1
+    assert result["status"] == ("error" if correction == "invalid" else "success")
+    assert next(iter(reporter.tasks.values())).status == ("failed" if correction == "invalid" else "completed")
+    assert len(list((work / ".completed-task-results").glob("*.json"))) == (0 if correction == "invalid" else 1)
+    assert report.await_count == (1 if correction == "finding" else 0)
+    saved = json.loads(next((work / "task-results").glob("*.json")).read_text())
+    assert saved == (bad if correction == "invalid" else [_finding()] if correction == "finding" else [])
+
+
+@pytest.mark.parametrize("old_session", ["original-session", ""])
+@pytest.mark.parametrize("legacy_result", [False, True])
+def test_resume_repairs_invalid_cached_file_in_original_session_when_available(
+    tmp_path, monkeypatch, old_session, legacy_result,
+):
+    kwargs, work, reporter, report = _scoped_audit(tmp_path)
+    target = {"module_name": "认证模块", "pattern_id": "SYS-AUTH-02", "pattern_name": "会话伪造"}
+    task_id = engine._task_id(kwargs["scan_id"], target)
+    path = work / "task-results" / f"{task_id}.json"
+    path.parent.mkdir(parents=True)
+    bad = [{**(_legacy_finding() if legacy_result else _finding()), "file": "src/shared/outside.c"}]
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    marker = work / ".completed-task-results" / f"{task_id}.json"
+    engine._write_completion_marker(marker, path, output_source={"serve_session_id": old_session})
+    calls = []
+
+    async def invoke(**task):
+        calls.append(task)
+        assert task.get("session_id", "") == old_session
+        assert json.loads(path.read_text()) == bad  # Keep the original artifact for the model to inspect.
+        assert not marker.exists()
+        assert "src/shared/outside.c" in task["prompt"]
+        assert str(path) in task["prompt"]
+        await _write_task_result(work, task, [])
+        return OpenCodeResult(status="success", text="问题不属于本扫描，已更新结果文件。",
+                              session_id=old_session or "new-session", structured=None, model="test/model")
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(is_resume=True, **kwargs))
+    assert result["status"] == "success" and len(calls) == 1
+    assert marker.is_file() and json.loads(path.read_text()) == []
+    assert next(iter(reporter.tasks.values())).status == "completed"
+    report.assert_not_awaited()
+
+
+def test_scope_valid_file_is_reused_when_only_reporting_failed(tmp_path, monkeypatch):
+    kwargs, work, reporter, report = _scoped_audit(tmp_path)
+    calls = []
+
+    async def invoke(**task):
+        calls.append(task)
+        await _write_task_result(work, task, [_finding()])
+        return OpenCodeResult(status="success", text="文件已生成", session_id="original",
+                              structured=None, model="test/model")
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    report.side_effect = RuntimeError("upload unavailable")
+    first = asyncio.run(engine.run(**kwargs))
+    assert first["status"] == "error"
+    assert len(list((work / ".completed-task-results").glob("*.json"))) == 1
+    report.side_effect = None
+    second = asyncio.run(engine.run(is_resume=True, **kwargs))
+    assert second["status"] == "success" and len(calls) == 1
+    assert report.await_count == 2
+    assert next(iter(reporter.tasks.values())).status == "completed"
+
+
+def test_validated_file_uses_canonical_report_identity_without_rewriting_json(tmp_path, monkeypatch):
+    kwargs, work, _reporter, report = _scoped_audit(tmp_path)
+    value = [{**_finding(), "file": "src\\auth\\session.c"}]
+
+    async def invoke(**task):
+        await _write_task_result(work, task, value)
+        return OpenCodeResult(status="success", text="完成", session_id="canonical",
+                              structured=None, model="test/model")
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(**kwargs))
+    assert result["status"] == "success"
+    assert report.await_args.args[0][0]["file"] == "src/auth/session.c"
+    assert json.loads((work / "previous-findings.json").read_text())[0]["file"] == "src/auth/session.c"
+    assert json.loads(next((work / "task-results").glob("*.json")).read_text()) == value
+
+
+def test_path_validation_failure_does_not_stop_other_pattern_tasks(tmp_path, monkeypatch):
+    kwargs, work, reporter, report = _scoped_audit(tmp_path)
+    tree_path = kwargs["threat_analysis_result"]["attack_tree_path"]
+    tree = json.loads(tree_path.read_text())
+    tree["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({
+        "pattern_id": "OTHER", "pattern_name": "另一个模式",
+    })
+    tree_path.write_text(json.dumps(tree), encoding="utf-8")
+    calls = []
+
+    async def invoke(**task):
+        calls.append(task)
+        if len(calls) == 1:
+            path = work / "task-results" / f"{task['task_name']}.json"
+            path.write_text(json.dumps([{**_finding(), "file": "src/shared/outside.c"}]))
+            feedback = await task["post_session_validator"]()
+            assert feedback
+            return OpenCodeResult(status="failure", text=feedback, session_id="failed",
+                                  structured=None, model="test/model")
+        await _write_task_result(work, task, [])
+        return OpenCodeResult(status="success", text="已完成", session_id="succeeded",
+                              structured=None, model="test/model")
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(**kwargs))
+    assert result["status"] == "error" and "1 of 2" in result["error_message"]
+    assert result["processed_candidates"] == 2 and len(calls) == 2
+    assert {item.status for item in reporter.tasks.values()} == {"failed", "completed"}
+    report.assert_not_awaited()
+
+
 def test_engine_reports_zero_progress_when_there_are_no_targets(
     tmp_path: Path,
 ) -> None:
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     events: list[dict] = []
 
     async def output(event):
@@ -1015,7 +1232,7 @@ def test_cancelled_engine_counts_only_finished_audits(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     work_dir = tmp_path / "work"
     project_path.mkdir()
-    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree_path, modules_path = _artifacts(tmp_path, project_path=project_path)
     attack_tree = json.loads(attack_tree_path.read_text(encoding="utf-8"))
     attack_tree["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({
         "pattern_id": "SYS-AUTH-03",
@@ -1109,7 +1326,7 @@ def test_required_artifact_validation_rejects_missing_or_invalid_results(
     project = tmp_path / "project"
     project.mkdir()
     work = tmp_path / "work"
-    tree, modules = _artifacts(tmp_path)
+    tree, modules = _artifacts(tmp_path, project_path=project)
     report = AsyncMock()
     diagnostics = []
 

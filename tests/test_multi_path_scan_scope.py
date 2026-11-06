@@ -153,7 +153,7 @@ def test_project_candidate_and_summary_preserve_exact_selection(source_tree: Pat
     ("src/b", ["src/b/file.c"]),
     ("src/c", []),
     ("src/a", ["src/a"]),
-    (None, ["src/a", "src/b/file.c"]),
+    (None, []),
 ])
 def test_threat_target_intersection_never_falls_back_after_exclusion(source_tree: Path, module_path, expected):
     scope = resolve_scan_scope(source_tree, code_scan_paths=[source_tree / "src/a", source_tree / "src/b/file.c"])

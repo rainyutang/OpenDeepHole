@@ -3205,6 +3205,107 @@ def test_threat_pattern_audit_queue_outcome_requires_the_designated_file(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("correction", ["finding", "empty", "still_outside"])
+def test_threat_pattern_path_repair_edits_the_same_file_in_the_same_session(
+    tmp_path: Path, correction: str,
+) -> None:
+    from deephole_client.vulnerability_mining.engines.threat_pattern_audit import engine
+    from test_threat_pattern_audit import _finding
+
+    async def run():
+        service = OpenCodeTaskService()
+        work_dir = tmp_path / "work"
+        for relative in ("src/auth/session.c", "src/shared/session.c"):
+            source = tmp_path / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("int session;\n", encoding="utf-8")
+        tree = tmp_path / "attack-tree.json"
+        modules = tmp_path / "modules.json"
+        tree.write_text(json.dumps({"attack_trees": [{"attack_paths": [{
+            "related_high_risk_modules": [{"module_name": "auth"}],
+            "attack_patterns": [{"pattern_id": "AUTH-1", "pattern_name": "authentication bypass"}],
+        }]}]}), encoding="utf-8")
+        modules.write_text(json.dumps([{"模块名称": "auth", "代码目录": "src/auth"}]), encoding="utf-8")
+        task_id = engine._task_id("scan-path-repair", {
+            "module_name": "auth", "pattern_id": "AUTH-1", "pattern_name": "authentication bypass",
+        })
+        result_path = work_dir / "task-results" / f"{task_id}.json"
+        marker = work_dir / ".completed-task-results" / f"{task_id}.json"
+        outside = [{**_finding(), "file": "src/shared/session.c"}]
+        repaired = [_finding()] if correction == "finding" else [] if correction == "empty" else outside
+        calls = []
+
+        async def run_prompt(**kwargs):
+            calls.append(kwargs)
+            assert not marker.exists()
+            assert "--project-path" in kwargs["allowed_bash_commands"][0]
+            if len(calls) == 1:
+                assert kwargs["session_id"] is None
+                await kwargs["on_session_id"]("ses_path_repair")
+                payload = outside
+            else:
+                assert len(calls) == 2
+                assert kwargs["session_id"] == "ses_path_repair"
+                # The original artifact remains available for the model to edit.
+                assert json.loads(result_path.read_text(encoding="utf-8")) == outside
+                assert "outside_scan_paths" in kwargs["prompt"]
+                assert "$[0].file" in kwargs["prompt"]
+                assert str(result_path) in kwargs["prompt"]
+                payload = repaired
+            result_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id=f"write-{len(calls)}", path=str(result_path), created=len(calls) == 1,
+            ))
+            # The chat response is deliberately not JSON on either message.
+            return OpenCodePromptResult(
+                session_id="ses_path_repair", message_id=f"msg_{len(calls)}",
+                lines=["已修改结果文件。"], text="已修改结果文件。", model="provider/model-low",
+            )
+
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path), "provider/model-low", _source(),
+        ))
+        config = _config(max_retries=0)
+        config.vulnerability_mining = SimpleNamespace(max_retries=0)
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), runtime_config=config)
+        report = AsyncMock(return_value=[(None, {"index": 7})])
+        with (
+            patches[0], patches[1] as acquire_mock, patches[2],
+            patches[3], patches[4], patches[5],
+            patch("task_agent.task_service._get_opencode_task_service", return_value=service),
+        ):
+            result = await engine.run(
+                engine_id="threat_pattern_audit", scan_id="scan-path-repair",
+                project_path=tmp_path, code_scan_path=tmp_path / "src/auth", work_dir=work_dir,
+                code_scan_paths=[str(tmp_path / "src/auth")],
+                config=config, cancel_event=threading.Event(), report_vulnerabilities=report,
+                threat_analysis_result={
+                    "result": True, "attack_tree_path": str(tree), "high_risk_modules_path": str(modules),
+                },
+            )
+            await asyncio.gather(*(record.worker for record in service._records.values()))
+
+        assert [call["session_id"] for call in calls] == [None, "ses_path_repair"]
+        assert acquire_mock.await_count == 1
+        assert all(record.spec.output_schema is None for record in service._records.values())
+        assert json.loads(result_path.read_text(encoding="utf-8")) == repaired
+        if correction == "still_outside":
+            assert result["status"] == "error"
+            assert "outside_scan_paths" in result["error_message"]
+            assert not marker.exists()
+            report.assert_not_awaited()
+        else:
+            assert result["status"] == "success"
+            assert marker.is_file()
+            if correction == "finding":
+                assert report.await_count == 1
+                assert report.await_args.args[0][0]["file"] == "src/auth/session.c"
+            else:
+                report.assert_not_awaited()
+
+    asyncio.run(run())
+
+
 def test_exhausted_post_session_validation_uses_existing_fresh_retry(
     tmp_path: Path,
 ) -> None:

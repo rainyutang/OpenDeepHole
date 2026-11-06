@@ -13,6 +13,7 @@ import pytest
 from backend.file_inventory import FileInventoryUpload
 from backend.threat_coverage import build_threat_coverage
 from deephole_client.process_artifacts import collect_json_artifacts, restore_json_artifacts
+from deephole_client.scan_paths import resolve_scan_scope
 from deephole_client.threat_analysis_runner import _adapt_high_risk_modules_for_project
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit.engine import _build_targets
 from test_threat_coverage import analysis, coverage_env, inventory
@@ -249,8 +250,9 @@ def test_agent_adaptation_and_restoration_are_idempotent_and_preserve_audit_scop
     restored_root = tmp_path / "restored"
     restored = restore_json_artifacts(bundle, output_root=restored_root)
     assert collect_json_artifacts(adapt(restored, restored_root), output_root=restored_root) == bundle
-    targets = _build_targets(bundle["artifacts"]["attack_tree_path"]["content"], normalized, fallback_code_path=root)
-    assert targets[0]["code_paths"] == [expected]
+    targets = _build_targets(bundle["artifacts"]["attack_tree_path"]["content"], normalized,
+                             fallback_code_path=root, scan_scope=resolve_scan_scope(project, root))
+    assert targets[0]["code_paths"] == [str(root / "auth")]
 
 
 def test_native_scan_relative_path_preserves_real_nested_directory_on_repeated_adaptation(tmp_path):

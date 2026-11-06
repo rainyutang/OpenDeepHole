@@ -25,6 +25,7 @@ from deephole_client import file_inventory as collector, scanner
 from deephole_client.config import AgentConfig
 from deephole_client.codex_runtime import ScanCodexConfigResult
 from deephole_client.reporter import Reporter
+from deephole_client.scan_paths import resolve_scan_scope
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit.engine import _build_targets
 
 
@@ -102,7 +103,16 @@ def analysis():
     }
 
 
-def test_target_derivation_matches_existing_engine_without_changing_it():
+@pytest.fixture
+def audit_scope(tmp_path):
+    project = tmp_path / "project"
+    (project / "src/auth").mkdir(parents=True)
+    (project / "src/auth/a.c").write_text("int auth;", encoding="utf-8")
+    (project / "src/authentication.c").write_text("int authentication;", encoding="utf-8")
+    return resolve_scan_scope(project, project / "src")
+
+
+def test_target_derivation_matches_auditable_modules_without_using_display_fallback(audit_scope):
     bundle = analysis()
     trees = bundle["artifacts"]["attack_tree_path"]["content"]
     modules = bundle["artifacts"]["high_risk_modules_path"]["content"]
@@ -111,15 +121,19 @@ def test_target_derivation_matches_existing_engine_without_changing_it():
                   {**copy.deepcopy(paths[0]), "related_high_risk_modules": [{"module_name": "缺失模块"}]}])
     paths[1]["attack_patterns"].append({"pattern_name": "无编号模式"})
     fields = ("module_name", "code_paths", "pattern_id", "pattern_name")
-    expected = [{key: target[key] for key in fields} for target in _build_targets(trees, modules, fallback_code_path=Path("/project/src"))]
-    actual = analysis_targets(trees, modules, "/project/src")
-    assert [{"module_name": target["module_name"], "code_paths": target["paths"], "pattern_id": target["pattern_id"], "pattern_name": target["pattern_name"]} for target in actual] == expected
+    expected = [{**{key: target[key] for key in fields},
+                 "code_paths": [Path(path).relative_to(audit_scope.project).as_posix() for path in target["code_paths"]]}
+                for target in _build_targets(trees, modules, fallback_code_path=audit_scope.root, scan_scope=audit_scope)]
+    actual = analysis_targets(trees, modules, str(audit_scope.root))
+    assert [{"module_name": target["module_name"], "code_paths": target["paths"], "pattern_id": target["pattern_id"], "pattern_name": target["pattern_name"]}
+            for target in actual if not target["fallback"]] == expected
+    assert len(actual) == len(expected) + 1  # Display fallback does not create an audit.
     assert actual[-1]["fallback"] is True
     assert len(actual[0]["sources"]) == 1
 
 
 @pytest.mark.parametrize("empty_trees", [False, True])
-def test_fixed_audit_targets_match_engine_and_preserve_module_provenance(empty_trees):
+def test_fixed_audit_targets_match_engine_and_preserve_module_provenance(empty_trees, audit_scope):
     bundle = analysis()
     trees = bundle["artifacts"]["attack_tree_path"]["content"]
     modules = bundle["artifacts"]["high_risk_modules_path"]["content"]
@@ -143,7 +157,9 @@ def test_fixed_audit_targets_match_engine_and_preserve_module_provenance(empty_t
         baseline("未知模块"), {**baseline("认证", "WRONG-SOURCE"), "source": "ai"},
         {**baseline("认证", "INVALID"), "attack_patterns": "not-a-list"}, None,
     ])
-    expected = _build_targets(trees, modules, fallback_code_path=Path("/project/src"))
+    expected = _build_targets(trees, modules, fallback_code_path=audit_scope.root, scan_scope=audit_scope)
+    for target in expected:
+        target["code_paths"] = [Path(path).relative_to(audit_scope.project).as_posix() for path in target["code_paths"]]
     actual = analysis_targets(trees, modules, "/project/src")
     assert [{"module_name": target["module_name"], "code_paths": target["paths"],
              "pattern_id": target["pattern_id"], "pattern_name": target["pattern_name"]}
