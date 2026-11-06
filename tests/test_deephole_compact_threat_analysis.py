@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import importlib
 import json
-import re
 from collections import Counter
 from pathlib import Path
 
@@ -87,13 +86,16 @@ def test_compact_catalog_is_an_exact_copy_of_the_51_mode_library():
     assert len(json.loads(original.read_text(encoding="utf-8"))) == 1355
 
 
-def test_attack_prompt_uses_private_catalog_without_a_pattern_quota():
+def test_attack_prompt_uses_private_catalog_with_lightweight_pattern_count():
     prompt = (ATTACK_SKILL / "SKILL.md").read_text(encoding="utf-8")
     assert "51 项" in prompt
     assert "唯一攻击模式来源" in prompt
-    assert "不设数量下限" in prompt
+    assert "针对每条攻击路径分析全部实际适用的攻击模式" in prompt
+    assert "有足够适用模式时至少输出 10 个" in prompt
+    assert "确实不足 10 个时输出全部实际适用模式" in prompt
+    assert "不为凑数关联缺乏依据的模式" in prompt
     assert "无法合理匹配时，攻击模式列表输出空数组" in prompt
-    assert not re.search(r"至少\s*10", prompt)
+    assert "不设数量下限" not in prompt
 
 
 @pytest.fixture
