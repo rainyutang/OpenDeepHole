@@ -15,6 +15,7 @@ from threat_analysis_harness.baselines import add_module_pattern_baselines
 from threat_analysis_harness.errors import ArtifactConsistencyError
 from threat_analysis_harness.output_validation import validate_json_schema
 from threat_analysis_harness.schemas import ATTACK_TREE_SCHEMA
+from threat_analysis_harness.validate_attack_tree import validate_patterns
 from threat_analysis_harness.stages.base import (
     ProgressReporter,
     SubmitTasks,
@@ -22,14 +23,6 @@ from threat_analysis_harness.stages.base import (
     TaskResultJson,
     require_all_success,
     run_or_resume_tasks,
-)
-
-
-_JSON_REPAIR_OUTPUT_PROMPT = (
-    "返回包含 attack_trees 数组的 JSON 对象，保留 value_asset、nodes、edges、"
-    "attack_paths 的嵌套结构和中文描述。所有节点、边、路径、攻击模式及模块引用"
-    "保持原样，尤其保留 node_id、module_id、路径节点顺序及模块关联；"
-    "布尔值和 null 保持原类型，不新增、重编号或补全引用。"
 )
 
 
@@ -76,7 +69,6 @@ class AttackTreeStage:
                     + [str(path) for path in context_files],
                     "output_path": str(self.layout.attack_trees_raw_dir / f"{task_id}.json"),
                     "output_schema": task_output_schema,
-                    "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                     "metadata": {
                         "stage": "attack_trees",
                         "asset_name": asset.get("资产名") or asset.get("asset_name"),
@@ -235,6 +227,7 @@ def normalize_attack_tree_output(
     allow_empty: bool = False,
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(output)
+    validate_patterns(normalized)
     attack_trees = normalized.get("attack_trees", [])
     if not attack_trees:
         if allow_empty:
@@ -311,7 +304,7 @@ def _non_external_leaf_repair_prompt(
     return (
         f"叶子节点{leaf_descriptions}引用了非外部暴露的高风险模块，"
         "请对这些位置进行修正；叶子节点只能是外部暴露的高风险模块。"
-        "请按照 JSON Schema 重新输出完整的攻击树 JSON。"
+        "请按照任务 JSON Schema 修正指定文件中的完整攻击树 JSON。"
     )
 
 
@@ -464,7 +457,7 @@ def _asset_prompt(
         "module_name 和 node_name 仍使用引用目录中的规范 module_name。"
         "module_id 仅用于任务过程中的程序对齐，最终公开攻击树产物会自动移除该字段。"
         f"{context_text}"
-        "最终只输出符合 JSON schema 的对象。"
+        "将符合任务 JSON Schema 的完整对象写入指定攻击树文件。"
     )
 
 

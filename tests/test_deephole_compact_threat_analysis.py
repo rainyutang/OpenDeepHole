@@ -41,7 +41,9 @@ def test_compact_method_preserves_original_implementation_and_prompts():
         relative.replace(SKILL_PREFIX, ""): path
         for relative, path in _method_files(COMPACT_ROOT).items()
     }
-    assert compact_files.keys() - original_files.keys() == {"baselines.py", "module_scope.py"}
+    assert compact_files.keys() - original_files.keys() == {
+        "baselines.py", "module_scope.py", "validate_attack_tree.py",
+    }
     assert original_files.keys() - compact_files.keys() == set()
     attack_skill = "skills/attack-trees/attack-tree-by-asset/"
     for relative, original in original_files.items():
@@ -49,6 +51,10 @@ def test_compact_method_preserves_original_implementation_and_prompts():
             "method.yaml",
             "pipeline.py",
             "threat_analysis.py",
+            # Compact tree tasks use model-written files and catalog validation.
+            "task_agent_submitter.py",
+            "stages/base.py",
+            "stages/attack_trees.py",
             attack_skill + "SKILL.md",
             attack_skill + "references/attack_mode.json",
         }:
@@ -56,13 +62,7 @@ def test_compact_method_preserves_original_implementation_and_prompts():
         compact_content = compact_files[relative].read_bytes().replace(SKILL_PREFIX.encode(), b"")
         if relative == "schemas.py":
             compact_content = compact_content.split(b"\n\n# Final artifacts extend")[0].rstrip(b"\n") + b"\n"
-        if relative == "stages/attack_trees.py":
-            compact_content = compact_content.replace(
-                b"from threat_analysis_harness.baselines import add_module_pattern_baselines\n", b"",
-            ).replace(
-                b"        combined = add_module_pattern_baselines(combined, high_risk_modules)\n", b"",
-            )
-        # All original behavior is preserved apart from the final baseline extension.
+        # Other business stages retain the original implementation.
         assert compact_content == original.read_bytes(), relative
 
 
@@ -333,7 +333,7 @@ def test_baselines_preserve_graph_and_select_first_module_host_globally(compact_
     baseline = importlib.import_module(compact_native.__name__ + ".baselines")
     first = _completed_tree(compact_native)
     second = _completed_tree(compact_native, task_id="second", patterns=[{
-        "pattern_id": "ODH-NATIVE-01", "pattern_name": "AI 原始名称",
+        "pattern_id": "ODH-NATIVE-01", "pattern_name": "越界写入破坏内存状态",
         "association_description": "AI 原始关系说明。",
     }])
     # Separate asset tasks are allowed to reuse tree IDs.
@@ -408,21 +408,15 @@ def test_baselines_use_private_catalog_and_leave_fully_covered_module_unchanged(
     assert baseline.add_module_pattern_baselines(output, [_module()]) == output
 
 
-def test_baselines_replace_unconsumable_ai_pattern_with_blank_name(tmp_path, compact_native):
-    (tmp_path / "src/parser").mkdir(parents=True)
+def test_baselines_reject_unconsumable_ai_pattern_with_blank_name(compact_native):
     baseline = importlib.import_module(compact_native.__name__ + ".baselines")
-    output = _completed_tree(compact_native, patterns=[{
+    output = _completed_tree(compact_native)
+    output["attack_trees"][0]["attack_paths"][0]["attack_patterns"] = [{
         "pattern_id": "ODH-NATIVE-01", "pattern_name": "   ",
         "association_description": "AI 返回了空白名称。",
-    }])
-    result = baseline.add_module_pattern_baselines(output, [_module()])
-    # Preserve the raw AI pattern, but do not let it suppress a usable fixed audit.
-    assert result["attack_trees"][0]["attack_paths"] == output["attack_trees"][0]["attack_paths"]
-    targets = _build_targets(result, [_module()], fallback_code_path=tmp_path)
-    coverage_targets = analysis_targets(result, [_module()], str(tmp_path))
-    assert len(targets) == len(coverage_targets) == 15
-    assert {item["pattern_id"] for item in targets} == set(baseline.BASELINE_PATTERN_IDS)
-    assert {item["pattern_id"] for item in coverage_targets} == set(baseline.BASELINE_PATTERN_IDS)
+    }]
+    with pytest.raises(ValueError, match="pattern"):
+        baseline.add_module_pattern_baselines(output, [_module()])
 
 
 def test_baselines_only_reference_known_high_risk_nodes(compact_native):

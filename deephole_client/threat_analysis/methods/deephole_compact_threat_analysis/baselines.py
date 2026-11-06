@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 from threat_analysis_harness.output_validation import validate_json_schema
 from threat_analysis_harness.schemas import FINAL_ATTACK_TREE_SCHEMA
+from threat_analysis_harness.validate_attack_tree import validate_patterns
 
 
 BASELINE_PATTERN_IDS = (
@@ -112,4 +113,5 @@ def add_module_pattern_baselines(
             supplemented.setdefault("unassigned_module_pattern_baselines", []).append(record)
 
     validate_json_schema(supplemented, FINAL_ATTACK_TREE_SCHEMA)
+    validate_patterns(supplemented)
     return supplemented

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 
 from threat_analysis_harness.stages.base import SUCCEEDED, TaskJson, TaskResultJson
+from threat_analysis_harness import validate_attack_tree as tree_validation
 
 
 TaskAgentCapability = Literal["low", "high"]
@@ -68,6 +69,35 @@ class TaskAgentSubmitter:
         started_at = time.time()
         output_path = Path(str(task["output_path"]))
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        file_output = task.get("task_type") == "attack_tree_by_asset"
+        output_schema = _task_output_schema(task)
+        validation_options: dict[str, Any] = {}
+        if file_output:
+            if output_schema is None:
+                raise ValueError("Attack tree file output requires a task schema")
+            # Resume has already selected reusable files. A new task must not
+            # succeed by reading a leftover output; same-Session repairs edit it.
+            if not task.get("session_id"):
+                output_path.unlink(missing_ok=True)
+            schema_path = output_path.with_suffix(output_path.suffix + ".schema.json").resolve()
+            schema_path.write_text(json.dumps(output_schema, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            async def validate_artifact() -> str | None:
+                try:
+                    await tree_validation.validate_file_async(output_path.resolve(), schema_path)
+                    # Check the host schema too; the model cannot edit this copy.
+                    tree_validation.validate_file(output_path, output_schema)
+                except Exception as exc:
+                    return str(exc) or type(exc).__name__
+                return None
+
+            validation_options = {
+                "readable_paths": (Path(tree_validation.__file__).resolve().parent,),
+                "allowed_bash_commands": (tree_validation.validation_command(output_path.resolve(), schema_path),),
+                "bash_command_match_mode": "bound_python_script",
+                "post_session_validator": validate_artifact,
+                "post_session_validation_retry_count": 1,
+            }
         prompt = build_task_agent_prompt(task)
         prompt_path = output_path.with_suffix(output_path.suffix + ".prompt.txt")
         raw_output_path = output_path.with_suffix(output_path.suffix + ".raw.txt")
@@ -78,7 +108,6 @@ class TaskAgentSubmitter:
         if runner is None:
             from task_agent import run_opencode_task as runner
 
-        output_schema = _task_output_schema(task)
         try:
             result = await runner(
                 task_name=str(task["task_id"]),
@@ -88,13 +117,14 @@ class TaskAgentSubmitter:
                     task,
                     default=self.required_capability,
                 ),
-                output_schema=output_schema,
-                json_repair_output_prompt=task.get("json_repair_output_prompt"),
+                output_schema=None if file_output else output_schema,
+                json_repair_output_prompt=None if file_output else task.get("json_repair_output_prompt"),
                 invalid_json_retry_count=int(
                     task.get("invalid_json_retry_count", self.invalid_json_retry_count)
                 ),
                 session_id=task.get("session_id"),
                 config_path=self.config_path,
+                **validation_options,
             )
         except Exception as exc:
             finished_at = time.time()
@@ -140,7 +170,18 @@ class TaskAgentSubmitter:
             )
 
         output = getattr(result, "structured", None)
-        if output_schema is not None and output is None:
+        if file_output:
+            try:
+                output = tree_validation.validate_file(output_path, output_schema)
+            except ValueError as exc:
+                log_path.write_text(str(exc), encoding="utf-8")
+                return _result_json(
+                    task, status=_FAILED, output_path=output_path,
+                    started_at=started_at, finished_at=finished_at, error=str(exc),
+                    returncode=1, model=model, log_path=log_path,
+                    raw_output=str(getattr(result, "text", "") or ""), metadata=metadata,
+                )
+        elif output_schema is not None and output is None:
             error = "task_agent returned success without schema-validated structured output"
             log_path.write_text(error, encoding="utf-8")
             return _result_json(
@@ -156,13 +197,14 @@ class TaskAgentSubmitter:
                 raw_output=str(getattr(result, "text", "") or ""),
                 metadata=metadata,
             )
-        if output_schema is None:
+        if not file_output and output_schema is None:
             output = _parse_json_or_text(str(getattr(result, "text", "") or ""))
 
-        output_path.write_text(
-            json.dumps(output, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        if not file_output:
+            output_path.write_text(
+                json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         log_path.write_text(
             json.dumps(
                 {
@@ -207,6 +249,23 @@ def build_task_agent_prompt(task: Mapping[str, Any]) -> str:
     """Build an initial skill invocation or a plain same-session continuation prompt."""
 
     runtime_prompt = str(task.get("runtime_prompt") or "").strip()
+    if task.get("task_type") == "attack_tree_by_asset":
+        output_path = Path(str(task["output_path"])).resolve()
+        schema_path = output_path.with_suffix(output_path.suffix + ".schema.json")
+        command = tree_validation.validation_command(output_path, schema_path)
+        runtime_prompt += (
+            f"\n\n攻击树文件输出要求（含当前 Session 的纠正）：\n"
+            f"读取任务 Schema：{schema_path}\n"
+            f"唯一模式库：{tree_validation.CATALOG_PATH}\n"
+            f"将完整攻击树 JSON 写入：{output_path}\n"
+            "pattern_id 与 pattern_name 必须成对原样匹配模式库，同一路径不得重复；"
+            "无适用模式时允许空数组。只修改指定输出文件，不得修改 Schema 或模式库。"
+            "聊天回复只需简短说明完成，不得用回复中的 JSON 代替文件。\n"
+            f"写完后可执行以下命令自检：\n{command}\n"
+            "自检命令必须逐字复制，不得改变参数或拼接其他命令。"
+            "是否执行自检不作为完成条件；宿主会独立运行 Python 校验。"
+            "校验失败时根据反馈在当前 Session 修正同一文件。"
+        )
     if task.get("invoke_skill") is False:
         if not runtime_prompt:
             raise ValueError("task runtime_prompt is required when skill invocation is disabled")

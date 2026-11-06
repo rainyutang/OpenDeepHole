@@ -55,12 +55,19 @@ def existing_success_result(
     if not Path(output_path).exists():
         return None
 
-    try:
-        output = json.loads(Path(output_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if validate_output_schema and not _matches_task_output_schema(output, task):
-        return None
+    if task.get("task_type") == "attack_tree_by_asset":
+        from threat_analysis_harness.validate_attack_tree import validate_file
+        try:
+            output = validate_file(Path(output_path), task["output_schema"])
+        except (ValueError, OSError, KeyError):
+            return None
+    else:
+        try:
+            output = json.loads(Path(output_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if validate_output_schema and not _matches_task_output_schema(output, task):
+            return None
 
     now = time.time()
     return {
