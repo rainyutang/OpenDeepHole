@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import re
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from backend.threat_data import parse_threat_analysis_data
+from backend.threat_coverage import analysis_targets
 from deephole_client.process_artifacts import collect_json_artifacts
 from deephole_client.threat_analysis import THREAT_ANALYSIS_METHODS_DIR
 from deephole_client.threat_analysis_runner import _load_implementation
@@ -40,7 +42,8 @@ def test_compact_method_preserves_original_implementation_and_prompts():
         relative.replace(SKILL_PREFIX, ""): path
         for relative, path in _method_files(COMPACT_ROOT).items()
     }
-    assert compact_files.keys() == original_files.keys()
+    assert compact_files.keys() - original_files.keys() == {"baselines.py"}
+    assert original_files.keys() - compact_files.keys() == set()
     attack_skill = "skills/attack-trees/attack-tree-by-asset/"
     for relative, original in original_files.items():
         if relative in {
@@ -49,10 +52,17 @@ def test_compact_method_preserves_original_implementation_and_prompts():
             attack_skill + "references/attack_mode.json",
         }:
             continue
-        # The clone may change Skill identities, but not business behavior.
-        assert compact_files[relative].read_bytes().replace(
-            SKILL_PREFIX.encode(), b""
-        ) == original.read_bytes(), relative
+        compact_content = compact_files[relative].read_bytes().replace(SKILL_PREFIX.encode(), b"")
+        if relative == "schemas.py":
+            compact_content = compact_content.split(b"\n\n# Final artifacts extend")[0].rstrip(b"\n") + b"\n"
+        if relative == "stages/attack_trees.py":
+            compact_content = compact_content.replace(
+                b"from threat_analysis_harness.baselines import add_module_pattern_baselines\n", b"",
+            ).replace(
+                b"        combined = add_module_pattern_baselines(combined, high_risk_modules)\n", b"",
+            )
+        # All original behavior is preserved apart from the final baseline extension.
+        assert compact_content == original.read_bytes(), relative
 
 
 def test_compact_catalog_is_an_exact_copy_of_the_51_mode_library():
@@ -189,7 +199,7 @@ def _attack_tree(task_id, asset, module, module_id, patterns):
     }
 
 
-@pytest.mark.parametrize("pattern_count", [0, 1, 3])
+@pytest.mark.parametrize("pattern_count", [0, 1, 3, 16, 51])
 def test_native_pipeline_artifacts_and_resume_preserve_actual_pattern_count(
     tmp_path, compact_native, monkeypatch, pattern_count,
 ):
@@ -281,9 +291,21 @@ def test_native_pipeline_artifacts_and_resume_preserve_actual_pattern_count(
         assert all("module_id" not in node for node in tree["nodes"])
         assert all("module_id" not in item for item in tree["attack_paths"][0]["related_high_risk_modules"])
     targets = _build_targets(tree_output, [module], fallback_code_path=code_root)
-    assert len(targets) == pattern_count
-    assert {target["pattern_id"] for target in targets} == {pattern["pattern_id"] for pattern in patterns}
-    assert [target["pattern_description"] for target in targets] == [mode["攻击模式描述"] for mode in modes]
+    baselines = importlib.import_module(native.__name__ + ".baselines")
+    expected_ids = set(baselines.BASELINE_PATTERN_IDS) | {pattern["pattern_id"] for pattern in patterns}
+    assert len(targets) == len(expected_ids)
+    assert {target["pattern_id"] for target in targets} == expected_ids
+    catalog = {"、".join(mode["攻击模式编号"]): mode for mode in json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))}
+    assert all(target["pattern_description"] == catalog[target["pattern_id"]]["攻击模式描述"] for target in targets)
+    missing_ids = set(baselines.BASELINE_PATTERN_IDS) - {pattern["pattern_id"] for pattern in patterns}
+    records = tree_output["attack_trees"][0].get("module_pattern_baselines", [])
+    assert {pattern["pattern_id"] for record in records for pattern in record["attack_patterns"]} == missing_ids
+    assert len(records) == (1 if missing_ids else 0)
+    assert all("module_pattern_baselines" not in tree for tree in tree_output["attack_trees"][1:])
+    coverage_targets = analysis_targets(tree_output, [module], str(code_root))
+    assert {(target["module_name"], target["pattern_id"], tuple(target["paths"])) for target in coverage_targets} == {
+        (target["module_name"], target["pattern_id"], tuple(target["code_paths"])) for target in targets
+    }
 
     def fail_if_called(*args, **kwargs):
         pytest.fail("Completed native artifacts should be reused without model tasks")
@@ -291,3 +313,151 @@ def test_native_pipeline_artifacts_and_resume_preserve_actual_pattern_count(
     monkeypatch.setattr(native.TaskAgentSubmitter, "submit_tasks", fail_if_called)
     assert native.run_threat_analysis(code_root, output_root, is_resume=True) == result
     assert collect_json_artifacts(result, output_root=output_root) == bundle
+
+
+def _completed_tree(native, *, task_id="tree", module=None, patterns=None):
+    module = module or _module()
+    trees = importlib.import_module(native.__name__ + ".stages.attack_trees")
+    return trees.normalize_attack_tree_output(
+        _attack_tree(task_id, _assets()[0], module, trees._stable_high_risk_module_id(module), patterns or []),
+        value_asset=_assets()[0], high_risk_modules=[module],
+    )
+
+
+def test_baselines_preserve_graph_and_select_first_module_host_globally(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    first = _completed_tree(compact_native)
+    second = _completed_tree(compact_native, task_id="second", patterns=[{
+        "pattern_id": "ODH-NATIVE-01", "pattern_name": "AI 原始名称",
+        "association_description": "AI 原始关系说明。",
+    }])
+    # Separate asset tasks are allowed to reuse tree IDs.
+    second["attack_trees"][0]["tree_id"] = first["attack_trees"][0]["tree_id"]
+    original = {"attack_trees": first["attack_trees"] + second["attack_trees"]}
+    before = copy.deepcopy(original)
+    result = baseline.add_module_pattern_baselines(original, [_module()])
+    assert original == before
+    record = result["attack_trees"][0].pop("module_pattern_baselines")[0]
+    assert record["module_name"] == _module()["模块名称"]
+    assert record["node_id"] == "tree-leaf"
+    assert record["source"] == "compact_baseline"
+    assert {pattern["pattern_id"] for pattern in record["attack_patterns"]} == set(baseline.BASELINE_PATTERN_IDS) - {"ODH-NATIVE-01"}
+    assert result == original
+
+
+def test_baselines_cover_internal_and_unassigned_modules_without_creating_paths(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    output = _completed_tree(compact_native)
+    internal = {**_module(), "模块名称": "内部缓存模块", "是否外部暴露面": "否"}
+    unassigned = {**_module(), "模块名称": "未关联资产模块", "是否外部暴露面": "否"}
+    tree = output["attack_trees"][0]
+    node = {**tree["nodes"][1], "node_id": "internal", "node_type": "内部节点",
+            "module_name": internal["模块名称"], "node_name": internal["模块名称"],
+            "external_exposure": False, "external_interface_description": None}
+    tree["nodes"].append(node)
+    tree["edges"][0]["target_node_id"] = "internal"
+    tree["edges"].append({**tree["edges"][0], "edge_id": "internal-edge", "source_node_id": "internal", "target_node_id": "tree-root"})
+    path = tree["attack_paths"][0]
+    path["node_ids"].insert(1, "internal")
+    path["edge_ids"].append("internal-edge")
+    path["related_high_risk_modules"].append({
+        "module_name": internal["模块名称"], "node_id": "internal", "external_exposure": False,
+        "path_role": "内部影响模块", "association_description": "处理入口数据。",
+    })
+    result = baseline.add_module_pattern_baselines(output, [_module(), internal, unassigned])
+    records = result["attack_trees"][0].pop("module_pattern_baselines")
+    assert [(item["module_name"], item["node_id"]) for item in records] == [(_module()["模块名称"], "tree-leaf"), (internal["模块名称"], "internal")]
+    unassigned_record = result.pop("unassigned_module_pattern_baselines")[0]
+    assert unassigned_record["module_name"] == unassigned["模块名称"]
+    assert unassigned_record["node_id"] is None
+    assert all(len(item["attack_patterns"]) == 15 for item in records + [unassigned_record])
+    assert result == output
+
+
+def test_baselines_handle_empty_trees_and_are_idempotent(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    empty = {"attack_trees": []}
+    assert baseline.add_module_pattern_baselines(empty, []) == empty
+    result = baseline.add_module_pattern_baselines(empty, [_module()])
+    assert result["attack_trees"] == []
+    record = result["unassigned_module_pattern_baselines"][0]
+    assert record["node_id"] is None
+    assert len(record["attack_patterns"]) == 15
+    assert baseline.add_module_pattern_baselines(result, [_module()]) == result
+    assigned = baseline.add_module_pattern_baselines(_completed_tree(compact_native), [_module()])
+    assert baseline.add_module_pattern_baselines(assigned, [_module()]) == assigned
+
+
+def test_baselines_use_private_catalog_and_leave_fully_covered_module_unchanged(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    catalog = {"、".join(mode["攻击模式编号"]): mode for mode in json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))}
+    result = baseline.add_module_pattern_baselines({"attack_trees": []}, [_module()])
+    patterns = result["unassigned_module_pattern_baselines"][0]["attack_patterns"]
+    assert [item["pattern_id"] for item in patterns] == [*(f"ODH-NATIVE-{i:02d}" for i in range(1, 12)), "ODH-SYS-08", "ODH-SYS-09", "ODH-SYS-12", "ODH-SYS-13"]
+    for pattern in patterns:
+        mode = catalog[pattern["pattern_id"]]
+        assert pattern["pattern_name"] == mode["攻击模式名称"]
+        assert mode["攻击模式描述"] in pattern["association_description"]
+        assert "不表示已确认" in pattern["association_description"]
+    output = _completed_tree(compact_native, patterns=patterns)
+    assert baseline.add_module_pattern_baselines(output, [_module()]) == output
+
+
+def test_baselines_replace_unconsumable_ai_pattern_with_blank_name(tmp_path, compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    output = _completed_tree(compact_native, patterns=[{
+        "pattern_id": "ODH-NATIVE-01", "pattern_name": "   ",
+        "association_description": "AI 返回了空白名称。",
+    }])
+    result = baseline.add_module_pattern_baselines(output, [_module()])
+    # Preserve the raw AI pattern, but do not let it suppress a usable fixed audit.
+    assert result["attack_trees"][0]["attack_paths"] == output["attack_trees"][0]["attack_paths"]
+    targets = _build_targets(result, [_module()], fallback_code_path=tmp_path)
+    coverage_targets = analysis_targets(result, [_module()], str(tmp_path))
+    assert len(targets) == len(coverage_targets) == 15
+    assert {item["pattern_id"] for item in targets} == set(baseline.BASELINE_PATTERN_IDS)
+    assert {item["pattern_id"] for item in coverage_targets} == set(baseline.BASELINE_PATTERN_IDS)
+
+
+def test_baselines_only_reference_known_high_risk_nodes(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    output = _completed_tree(compact_native)
+    output["attack_trees"][0]["nodes"][1]["is_high_risk_module"] = False
+    result = baseline.add_module_pattern_baselines(output, [_module()])
+    assert "module_pattern_baselines" not in result["attack_trees"][0]
+    assert result["unassigned_module_pattern_baselines"][0]["node_id"] is None
+    assert baseline.add_module_pattern_baselines(output, []) == output
+
+
+def test_final_baseline_schema_is_separate_from_ai_task_schema(compact_native):
+    baseline = importlib.import_module(compact_native.__name__ + ".baselines")
+    schemas = importlib.import_module(compact_native.__name__ + ".schemas")
+    validator = importlib.import_module(compact_native.__name__ + ".output_validation")
+    errors = importlib.import_module(compact_native.__name__ + ".errors")
+    result = baseline.add_module_pattern_baselines(_completed_tree(compact_native), [_module()])
+    validator.validate_json_schema(result, schemas.FINAL_ATTACK_TREE_SCHEMA)
+    with pytest.raises(errors.OutputSchemaValidationError, match="additional properties"):
+        validator.validate_json_schema(result, schemas.ATTACK_TREE_SCHEMA)
+    result["attack_trees"][0]["module_pattern_baselines"][0]["node_id"] = None
+    with pytest.raises(errors.OutputSchemaValidationError):
+        validator.validate_json_schema(result, schemas.FINAL_ATTACK_TREE_SCHEMA)
+
+
+def test_pipeline_without_assets_still_produces_unassigned_baselines(tmp_path, compact_native, monkeypatch):
+    def submit_tasks(_submitter, tasks, *, timeout=None):
+        results = []
+        for task in tasks:
+            output = [] if task["task_type"] == "value_asset_map" else [_module()]
+            Path(task["output_path"]).write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
+            results.append({"task_id": task["task_id"], "task_type": task["task_type"], "status": "succeeded",
+                            "output_path": task["output_path"], "output": output, "metadata": task["metadata"]})
+        return results
+
+    monkeypatch.setattr(compact_native.TaskAgentSubmitter, "submit_tasks", submit_tasks)
+    code_root = tmp_path / "source"
+    code_root.mkdir()
+    result = compact_native.run_threat_analysis(code_root, tmp_path / "analysis")
+    assert result["result"] is True, result
+    artifact = json.loads(Path(result["attack_tree_path"]).read_text(encoding="utf-8"))
+    assert artifact["attack_trees"] == []
+    assert len(artifact["unassigned_module_pattern_baselines"][0]["attack_patterns"]) == 15

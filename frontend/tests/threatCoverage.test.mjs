@@ -149,6 +149,29 @@ async function mount(scanId = "s", extra = {}, viewport = { width: 960, height: 
   return root;
 }
 
+test("fixed audit sources cover standalone modules and retain their distinct provenance", async () => {
+  const data = fixture();
+  data.targets.push({
+    id: "baseline", module_name: "单文件模块", pattern_id: "ODH-NATIVE-01", pattern_name: "越界写入破坏内存状态",
+    paths: ["src/authentication.c"], mapped_paths: ["authentication.c"], fallback: false,
+    sources: [{ source_kind: "compact_baseline", node_id: null, tree_id: "", path_id: "", path_name: "固定审计", description: "系统补充的模块审计范围。" }],
+  });
+  const tree = buildCoverageTree(data);
+  assert.equal(tree.byPath.get("authentication.c").covered, 1);
+  assert.equal(tree.byPath.get("authentication.c").riskOnly, 0);
+  installApi(data);
+  const root = await mount();
+  const detail = section(root, "路径覆盖详情");
+  const baseline = detail.findAllByType("details").find((item) => text(item).includes("越界写入破坏内存状态"));
+  assert.ok(baseline);
+  assert.match(text(baseline), /固定审计.*系统补充的模块审计范围/);
+  assert.doesNotMatch(text(baseline), /攻击路径|产物未提供关联说明/);
+  const label = baseline.findByProps({ className: "baseline-audit-label" });
+  await act(async () => label.props.onFocus());
+  assert.match(text(baseline.findByProps({ role: "tooltip" })), /是否存在问题由审计确认/);
+  assert.ok(root.root.findAllByType("option").some((item) => item.props.value === "ODH-NATIVE-01"));
+});
+
 function issueData(files) {
   return { inventory_snapshot_id: "snapshot", total_issue_count: files.reduce((n, file) => n + file.issues.length, 0), files,
     unmapped_count: 0, unmapped: [] };

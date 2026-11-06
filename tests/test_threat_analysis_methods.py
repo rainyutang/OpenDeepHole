@@ -69,7 +69,7 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
         {
             "method_id": "deephole_compact_threat_analysis",
             "label": "DeepHole精简威胁分析",
-            "description": "沿用 DeepHole 的资产、模块识别流程，使用 51 种攻击模式生成攻击树。",
+            "description": "沿用 DeepHole 的资产、模块识别流程，使用 51 种攻击模式生成攻击树，并为每个高风险模块补齐 15 项固定审计模式。",
         },
         {
             "method_id": "opencode_coverage_guided_lightweight_threat_analysis",

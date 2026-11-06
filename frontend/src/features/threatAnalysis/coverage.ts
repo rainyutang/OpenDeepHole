@@ -26,7 +26,11 @@ export interface CoverageTarget {
   scan_relative_paths?: string[];
   mapped_paths: string[];
   fallback: boolean;
-  sources: Array<{ tree_id: string; path_id: string; path_name: string; description: string }>;
+  sources: Array<{
+    tree_id: string; path_id: string; path_name: string; description: string;
+    source_kind?: "compact_baseline";
+    node_id?: string | null;
+  }>;
 }
 export interface ThreatCoverage {
   inventory: CoverageInventory | null;

@@ -118,6 +118,51 @@ def test_target_derivation_matches_existing_engine_without_changing_it():
     assert len(actual[0]["sources"]) == 1
 
 
+@pytest.mark.parametrize("empty_trees", [False, True])
+def test_fixed_audit_targets_match_engine_and_preserve_module_provenance(empty_trees):
+    bundle = analysis()
+    trees = bundle["artifacts"]["attack_tree_path"]["content"]
+    modules = bundle["artifacts"]["high_risk_modules_path"]["content"]
+
+    def baseline(name, pattern_id="FIXED", node_id=None):
+        return {"module_name": name, "node_id": node_id, "source": "compact_baseline",
+                "attack_patterns": [{"pattern_id": pattern_id, "pattern_name": "固定检查",
+                                     "association_description": "预设检查项，尚未确认风险"}]}
+
+    if empty_trees:
+        trees["attack_trees"] = []
+        trees["unassigned_module_pattern_baselines"] = [baseline("认证"), baseline("其它")]
+    else:
+        tree = trees["attack_trees"][0]
+        tree["nodes"][0]["node_type"] = "内部节点"
+        tree["module_pattern_baselines"] = [baseline("认证", node_id="auth"), baseline("认证", "AUTH-1", "auth")]
+        # A second tree/source still creates only one module/pattern audit target.
+        trees["attack_trees"].append({"tree_id": "tree-2", "module_pattern_baselines": [baseline("认证", node_id="internal")]})
+        trees["unassigned_module_pattern_baselines"] = [baseline("其它")]
+    trees["unassigned_module_pattern_baselines"].extend([
+        baseline("未知模块"), {**baseline("认证", "WRONG-SOURCE"), "source": "ai"},
+        {**baseline("认证", "INVALID"), "attack_patterns": "not-a-list"}, None,
+    ])
+    expected = _build_targets(trees, modules, fallback_code_path=Path("/project/src"))
+    actual = analysis_targets(trees, modules, "/project/src")
+    assert [{"module_name": target["module_name"], "code_paths": target["paths"],
+             "pattern_id": target["pattern_id"], "pattern_name": target["pattern_name"]}
+            for target in actual] == [{key: target[key] for key in ("module_name", "code_paths", "pattern_id", "pattern_name")}
+                                      for target in expected]
+    assert len(actual) == (2 if empty_trees else 3)
+    by_pair = {(target["module_name"], target["pattern_id"]): target for target in actual}
+    orphan_source = by_pair["其它", "FIXED"]["sources"]
+    assert orphan_source == [{"source_kind": "compact_baseline", "tree_id": "", "path_id": "",
+                              "path_name": "固定审计", "description": "预设检查项，尚未确认风险"}]
+    if not empty_trees:
+        assert by_pair["认证", "FIXED"]["sources"][0] == {
+            **orphan_source[0], "tree_id": "tree-1", "node_id": "auth"}
+        assert len(by_pair["认证", "AUTH-1"]["sources"]) == 2  # AI and fixed provenance coexist.
+    data = build_threat_coverage(inventory(), bundle)
+    assert {target["module_name"]: target["mapped_paths"] for target in data["targets"]} == {
+        "认证": ["auth", "auth/a.c"], "其它": ["authentication.c"]}
+
+
 @pytest.mark.parametrize("project,root,module_path", [
     ("/project", "/project/src", "src/auth"),
     ("/project", "/project/src", "/project/src/auth"),

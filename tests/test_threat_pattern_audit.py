@@ -388,6 +388,86 @@ def test_targets_are_deduplicated_by_module_and_pattern(tmp_path: Path) -> None:
     }]
 
 
+def _module_baseline(name, *patterns, node_id=None):
+    return {"module_name": name, "node_id": node_id, "source": "compact_baseline",
+            "attack_patterns": [{"pattern_id": pattern, "pattern_name": pattern,
+                                 "association_description": "固定补充检查"} for pattern in patterns]}
+
+
+def test_baselines_bind_one_module_and_deduplicate_against_ai_and_other_trees(tmp_path):
+    baseline = _module_baseline("内部模块", "existing", "fixed", node_id="internal")
+    data = {"attack_trees": [{
+        "nodes": [{"node_id": "internal", "node_type": "内部节点", "module_name": "内部模块",
+                   "is_high_risk_module": True}],
+        "attack_paths": [{"related_high_risk_modules": [{"module_name": "内部模块"}, {"module_name": "入口"}],
+                          "attack_patterns": [{"pattern_id": "existing", "pattern_name": "AI已有"}]}],
+        "module_pattern_baselines": [baseline],
+    }, {"module_pattern_baselines": [baseline]}],
+        "unassigned_module_pattern_baselines": [_module_baseline("孤立模块", "fixed"),
+                                                _module_baseline("未知模块", "fixed")]}
+    modules = [{"模块名称": name, "代码目录": f"src/{index}"}
+               for index, name in enumerate(["内部模块", "入口", "孤立模块"])]
+    targets = engine._build_targets(data, modules, fallback_code_path=tmp_path)
+    by_pair = {(target["module_name"], target["pattern_id"]): target for target in targets}
+    assert set(by_pair) == {("内部模块", "existing"), ("入口", "existing"),
+                            ("内部模块", "fixed"), ("孤立模块", "fixed")}
+    assert len(targets) == len(by_pair)
+    assert by_pair["内部模块", "existing"]["pattern_name"] == "AI已有"
+    assert by_pair["内部模块", "fixed"]["code_paths"] == ["src/0"]
+    assert engine._task_id("scan", by_pair["内部模块", "existing"]) == engine._task_id(
+        "scan", {"module_name": "内部模块", "pattern_id": "existing", "pattern_name": "renamed"})
+
+
+def test_baselines_with_empty_trees_intersect_scope_and_ignore_unknown_modules(tmp_path):
+    from deephole_client.scan_paths import resolve_scan_scope
+
+    source = tmp_path / "src"
+    source.mkdir()
+    selected, other = source / "selected.c", source / "other.c"
+    selected.write_text("int selected;\n")
+    other.write_text("int other;\n")
+    scope = resolve_scan_scope(tmp_path, code_scan_paths=[selected])
+    modules = [{"模块名称": "包含模块", "代码目录": "src"},
+               {"模块名称": "排除模块", "代码目录": "src/other.c"},
+               {"模块名称": "空路径模块", "代码目录": []}]
+    data = {"attack_trees": [], "unassigned_module_pattern_baselines": [
+        _module_baseline(name, "fixed") for name in ["包含模块", "排除模块", "空路径模块", "未知模块"]]}
+    targets = engine._build_targets(data, modules, fallback_code_path=tmp_path, scan_scope=scope)
+    assert {target["module_name"] for target in targets} == {"包含模块", "空路径模块"}
+    assert all(target["code_paths"] == [str(selected)] for target in targets)
+    assert engine._build_targets(data, [], fallback_code_path=tmp_path) == []
+
+
+def test_baseline_only_tasks_execute_once_and_reuse_successful_results(tmp_path, monkeypatch):
+    tree, modules = _artifacts(tmp_path)
+    data = {"attack_trees": [], "unassigned_module_pattern_baselines": [
+        _module_baseline("认证模块", "fixed", "fixed"), _module_baseline("未知模块", "fixed")]}
+    tree.write_text(json.dumps(data), encoding="utf-8")
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    calls = []
+
+    async def invoke(**values):
+        calls.append(values["task_name"])
+        await _write_task_result(work, values, [])
+        return OpenCodeResult(status="success", text="", session_id="baseline", structured=None,
+                              model="test/model", output_source={"model": "test/model"})
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    kwargs = dict(engine_id="threat_pattern_audit", scan_id="baseline", project_path=tmp_path,
+                  code_scan_path=tmp_path, work_dir=work, reporter=reporter, cancel_event=threading.Event(),
+                  config=SimpleNamespace(opencode_concurrency=1),
+                  threat_analysis_result={"result": True, "attack_tree_path": str(tree),
+                                          "high_risk_modules_path": str(modules)})
+    first = asyncio.run(engine.run(**kwargs))
+    second = asyncio.run(engine.run(is_resume=True, **kwargs))
+    assert first["status"] == second["status"] == "success"
+    assert first["total_candidates"] == second["total_candidates"] == 1
+    assert len(calls) == 1
+    assert len(reporter.tasks) == 1
+    assert next(iter(reporter.tasks.values())).status == "completed"
+
+
 @pytest.mark.parametrize("reply", ["审计完成", "[]"])
 def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, reply: str) -> None:
     project_path = tmp_path / "project"

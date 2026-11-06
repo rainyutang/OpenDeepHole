@@ -29,6 +29,7 @@
     "test:threat-coverage": "node tests/threatCoverage.test.mjs",
     "benchmark:threat-coverage": "node scripts/benchmarkThreatCoverage.mjs",
     "test:threat-module-paths": "node tests/threatModulePaths.test.mjs",
+    "test:threat-baseline-patterns": "node tests/threatBaselinePatterns.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

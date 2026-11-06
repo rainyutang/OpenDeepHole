@@ -4,6 +4,7 @@ import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
   NativeThreatHighRiskModule,
+  NativeThreatModulePatternBaseline,
   NativeThreatTreeNode,
   NativeThreatValueAsset,
   ScanEvent,
@@ -12,6 +13,7 @@ import type {
 import { moduleSourcePaths, scanRelativePaths } from "./coverage";
 import type { ThreatCoverage } from "./coverage";
 import { useThreatCoverage } from "./useThreatCoverage";
+import { BaselineAuditLabel } from "./BaselineAuditLabel";
 import "./ThreatAnalysisPanel.css";
 
 interface ThreatAnalysisPanelProps {
@@ -125,6 +127,10 @@ export function ThreatAnalysisPanel({
     "high_risk_modules_path",
   );
   const trees = attackTreesFromAnalysis(analysis);
+  const attackTreeArtifact = artifactContent(analysis, "attack_tree_path");
+  const unassignedBaselines = isRecord(attackTreeArtifact)
+    ? recordItems<NativeThreatModulePatternBaseline>(attackTreeArtifact.unassigned_module_pattern_baselines)
+    : [];
   const internalNodes = useMemo(() => collectInternalNodes(trees), [trees]);
 
   if (!analysis) {
@@ -235,7 +241,7 @@ export function ThreatAnalysisPanel({
           {resultTab === "valueAssets" && <ValueAssetsTable assets={assets} />}
           {resultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} coverage={coverageState.data} pathError={coverageState.error} />}
           {resultTab === "internalNodes" && <InternalNodesTable nodes={internalNodes} />}
-          {resultTab === "attackTrees" && <AttackTrees trees={trees} />}
+          {resultTab === "attackTrees" && <AttackTrees trees={trees} unassignedBaselines={unassignedBaselines} />}
         </section>
       </section>
 
@@ -486,8 +492,11 @@ function collectInternalNodes(
   return nodes;
 }
 
-function AttackTrees({ trees }: { trees: NativeThreatAttackTree[] }) {
-  if (trees.length === 0) {
+function AttackTrees({ trees, unassignedBaselines }: {
+  trees: NativeThreatAttackTree[];
+  unassignedBaselines: NativeThreatModulePatternBaseline[];
+}) {
+  if (trees.length === 0 && unassignedBaselines.length === 0) {
     return <ViewerEmptyBlock text="暂无攻击树" />;
   }
 
@@ -500,6 +509,7 @@ function AttackTrees({ trees }: { trees: NativeThreatAttackTree[] }) {
           index={index}
         />
       ))}
+      <ModuleBaselinePanel groups={unassignedBaselines} title="未关联攻击路径的高风险模块" />
     </div>
   );
 }
@@ -553,6 +563,7 @@ function AttackTreeView({
       {leafPatternGroups.length > 0 && (
         <LeafPatternPanel groups={leafPatternGroups} />
       )}
+      <ModuleBaselinePanel groups={recordItems<NativeThreatModulePatternBaseline>(tree.module_pattern_baselines)} />
     </article>
   );
 }
@@ -799,6 +810,24 @@ function LeafPatternPanel({ groups }: { groups: LeafPatternGroup[] }) {
       </div>
     </section>
   );
+}
+
+function ModuleBaselinePanel({ groups, title = "高风险模块固定审计模式" }: {
+  groups: NativeThreatModulePatternBaseline[];
+  title?: string;
+}) {
+  if (!groups.length) return null;
+  return <section className="threat-analysis-viewer__leaf-patterns" aria-label={title}>
+    <h4>{title}<BaselineAuditLabel /></h4>
+    <div className="threat-analysis-viewer__leaf-pattern-list">
+      {groups.map((group, index) => <section key={`${group.module_name}-${group.node_id ?? "unassigned"}-${index}`}
+        className="threat-analysis-viewer__leaf-pattern-row">
+        <h5>{group.module_name}</h5>
+        <ul>{recordItems<NativeThreatModulePatternBaseline["attack_patterns"][number]>(group.attack_patterns)
+          .map((pattern) => <li key={pattern.pattern_id || pattern.pattern_name}>{pattern.pattern_name}</li>)}</ul>
+      </section>)}
+    </div>
+  </section>;
 }
 
 function ViewerEmptyBlock({ text }: { text: string }) {

@@ -243,3 +243,36 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
     },
     "additionalProperties": False,
 }
+
+
+# Final artifacts extend the AI output without changing its task schema.
+def _final_attack_tree_schema() -> dict[str, Any]:
+    from copy import deepcopy
+
+    schema = deepcopy(ATTACK_TREE_SCHEMA)
+    schema["properties"]["attack_trees"]["minItems"] = 0
+    baseline = {
+        "type": "object",
+        "required": ["module_name", "node_id", "source", "attack_patterns"],
+        "properties": {
+            "module_name": NON_EMPTY_STRING,
+            "node_id": NON_EMPTY_STRING,
+            "source": {"const": "compact_baseline"},
+            "attack_patterns": {
+                "type": "array", "minItems": 1, "items": ATTACK_PATTERN_SCHEMA,
+            },
+        },
+        "additionalProperties": False,
+    }
+    schema["properties"]["attack_trees"]["items"]["properties"]["module_pattern_baselines"] = {
+        "type": "array", "items": baseline,
+    }
+    unassigned = deepcopy(baseline)
+    unassigned["properties"]["node_id"] = {"type": "null"}
+    schema["properties"]["unassigned_module_pattern_baselines"] = {
+        "type": "array", "items": unassigned,
+    }
+    return schema
+
+
+FINAL_ATTACK_TREE_SCHEMA = _final_attack_tree_schema()

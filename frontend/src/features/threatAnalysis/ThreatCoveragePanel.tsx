@@ -4,6 +4,7 @@ import type { CoverageIssues, CoverageNode, ThreatCoverage } from "./coverage";
 import { buildCoverageIssueOverlay, coverageIssueRows, coveragePercent, createCoverageMatcher, scanRelativePaths } from "./coverage";
 import { CoverageTreemap } from "./CoverageTreemap";
 import { useCoverageIssues, useThreatCoverage } from "./useThreatCoverage";
+import { BaselineAuditLabel } from "./BaselineAuditLabel";
 import "./ThreatCoveragePanel.css";
 
 const ISSUE_LABELS: Record<string, string> = {
@@ -52,8 +53,9 @@ function SelectionDetails({ node, data, issues, issuesLoading, issuesError, onOp
       {target.fallback && <p className="coverage-warning">产物缺少模块路径，按现有目标构建规则回退到扫描根目录。</p>}
       <p className="coverage-paths">{scanRelativePaths(target).join("\n") || "路径无法映射"}</p>
       {target.sources.map((source, index) => <div key={index} className="coverage-source">
-        <strong>{source.path_name || source.path_id || "攻击路径"}</strong>
-        <small>{[source.tree_id, source.path_id].filter(Boolean).join(" / ")}</small>
+        {source.source_kind === "compact_baseline" ? <BaselineAuditLabel />
+          : <strong>{source.path_name || source.path_id || "攻击路径"}</strong>}
+        <small>{[source.tree_id, source.path_id, source.source_kind === "compact_baseline" ? source.node_id : null].filter(Boolean).join(" / ")}</small>
         <p>{source.description || "产物未提供关联说明。"}</p>
       </div>)}
     </details>)}

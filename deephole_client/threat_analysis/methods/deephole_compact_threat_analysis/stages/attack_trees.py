@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from threat_analysis_harness.artifacts import ThreatAnalysisLayout
+from threat_analysis_harness.baselines import add_module_pattern_baselines
 from threat_analysis_harness.errors import ArtifactConsistencyError
 from threat_analysis_harness.output_validation import validate_json_schema
 from threat_analysis_harness.schemas import ATTACK_TREE_SCHEMA
@@ -135,6 +136,7 @@ class AttackTreeStage:
             for index, (asset, result) in enumerate(zip(value_assets, results))
         ]
         combined = combine_attack_tree_outputs(normalized_outputs)
+        combined = add_module_pattern_baselines(combined, high_risk_modules)
         self.layout.write_final_json("attack_trees/final/attack_trees.json", combined)
         return combined
 

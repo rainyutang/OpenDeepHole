@@ -285,6 +285,13 @@ export interface NativeThreatAttackPattern {
   association_description: string;
 }
 
+export interface NativeThreatModulePatternBaseline {
+  module_name: string;
+  node_id: string | null;
+  source: "compact_baseline";
+  attack_patterns: NativeThreatAttackPattern[];
+}
+
 export interface NativeThreatAttackPath {
   path_id: string;
   path_name: string;
@@ -318,6 +325,12 @@ export interface NativeThreatAttackTree {
     description: string;
   }>;
   attack_paths: NativeThreatAttackPath[];
+  module_pattern_baselines?: NativeThreatModulePatternBaseline[];
+}
+
+export interface NativeThreatAttackTreeArtifact {
+  attack_trees: NativeThreatAttackTree[];
+  unassigned_module_pattern_baselines?: NativeThreatModulePatternBaseline[];
 }
 
 export interface ThreatAnalysisArtifact<T = unknown> {
@@ -336,7 +349,7 @@ export interface ThreatAnalysis {
   artifacts: Record<string, ThreatAnalysisArtifact | undefined> & {
     value_asset_path?: ThreatAnalysisArtifact<NativeThreatValueAsset[]>;
     high_risk_modules_path?: ThreatAnalysisArtifact<NativeThreatHighRiskModule[]>;
-    attack_tree_path?: ThreatAnalysisArtifact<{ attack_trees: NativeThreatAttackTree[] }>;
+    attack_tree_path?: ThreatAnalysisArtifact<NativeThreatAttackTreeArtifact>;
   };
 }
 

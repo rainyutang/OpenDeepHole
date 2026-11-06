@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.threat_paths import ModulePathResolver
 from backend.file_inventory import project_file_inventory
+from backend.threat_pattern_baselines import iter_module_pattern_baselines
 
 
 def _text(value: Any) -> str:
@@ -79,6 +80,19 @@ def analysis_targets(attack_tree: dict, modules: list, fallback: str) -> list[di
                     }
                     if source not in targets[key]["sources"]:
                         targets[key]["sources"].append(source)
+    for name, pattern, source in iter_module_pattern_baselines(attack_tree, by_name):
+        pattern_id = _text(pattern.get("pattern_id"))
+        pattern_name = _text(pattern.get("pattern_name")) or pattern_id
+        key = (name, pattern_id or pattern_name)
+        if key not in targets:
+            paths = _module_paths(by_name[name])
+            targets[key] = {
+                "id": hashlib.sha1("\0".join(key).encode()).hexdigest()[:20],
+                "module_name": name, "pattern_id": pattern_id, "pattern_name": pattern_name,
+                "paths": paths or [fallback], "fallback": not paths, "sources": [],
+            }
+        if source not in targets[key]["sources"]:
+            targets[key]["sources"].append(source)
     return list(targets.values())
 
 
