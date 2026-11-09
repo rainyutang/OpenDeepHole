@@ -726,11 +726,12 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
 interface Props {
   scanId: string;
   onBack: () => void;
+  onCopyScan?: (scanId: string) => void;
   sharedView?: boolean;
   navigation?: ScanNavigation;
 }
 
-export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(scanId), navigation }: Props) {
+export default function ScanStatus({ scanId, onBack, onCopyScan, sharedView = isSharedScan(scanId), navigation }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [localRoute, setLocalRoute] = useState(DEFAULT_SCAN_ROUTE);
   const route = navigation?.state ?? localRoute;
@@ -2469,6 +2470,8 @@ export default function ScanStatus({ scanId, onBack, sharedView = isSharedScan(s
             scan_name: scan.scan_name || scan.project_id,
             product: scan.product,
           }) : undefined}
+          onCopy={!sharedView && !isPublicScan(scanId) && scan.can_copy_scan === true && onCopyScan
+            ? () => onCopyScan(scan.scan_id) : undefined}
           onCodeGraphSaved={!sharedView && !isPublicScan(scanId) ? (state) => setScan((previous) => previous?.scan_id === state.scan_id
             ? mergeScanCodeGraph(previous, { ...previous, ...state }) : previous) : undefined}
         />
@@ -3636,11 +3639,13 @@ function ScanInformationPanel({
   scan,
   onClose,
   onEdit,
+  onCopy,
   onCodeGraphSaved,
 }: {
   scan: ScanStatusType;
   onClose: () => void;
   onEdit?: () => void;
+  onCopy?: () => void;
   onCodeGraphSaved?: (state: ScanCodeGraphState) => void;
 }) {
   const [codeGraphSaving, setCodeGraphSaving] = useState(false);
@@ -3704,9 +3709,10 @@ function ScanInformationPanel({
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
           <ScanInformationSection title="基本信息">
-            {onEdit && (
-              <div className="mb-3 flex justify-end">
-                <button type="button" onClick={onEdit} className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800">编辑名称</button>
+            {(onEdit || onCopy) && (
+              <div className="mb-3 flex flex-wrap justify-end gap-2">
+                {onEdit && <button type="button" onClick={onEdit} className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800">编辑名称</button>}
+                {onCopy && <button type="button" onClick={onCopy} className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800">复制扫描</button>}
               </div>
             )}
             <div className="grid gap-3 sm:grid-cols-2">

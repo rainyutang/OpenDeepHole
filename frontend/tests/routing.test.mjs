@@ -19,6 +19,7 @@ const { default: ScanStatus, ThreatAuditPanel } = await server.ssrLoadModule("/s
 const { THREAT_AUDIT_ENGINE_LABEL } = await server.ssrLoadModule("/src/miningEngines.ts");
 const { default: LoginPage } = await server.ssrLoadModule("/src/components/LoginPage.tsx");
 const { default: AgentConfigPage } = await server.ssrLoadModule("/src/components/AgentConfigPage.tsx");
+const { default: NewScanForm } = await server.ssrLoadModule("/src/components/NewScanForm.tsx");
 const { ThreatAnalysisPanel } = await server.ssrLoadModule("/src/features/threatAnalysis/index.ts");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
@@ -73,7 +74,7 @@ function installApi(intercept = () => undefined) {
       status: "complete", created_at: "2026-10-29T00:00:00Z", suspected_issue_count: 0, confirmed_vulnerability_count: 0 }] });
     if (url.endsWith("/fp-review/overview") || url.endsWith("/threat-analysis")) return response(config, null);
     if (url.endsWith("/overview")) return response(config, { scan_id: "s", project_id: "p", status: "complete", progress: 1,
-      total_candidates: 0, processed_candidates: 0, auto_fp_review: false, agent_online: true, scan_items: [],
+      total_candidates: 0, processed_candidates: 0, auto_fp_review: false, agent_online: true, scan_items: [], can_copy_scan: true,
       threat_analysis_enabled: true, detail_counts: {}, mining_engines: [{ engine_id: "threat_audit", enabled: true }] });
     if (url.endsWith("/index-status")) return response(config, { status: "skipped" });
     if (url.endsWith("/git_history")) return response(config, []);
@@ -294,12 +295,55 @@ test("Agent selection comes from the URL and admin pages enforce the existing ro
   assert.match(content(root.toJSON()), /页面不存在/);
 });
 
+test("copy scan opens a source URL that survives refresh and resets the form for another source", async () => {
+  installApi((config) => {
+    const url = config.url;
+    if (url === "/api/agents") return [{ agent_key: "agent", name: "Agent", online: true, has_explicit_model: true }];
+    if (url === "/api/threat-analysis-methods") return { methods: [{ method_id: "threat", label: "Threat" }] };
+    if (url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "FP", default: true }] };
+    if (url.endsWith("/validator-catalog")) return { methods: [], errors: [] };
+    if (url.includes("/config-memory/")) return { knowledge_base: null, validation_by_product: {} };
+    if (url.endsWith("/copy-config")) return {
+      agent_key: "agent", scan_name: "", product: url.includes("/s2/") ? "Second product" : "Source product",
+      project_path: "/repo", code_scan_paths: ["/repo/src"], scan_mode: "standard", multi_versions: [],
+      knowledge_base: { enabled: false, project_id: "", project_name: "" },
+      vulnerability_validation: { enabled: false, method_id: "", values: {} },
+      code_graph_mcp: null, review_notes_enabled: false, review_note_ids: [],
+      threat_analysis_enabled: true, threat_analysis_method: "threat", mining_engines: [],
+      auto_fp_review: true, fp_review_method: "adversarial",
+    };
+    return undefined;
+  });
+  const { root, router } = await mount("/scans/s/overview");
+  await select(root, "扫描信息");
+  await click(root, "复制扫描");
+  assert.equal(router.state.location.pathname, "/scans/new");
+  assert.equal(router.state.location.search, "?copyFrom=s");
+  assert.equal(root.root.findByType(NewScanForm).props.sourceScanId, "s");
+  assert.equal(root.root.findByProps({ placeholder: "请输入产品名称" }).props.value, "Source product");
+  await act(async () => root.root.findByProps({ placeholder: "例如 project_audit" }).props.onChange({ target: { value: "Draft name" } }));
+  const refreshed = await mount(router.state.location.pathname + router.state.location.search);
+  assert.equal(refreshed.root.root.findByType(NewScanForm).props.sourceScanId, "s");
+  assert.equal(refreshed.root.root.findByProps({ placeholder: "例如 project_audit" }).props.value, "");
+  assert.equal(refreshed.root.root.findByProps({ placeholder: "请输入产品名称" }).props.value, "Source product");
+  await go(router, "/scans/new?copyFrom=s2");
+  assert.equal(root.root.findByType(NewScanForm).props.sourceScanId, "s2");
+  assert.equal(root.root.findByProps({ placeholder: "例如 project_audit" }).props.value, "");
+  assert.equal(root.root.findByProps({ placeholder: "请输入产品名称" }).props.value, "Second product");
+  await go(router, "/scans/new");
+  assert.equal(root.root.findByType(NewScanForm).props.sourceScanId, undefined);
+  assert.equal(root.root.findByProps({ placeholder: "请输入产品名称" }).props.value, "");
+});
+
 for (const kind of ["shared", "public"]) {
   test(`legacy ${kind} links and anonymous column navigation preserve token access`, async () => {
     stored.clear();
     const { root, router } = await mount(`/#/${kind}-scan/s?token=access-token`);
     assert.equal(router.state.location.pathname, `/${kind}-scan/s/overview`);
     assert.equal(router.state.location.search, "?token=access-token");
+    await select(root, "扫描信息");
+    assert.equal(root.root.findAllByType("button").some((node) => content(node) === "复制扫描"), false);
+    await act(async () => root.root.findByProps({ "aria-label": "关闭扫描信息" }).props.onClick());
     await select(root, "疑似问题");
     assert.equal(router.state.location.pathname, `/${kind}-scan/s/issues`);
     assert.equal(router.state.location.search, "?token=access-token");

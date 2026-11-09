@@ -62,6 +62,7 @@ from backend.models import (
     ScanMetadataResponse,
     ScanCodeGraphResponse,
     ScanConfigMemoryResponse,
+    ScanCopyConfig,
     ScanKnowledgeBaseRequest,
     ScanOverview,
     ScanStartResponse,
@@ -2187,6 +2188,97 @@ async def list_scan_validation_targets(
     )
 
 
+@router.get("/api/scan/{scan_id}/copy-config", response_model=ScanCopyConfig)
+async def get_scan_copy_config(
+    scan_id: str,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+) -> ScanCopyConfig:
+    """Read saved form values without creating a scan or resolving new defaults."""
+    store = get_scan_store()
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    await _check_scan_owner(scan_id, current_user)
+    # Review notes and validation values remain private even to administrators
+    # who may otherwise inspect another user's scan results.
+    if not meta.user_id or meta.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="只能复制自己的扫描")
+
+    missing = []
+    for value, label in (
+        (meta.agent_key, "客户端标识"),
+        (meta.project_path, "项目总路径"),
+        (meta.product, "产品"),
+    ):
+        if not value.strip():
+            missing.append(label)
+    try:
+        mode = normalize_scan_mode(meta.scan_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="原扫描的模式无法用于创建扫描") from exc
+    if mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+        mode = SCAN_MODE_CUSTOM
+    if mode == SCAN_MODE_MULTI_VERSION and not 2 <= len(meta.multi_versions) <= 5:
+        missing.append("多版本配置")
+    knowledge = meta.knowledge_base_mcp
+    if meta.knowledge_base_enabled and (knowledge is None or not knowledge.project_id):
+        missing.append("知识库项目配置")
+    validation = meta.vulnerability_validation
+    if meta.vulnerability_validation_enabled and (validation is None or not validation.method_id):
+        missing.append("漏洞验证配置")
+    if meta.validation_environment:
+        missing.append("旧版验证环境对应的验证方法配置")
+    if mode == SCAN_MODE_CUSTOM:
+        if meta.threat_analysis_enabled and not meta.threat_analysis_method:
+            missing.append("威胁分析方法")
+        if not meta.fp_review_method:
+            missing.append("去误报方法")
+        if not meta.threat_analysis_enabled and not any(item.enabled for item in meta.mining_engines):
+            missing.append("漏洞挖掘引擎配置")
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail="原扫描缺少可复制的配置：" + "、".join(missing) + "，请使用普通新建扫描",
+        )
+    notes = await run_store_call(store, "get_scan_review_notes", scan_id)
+    response.headers["Cache-Control"] = "no-store"
+    return ScanCopyConfig(
+        agent_key=meta.agent_key,
+        project_path=meta.project_path,
+        code_scan_path=meta.code_scan_path,
+        code_scan_paths=list(meta.code_scan_paths or [meta.code_scan_path or meta.project_path]),
+        scan_mode=mode,
+        product=meta.product,
+        knowledge_base=ScanKnowledgeBaseRequest(
+            enabled=meta.knowledge_base_enabled,
+            project_id=knowledge.project_id if knowledge else "",
+            project_name=knowledge.project_name if knowledge else "",
+        ),
+        vulnerability_validation=ScanVulnerabilityValidationRequest(
+            enabled=meta.vulnerability_validation_enabled,
+            method_id=validation.method_id if validation else "",
+            values=dict(validation.values) if validation else {},
+        ),
+        code_graph_mcp=meta.code_graph_mcp.model_copy(deep=True) if meta.code_graph_mcp else None,
+        review_notes_enabled=notes["enabled"],
+        review_note_ids=notes["note_ids"],
+        multi_versions=[
+            item.model_copy(update={
+                "code_scan_paths": list(item.code_scan_paths or [item.code_scan_path or item.project_path]),
+            }, deep=True)
+            for item in meta.multi_versions
+        ],
+        **({
+            "threat_analysis_enabled": meta.threat_analysis_enabled,
+            "threat_analysis_method": meta.threat_analysis_method,
+            "mining_engines": [MiningEngineRequest(engine_id=item.engine_id) for item in meta.mining_engines if item.enabled],
+            "auto_fp_review": meta.auto_fp_review,
+            "fp_review_method": meta.fp_review_method,
+        } if mode == SCAN_MODE_CUSTOM else {}),
+    )
+
+
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
 async def get_scan_status(
     scan_id: str,
@@ -2248,7 +2340,10 @@ async def get_scan_status(
     _hydrate_fp_review_method_selection(scan)
     if meta is not None:
         _apply_scan_metadata(scan, meta)
-    return scan
+    # This permission belongs to the requesting user, never to the cached scan.
+    return scan.model_copy(update={
+        "can_copy_scan": bool(meta and meta.user_id and meta.user_id == current_user.user_id),
+    })
 
 
 async def _check_scan_owner_v2(scan_id: str, current_user: User) -> None:
@@ -2415,6 +2510,7 @@ async def get_scan_overview_v2(
     _apply_scan_metadata(scan, meta)
     payload = scan.model_dump(mode="python")
     payload.update({
+        "can_copy_scan": bool(meta.user_id and meta.user_id == current_user.user_id),
         "candidates": [],
         "vulnerabilities": [],
         "skill_reports": [],

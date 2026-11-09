@@ -66,7 +66,8 @@ async def get_public_fp_results(scan_id: str, token: str = Query(...), after: in
 
 @router.get("/api/public/scans/{scan_id}/overview")
 async def get_public_overview(scan_id: str, token: str = Query(...)):
-    return await scan_api.get_scan_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+    overview = await scan_api.get_scan_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+    return overview.model_copy(update={"can_copy_scan": False})
 
 
 @router.get("/api/public/scans/{scan_id}/tasks")
@@ -445,7 +446,8 @@ async def get_public_scan_status(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> ScanStatus:
-    return await scan_api.get_scan_status(scan_id, current_user)
+    scan = await scan_api.get_scan_status(scan_id, current_user)
+    return scan.model_copy(update={"can_copy_scan": False})
 
 
 @router.get(

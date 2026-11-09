@@ -599,6 +599,7 @@ export interface ScanCodeGraphState {
 
 export interface ScanStatus {
   scan_id: string;
+  can_copy_scan?: boolean;
   execution_revision?: number;
   scan_name: string;
   metadata_revision: number;

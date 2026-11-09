@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createScan,
   getAgents,
@@ -6,6 +6,7 @@ import {
   getFpReviewMethodCatalog,
   getMiningEngineCatalog,
   getScanConfigMemory,
+  getScanCopyConfig,
   getThreatAnalysisMethodCatalog,
   probeScanKnowledgeBaseMcp,
 } from "../api/client";
@@ -31,6 +32,7 @@ import { agentOwnerLabel } from "../agentPresentation";
 import ScanPathList from "./ScanPathList";
 
 interface Props {
+  sourceScanId?: string;
   onScanStarted: (scanId: string) => void;
   onBack: () => void;
   onConfigureAgent: (agentKey: string) => void;
@@ -38,7 +40,7 @@ interface Props {
 
 interface MiningEngineFormValue { selected: boolean }
 interface VersionInput { version_name: string; project_path: string; code_scan_paths: string[] }
-type ScanMode = "standard" | "custom" | "multi_version";
+type ScanMode = "standard" | "custom" | "multi_version" | "quick";
 type ScanModeOption =
   | { id: ScanMode; label: string; selectable: true }
   | { id: "smart"; label: string; selectable: false };
@@ -82,7 +84,7 @@ function DynamicValidationField({ schema, value, onChange }: { schema: AgentVali
   return <Field label={`${schema.label}${schema.required ? " *" : ""}`} hint={schema.help}><input className={input} type={htmlType} min={schema.min ?? undefined} max={schema.max ?? undefined} step={schema.type === "number" ? "any" : undefined} placeholder={schema.placeholder} value={String(value ?? "")} onChange={(event) => onChange(htmlType === "number" && event.target.value !== "" ? Number(event.target.value) : event.target.value)} /></Field>;
 }
 
-export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }: Props) {
+export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onConfigureAgent }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [validatorMethods, setValidatorMethods] = useState<AgentValidatorMethod[]>([]);
   const [validatorErrors, setValidatorErrors] = useState<string[]>([]);
@@ -94,6 +96,11 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [agentConfigLoading, setAgentConfigLoading] = useState(false);
+  const copiedAgentInitialization = useRef<string | null>(null);
+  const [copiedCapabilities, setCopiedCapabilities] = useState({ knowledge: false, validation: false });
 
   const [selectedAgent, setSelectedAgent] = useState("");
   const [scanName, setScanName] = useState("");
@@ -123,6 +130,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [fpReviewMethod, setFpReviewMethod] = useState("");
   const [reviewNotesEnabled, setReviewNotesEnabled] = useState(false);
   const [reviewNoteIds, setReviewNoteIds] = useState<string[]>([]);
+  const [reviewNotesReady, setReviewNotesReady] = useState(true);
 
   const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
   const selectedAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
@@ -134,9 +142,20 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       && miningEngineRequiresThreatAnalysis(engine.engine_id),
   );
   const selectedKnowledgeProject = knowledgeProjects.find((item) => item.id === knowledgeProjectId) || null;
+  const unavailableEngines = Object.keys(miningEngines).filter((id) => miningEngines[id].selected && !miningEngineCatalog.some((engine) => engine.engine_id === id));
+  const unavailableMethod = scanMode === "custom" && (
+    (threatAnalysisEnabled && !threatMethods.some((method) => method.method_id === threatAnalysisMethod))
+    || !fpMethods.some((method) => method.method_id === fpReviewMethod)
+  );
 
   useEffect(() => {
-    Promise.all([getAgents(), getMiningEngineCatalog(), getThreatAnalysisMethodCatalog(), getFpReviewMethodCatalog()]).then(([agentList, engineCatalog, threatCatalog, fpCatalog]) => {
+    const controller = new AbortController();
+    setLoading(true);
+    setLoadError("");
+    Promise.all([getAgents(), getMiningEngineCatalog(), getThreatAnalysisMethodCatalog(), getFpReviewMethodCatalog(),
+      sourceScanId ? getScanCopyConfig(sourceScanId, controller.signal) : Promise.resolve(null),
+    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, copied]) => {
+      if (controller.signal.aborted) return;
       setAgents(agentList);
       setMiningEngineCatalog(engineCatalog.engines);
       setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => [engine.engine_id, { selected: true }])));
@@ -144,22 +163,66 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       setThreatAnalysisMethod(threatCatalog.methods.find((method) => method.method_id === "opencode_lightweight_threat_analysis")?.method_id || threatCatalog.methods[0]?.method_id || "");
       setFpMethods(fpCatalog.methods);
       setFpReviewMethod(fpCatalog.methods.find((method) => method.default)?.method_id || fpCatalog.methods[0]?.method_id || "");
+      if (copied) {
+        const mode = copied.scan_mode || "custom";
+        if (!["standard", "custom", "multi_version", "quick"].includes(mode)) throw new Error("原扫描模式暂不支持复制");
+        copiedAgentInitialization.current = copied.agent_key;
+        setSelectedAgent(copied.agent_key);
+        setScanName("");
+        setProduct(copied.product);
+        setProjectPath(copied.project_path);
+        setCodeScanPaths(copied.code_scan_paths?.length ? [...copied.code_scan_paths] : [copied.code_scan_path || copied.project_path]);
+        setScanMode(mode as ScanMode);
+        if (copied.multi_versions?.length) setMultiVersions(copied.multi_versions.map((version) => ({
+          version_name: version.version_name, project_path: version.project_path,
+          code_scan_paths: version.code_scan_paths?.length ? [...version.code_scan_paths] : [version.code_scan_path || version.project_path],
+        })));
+        if (copied.threat_analysis_enabled != null) setThreatAnalysisEnabled(copied.threat_analysis_enabled);
+        if (copied.threat_analysis_method != null) setThreatAnalysisMethod(copied.threat_analysis_method);
+        if (copied.mining_engines != null) setMiningEngines(Object.fromEntries(copied.mining_engines.map((engine) => [engine.engine_id, { selected: true }])));
+        if (copied.auto_fp_review != null) setAutoFpReview(copied.auto_fp_review);
+        if (copied.fp_review_method != null) setFpReviewMethod(copied.fp_review_method);
+        setCodeGraphMcp(copied.code_graph_mcp || defaultScanCodeGraphMcp());
+        setKnowledgeEnabled(copied.knowledge_base?.enabled ?? false);
+        setCopiedCapabilities({ knowledge: copied.knowledge_base?.enabled ?? false, validation: copied.vulnerability_validation?.enabled ?? false });
+        const knowledge = copied.knowledge_base;
+        setKnowledgeProjectId(knowledge?.project_id || "");
+        setKnowledgeProjects(knowledge?.project_id ? [{ id: knowledge.project_id, name: knowledge.project_name, path: "", current: false }] : []);
+        setKnowledgeProbe(null);
+        setValidationEnabled(copied.vulnerability_validation?.enabled ?? false);
+        setValidationMethodId(copied.vulnerability_validation?.method_id || "");
+        setValidationValues(copied.vulnerability_validation?.values || {});
+        setReviewNotesEnabled(copied.review_notes_enabled ?? false);
+        setReviewNoteIds(copied.review_note_ids || []);
+        return;
+      }
       const preferred = agentList.find((agent) => agentAcceptsTasks(agent) && agent.has_explicit_model) || agentList.find(agentAcceptsTasks);
       if (preferred) setSelectedAgent(preferred.agent_key);
-    }).catch(() => setError("加载扫描配置失败，请重试")).finally(() => setLoading(false));
-  }, []);
+    }).catch((caught: unknown) => {
+      if (controller.signal.aborted) return;
+      const detail = (caught as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setLoadError(typeof detail === "string" ? detail : sourceScanId ? "读取原扫描配置失败，请重试" : "加载扫描配置失败，请重试");
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [sourceScanId, loadAttempt]);
 
   useEffect(() => {
-    setKnowledgeProbe(null);
-    setKnowledgeEnabled(false);
-    setKnowledgeProjects([]);
-    setKnowledgeProjectId("");
-    setValidationEnabled(false);
-    setValidationMethodId("");
-    setValidationValues({});
+    const preserveCopied = copiedAgentInitialization.current === selectedAgent;
+    if (preserveCopied) copiedAgentInitialization.current = null;
+    if (!preserveCopied) {
+      setKnowledgeProbe(null);
+      setKnowledgeEnabled(false);
+      setKnowledgeProjects([]);
+      setKnowledgeProjectId("");
+      setValidationEnabled(false);
+      setValidationMethodId("");
+      setValidationValues({});
+    }
     setMemory(emptyMemory);
     if (!selectedAgent) { setValidatorMethods([]); return; }
     let disposed = false;
+    setAgentConfigLoading(true);
+    setValidatorErrors([]);
     Promise.all([getAgentValidatorCatalog(selectedAgent), getScanConfigMemory(selectedAgent)]).then(([catalog, remembered]) => {
       if (disposed) return;
       setValidatorMethods(catalog.methods);
@@ -167,7 +230,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       setMemory(remembered);
     }).catch(() => {
       if (!disposed) { setValidatorMethods([]); setValidatorErrors(["读取验证方法或记忆配置失败"]); }
-    });
+    }).finally(() => { if (!disposed) setAgentConfigLoading(false); });
     return () => { disposed = true; };
   }, [selectedAgent]);
 
@@ -231,9 +294,11 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || loading || loadError || agentConfigLoading || (reviewNotesEnabled && !reviewNotesReady)) return;
     setError(null);
+    if (sourceScanId && !scanName.trim()) return setError("请填写新扫描的名称");
     if (!selectedAgent) return setError("请选择一个客户端");
+    if (!selectedAgentInfo || !agentAcceptsTasks(selectedAgentInfo)) return setError("原客户端不可用或离线，请选择可用客户端后重试");
     if (!selectedAgentReady) return setError("所选客户端尚未配置模型，请先前往客户端配置添加并启用模型");
     if (scanMode === "multi_version") {
       if (multiVersions.length < 2 || multiVersions.length > 5) return setError("请配置 2 到 5 个版本");
@@ -258,6 +323,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       if (missing) return setError(`请填写验证参数：${missing.label}`);
     }
     if (scanMode === "custom") {
+      if (unavailableEngines.length) return setError(`原扫描的漏洞挖掘引擎不可用：${unavailableEngines.join("、")}，请取消选择后重试`);
+      if (unavailableMethod) return setError("原扫描的分析或去误报方法不可用，请重新选择");
       if (!enabledEngineCount && !threatAnalysisEnabled) return setError("请至少启用威胁分析或选择一个漏洞挖掘引擎");
       if (selectedThreatDependentEngine && !threatAnalysisEnabled) return setError(`${canonicalMiningEngineLabel(selectedThreatDependentEngine.engine_id, selectedThreatDependentEngine.label)}要求本次扫描启用威胁分析`);
       if (threatAnalysisEnabled && !threatAnalysisMethod) return setError("没有可用的威胁分析方法");
@@ -305,12 +372,17 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   return <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
     <header className="border-b border-slate-700 bg-slate-800/80 px-4 py-4 backdrop-blur sm:px-6"><div className="mx-auto flex max-w-5xl items-center justify-between gap-4"><div><h1 className="text-lg font-bold">新建扫描</h1><p className="mt-0.5 text-sm text-slate-400">先填写扫描范围和产品，再配置本次扫描能力</p></div><div className="flex gap-2"><ThemeToggle /><button onClick={onBack} className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-600">返回</button></div></div></header>
     <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
-      {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : <form onSubmit={handleSubmit} className="space-y-6">
+      {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : loadError ? <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">{loadError}<button type="button" onClick={() => setLoadAttempt((value) => value + 1)} className="ml-3 rounded border border-red-400/40 px-3 py-1.5">重试</button></div> : <form onSubmit={handleSubmit} className="space-y-6">
+        {sourceScanId && <p className="text-sm text-slate-400">已复制原扫描配置，请填写新扫描的名称。</p>}
+        {sourceScanId && !selectedAgentReady && <p role="alert" className="text-sm text-amber-300">原客户端不可用、离线或未配置模型，请检查客户端或重新选择。{!selectedAgentInfo && `（${selectedAgent}）`}</p>}
+        {unavailableMethod && <p role="alert" className="text-sm text-amber-300">原扫描的分析或去误报方法不可用，请重新选择：{threatAnalysisEnabled && !threatMethods.some((method) => method.method_id === threatAnalysisMethod) ? threatAnalysisMethod : ""} {!fpMethods.some((method) => method.method_id === fpReviewMethod) ? fpReviewMethod : ""}</p>}
+        {validationEnabled && !agentConfigLoading && !selectedValidationMethod && <p role="alert" className="text-sm text-amber-300">原验证方法不可用或与当前产品不兼容：{validationMethodId}，请重新选择。</p>}
         <Card><h2 className="mb-3 text-sm font-medium text-slate-300">选择客户端</h2>{agents.length === 0 ? <p className="text-sm text-slate-500">暂无客户端，请先运行 ./run_agent.sh</p> : <div className="space-y-2">{agents.map((agent) => <label key={agent.agent_key || agent.agent_id} className={`flex items-center gap-3 rounded-lg border p-3 ${agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${selectedAgent === agent.agent_key ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="sr-only" type="radio" checked={selectedAgent === agent.agent_key} disabled={!agentAcceptsTasks(agent)} onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="block text-xs text-slate-400">{agent.ip}</span><span className="block truncate text-xs text-slate-400" title={agentOwnerLabel(agent)}>{agentOwnerLabel(agent)}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? "更新中" : "在线" : "离线"}</span>{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button type="button" onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)} className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}</Card>
 
-        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field>{scanMode !== "multi_version" ? <><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><ScanPathList paths={codeScanPaths} onChange={setCodeScanPaths} /></> : <div className="space-y-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-medium text-cyan-100">项目版本</h3><p className="mt-1 text-xs text-slate-400">列表首项作为基准版本；所有版本均使用你填写的名称，并在各自模块路径内扫描。</p></div><button type="button" disabled={multiVersions.length >= 5} onClick={() => setMultiVersions((current) => [...current, { version_name: "", project_path: "", code_scan_paths: [""] }])} className="shrink-0 rounded border border-cyan-400/40 px-3 py-1.5 text-xs text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40">添加版本</button></div>{multiVersions.map((version, index) => <div key={index} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3"><div className="mb-3 flex items-center justify-between"><span className="text-sm font-medium text-slate-200">{version.version_name.trim() || "未命名版本"}{index === 0 ? "（基准）" : "（对照）"}</span>{multiVersions.length > 2 && <button type="button" onClick={() => setMultiVersions((current) => current.filter((_, currentIndex) => currentIndex !== index))} className="text-xs text-red-300 hover:text-red-200">移除</button>}</div><div className="grid gap-3"><Field label="版本名称"><input className={input} required value={version.version_name} placeholder="例如 release-2026.09" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, version_name: event.target.value } : item))} /></Field><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={version.project_path} placeholder="/path/to/project-version" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, project_path: event.target.value } : item))} /></Field><ScanPathList paths={version.code_scan_paths} onChange={(paths) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, code_scan_paths: paths } : item))} /></div></div>)}</div>}<Field label="产品"><input className={input} value={product} placeholder="请输入产品名称" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /></Field></div></Card>
+        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} aria-label="扫描名称" required={Boolean(sourceScanId)} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field>{scanMode !== "multi_version" ? <><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><ScanPathList paths={codeScanPaths} onChange={setCodeScanPaths} /></> : <div className="space-y-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-medium text-cyan-100">项目版本</h3><p className="mt-1 text-xs text-slate-400">列表首项作为基准版本；所有版本均使用你填写的名称，并在各自模块路径内扫描。</p></div><button type="button" disabled={multiVersions.length >= 5} onClick={() => setMultiVersions((current) => [...current, { version_name: "", project_path: "", code_scan_paths: [""] }])} className="shrink-0 rounded border border-cyan-400/40 px-3 py-1.5 text-xs text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40">添加版本</button></div>{multiVersions.map((version, index) => <div key={index} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3"><div className="mb-3 flex items-center justify-between"><span className="text-sm font-medium text-slate-200">{version.version_name.trim() || "未命名版本"}{index === 0 ? "（基准）" : "（对照）"}</span>{multiVersions.length > 2 && <button type="button" onClick={() => setMultiVersions((current) => current.filter((_, currentIndex) => currentIndex !== index))} className="text-xs text-red-300 hover:text-red-200">移除</button>}</div><div className="grid gap-3"><Field label="版本名称"><input className={input} required value={version.version_name} placeholder="例如 release-2026.09" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, version_name: event.target.value } : item))} /></Field><Field label="项目总路径" hint="客户端上的绝对路径"><input className={input} value={version.project_path} placeholder="/path/to/project-version" onChange={(event) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, project_path: event.target.value } : item))} /></Field><ScanPathList paths={version.code_scan_paths} onChange={(paths) => setMultiVersions((current) => current.map((item, currentIndex) => currentIndex === index ? { ...item, code_scan_paths: paths } : item))} /></div></div>)}</div>}<Field label="产品"><input className={input} value={product} placeholder="请输入产品名称" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /></Field></div></Card>
 
         <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2></div><div className="mt-4 grid gap-3 md:grid-cols-4">{([
+          ...(scanMode === "quick" ? [{ id: "quick" as const, label: "快速模式", selectable: true as const }] : []),
           { id: "standard", label: "标准模式", selectable: true },
           { id: "smart", label: "智能模式", selectable: false },
           { id: "custom", label: "自定义模式", selectable: true },
@@ -329,7 +401,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
               <h2 className="text-sm font-medium text-slate-200">启用知识库</h2>
               <p className="mt-1 text-xs leading-5 text-slate-500">实现中...</p>
             </div>
-            <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" disabled />
+            <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" disabled={!copiedCapabilities.knowledge} />
           </div>
           {knowledgeEnabled && <div className="mt-5 space-y-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -347,20 +419,20 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
           </Card>
         </>}
 
-        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">实现中...</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" disabled /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
+        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">实现中...</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" disabled={!copiedCapabilities.validation} /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{!selectedValidationMethod && <option value={validationMethodId} disabled>原验证方法不可用，请重新选择</option>}{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
 
         {scanMode === "custom" && <>
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">威胁分析</h2><p className="mt-1 text-xs text-slate-500">可单独运行，也为依赖威胁分析产物的漏洞挖掘引擎提供输入。</p></div><Toggle checked={threatAnalysisEnabled} onChange={() => { const next = !threatAnalysisEnabled; setThreatAnalysisEnabled(next); if (!next) setMiningEngines((current) => Object.fromEntries(Object.entries(current).map(([engineId, value]) => [engineId, miningEngineRequiresThreatAnalysis(engineId) ? { selected: false } : value]))); }} label="启用威胁分析" /></div>{threatAnalysisEnabled && <div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${threatAnalysisMethod === method.method_id ? "border-emerald-500 bg-emerald-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={threatAnalysisMethod === method.method_id} onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>
 
-        <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2><p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => { const enabled = miningEngines[engine.engine_id]?.selected ?? true; return <label key={engine.engine_id} className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="checkbox" checked={enabled} onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>; })}</div></Card>
+        <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2>{unavailableEngines.map((id) => <label key={id} className="mt-3 block text-sm text-amber-300"><input type="checkbox" checked onChange={() => setMiningEngines((current) => ({ ...current, [id]: { selected: false } }))} /> {id}（引擎不可用，请取消选择）</label>)}<p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => { const enabled = miningEngines[engine.engine_id]?.selected ?? false; return <label key={engine.engine_id} className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="checkbox" checked={enabled} onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>; })}</div></Card>
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动去误报</h2><p className="mt-1 text-xs text-slate-500">扫描后自动复核已确认问题。</p></div><Toggle checked={autoFpReview} onChange={() => setAutoFpReview((value) => !value)} label="自动去误报" /></div><div className="mt-4 grid gap-3 md:grid-cols-2">{fpMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${fpReviewMethod === method.method_id ? "border-amber-500 bg-amber-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={fpReviewMethod === method.method_id} onChange={() => setFpReviewMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div></Card>
         </>}
 
-        <ReviewNotesSelector enabled={reviewNotesEnabled} noteIds={reviewNoteIds} onEnabledChange={setReviewNotesEnabled} onSelectionChange={setReviewNoteIds} />
+        <ReviewNotesSelector enabled={reviewNotesEnabled} noteIds={reviewNoteIds} onEnabledChange={setReviewNotesEnabled} onSelectionChange={setReviewNoteIds} onValidityChange={setReviewNotesReady} />
 
         {error && <div role="alert" className="whitespace-pre-line rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
-        <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "检查路径并创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>
+        <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady || agentConfigLoading || (reviewNotesEnabled && !reviewNotesReady)} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "检查路径并创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>
       </form>}
     </main>
   </div>;

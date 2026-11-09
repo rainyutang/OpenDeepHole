@@ -66,13 +66,23 @@ function ScanDetailRoute({ access, publicView = false }: { access?: PublicScanAc
   return <RuntimeErrorBoundary name={publicView ? "public-scan-detail" : "scan-detail"} resetKey={identity} fullscreen>
     {access?.kind === "shared" ? <SharedScanView key={identity} access={access} onBack={onBack}
       onHome={() => navigate("/")} navigation={navigation} />
-      : <ScanStatusView key={identity} scanId={scanId} onBack={onBack} navigation={navigation} />}
+      : <ScanStatusView key={identity} scanId={scanId} onBack={onBack} navigation={navigation}
+        onCopyScan={publicView ? undefined : (id) => navigate(`/scans/new?${new URLSearchParams({ copyFrom: id })}`)} />}
   </RuntimeErrorBoundary>;
 }
 
 function AgentConfigRoute() {
   const [params] = useSearchParams();
   return <AgentConfigPage onBack={useBack()} initialAgentKey={params.get("agent") || ""} />;
+}
+
+function NewScanRoute() {
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const sourceScanId = params.get("copyFrom") || undefined;
+  return <NewScanForm key={sourceScanId ?? "new"} sourceScanId={sourceScanId}
+    onScanStarted={(scanId) => navigate(scanPath(scanId))} onBack={useBack()}
+    onConfigureAgent={(agentKey) => navigate(`/agents/config?${new URLSearchParams({ agent: agentKey })}`)} />;
 }
 
 export default function App() {
@@ -130,8 +140,7 @@ export default function App() {
         onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
         onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")}
         onReviewNotes={() => navigate("/review-notes")} />} />
-      <Route path="scans/new" element={<NewScanForm onScanStarted={viewScan} onBack={onBack}
-        onConfigureAgent={(agentKey) => navigate(`/agents/config?${new URLSearchParams({ agent: agentKey })}`)} />} />
+      <Route path="scans/new" element={<NewScanRoute />} />
       <Route path="scans/:scanId/:section?" element={<ScanDetailRoute />} />
       <Route path="agents/download" element={<AgentDownload onBack={onBack} />} />
       <Route path="agents/config" element={<AgentConfigRoute />} />

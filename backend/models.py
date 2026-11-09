@@ -845,6 +845,7 @@ class MultiVersionTarget(BaseModel):
 
 class ScanStatus(BaseModel):
     scan_id: str
+    can_copy_scan: bool = False
     execution_revision: int = 0
     project_id: str = ""
     scan_name: str = ""
@@ -1813,6 +1814,29 @@ class CreateScanRequest(BaseModel):
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
+
+
+class ScanCopyConfig(BaseModel):
+    """Owner-only form input; excludes execution state and Agent credentials."""
+
+    agent_key: str
+    project_path: str
+    code_scan_path: str
+    code_scan_paths: list[str]
+    scan_name: str = ""
+    scan_mode: Literal["standard", "quick", "custom", "multi_version"]
+    product: str
+    knowledge_base: ScanKnowledgeBaseRequest
+    vulnerability_validation: ScanVulnerabilityValidationRequest
+    code_graph_mcp: AgentMcpConfig | None = None
+    review_notes_enabled: bool = False
+    review_note_ids: list[str] = Field(default_factory=list)
+    multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
+    threat_analysis_enabled: bool | None = None
+    threat_analysis_method: str | None = None
+    mining_engines: list[MiningEngineRequest] | None = None
+    auto_fp_review: bool | None = None
+    fp_review_method: str | None = None
 
 
 class ReviewNoteRequest(BaseModel):

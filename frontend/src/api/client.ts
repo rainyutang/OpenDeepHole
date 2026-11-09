@@ -342,7 +342,7 @@ export async function startScan(
   return data;
 }
 
-export async function createScan(body: {
+export interface CreateScanInput {
   agent_key: string;
   project_path: string;
   code_scan_path?: string;
@@ -368,7 +368,19 @@ export async function createScan(body: {
     code_scan_path?: string;
     code_scan_paths?: string[];
   }>;
-}): Promise<ScanStartResponse> {
+}
+
+type ProfileFields = "threat_analysis_enabled" | "threat_analysis_method" | "mining_engines" | "auto_fp_review" | "fp_review_method";
+export type ScanCopyConfig = Omit<CreateScanInput, ProfileFields> & {
+  [K in ProfileFields]?: CreateScanInput[K] | null;
+};
+
+export async function getScanCopyConfig(scanId: string, signal?: AbortSignal): Promise<ScanCopyConfig> {
+  const { data } = await api.get<ScanCopyConfig>(`/api/scan/${encodeURIComponent(scanId)}/copy-config`, { signal });
+  return data;
+}
+
+export async function createScan(body: CreateScanInput): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;
 }

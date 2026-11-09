@@ -259,6 +259,32 @@ for (const kind of ["shared", "integration"]) {
   });
 }
 
+for (const status of ["pending", "auditing", "complete", "error", "cancelled"]) {
+  test(`owned ${status} scans expose copy next to edit even while the Agent is offline`, async () => {
+    const api = installDetailApi(status);
+    api.setSnapshot({ can_copy_scan: true });
+    const copied = [];
+    const root = await mount(ScanStatus, { scanId: "s", onBack() {}, onCopyScan: (id) => copied.push(id) });
+    await openInformation(root);
+    assert.equal(button(root, "复制扫描").props.disabled, undefined);
+    assert.equal(button(root, "复制扫描").parent, button(root, "编辑名称").parent);
+    await click(button(root, "复制扫描"));
+    assert.deepEqual(copied, ["s"]);
+    assert.equal(api.calls.some((call) => call.method !== "get"), false);
+  });
+}
+
+for (const access of ["not-owner", "missing-capability", "shared", "integration"]) {
+  test(`${access} scan information does not expose copy`, async () => {
+    if (access === "shared" || access === "integration") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access });
+    const api = installDetailApi();
+    api.setSnapshot({ can_copy_scan: access === "missing-capability" ? undefined : access !== "not-owner" });
+    const root = await mount(ScanStatus, { scanId: "s", onBack() {}, onCopyScan() { assert.fail("Copy is unavailable"); } });
+    await openInformation(root);
+    assert.equal(buttons(root, "复制扫描").length, 0);
+  });
+}
+
 test("scan information lists selected files and directories instead of only the common root", async () => {
   const api = installDetailApi();
   api.setSnapshot({ code_scan_path: "/repo", code_scan_paths: ["/repo/src", "/repo/lib/file.c"] });

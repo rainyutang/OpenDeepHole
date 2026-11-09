@@ -47,13 +47,17 @@ function EnabledSwitch({ enabled, onChange, disabled = false }: { enabled: boole
 }
 
 /** The create form only loads the personal library when this optional capability is enabled. */
-export function ReviewNotesSelector({ enabled, noteIds, onEnabledChange, onSelectionChange }: {
+export function ReviewNotesSelector({ enabled, noteIds, onEnabledChange, onSelectionChange, onValidityChange }: {
   enabled: boolean; noteIds: string[]; onEnabledChange: (value: boolean) => void; onSelectionChange: (ids: string[]) => void;
+  onValidityChange?: (valid: boolean) => void;
 }) {
   const [notes, setNotes] = useState<ReviewNote[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const missingIds = noteIds.filter((id) => !notes.some((note) => note.id === id));
+  const valid = !enabled || (!loading && !error && missingIds.length === 0);
+  useEffect(() => { onValidityChange?.(valid); }, [valid, onValidityChange]);
   useEffect(() => {
     if (!enabled) return;
     const controller = new AbortController();
@@ -69,6 +73,10 @@ export function ReviewNotesSelector({ enabled, noteIds, onEnabledChange, onSelec
       <p className="text-xs text-slate-400">勾选本次扫描使用的依据，也可在扫描运行时添加。</p>
       {loading ? <p role="status" className="text-sm text-slate-400">加载中…</p> : error ? <p role="alert" className="text-sm text-red-300">{error} <button type="button" className={buttonClass} onClick={() => setRetry((value) => value + 1)}>重试</button></p>
         : <NoteList notes={notes} selected={noteIds} onSelect={onSelectionChange} />}
+      {!loading && !error && missingIds.length > 0 && <div role="alert" className="text-sm text-amber-300">
+        <p>以下问题判定依据已不可用，请取消选择后创建扫描：</p>
+        {missingIds.map((id) => <label key={id} className="mt-2 block break-all"><input type="checkbox" checked aria-label={`取消不可用依据 ${id}`} onChange={() => onSelectionChange(noteIds.filter((selected) => selected !== id))} /> {id}</label>)}
+      </div>}
       {!loading && !error && !notes.length && <p className="text-xs text-slate-400">可先在主页的「问题判定依据」中新增。</p>}
     </div>}
   </div>;

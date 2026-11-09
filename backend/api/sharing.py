@@ -71,7 +71,8 @@ shared = APIRouter(prefix="/api/shared/scans/{scan_id}")
 
 @shared.get("/overview")
 async def overview(scan_id: str, user: SharedUser):
-    return await scan_api.get_scan_overview_v2(scan_id, user)
+    scan = await scan_api.get_scan_overview_v2(scan_id, user)
+    return scan.model_copy(update={"can_copy_scan": False})
 
 
 @shared.get("/details/{resource}/{index}")
