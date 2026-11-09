@@ -2997,16 +2997,21 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(("match_mode", "allow_command"), [
-    ("exact", True), ("bound_python_script", True), ("exact", False),
+@pytest.mark.parametrize(("match_mode", "command_count"), [
+    ("exact", 0), ("exact", 1), ("exact", 2),
+    ("bound_python_script", 1), ("bound_python_script", 2),
 ])
 def test_post_session_validator_returns_feedback_to_the_same_session(
-    tmp_path: Path, match_mode: str, allow_command: bool,
+    tmp_path: Path, match_mode: str, command_count: int,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
-        command = f'python "{tmp_path / "validate.py"}"'
-        commands = (command,) if allow_command else ()
+        commands = tuple(
+            f'python "{tmp_path / "validator scripts" / f"validate_{index}.py"}" '
+            f'--result "{tmp_path / "task results" / f"attack tree_{index}.json"}" '
+            f'--schema "{tmp_path / "task schemas" / "result schema.json"}"'
+            for index in range(command_count)
+        )
         calls: list[tuple[str, str | None, tuple[str, ...]]] = []
         rogue_path = tmp_path / "post-validation-rogue.json"
         validation_calls = 0
@@ -3079,8 +3084,19 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
         assert all(actual_commands == commands for _, _, actual_commands in calls)
         assert validation_calls == 2
         assert not rogue_path.exists()
-        assert "missing required property 'nodes'" in calls[1][0]
-        assert "不要求你在 Session 内执行校验命令" in calls[1][0]
+        correction_prompt = calls[1][0]
+        assert "missing required property 'nodes'" in correction_prompt
+        assert "不要求你在 Session 内执行校验命令" not in correction_prompt
+        assert "宿主会在回复结束后再次校验。" in correction_prompt
+        if commands:
+            instructions, diagnostic = correction_prompt.split("<validation-output>\n", 1)
+            assert "修正后必须在当前 Session 内执行以下校验命令" in instructions
+            assert "校验通过后再结束本次回复" in instructions
+            assert "\n".join(commands) in instructions
+            assert all(command not in diagnostic for command in commands)
+        else:
+            assert "请根据错误修正指定产物后结束本次回复" in correction_prompt
+            assert "以下校验命令" not in correction_prompt
         assert acquire_mock.await_count == 1
         assert release_mock.await_args.kwargs["outcome"] == "success"
         final_updates = update_context_mock.await_args_list[-1].args[1]

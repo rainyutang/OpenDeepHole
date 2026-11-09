@@ -69,7 +69,7 @@ result = await run_opencode_task(
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 本次 Session 额外允许写入并默认保留的文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径自身及所有后代会获得 `read`、`external_directory` 和 `edit` 权限。不允许通配符或文件系统根目录。 |
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者同时传入时合并去重，并使用完全相同的写权限和保留语义。 |
 | `readable_paths` | 单个路径、路径序列或 `None` | `None` | 保留的兼容参数，用于显式声明本次 Session 的只读路径意图；最终全局配置已经允许读取全部本地路径，该参数不会获得编辑权限，也不参与文件保留。 |
-| `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许但不要求执行的命令。拒绝空值、换行和通配符；不会参与 Session 完成审计。 |
+| `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许执行、但不参与 Session 完成审计的命令。拒绝空值、换行和通配符；宿主产物校验纠正时用作模型自检命令。 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的命令。拒绝空值、换行和通配符；除明确列出的完整命令外仍拒绝所有 shell。 |
 | `bash_command_match_mode` | `"exact"` 或 `"bound_python_script"` | `"exact"` | 默认按完整字符串匹配。显式选择脚本模式时，识别 Python 对绑定脚本的直接调用，并在执行前将整条命令替换为任务声明的标准命令，包括所有固定参数。 |
 | `required_bash_retry_count` | `int` | `0` | 必需命令校验失败后，在同一个 Session 追加诊断和纠正消息的次数；耗尽后才进入既有 fresh Session 重试。大于 `0` 时必须同时声明 `required_bash_commands`。 |
@@ -122,8 +122,11 @@ OpenCode 没有暴露退出码，也可由输出中的完全匹配行判定。�
 `required_bash_retry_count > 0` 时，Task Agent 先把失败类型、退出码、超时状态和该输出追加到原
 Session，要求模型修复产物并再次执行同一命令；再次失败并耗尽此预算后才进入既有 fresh Session
 重试，整个过程不降低模型健康权重。`post_session_validator` 则在每次完整消息返回后校验宿主产物；
-非空诊断会按 `post_session_validation_retry_count` 回传同一 Session，纠正消息明确诊断不是新指令且
-不要求模型自行执行校验命令，预算耗尽后沿用 fresh Session 重试。Windows 任务会给绑定了任一精确
+非空诊断会按 `post_session_validation_retry_count` 回传同一 Session，纠正消息明确诊断不是新指令。
+配置了 `allowed_bash_commands` 时，纠正消息会原样列出这些校验命令，要求模型修正产物后在当前
+Session 执行，失败则继续修正并重新执行，通过后再结束回复；宿主仍会在回复结束后再次校验。
+未提供命令时只要求修正产物并由宿主复验，不要求调用 Bash。此提示词要求不增加命令执行审计，
+纠正预算耗尽后沿用 fresh Session 重试。Windows 任务会给绑定了任一精确
 命令的 Session 临时前置当前 Python 目录到 `PATH`；面向模型的便携命令可直接使用 `python`。
 
 OpenCode 轻量威胁分析显式使用 `bash_command_match_mode="bound_python_script"`：允许
