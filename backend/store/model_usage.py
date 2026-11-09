@@ -67,6 +67,19 @@ class ScanModelUsageMixin:
     def _model_usage_execution_matches_locked(self, scan_id, status, row) -> bool:
         owner = status.execution_owner
         if owner is not None:
+            if owner.kind == "vulnerability_validation":
+                owner_scan_id, separator, index = owner.id.rpartition(":")
+                try:
+                    vuln_index = int(index)
+                except ValueError:
+                    return False
+                if not separator or owner_scan_id != scan_id or vuln_index < 0:
+                    return False
+                return self.execution_matches(
+                    "validation", scan_id, vuln_index,
+                    agent_session_id=status.agent_session_id,
+                    execution_revision=owner.revision,
+                )
             if owner.kind == "scan" and owner.id != scan_id:
                 return False
             if owner.kind == "fp_review":

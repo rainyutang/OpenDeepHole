@@ -6129,24 +6129,36 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     if loaded is None:
         _scan_not_found(scan_id, endpoint="opencode-pool", store=store)
     owner = body.execution_owner
+    execution_kind = owner.kind if owner is not None else "scan"
+    execution_id = owner.id if owner is not None else scan_id
+    execution_sub_id = None
     if owner is not None and owner.kind == "fp_review":
         review = await run_store_call(store, "get_fp_review_job_state", owner.id)
         if review is None or review.scan_id != scan_id:
             raise HTTPException(status_code=409, detail="stale fp_review execution")
+    elif owner is not None and owner.kind == "vulnerability_validation":
+        owner_scan_id, separator, index = owner.id.rpartition(":")
+        try:
+            execution_sub_id = int(index)
+        except ValueError:
+            execution_sub_id = -1
+        if not separator or owner_scan_id != scan_id or execution_sub_id < 0:
+            raise HTTPException(status_code=409, detail="stale validation execution")
+        execution_kind, execution_id = "validation", scan_id
     elif owner is not None and owner.id != scan_id:
         raise HTTPException(status_code=409, detail="stale scan execution")
     if not await run_store_call(
         store,
         "execution_matches",
-        owner.kind if owner is not None else "scan",
-        owner.id if owner is not None else scan_id,
-        None,
+        execution_kind,
+        execution_id,
+        execution_sub_id,
         agent_session_id=body.agent_session_id,
         execution_revision=owner.revision if owner is not None else body.execution_revision,
     ):
         raise HTTPException(status_code=409, detail="stale scan execution")
-    # The source can be an independently resumed review. GET/SSE ordering still
-    # uses the parent scan revision, never the review's revision counter.
+    # Reviews and validations have independent execution identities. GET/SSE
+    # ordering still uses the parent scan revision.
     body.execution_revision = int(loaded["execution_revision"] or 0)
     if hasattr(store, "upsert_scan_opencode_token_usage"):
         await run_store_call(

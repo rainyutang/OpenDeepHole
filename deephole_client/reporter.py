@@ -102,6 +102,11 @@ def _compact_pool_task(value: object) -> dict:
         "started_at",
         "finished_at",
         "duration_seconds",
+        "logical_duration_seconds",
+        "token_category",
+        "token_category_label",
+        "mining_engine_id",
+        "mining_engine_label",
         "outcome",
         "blocked_reason",
         "execution_kind", "execution_id", "execution_revision", "agent_session_id",
@@ -2193,7 +2198,7 @@ class Reporter:
         *,
         execution_owner: dict | None = None,
     ) -> None:
-        """Keep one publisher alive while any scan/review owner needs it."""
+        """Keep one publisher alive while any scan/review/validation needs it."""
         publisher = self._scan_pool_publishers.get(scan_id)
         if publisher is None or publisher.stop.is_set() or (publisher.task and publisher.task.done()):
             publisher = _ScanPoolPublisher()

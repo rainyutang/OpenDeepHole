@@ -1,4 +1,5 @@
 import { selectedScanPaths } from "./scanPaths";
+import { normalizeScanProgressEstimate, selectScanProgressEstimate } from "./scanProgress";
 import type {
   Candidate,
   FpReviewJob,
@@ -460,6 +461,8 @@ export function mergeScanSnapshot(
     ...incoming,
     ...Object.fromEntries(progressFields.map((key) => [key, runtime[key]])),
     execution_revision: scanExecutionRevision(runtime) ?? scanExecutionRevision(previous),
+    progress_estimate: selectScanProgressEstimate(previous.progress_estimate, incoming.progress_estimate,
+      scanExecutionRevision(runtime) ?? scanExecutionRevision(previous)),
     progress: runtime.total_candidates > 0
       ? Math.min(1, Math.max(0, runtime.processed_candidates / runtime.total_candidates))
       : runtime.progress,
@@ -567,6 +570,7 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     created_at: text(value.created_at),
     status,
     progress: finiteNumber(value.progress),
+    progress_estimate: normalizeScanProgressEstimate(value.progress_estimate),
     total_candidates: finiteNumber(value.total_candidates),
     processed_candidates: finiteNumber(value.processed_candidates),
     candidates: Array.isArray(value.candidates)

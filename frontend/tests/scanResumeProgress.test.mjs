@@ -138,6 +138,70 @@ function assertReviewProgress(root, processed, total) {
   assert.equal(fill.props.style.width, `${total > 0 ? Math.round(processed / total * 100) : 0}%`);
 }
 
+function progressEstimate(overrides = {}) {
+  return { progress: 0.4, remaining_seconds: 600, state: "ready", calculated_at: "2026-11-09T01:00:00Z",
+    execution_revision: 2, active: true, ...overrides };
+}
+function overallProgress(root) {
+  return root.root.findByProps({ role: "progressbar", "aria-label": "整体进度" }).props["aria-valuenow"];
+}
+
+test("overall estimate survives sparse and reordered SSE updates then clears on a new execution", async () => {
+  const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
+  const root = await mount();
+  assert.equal(overallProgress(root), 40);
+  await notify(["scan_status", { execution_revision: 2, processed_candidates: 85 }]);
+  assert.equal(overallProgress(root), 40);
+  await notify(
+    ["scan_status", { execution_revision: 2, progress_estimate: progressEstimate({ progress: 0.7, calculated_at: "2026-11-09T01:02:00Z" }) }],
+    ["scan_status", { execution_revision: 2, progress_estimate: progressEstimate({ progress: 0.5 }) }],
+  );
+  assert.equal(overallProgress(root), 70);
+  await poll(10_000);
+  assert.equal(overallProgress(root), 70, "an older GET summary must not undo live progress");
+  await notify(["scan_status", { execution_revision: 3, status: "auditing", processed_candidates: 90 }]);
+  assert.equal(overallProgress(root), undefined);
+  state.overview = { ...overview(90, 3), progress_estimate: progressEstimate({ execution_revision: 3, progress: 0.3 }) };
+  await poll(10_000);
+  assert.equal(overallProgress(root), 30);
+});
+
+for (const work of ["review", "validation", "planned"]) {
+  test(`overall estimate keeps refreshing after main completion with ${work} work`, async () => {
+    const state = installApi({ ...overview(), progress_estimate: progressEstimate({ execution_revision: 1, active: false }) });
+    if (work === "review") state.fpReview.status = "running";
+    if (work === "validation") state.overview.validations = [{ vuln_index: 0, status: "queued", running: true }];
+    if (work === "planned") state.overview.opencode_pool = { scope_id: "s", global_running: 0, global_queued: 0,
+      total_tasks: 1, completed_task_count: 0, queued_tasks: [], models: [], planned_tasks: [{ planned_task_id: "p" }], updated_at: "" };
+    const root = await mount();
+    if (work === "validation") await notify(["vulnerability_validation", { validation: { scan_id: "s", vuln_index: 0, status: "queued", running: true } }]);
+    const before = state.overviewRequestCount;
+    state.overview.progress_estimate = progressEstimate({ execution_revision: 1, progress: 0.8,
+      calculated_at: "2026-11-09T01:03:00Z" });
+    await poll(10_000);
+    assert.ok(state.overviewRequestCount > before);
+    assert.equal(overallProgress(root), 80);
+  });
+}
+
+test("a completed overview clears the previous active estimate and stops overview polling", async () => {
+  const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
+  const root = await mount();
+  assert.equal(overallProgress(root), 40);
+  assert.ok([...timers.values()].some((timer) => timer.delay === 10_000));
+  state.overview = { ...overview(100, 2), status: "complete",
+    mining_engine_runs: [{ engine_id: "static_candidate", engine_label: "static", status: "success" }],
+    progress_estimate: progressEstimate({ progress: 1, state: "complete", remaining_seconds: 0,
+      active: false, calculated_at: "2026-11-09T01:10:00Z" }) };
+  await poll(10_000);
+  assert.equal(overallProgress(root), 100);
+  assert.match(text(root.toJSON()), /预计剩余时间 0 分钟/);
+  assert.equal([...timers.values()].some((timer) => timer.delay === 10_000), false);
+  await notify(["scan_status", { execution_revision: 2, progress_estimate: progressEstimate() }]);
+  assert.equal(overallProgress(root), 100, "a late active estimate cannot undo completion");
+  assert.equal([...timers.values()].some((timer) => timer.delay === 10_000), false);
+});
+
 for (const enabled of [false, true]) {
   for (const staticSelected of [false, true]) {
     test(`codegraph capability agrees with task progress (enabled=${enabled}, static=${staticSelected})`, async () => {

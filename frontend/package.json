@@ -10,6 +10,7 @@
     "test:scan-paths": "node tests/scanPathValidation.test.mjs",
     "test:scan-copy": "node tests/scanCopy.test.mjs",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
+    "test:scan-progress": "node tests/scanProgress.test.mjs",
     "test:scan-metadata": "node tests/scanMetadata.test.mjs",
     "test:scan-codegraph": "node tests/scanCodeGraph.test.mjs",
     "test:scan-sharing": "node tests/scanSharing.test.mjs",

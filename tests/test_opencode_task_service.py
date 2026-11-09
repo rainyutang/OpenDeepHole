@@ -2565,12 +2565,14 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
             key: value
             for key, value in formatter_context.items()
             if key != "session_events"
-        } == {**base_context, "task_phase": "json_format"}
+        } == {**base_context, "task_phase": "json_format",
+              "logical_duration_seconds": release_mock.await_args_list[0].kwargs["context_updates"]["logical_duration_seconds"]}
         assert {
             key: value
             for key, value in correction_context.items()
             if key not in {"session_events", "serve_session_id"}
-        } == {**base_context, "task_phase": "json_correction"}
+        } == {**base_context, "task_phase": "json_correction",
+              "logical_duration_seconds": formatter_release["context_updates"]["logical_duration_seconds"]}
         assert correction_context["serve_session_id"] == "ses_first"
         assert [
             event["phase"] for event in formatter_context["session_events"]
@@ -2683,6 +2685,57 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
         assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
         assert release_mock.await_args_list[1].kwargs["outcome"] == "success"
         assert release_mock.await_args_list[1].kwargs["health_outcome"] == "success"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("recovery", ["fresh_session", "formatter", "correction"])
+def test_logical_duration_includes_retries_and_recovery_but_excludes_queue_wait(tmp_path, recovery):
+    async def run():
+        service = OpenCodeTaskService()
+        clock = [100.0]
+        calls = []
+
+        async def acquire(*_args, **kwargs):
+            clock[0] += 500  # Deliberately much longer than actual execution.
+            return dataclasses.replace(_lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"]),
+                                       started_at=clock[0])
+
+        async def prompt(**kwargs):
+            calls.append(kwargs)
+            clock[0] += 10 * len(calls)
+            session = kwargs["session_id"] or f"session-{len(calls)}"
+            await kwargs["on_session_id"](session)
+            if recovery == "fresh_session" and len(calls) == 1:
+                raise RuntimeError("retryable transport error")
+            text = '{"answer": 7}'
+            if recovery != "fresh_session" and len(calls) == 1:
+                text = "not JSON"
+            elif recovery == "correction" and len(calls) == 2:
+                text = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"
+            return OpenCodePromptResult(session_id=session, message_id=f"message-{len(calls)}",
+                                       text=text, lines=[text], model="provider/model-low")
+
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        patches = _service_patches(SimpleNamespace(run_prompt=prompt))
+        with (patches[0], patches[1] as acquire_mock, patches[2] as release_mock,
+              patches[3], patches[4], patches[5],
+              patch("task_agent.task_service.time", SimpleNamespace(monotonic=lambda: clock[0]))):
+            acquire_mock.side_effect = acquire
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="duration", prompt="run", directory=tmp_path,
+                    attempt=1 if recovery == "fresh_session" else 0,
+                    output_schema=None if recovery == "fresh_session" else SCHEMA,
+                ))
+        assert result.status == "success"
+        expected = [10, 30, 60] if recovery == "correction" else [10, 30]
+        releases = release_mock.await_args_list
+        assert [call.kwargs["context_updates"]["logical_duration_seconds"] for call in releases] == expected
+        assert [call.kwargs["task_context"]["logical_duration_seconds"] for call in acquire_mock.await_args_list] == [0, *expected[:-1]]
+        assert releases[-1].kwargs["record_completion"] is True
+        # Existing model duration accounting remains separate from logical totals.
+        assert releases[0].kwargs["duration_seconds"] == 10
 
     asyncio.run(run())
 

@@ -990,6 +990,8 @@ CREATE TABLE IF NOT EXISTS opencode_task_reports (
 
 CREATE INDEX IF NOT EXISTS idx_opencode_task_reports_scan
 ON opencode_task_reports(scan_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_opencode_task_reports_agent_created
+ON opencode_task_reports(agent_key, created_at DESC, sequence DESC);
 """
 
 

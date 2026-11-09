@@ -597,6 +597,15 @@ export interface ScanCodeGraphState {
   sync_message?: string;
 }
 
+export interface ScanProgressEstimate {
+  progress: number;
+  remaining_seconds: number | null;
+  state: "ready" | "estimating" | "unavailable" | "complete";
+  calculated_at: string;
+  execution_revision: number;
+  active: boolean;
+}
+
 export interface ScanStatus {
   scan_id: string;
   can_copy_scan?: boolean;
@@ -632,6 +641,7 @@ export interface ScanStatus {
   created_at: string;
   status: ScanItemStatus;
   progress: number;
+  progress_estimate?: ScanProgressEstimate;
   total_candidates: number;
   processed_candidates: number;
   candidates: ScanCandidate[];

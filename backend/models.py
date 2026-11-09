@@ -775,7 +775,7 @@ class OpenCodeTokenUsage(OpenCodeTokenCounters):
 
 
 class OpenCodePoolExecutionOwner(BaseModel):
-    kind: Literal["scan", "fp_review"]
+    kind: Literal["scan", "fp_review", "vulnerability_validation"]
     id: str = Field(min_length=1)
     revision: int = Field(ge=0)
 
@@ -843,6 +843,15 @@ class MultiVersionTarget(BaseModel):
         return str(value or "").strip()
 
 
+class ScanProgressEstimate(BaseModel):
+    progress: float = Field(ge=0, le=1)
+    remaining_seconds: float | None = Field(default=None, ge=0)
+    state: Literal["ready", "estimating", "unavailable", "complete"]
+    calculated_at: str
+    execution_revision: int = 0
+    active: bool = False
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     can_copy_scan: bool = False
@@ -898,6 +907,7 @@ class ScanStatus(BaseModel):
     total_task_count: int = 0
     completed_task_count: int = 0
     opencode_pool: OpenCodePoolStatus | None = None
+    progress_estimate: ScanProgressEstimate | None = None
 
     # 静态分析进度（按文件计）
     static_total_files: int = 0

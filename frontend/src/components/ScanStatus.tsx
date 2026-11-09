@@ -1,5 +1,7 @@
 import { selectedScanPaths } from "../scanPaths";
 import { ScanTokenUsagePanel } from "./ScanTokenUsagePanel";
+import { ScanProgressPanel } from "./ScanProgressPanel";
+import { hasActiveScanProgress, normalizeScanProgressEstimate, selectScanProgressEstimate } from "../scanProgress";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefCallback } from "react";
 import { isInvalidTaskCursorError, updateScanCodeGraph } from "../api/client";
@@ -1142,6 +1144,9 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         const patch: Partial<ScanStatusType> = {};
         const revision = scanExecutionRevision(data);
         if (revision !== undefined && revision !== prev.execution_revision) patch.execution_revision = revision;
+        const progressEstimate = selectScanProgressEstimate(prev.progress_estimate,
+          normalizeScanProgressEstimate(data.progress_estimate), revision ?? scanExecutionRevision(prev));
+        if (progressEstimate !== prev.progress_estimate) patch.progress_estimate = progressEstimate;
         if (data.error_message !== undefined) patch.error_message = data.error_message;
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
         const nextTotal = data.total_candidates ?? prev.total_candidates;
@@ -1232,6 +1237,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
           },
         };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onScanCandidates: (data) => {
       setScan((prev) => prev ? {
@@ -1417,6 +1423,8 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
       setScan((prev) =>
         prev && !isOlderScanExecution(prev, data)
           ? { ...prev, execution_revision: data.execution_revision ?? prev.execution_revision,
+              progress_estimate: selectScanProgressEstimate(prev.progress_estimate, undefined,
+                data.execution_revision ?? scanExecutionRevision(prev)),
               status: data.status as ScanItemStatus, error_message: data.error_message }
           : prev,
       );
@@ -1439,6 +1447,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         error_message: null,
         created_at: prev?.created_at ?? new Date().toISOString(),
       }));
+      scheduleOverviewSummaryRefresh(0);
     },
     onFpReviewProgress: (data) => {
       setFpReview((prev) => {
@@ -1452,6 +1461,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
           total: data.total,
         };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onFpReviewStageOutput: (data) => {
       setFpReview((prev) => {
@@ -1639,13 +1649,14 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
     return () => controller.abort();
   }, [activeTab, scanId, fpReview?.scan_id, fpReview?.review_id, fpReview?.execution_revision, fpReview?.next_cursor, fpReviewPageRetry, fpReviewRefreshing, fpReviewRefreshFailed]);
 
+  const progressActive = Boolean(isRunning) || hasActiveScanProgress(scan, fpReview);
   useEffect(() => {
-    if (!isRunning || !scan?.detail_counts) return;
+    if (!progressActive || !scan?.detail_counts) return;
     const interval = window.setInterval(() => {
       if (!document.hidden) void refreshOverviewSummary();
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [isRunning, refreshOverviewSummary, scan?.detail_counts]);
+  }, [progressActive, refreshOverviewSummary, scan?.detail_counts]);
 
   const handleFpReview = async () => {
     setFpReviewLoading(true);
@@ -4631,6 +4642,8 @@ function ScanOverview({
           />
         </div>
       </section>
+
+      <ScanProgressPanel scan={scan} active={isRunning || hasActiveScanProgress(scan, fpReview)} />
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         {staticEngineSelected && (

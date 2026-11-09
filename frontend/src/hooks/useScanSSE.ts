@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { scanSSEUrl, getScanOverviewRequest, getScanDetailItem, getFpReviewOverview, getAgentIndexStatus, notifyShareUnavailable } from "../api/client";
 import { isScanDetailResource, refreshScanResource, SCAN_DETAIL_RESOURCES } from "../scanResourceRefresh";
+import { normalizeScanProgressEstimate, selectScanProgressEstimate } from "../scanProgress";
 import type { ScanDetailResource } from "../scanResourceRefresh";
 import {
   isRecord,
@@ -44,6 +45,7 @@ interface ScanStatusEvent {
   execution_revision?: number;
   status: string | null;
   progress: number | null;
+  progress_estimate?: ScanStatus["progress_estimate"];
   total_candidates: number | null;
   processed_candidates: number | null;
   static_total_files?: number | null;
@@ -468,6 +470,9 @@ export function useScanSSE(
         execution_revision: scanExecutionRevision(status) ?? scanExecutionRevision(pendingStatus),
         status: status.status ?? pendingStatus?.status ?? null,
         progress: status.progress ?? pendingStatus?.progress ?? null,
+        progress_estimate: selectScanProgressEstimate(pendingStatus?.progress_estimate,
+          normalizeScanProgressEstimate(status.progress_estimate),
+          scanExecutionRevision(status) ?? scanExecutionRevision(pendingStatus)),
         total_candidates: status.total_candidates ?? pendingStatus?.total_candidates ?? null,
         processed_candidates: status.processed_candidates ?? pendingStatus?.processed_candidates ?? null,
         static_total_files: status.static_total_files ?? pendingStatus?.static_total_files ?? null,

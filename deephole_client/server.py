@@ -1342,16 +1342,32 @@ def refresh_validation_scheduling() -> None:
 
 
 async def _run_validation_item(environment_key: str, item: _ValidationQueueItem) -> None:
+    pool_stop = asyncio.Event()
+    pool_task = None
     try:
         if item.cancel_event.is_set():
             print(f"Skipping cancelled validation {item.scan_id}#{item.vuln_index}")
             await _report_validation_cancelled(item)
             return
+        publish_pool = getattr(item.reporter, "publish_opencode_pool_until", None)
+        if callable(publish_pool):
+            pool_task = asyncio.create_task(publish_pool(
+                item.scan_id, pool_stop,
+                execution_owner={
+                    "kind": "vulnerability_validation",
+                    "id": f"{item.scan_id}:{item.vuln_index}",
+                    "revision": item.execution_revision,
+                },
+            ))
         await _run_single_validation(item)
     except asyncio.CancelledError:
         item.cancel_event.set()
         await _report_validation_cancelled(item)
         raise
+    finally:
+        pool_stop.set()
+        if pool_task is not None:
+            await asyncio.gather(pool_task, return_exceptions=True)
 
 
 async def _finish_validation_item(
@@ -1490,6 +1506,9 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             task_metadata={
                 "validation_model_policy": copy.deepcopy(model_policy),
                 "scan_mode": item.scan_mode,
+                "execution_revision": item.execution_revision,
+                "agent_session_id": getattr(item.reporter, "agent_session_id", ""),
+                "vuln_index": item.vuln_index,
             },
             cancel_event=item.cancel_event,
         ):

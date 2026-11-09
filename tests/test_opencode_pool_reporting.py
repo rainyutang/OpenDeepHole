@@ -47,8 +47,10 @@ def patch_snapshots(monkeypatch):
     monkeypatch.setattr("task_agent.model_pool.wait_for_model_pool_update", wait_for_update)
 
 
-def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch):
+@pytest.mark.parametrize("owner_kind", ["fp_review", "vulnerability_validation"])
+def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch, owner_kind):
     patch_snapshots(monkeypatch)
+    owner_id = "scan-1:0" if owner_kind == "vulnerability_validation" else "review-1"
 
     async def run():
         posts = []
@@ -56,7 +58,7 @@ def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch):
         async def handler(request):
             payload = json.loads(request.content)
             posts.append(payload)
-            if payload.get("execution_owner", {}).get("kind") == "fp_review":
+            if payload.get("execution_owner", {}).get("kind") == owner_kind:
                 review_published.set()
             return httpx.Response(200)
         reporter = await make_reporter(handler)
@@ -64,7 +66,7 @@ def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch):
         scan = asyncio.create_task(publisher(reporter, "scan-1", scan_stop))
         review = asyncio.create_task(reporter.publish_opencode_pool_until(
             "scan-1", review_stop, debounce_seconds=0, unchanged_heartbeat_seconds=0.005,
-            execution_owner={"kind": "fp_review", "id": "review-1", "revision": 9},
+            execution_owner={"kind": owner_kind, "id": owner_id, "revision": 9},
         ))
         try:
             await asyncio.sleep(0.03)
@@ -75,7 +77,7 @@ def test_scan_and_review_share_publisher_and_review_keeps_it_alive(monkeypatch):
             await asyncio.wait_for(scan, 1)
             await asyncio.wait_for(review_published.wait(), 1)
             assert not state.task.done()
-            assert posts[-1]["execution_owner"] == {"kind": "fp_review", "id": "review-1", "revision": 9}
+            assert posts[-1]["execution_owner"] == {"kind": owner_kind, "id": owner_id, "revision": 9}
             assert posts[-1]["execution_revision"] == 1
             review_stop.set()
             await asyncio.wait_for(review, 1)
@@ -297,7 +299,16 @@ def test_compact_413_retry_preserves_identity_and_honors_stale(scope):
             })
 
         reporter = await make_reporter(handler)
-        value = {**snapshot(scope), "queued_tasks": [{"task_id": "t", "prompt": "large prompt"}]}
+        estimation_metadata = {
+            "logical_duration_seconds": 75.0,
+            "token_category": "static_candidate",
+            "token_category_label": "基于候选点的审计",
+            "mining_engine_id": "static_candidate",
+            "mining_engine_label": "候选点审计",
+        }
+        value = {**snapshot(scope), "queued_tasks": [{
+            "task_id": "t", "prompt": "large prompt", **estimation_metadata,
+        }]}
         try:
             if scope:
                 assert not await reporter.push_opencode_pool_status(scope, value)
@@ -310,6 +321,8 @@ def test_compact_413_retry_preserves_identity_and_honors_stale(scope):
             assert first["agent_session_id"] == compact["agent_session_id"]
             assert compact["details_truncated"] is True
             assert "prompt" not in compact["queued_tasks"][0]
+            for key, value in estimation_metadata.items():
+                assert compact["queued_tasks"][0][key] == value
             if scope:
                 assert first["execution_revision"] == compact["execution_revision"] == 1
         finally:

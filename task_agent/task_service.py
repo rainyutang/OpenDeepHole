@@ -452,6 +452,7 @@ class _TaskRecord:
     worker: asyncio.Task[None] | None = None
     requeue_requested: bool = False
     last_session_id: str = ""
+    logical_duration_seconds: float = 0.0
 
 
 class OpenCodeTaskHandle:
@@ -770,6 +771,7 @@ class OpenCodeTaskService:
         record.revision += 1
         record.queued_at = _now_iso()
         record.started_at = ""
+        record.logical_duration_seconds = 0.0
         record.status = "queued"
         record.cancel_event = asyncio.Event()
         record.requeue_requested = False
@@ -877,6 +879,20 @@ class OpenCodeTaskService:
                     )
             finally:
                 get_config_reload_coordinator().release_task(record.task_id)
+
+    async def _release_task_lease(self, record: _TaskRecord, lease: ModelLease | None, **kwargs) -> None:
+        """Track logical execution separately from existing per-lease accounting.
+
+        Retries and JSON recovery acquire fresh leases for the same task. Start
+        each interval at admission so time spent waiting for capacity is excluded.
+        """
+        if lease is not None:
+            record.logical_duration_seconds += _elapsed(lease.started_at)
+            kwargs["context_updates"] = {
+                **(kwargs.get("context_updates") or {}),
+                "logical_duration_seconds": record.logical_duration_seconds,
+            }
+        await release_model_lease(lease, **kwargs)
 
     async def _execute_record(self, record: _TaskRecord) -> None:
         spec = record.spec
@@ -1750,8 +1766,8 @@ class OpenCodeTaskService:
                     ),
                 ))
                 try:
-                    await release_model_lease(
-                        lease,
+                    await self._release_task_lease(
+                        record, lease,
                         outcome=attempt_outcome,
                         health_outcome=health_outcome,
                         quota_retry_after_seconds=quota_retry_after_seconds,
@@ -2131,8 +2147,8 @@ class OpenCodeTaskService:
                 formatter_failure_reason = formatter_parse.failure_reason
             if formatted is not None:
                 record_formatter_event("success")
-                await release_model_lease(
-                    formatter_lease,
+                await self._release_task_lease(
+                    record, formatter_lease,
                     outcome="success",
                     health_outcome="success",
                     duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
@@ -2185,8 +2201,8 @@ class OpenCodeTaskService:
                 session_id=session_id,
                 category="session",
             )
-            await release_model_lease(
-                formatter_lease,
+            await self._release_task_lease(
+                record, formatter_lease,
                 outcome="failure",
                 health_outcome=None,
                 duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
@@ -2201,8 +2217,8 @@ class OpenCodeTaskService:
                     failure_kind="cancelled",
                     failure_reason="OpenCode task cancelled",
                 )
-                await release_model_lease(
-                    formatter_lease,
+                await self._release_task_lease(
+                    record, formatter_lease,
                     outcome="cancelled",
                     health_outcome=None,
                     duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
@@ -2239,8 +2255,8 @@ class OpenCodeTaskService:
                     failure_kind=formatter_failure_kind,
                     failure_reason=formatter_failure_reason,
                 )
-                await release_model_lease(
-                    formatter_lease,
+                await self._release_task_lease(
+                    record, formatter_lease,
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
                     health_outcome=formatter_model_failure or None,
                     quota_retry_after_seconds=formatter_quota_retry_after_seconds,
@@ -2476,8 +2492,8 @@ class OpenCodeTaskService:
                         correction_failure_kind = ""
                         correction_failure_reason = ""
                         record_correction_event("success")
-                        await release_model_lease(
-                            correction_lease,
+                        await self._release_task_lease(
+                            record, correction_lease,
                             outcome="success",
                             health_outcome="success",
                             duration_seconds=max(
@@ -2555,8 +2571,8 @@ class OpenCodeTaskService:
                     failure_kind="cancelled",
                     failure_reason="OpenCode task cancelled",
                 )
-                await release_model_lease(
-                    correction_lease,
+                await self._release_task_lease(
+                    record, correction_lease,
                     outcome="cancelled",
                     health_outcome=None,
                     duration_seconds=max(0.0, time.monotonic() - correction_started_at),
@@ -2616,8 +2632,8 @@ class OpenCodeTaskService:
                     if terminal_failure_kind
                     else ""
                 )
-                await release_model_lease(
-                    correction_lease,
+                await self._release_task_lease(
+                    record, correction_lease,
                     outcome=correction_outcome,
                     health_outcome=correction_model_failure or None,
                     quota_retry_after_seconds=correction_quota_retry_after_seconds,
@@ -2962,6 +2978,7 @@ def _model_pool_task_context(
         "prompt_length": len(prompt),
         "priority": spec.priority,
         "revision": record.revision,
+        "logical_duration_seconds": record.logical_duration_seconds,
         "session_attempt": session_attempt,
         "retry_ordinal": session_attempt - 1,
         "session_attempts": total_session_attempts,

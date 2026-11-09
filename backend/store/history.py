@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 
 from backend.models import OpenCodePoolStatus
 from backend.scan_runtime import is_terminal_scan_status, terminal_opencode_pool_status
-from backend.task_order import task_sort_time, task_sort_time_sql
+from backend.task_order import MISSING_TASK_TIME, task_sort_time, task_sort_time_sql
 
 
 HISTORY_COLUMNS = {
@@ -79,7 +80,7 @@ TASK_METADATA_FIELDS = frozenset({
     "task_id", "scope_id", "revision", "task_type", "task_name", "title",
     "request_id", "planned_task_id", "planned_at", "queued_at", "prompt_length",
     "model", "model_id", "capability", "started_at", "finished_at", "outcome",
-    "status", "duration_seconds", "serve_session_id", "failure_kind",
+    "status", "duration_seconds", "logical_duration_seconds", "serve_session_id", "failure_kind",
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
     "token_category", "token_category_label", "mining_engine_id", "mining_engine_label",
     "execution_kind", "execution_id", "execution_revision", "agent_session_id",
@@ -162,6 +163,14 @@ class ScanHistoryMixin:
                 "FROM fp_review_jobs WHERE scan_id = ? AND status IN ('pending', 'running')",
                 (scan_id,),
             ).fetchall()}
+        validations = {}
+        if any(task.get("execution_kind") == "vulnerability_validation" for task in tasks):
+            validations = {f"{scan_id}:{item['vuln_index']}": dict(item) for item in self._conn.execute(
+                "SELECT vuln_index, execution_revision, execution_agent_session_id "
+                "FROM vulnerability_validations WHERE scan_id = ? "
+                "AND (running = 1 OR status IN ('pending', 'queued', 'running'))",
+                (scan_id,),
+            ).fetchall()}
 
         def matches(task, owner):
             revision = int(owner["execution_revision"] or 0)
@@ -180,6 +189,9 @@ class ScanHistoryMixin:
             if kind == "fp_review":
                 review = reviews.get(str(task.get("execution_id") or ""))
                 return review is not None and matches(task, review)
+            if kind == "vulnerability_validation":
+                validation = validations.get(str(task.get("execution_id") or ""))
+                return validation is not None and matches(task, validation)
             if terminal_scan or is_terminal_scan_status(row["status"]):
                 return False
             if kind == "scan":
@@ -409,6 +421,117 @@ class ScanHistoryMixin:
         pool = OpenCodePoolStatus.model_validate_json(row["opencode_pool"] or "{}")
         pool.completed_tasks = []
         return self.normalize_scan_pool(scan_id, pool)
+
+    def _legacy_estimation_metadata(self, scan_id: str) -> list[dict]:
+        """Project old embedded history in SQL; never transfer prompts or traces."""
+        fields = sorted(TASK_METADATA_FIELDS)
+        if getattr(self, "distributed", False):
+            columns = ", ".join(f"j.value -> '{key}' AS {key}" for key in fields)
+            source = ("scans s CROSS JOIN LATERAL jsonb_array_elements("
+                      "COALESCE(CAST(s.opencode_pool AS jsonb) -> 'completed_tasks', '[]'::jsonb)) "
+                      "WITH ORDINALITY j(value, position)")
+            object_filter = "jsonb_typeof(j.value) = 'object'"
+            order = "j.position"
+        else:
+            columns = ", ".join(f"json_extract(j.value, '$.{key}') AS {key}" for key in fields)
+            source = "scans s, json_each(s.opencode_pool, '$.completed_tasks') j"
+            object_filter = "j.type = 'object'"
+            order = "CAST(j.key AS INTEGER)"
+        rows = self._conn.execute(
+            f"SELECT {columns} FROM {source} WHERE s.scan_id = ? AND {object_filter} ORDER BY {order}", (scan_id,),
+        ).fetchall()
+        tasks = []
+        for index, row in enumerate(rows):
+            task = {key: row[key] for key in fields if row[key] is not None}
+            # Distinct legacy invocations can have identical metadata and no
+            # logical ID. Preserve their positions without loading report bodies.
+            if not task.get("task_id"):
+                task["task_id"] = f"legacy-estimation:{scan_id}:{index}"
+            tasks.append(task)
+        return tasks
+
+    def get_scan_estimation_tasks(self, scan_id: str) -> list[dict]:
+        row = self._conn.execute("SELECT history_version FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        if row is None:
+            return []
+        tasks = {}
+        if not row["history_version"]:
+            for task in self._legacy_estimation_metadata(scan_id):
+                identity, revision = task_identity(task)
+                if identity not in tasks or revision >= task_identity(tasks[identity])[1]:
+                    tasks[identity] = {**task, "task_id": identity, "revision": revision}
+        rows = self._conn.execute(
+            "SELECT v.metadata_json FROM scan_task_current c "
+            "JOIN scan_task_versions v ON v.record_id = c.record_id WHERE c.scan_id = ?", (scan_id,),
+        ).fetchall()
+        for row in rows:
+            task = json.loads(row["metadata_json"])
+            identity, revision = task_identity(task)
+            if identity not in tasks or revision >= task_identity(tasks[identity])[1]:
+                tasks[identity] = task
+        return list(tasks.values())
+
+    def get_agent_estimation_samples(self, scan_id: str, *, since: str) -> list[dict]:
+        identity = self.get_scan_identity(scan_id)
+        cutoff = task_sort_time(since)
+        if identity is None or not identity.get("agent_key") or cutoff == MISSING_TASK_TIME:
+            return []
+        owner, agent = identity["user_id"] or "", identity["agent_key"]
+        received_since = cutoff.replace("Z", "+00:00")
+        # Receipts preserve the actual executor even if a scan later moves to
+        # another Agent. Only the current logical revision contributes a sample.
+        rows = self._conn.execute(
+            "SELECT c.scan_id, v.metadata_json FROM opencode_task_reports r "
+            "JOIN scans s ON s.scan_id = r.scan_id "
+            "JOIN scan_task_current c ON c.scan_id = r.scan_id AND c.task_id = r.task_id "
+            "AND c.revision = r.revision AND (c.record_id = r.record_id OR r.record_id = '') "
+            "JOIN scan_task_versions v ON v.record_id = c.record_id "
+            "WHERE r.agent_key = ? AND r.created_at >= ? AND s.user_id = ? AND s.scan_id <> ?",
+            (agent, received_since, owner, scan_id),
+        ).fetchall()
+        # Snapshot-only history predates receipts. Use the stored stable Agent
+        # key only when no receipt can provide stronger ownership evidence.
+        rows += self._conn.execute(
+            "SELECT c.scan_id, v.metadata_json FROM scans s "
+            "JOIN scan_task_current c ON c.scan_id = s.scan_id "
+            "JOIN scan_task_versions v ON v.record_id = c.record_id "
+            "WHERE s.agent_key = ? AND s.user_id = ? AND s.scan_id <> ? AND v.created_at >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM opencode_task_reports r "
+            "WHERE r.scan_id = c.scan_id AND r.task_id = c.task_id AND r.revision = c.revision)",
+            (agent, owner, scan_id, received_since),
+        ).fetchall()
+        candidates = [(row["scan_id"], json.loads(row["metadata_json"])) for row in rows]
+        for row in self._conn.execute(
+            "SELECT scan_id FROM scans WHERE agent_key = ? AND user_id = ? "
+            "AND scan_id <> ? AND history_version = 0", (agent, owner, scan_id),
+        ).fetchall():
+            # Legacy rows do not yet have current-version metadata projections.
+            receipted = {(receipt["task_id"], int(receipt["revision"])) for receipt in self._conn.execute(
+                "SELECT task_id, revision FROM opencode_task_reports WHERE scan_id = ?", (row["scan_id"],),
+            ).fetchall()}
+            candidates.extend((row["scan_id"], task) for task in self.get_scan_estimation_tasks(row["scan_id"])
+                              if task_identity(task) not in receipted)
+        now = task_sort_time(utc_now())
+        samples = {}
+        for source_scan, task in candidates:
+            finished = task_sort_time(task.get("finished_at"))
+            if task.get("outcome", task.get("status")) != "success" or not cutoff <= finished <= now:
+                continue
+            try:
+                raw_duration = task.get("logical_duration_seconds")
+                raw_duration = task.get("duration_seconds") if raw_duration is None else raw_duration
+                if isinstance(raw_duration, bool):
+                    continue
+                duration = float(raw_duration)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(duration) or duration <= 0:
+                continue
+            task_id, revision = task_identity(task)
+            key = (source_scan, task_id)
+            if key not in samples or revision >= task_identity(samples[key])[1]:
+                samples[key] = {**task, "scope_id": source_scan, "task_id": task_id, "revision": revision}
+        return sorted(samples.values(), key=lambda task: (task_sort_time(task.get("finished_at")), task["scope_id"], task["task_id"]), reverse=True)
 
     def list_task_page(self, scan_id: str, *, limit: int = 50, before_sort_time: str | None = None,
                        before_task_id: str = "",
