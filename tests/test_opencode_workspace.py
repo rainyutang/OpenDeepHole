@@ -32,6 +32,13 @@ def _coverage_method_root() -> Path:
     )
 
 
+def _compact_method_root() -> Path:
+    return (
+        Path(__file__).resolve().parents[1] / "deephole_client" / "threat_analysis"
+        / "methods" / "deephole_compact_threat_analysis"
+    )
+
+
 def assert_opencode_read_permissions(
     testcase: unittest.TestCase,
     config: dict,
@@ -58,6 +65,7 @@ def assert_opencode_read_permissions(
         workspace / ".opencode" / "skills",
         codex_runtime_reference_root().resolve(),
         _coverage_method_root(),
+        _compact_method_root(),
     ):
         for pattern in writable_edit_patterns(root):
             testcase.assertEqual(read.get(pattern), "allow")
@@ -106,8 +114,42 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             (
                 codex_runtime_reference_root().resolve(),
                 _coverage_method_root(),
+                _compact_method_root(),
             ),
         )
+
+    def test_runtime_keeps_compact_resources_read_only_and_artifacts_writable(self) -> None:
+        from task_agent.task_service import (
+            OpenCodeExecutionContext,
+            _SessionRuntime,
+            _permission_path_patterns,
+            _runtime_with_permissions,
+        )
+
+        with patch("task_agent.configure_opencode") as configure:
+            configure_opencode_component()
+        bindings = configure.call_args.args[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            output = Path(tmp) / "analysis"
+            context = OpenCodeExecutionContext(project_dir=source, work_dir=output)
+            with patch("task_agent.task_service.get_host_bindings", return_value=bindings):
+                runtime = _runtime_with_permissions(
+                    _SessionRuntime(directory=source, tool="opencode", executable="opencode", config_content="{}"),
+                    context,
+                )
+
+            permission = json.loads(runtime.config_content)["permission"]
+            for pattern in _permission_path_patterns(_compact_method_root()):
+                self.assertEqual(permission["read"][pattern], "allow")
+                self.assertEqual(permission["external_directory"][pattern], "allow")
+                self.assertNotIn(pattern, permission["edit"])
+            for pattern in _permission_path_patterns(output):
+                self.assertEqual(permission["edit"][pattern], "allow")
+            for pattern in _permission_path_patterns(source):
+                self.assertNotIn(pattern, permission["edit"])
+            self.assertEqual(permission["edit"]["*"], "deny")
+            self.assertEqual(permission["bash"], {"*": "deny"})
 
     def test_runtime_environment_only_adds_no_proxy(self) -> None:
         system_proxies = {
@@ -745,6 +787,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config_path = managed_opencode_config_path(workspace)
                 for reference_root in (
                     codex_runtime_reference_root().resolve(), _coverage_method_root(),
+                    _compact_method_root(),
                 ):
                     with self.subTest(reference_root=reference_root):
                         config = json.loads(config_path.read_text(encoding="utf-8"))

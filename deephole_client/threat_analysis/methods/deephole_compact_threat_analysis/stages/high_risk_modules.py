@@ -43,13 +43,6 @@ HIGH_RISK_MAP_CATEGORIES: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-_JSON_REPAIR_OUTPUT_PROMPT = (
-    "返回高风险模块 JSON 数组，使用 Schema 中的中文字段名。"
-    "保留模块名称、代码目录、面临威胁和判断原因；代码目录保持原有字符串或数组形式。"
-    "各项“是否涉及”和“是否外部暴露面”保留原始“是”或“否”字符串，"
-    "不要改成布尔值，不合并或补写模块。"
-)
-
 
 class HighRiskModuleStage:
     map_task_type = "high_risk_module_map"
@@ -85,7 +78,6 @@ class HighRiskModuleStage:
                         "input_files": [str(path) for path in input_files],
                         "output_path": str(self.layout.high_risk_raw_dir / f"{task_id}.json"),
                         "output_schema": HIGH_RISK_MODULES_SCHEMA,
-                        "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                         "metadata": {
                             "stage": "high_risk_modules",
                             "phase": "map",
@@ -111,7 +103,6 @@ class HighRiskModuleStage:
                         "input_files": [str(path) for path in input_files],
                         "output_path": str(self.layout.high_risk_raw_dir / f"{task_id}.json"),
                         "output_schema": HIGH_RISK_MODULES_SCHEMA,
-                        "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
                         "metadata": {
                             "stage": "high_risk_modules",
                             "phase": "map",
@@ -139,7 +130,6 @@ class HighRiskModuleStage:
             "input_files": [str(path) for path in candidate_files],
             "output_path": str(self.layout.high_risk_final_dir / f"{task_id}.json"),
             "output_schema": HIGH_RISK_MODULES_SCHEMA,
-            "json_repair_output_prompt": _JSON_REPAIR_OUTPUT_PROMPT,
             "metadata": {"stage": "high_risk_modules", "phase": "merge"},
             "priority": 30,
         }
@@ -179,7 +169,7 @@ def _category_map_prompt(
         f"输出项的“{category_field}”必须全部为“是”。"
         "其他“是否涉及”字段仍需结合代码证据真实填写，不得为了当前分类强行填写“是”；"
         "“是否外部暴露面”也必须按代码中的外部接口、外部输入或暴露路径证据真实判断。"
-        "最终只输出符合 JSON schema 的数组。"
+        "结果使用本 Skill 规定字段的 JSON 数组。"
         "输入文件："
         + ", ".join(str(path) for path in input_files)
     )
@@ -189,7 +179,7 @@ def _merge_prompt(candidate_files: Sequence[str | Path]) -> str:
     return (
         "请根据 skill 要求合并多个按高风险特征拆分识别的高风险模块候选 JSON，"
         "处理命名不一致、功能重叠和同一模块命中多个高风险特征的情况，"
-        "最终只输出符合 JSON schema 的最终高风险模块数组。"
+        "合并结果使用本 Skill 规定字段的高风险模块 JSON 数组。"
         "候选文件："
         + ", ".join(str(path) for path in candidate_files)
     )

@@ -139,7 +139,7 @@ def test_cli_is_standalone_from_an_unrelated_working_directory(validation_case, 
     standalone = tmp_path / "standalone validator"
     standalone.mkdir()
     source = case.validator.VALIDATOR_PATH.parent
-    for name in ("validate_attack_tree.py", "output_validation.py", "errors.py"):
+    for name in ("validate_attack_tree.py", "artifact_validation.py", "output_validation.py", "errors.py"):
         shutil.copy2(source / name, standalone / name)
     catalog = standalone / case.validator.CATALOG_PATH.relative_to(source)
     catalog.parent.mkdir(parents=True)
@@ -213,7 +213,8 @@ def test_async_timeout_and_cancellation_reap_validator(validation_case, monkeypa
             assert "shell" not in kwargs
             return process
 
-        monkeypatch.setattr(case.validator.asyncio, "create_subprocess_exec", spawn)
+        runtime = importlib.import_module(case.validator.__package__ + ".artifact_validation")
+        monkeypatch.setattr(runtime.asyncio, "create_subprocess_exec", spawn)
         monkeypatch.setattr(case.validator, "ARTIFACT_VALIDATION_TIMEOUT_SECONDS", 0.01)
         monkeypatch.setattr(case.validator, "_VALIDATION_STOP_TIMEOUT_SECONDS", 0.04)
         task = asyncio.create_task(case.validator.validate_file_async(case.output, case.schema_path))

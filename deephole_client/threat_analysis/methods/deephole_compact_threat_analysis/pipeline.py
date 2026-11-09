@@ -145,7 +145,8 @@ class ThreatAnalysisPipeline:
             run_or_resume_task(
                 submit_tasks=self.submit_tasks,
                 task=merge_task,
-                resume=resume,
+                # Recomputed candidates invalidate their previously merged result.
+                resume=resume and not pending_high_risk_map_tasks,
                 timeout=timeout,
                 progress_reporter=self.progress_reporter,
             )

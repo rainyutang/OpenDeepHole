@@ -43,6 +43,7 @@ def test_compact_method_preserves_original_implementation_and_prompts():
     }
     assert compact_files.keys() - original_files.keys() == {
         "baselines.py", "module_scope.py", "validate_attack_tree.py",
+        "artifact_validation.py", "validate_high_risk_modules.py",
     }
     assert original_files.keys() - compact_files.keys() == set()
     attack_skill = "skills/attack-trees/attack-tree-by-asset/"
@@ -51,10 +52,13 @@ def test_compact_method_preserves_original_implementation_and_prompts():
             "method.yaml",
             "pipeline.py",
             "threat_analysis.py",
-            # Compact tree tasks use model-written files and catalog validation.
+            # Compact module/tree tasks validate model-written files.
             "task_agent_submitter.py",
             "stages/base.py",
             "stages/attack_trees.py",
+            "stages/high_risk_modules.py",
+            "skills/high-risk-modules/high-risk-module-map/SKILL.md",
+            "skills/high-risk-modules/high-risk-module-merge/SKILL.md",
             attack_skill + "SKILL.md",
             attack_skill + "references/attack_mode.json",
         }:

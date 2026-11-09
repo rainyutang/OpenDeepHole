@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import contextlib
-import json
-import shlex
 import sys
-import tempfile
-import time
 import types
 from collections.abc import Mapping
 from pathlib import Path
@@ -25,6 +19,11 @@ if __name__ == "__main__" and not __package__:
 
 from threat_analysis_harness.errors import OutputSchemaValidationError
 from threat_analysis_harness.output_validation import validate_json_schema
+from threat_analysis_harness.artifact_validation import (
+    command_for_argv,
+    read_json as _read_json,
+    run_validator,
+)
 
 
 VALIDATOR_PATH = Path(__file__).resolve()
@@ -34,17 +33,6 @@ CATALOG_PATH = (
 )
 ARTIFACT_VALIDATION_TIMEOUT_SECONDS = 60.0
 _VALIDATION_STOP_TIMEOUT_SECONDS = 2.0
-
-
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{path}: JSON 第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}"
-        ) from exc
-    except (OSError, UnicodeError) as exc:
-        raise ValueError(f"{path}: cannot read UTF-8 JSON: {exc}") from exc
 
 
 def _allowed_patterns() -> dict[str, str]:
@@ -140,53 +128,17 @@ def validation_argv(output_path: str | Path, schema_path: str | Path) -> tuple[s
 
 
 def validation_command(output_path: str | Path, schema_path: str | Path) -> str:
-    argv = validation_argv(output_path, schema_path)
-    if sys.platform != "win32":
-        return shlex.join(argv)
-    # The bound Session prepends the host interpreter directory on Windows.
-    if any('"' in value for value in argv[1:]):
-        raise ValueError("Windows validation command arguments cannot contain quotes")
-    return "python " + " ".join(f'"{value}"' for value in argv[1:])
+    return command_for_argv(validation_argv(output_path, schema_path))
 
 
 async def validate_file_async(output_path: str | Path, schema_path: str | Path) -> None:
     """Run the same CLI with bounded diagnostics and cancellable host validation."""
-    # Imported only by the host; the CLI itself needs no Task Agent installation.
-    from task_agent.deadline import OperationDeadline, retire_task
-
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        process = await asyncio.create_subprocess_exec(
-            *validation_argv(output_path, schema_path), stdout=stdout, stderr=stderr,
-        )
-        deadline = OperationDeadline(ARTIFACT_VALIDATION_TIMEOUT_SECONDS)
-        try:
-            returncode = await deadline.wait(process.wait(), phase="artifact_validation")
-        except BaseException as exc:
-            stop_expires = time.monotonic() + _VALIDATION_STOP_TIMEOUT_SECONDS
-            if process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.terminate()
-                waiter = asyncio.create_task(process.wait())
-                await asyncio.wait({waiter}, timeout=min(0.5, _VALIDATION_STOP_TIMEOUT_SECONDS / 2))
-                if process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        process.kill()
-                await asyncio.wait({waiter}, timeout=max(0.0, stop_expires - time.monotonic()))
-                retire_task(waiter)
-            if isinstance(exc, asyncio.TimeoutError):
-                raise ValueError(
-                    f"{output_path}: compact attack-tree validation timed out after "
-                    f"{ARTIFACT_VALIDATION_TIMEOUT_SECONDS:g}s"
-                ) from exc
-            raise
-        if returncode != 0:
-            def tail(stream) -> str:
-                stream.seek(0, 2)
-                stream.seek(max(0, stream.tell() - 16 * 1024))
-                return stream.read().decode("utf-8", errors="replace").strip()
-
-            detail = tail(stderr) or tail(stdout) or f"exit={returncode}"
-            raise ValueError(f"Compact attack-tree validation failed: {detail}")
+    await run_validator(
+        validation_argv(output_path, schema_path), output_path=output_path,
+        label="Compact attack-tree validation",
+        timeout_seconds=ARTIFACT_VALIDATION_TIMEOUT_SECONDS,
+        stop_timeout_seconds=_VALIDATION_STOP_TIMEOUT_SECONDS,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
