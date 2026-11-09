@@ -233,10 +233,26 @@ async function openInformation(root) {
   return root.root.findByProps({ "aria-label": "扫描信息" });
 }
 
+for (const [name, projectId, expected] of [
+  ["  Named scan  ", "project", "Named scan"],
+  ["", "project", "project"],
+  ["  ", "", "s"],
+]) {
+  test(`the navigation heading shows the scan name or identity (${expected}), never its product`, async () => {
+    const api = installDetailApi();
+    api.setSnapshot({ scan_name: name, project_id: projectId, product: "Different product" });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
+    const label = root.root.findByProps({ "aria-label": "当前扫描名称" });
+    assert.equal(content(label), expected);
+    assert.equal(label.props.title, expected);
+    assert.equal(content(root.root.findByType("h1")), "扫描导航");
+  });
+}
+
 for (const status of ["pending", "analyzing", "auditing", "complete", "error", "cancelled"]) {
   test(`authenticated ${status} scans allow name editing with the Agent offline`, async () => {
     installDetailApi(status);
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     await openInformation(root);
     assert.equal(button(root, "编辑名称").props.disabled, undefined);
     await click(button(root, "编辑名称"));
@@ -250,9 +266,10 @@ for (const kind of ["shared", "integration"]) {
   test(`${kind} access shows current names without edit controls or a metadata write API`, async () => {
     client.setPublicScanAccess({ scanId: "s", token: "token", kind });
     const { calls } = installDetailApi();
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     const information = await openInformation(root);
     assert.match(content(information), /Original scan/);
+    assert.equal(content(root.root.findByProps({ "aria-label": "当前扫描名称" })), "Original scan");
     assert.equal(buttons(root, "编辑名称").length, 0);
     await assert.rejects(client.updateScanMetadata("s", { scan_name: "No" }), /不支持编辑/);
     assert.equal(calls.filter((call) => call.method === "patch").length, 0);
@@ -264,7 +281,7 @@ for (const status of ["pending", "auditing", "complete", "error", "cancelled"]) 
     const api = installDetailApi(status);
     api.setSnapshot({ can_copy_scan: true });
     const copied = [];
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {}, onCopyScan: (id) => copied.push(id) });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {}, onCopyScan: (id) => copied.push(id) });
     await openInformation(root);
     assert.equal(button(root, "复制扫描").props.disabled, undefined);
     assert.equal(button(root, "复制扫描").parent, button(root, "编辑名称").parent);
@@ -279,7 +296,7 @@ for (const access of ["not-owner", "missing-capability", "shared", "integration"
     if (access === "shared" || access === "integration") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access });
     const api = installDetailApi();
     api.setSnapshot({ can_copy_scan: access === "missing-capability" ? undefined : access !== "not-owner" });
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {}, onCopyScan() { assert.fail("Copy is unavailable"); } });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {}, onCopyScan() { assert.fail("Copy is unavailable"); } });
     await openInformation(root);
     assert.equal(buttons(root, "复制扫描").length, 0);
   });
@@ -288,7 +305,7 @@ for (const access of ["not-owner", "missing-capability", "shared", "integration"
 test("scan information lists selected files and directories instead of only the common root", async () => {
   const api = installDetailApi();
   api.setSnapshot({ code_scan_path: "/repo", code_scan_paths: ["/repo/src", "/repo/lib/file.c"] });
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   const information = await openInformation(root);
   assert.match(content(information), /代码扫描路径（绝对路径）\/repo\/src/);
   assert.match(content(information), /代码扫描路径（绝对路径）\/repo\/lib\/file\.c/);
@@ -298,7 +315,7 @@ test("a coalesced overview started before save preserves renamed labels and acce
   const pending = deferred();
   let holdOverview = false;
   installDetailApi("auditing", (config) => holdOverview && config.url.endsWith("/scans/s/overview") ? pending.promise : undefined);
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   const requestedFrom = await client.getScanOverview("s");
   holdOverview = true;
@@ -309,6 +326,7 @@ test("a coalesced overview started before save preserves renamed labels and acce
   await change(root, "扫描名称", "Renamed scan");
   await change(root, "产品名", "Renamed product");
   await submit(root);
+  assert.equal(content(root.root.findByProps({ "aria-label": "当前扫描名称" })), "Renamed scan");
   await act(async () => pending.resolve({ ...originalMetadata, project_id: "immutable-identity", scan_id: "s", status: "complete",
     execution_revision: 1, total_candidates: 10, processed_candidates: 10, scan_items: [], detail_counts: { candidates: 0, vulnerabilities: 0 } }));
   await request;
@@ -316,12 +334,13 @@ test("a coalesced overview started before save preserves renamed labels and acce
   const information = root.root.findByProps({ "aria-label": "扫描信息" });
   assert.match(content(information), /Renamed scan/);
   assert.match(content(information), /Renamed product/);
+  assert.equal(content(root.root.findByProps({ "aria-label": "当前扫描名称" })), "Renamed scan");
   assert.match(content(root.toJSON()), /扫描完成/);
 });
 
 test("metadata invalidation refreshes names without reloading result collections", async () => {
   const api = installDetailApi();
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   const before = api.calls.filter((call) => /\/(candidates|vulnerabilities|events|threat-audit-tasks|threat-pattern-audit-tasks|validations)$/.test(call.url)).length;
   api.setSnapshot({ scan_name: "Another tab name", product: "Another product", metadata_revision: 2 });
@@ -330,6 +349,7 @@ test("metadata invalidation refreshes names without reloading result collections
     await new Promise((resolve) => setTimeout(resolve, 220));
   });
   assert.match(content(root.root.findByProps({ "aria-label": "扫描信息" })), /Another tab name.*Another product/);
+  assert.equal(content(root.root.findByProps({ "aria-label": "当前扫描名称" })), "Another tab name");
   const after = api.calls.filter((call) => /\/(candidates|vulnerabilities|events|threat-audit-tasks|threat-pattern-audit-tasks|validations)$/.test(call.url)).length;
   assert.equal(after, before);
 });

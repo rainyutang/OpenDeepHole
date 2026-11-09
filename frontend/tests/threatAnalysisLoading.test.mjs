@@ -136,7 +136,7 @@ function installApi(fixtures = [fixture()], intercept = async () => undefined) {
   };
   return calls;
 }
-function component(scanId) { return createElement(ThemeProvider, null, createElement(ScanStatus, { scanId, onBack() {} })); }
+function component(scanId) { return createElement(ThemeProvider, null, createElement(ScanStatus, { scanId, onHome() {} })); }
 async function mount(scanId = "s") {
   let root;
   await act(async () => { root = create(component(scanId), { createNodeMock(element) {

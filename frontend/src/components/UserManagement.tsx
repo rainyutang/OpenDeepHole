@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { listUsers, createUser, deleteUser } from "../api/client";
 import type { User } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 
 interface Props {
   onBack: () => void;
@@ -97,29 +98,15 @@ export default function UserManagement({ onBack, user }: Props) {
         </div>
       )}
 
-      {/* Header */}
-      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              onClick={onBack}
-              className="text-sm text-slate-400 hover:text-white transition-colors"
-            >
-              &larr; 返回
-            </button>
-            <h1 className="text-lg font-bold text-white">用户管理</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <ThemeToggle />
-            <button
-              onClick={() => setShowCreate(true)}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap"
-            >
-              + 新建用户
-            </button>
-          </div>
-        </div>
-      </div>
+      <PageHeader title="用户管理" onBack={onBack} actions={<>
+        <ThemeToggle />
+        <button
+          onClick={() => setShowCreate(true)}
+          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap"
+        >
+          + 新建用户
+        </button>
+      </>} />
 
       {/* Create user form */}
       {showCreate && (

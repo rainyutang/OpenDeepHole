@@ -58,7 +58,7 @@ function deferred() {
   return { promise, resolve };
 }
 function component(scanId) {
-  return createElement(ThemeProvider, null, createElement(ScanStatus, { scanId, onBack() {} }));
+  return createElement(ThemeProvider, null, createElement(ScanStatus, { scanId, onHome() {} }));
 }
 async function mount(scanId = "s") {
   let root;

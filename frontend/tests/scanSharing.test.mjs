@@ -108,7 +108,7 @@ for (const status of ["auditing", "complete"]) {
   test(`share controls and pagination remain scoped with an owner JWT (${status})`, async () => {
     client.setPublicScanAccess(access);
     const calls = installApi(status);
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     for (const forbidden of ["停止扫描", "续扫", "分享", "误报屏蔽规则"]) {
       assert.ok(!buttons(root).some((node) => content(node).includes(forbidden)), forbidden);
     }
@@ -151,7 +151,7 @@ for (const scenario of [
       }
       if (config.url.endsWith("/fp-review/results")) return { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
     }, scenario);
-    const root = await mount(SharedView, { access, onBack() {} });
+    const root = await mount(SharedView, { access, onHome() {} });
     assert.ok(calls.some((config) => config.url === "/api/shared/scans/s/overview"));
     assert.ok(calls.some((config) => config.url === "/api/shared/scans/s/fp-review/overview"));
     assert.equal(root.root.findAllByType(ScanStatus).length, 1);
@@ -174,7 +174,7 @@ test("a shared scan loads a later FP review without replacing the link or stream
     }
     if (config.url.endsWith("/fp-review/results")) return { items: [], vulnerabilities: [], next_cursor: null, has_more: false };
   });
-  const root = await mount(SharedView, { access, onBack() {} });
+  const root = await mount(SharedView, { access, onHome() {} });
   assert.equal(root.root.findAllByType(ScanStatus).length, 1);
   const initialRequests = calls.filter((config) => config.url.endsWith("/fp-review/overview")).length;
   reviewCreated = true;
@@ -210,7 +210,7 @@ for (const failure of [
         });
       }
     });
-    const root = await mount(SharedView, { access, onBack() {} });
+    const root = await mount(SharedView, { access, onHome() {} });
     assert.ok(content(root.toJSON()).includes("分享已关闭或链接无效"));
     assert.equal(root.root.findAllByType(ScanStatus).length, 0);
     assert.ok(streams.length > 0 && streams.every((stream) => stream.closed));
@@ -265,7 +265,7 @@ test("shared marking and every download use share credentials", async () => {
 test("manual verdict notifications refresh the stable issue on the open page", async () => {
   client.setPublicScanAccess(access);
   installApi();
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await act(async () => button(root, "疑似问题").props.onClick());
   await act(async () => {
     streams[0].emit("resource_changed", { resource: "vulnerabilities", index: 156 });
@@ -276,7 +276,7 @@ test("manual verdict notifications refresh the stable issue on the open page", a
 
 test("revocation closes the stream and unmounts the detail without logging out", async () => {
   client.setPublicScanAccess(access); installApi();
-  const root = await mount(SharedView, { access, onBack() {} });
+  const root = await mount(SharedView, { access, onHome() {} });
   await act(async () => client.notifyShareUnavailable("s", "old-token"));
   assert.equal(root.root.findAllByType(ScanStatus).length, 1);
   await act(async () => streams[0].emit("share_unavailable", { scan_id: "s" }));
@@ -288,7 +288,7 @@ test("revocation closes the stream and unmounts the detail without logging out",
 
 test("invalid share response displays an error, including a blob download failure", async () => {
   client.setPublicScanAccess(access); installApi();
-  const root = await mount(SharedView, { access, onBack() {} });
+  const root = await mount(SharedView, { access, onHome() {} });
   client.api.defaults.adapter = async (config) => {
     throw new AxiosError("Forbidden", "ERR_BAD_REQUEST", config, null, { ...response(config, new Blob()), status: 403 });
   };

@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { createSkill, deleteSkill, getCheckerCatalog, importSkill } from "../api/client";
 import type { CheckerCatalogItem, SkillCreateJob, SkillImportFile } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 
 interface Props {
   onBack: () => void;
@@ -78,39 +79,26 @@ export default function CheckerCatalogPage({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-4">
-            <button
-              onClick={onBack}
-              className="text-sm text-slate-400 hover:text-white transition-colors"
-            >
-              &larr; 返回
-            </button>
-            <div>
-              <h1 className="text-lg font-bold text-white">SKILL市场</h1>
-              <p className="text-sm text-slate-400 mt-0.5">
-                查看当前可用 SKILL 的检测范围和使用说明
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <button
-              onClick={() => setMode("create")}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg border border-blue-500/60 transition-colors"
-            >
-              在线创建
-            </button>
-            <button
-              onClick={refresh}
-              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-            >
-              刷新
-            </button>
-            <ThemeToggle />
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        title="SKILL市场"
+        onBack={onBack}
+        description="查看当前可用 SKILL 的检测范围和使用说明"
+        actions={<>
+          <button
+            onClick={() => setMode("create")}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg border border-blue-500/60 transition-colors"
+          >
+            在线创建
+          </button>
+          <button
+            onClick={refresh}
+            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
+          >
+            刷新
+          </button>
+          <ThemeToggle />
+        </>}
+      />
 
       <div className="flex-1 px-4 py-6 sm:px-6">
         {loading ? (
@@ -280,28 +268,12 @@ function SkillCreatePage({
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-4">
-            <button
-              onClick={handleBack}
-              className="text-sm text-slate-400 hover:text-white transition-colors"
-            >
-              &larr; 返回
-            </button>
-            <div>
-              <h1 className="text-lg font-bold text-white">新增 SKILL</h1>
-              <p className="text-sm text-slate-400 mt-0.5">
-                直接生成可编辑模板，系统固定运行规则会在导入时强制拼接
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <StatusPill status={job?.status || "idle"} />
-            <ThemeToggle />
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        title="在线创建"
+        onBack={handleBack}
+        description="直接生成可编辑模板，系统固定运行规则会在导入时强制拼接"
+        actions={<><StatusPill status={job?.status || "idle"} /><ThemeToggle /></>}
+      />
 
       <div className="flex-1 px-4 py-6 sm:px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-[34rem_1fr] gap-5">

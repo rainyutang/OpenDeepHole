@@ -109,7 +109,7 @@ const informationText = (root) => content(root.root.findByProps({ "aria-label": 
 for (const status of ["pending", "analyzing", "auditing", "complete", "error", "cancelled"]) {
   test(`${status} scans can enable and disable CodeGraph while the Agent is offline`, async () => {
     const api = installDetailApi({ status });
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     await openInformation(root);
     await click(button(root, "启用 CodeGraph"));
     assert.ok(button(root, "停用 CodeGraph"));
@@ -124,7 +124,7 @@ for (const status of ["pending", "analyzing", "auditing", "complete", "error", "
 test("pending submission prevents repeated clicks and only changes state after success", async () => {
   const pending = deferred();
   const api = installDetailApi({}, (config) => config.method === "put" ? pending.promise : undefined);
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   const toggle = button(root, "启用 CodeGraph");
   await act(async () => { void toggle.props.onClick(); void toggle.props.onClick(); });
@@ -141,7 +141,7 @@ test("failed saves keep the prior toggle and allow retry", async () => {
     if (failure && config.method === "put") throw new AxiosError("Conflict", "ERR_BAD_REQUEST", config, null,
       { status: 409, data: { detail: "扫描正在删除" } });
   });
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   await click(button(root, "启用 CodeGraph"));
   assert.equal(content(root.root.findByProps({ "aria-label": "扫描信息" }).findByProps({ role: "alert" })), "扫描正在删除");
@@ -156,7 +156,7 @@ for (const kind of ["shared", "integration"]) {
   test(`${kind} access has no CodeGraph mutation control or client write`, async () => {
     client.setPublicScanAccess({ scanId: "s", token: "token", kind });
     const api = installDetailApi();
-    const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+    const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     await openInformation(root);
     assert.match(informationText(root), /CodeGraph MCP/);
     assert.equal(buttons(root, "启用 CodeGraph").length, 0);
@@ -168,7 +168,7 @@ for (const kind of ["shared", "integration"]) {
 
 test("multi-version scans explain why CodeGraph cannot be enabled", async () => {
   const api = installDetailApi({ scan_mode: "multi_version" });
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   assert.equal(button(root, "启用 CodeGraph").props.disabled, true);
   await click(button(root, "启用 CodeGraph"));
@@ -180,7 +180,7 @@ test("an old coalesced overview cannot undo a successful toggle but can complete
   const pending = deferred();
   let hold = false;
   installDetailApi({}, (config) => hold && config.url.endsWith("/scans/s/overview") ? pending.promise : undefined);
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   const original = await client.getScanOverview("s");
   hold = true;
@@ -197,7 +197,7 @@ test("an old coalesced overview cannot undo a successful toggle but can complete
 
 test("SSE CodeGraph invalidation refreshes the toggle and acknowledgement without reloading results", async () => {
   const api = installDetailApi();
-  const root = await mount(ScanStatus, { scanId: "s", onBack() {} });
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
   await openInformation(root);
   const collectionRequests = () => api.calls.filter((call) => /\/(candidates|vulnerabilities|events|threat-audit-tasks|threat-pattern-audit-tasks|validations)$/.test(call.url)).length;
   const before = collectionRequests();

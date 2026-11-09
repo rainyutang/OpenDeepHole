@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { deleteReviewNote, getReviewNotes, getScanReviewNotes, saveReviewNote, updateScanReviewNotes } from "../api/client";
 import type { ReviewNote, ScanReviewNotes } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 
 const buttonClass = "rounded-lg border border-slate-600 px-3 py-2 text-sm text-slate-200 hover:bg-slate-700 disabled:opacity-50";
 const primaryClass = "rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50";
@@ -131,7 +132,7 @@ function NoteEditor({ note, scanMode, onSave, onClose }: {
   </div>;
 }
 
-export function ReviewNotesManager({ scanId }: { scanId?: string }) {
+export function ReviewNotesManager({ scanId, showHeading = true }: { scanId?: string; showHeading?: boolean }) {
   const [notes, setNotes] = useState<ReviewNote[]>([]);
   const [selection, setSelection] = useState<ScanReviewNotes | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -164,8 +165,8 @@ export function ReviewNotesManager({ scanId }: { scanId?: string }) {
   const changed = selection && (enabled !== selection.enabled || [...noteIds].sort().join("\n") !== [...selection.note_ids].sort().join("\n"));
 
   return <section className="space-y-4" aria-label="问题判定依据管理">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h1 className="text-lg font-semibold text-white">问题判定依据</h1><p className="mt-1 text-sm text-slate-400">{scanId ? "选择本次扫描使用的依据，保存后供后续复核参考。" : "记录判断问题时需要考虑的条件，供扫描选用。"}</p></div>
+    <div className={`flex flex-wrap items-start gap-3 ${showHeading ? "justify-between" : "justify-end"}`}>
+      {showHeading && <div><h1 className="text-lg font-semibold text-white">问题判定依据</h1><p className="mt-1 text-sm text-slate-400">{scanId ? "选择本次扫描使用的依据，保存后供后续复核参考。" : "记录判断问题时需要考虑的条件，供扫描选用。"}</p></div>}
       <button type="button" className={primaryClass} disabled={loading || saving || Boolean(scanId && !selection)} onClick={() => setEditing("new")}>{scanId ? "新增并选用" : "新增依据"}</button>
     </div>
     {loading ? <p role="status" className="py-6 text-sm text-slate-400">加载中…</p> : <>
@@ -208,7 +209,7 @@ export function ReviewNotesManager({ scanId }: { scanId?: string }) {
 
 export default function ReviewNotesPage({ onBack }: { onBack: () => void }) {
   return <div className="min-h-screen bg-slate-950 text-slate-100">
-    <header className="border-b border-slate-700 bg-slate-800/80 px-4 py-4"><div className="mx-auto flex max-w-5xl items-center justify-between"><button type="button" onClick={onBack} className={buttonClass}>返回</button><ThemeToggle /></div></header>
-    <main className="mx-auto max-w-5xl px-4 py-6"><ReviewNotesManager /></main>
+    <PageHeader title="问题判定依据" onBack={onBack} description="记录判断问题时需要考虑的条件，供扫描选用。" actions={<ThemeToggle />} />
+    <main className="mx-auto max-w-5xl px-4 py-6"><ReviewNotesManager showHeading={false} /></main>
   </div>;
 }

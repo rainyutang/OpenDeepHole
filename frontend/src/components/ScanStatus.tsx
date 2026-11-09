@@ -725,13 +725,13 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
 
 interface Props {
   scanId: string;
-  onBack: () => void;
+  onHome: () => void;
   onCopyScan?: (scanId: string) => void;
   sharedView?: boolean;
   navigation?: ScanNavigation;
 }
 
-export default function ScanStatus({ scanId, onBack, onCopyScan, sharedView = isSharedScan(scanId), navigation }: Props) {
+export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = isSharedScan(scanId), navigation }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [localRoute, setLocalRoute] = useState(DEFAULT_SCAN_ROUTE);
   const route = navigation?.state ?? localRoute;
@@ -2037,7 +2037,7 @@ export default function ScanStatus({ scanId, onBack, onCopyScan, sharedView = is
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 lg:flex">
       <ScanDetailSidebar
         mobileOpen={sidebarOpen}
-        scanLabel={scan.product || scan.scan_name || scan.project_id || scan.scan_id}
+        onScanList={onHome}
         flow={flowModel}
         activeTab={activeTab}
         issueCount={issueCount}
@@ -2084,29 +2084,29 @@ export default function ScanStatus({ scanId, onBack, onCopyScan, sharedView = is
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
       {/* Top bar */}
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
+        <div className="mb-4 flex items-center justify-between gap-3 lg:hidden">
+          <ScanBrandButton onClick={onHome} />
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="打开扫描导航"
+            aria-expanded={sidebarOpen}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-600 text-slate-300 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+        </div>
         <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="打开扫描导航"
-              aria-expanded={sidebarOpen}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-600 text-slate-300 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 lg:hidden"
-            >
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-              </svg>
-            </button>
-            <button
-              onClick={onBack}
-              className="flex items-center gap-1 rounded-md text-sm text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 motion-reduce:transition-none"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              返回
-            </button>
-            <h1 className="text-lg font-bold text-white">DeepHole 2.0</h1>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="min-w-0 w-full sm:w-auto sm:max-w-sm">
+              <h1 className="text-lg font-bold text-white">扫描导航</h1>
+              <div className="mt-1 truncate text-sm text-slate-400" aria-label="当前扫描名称"
+                title={scan.scan_name?.trim() || scan.project_id || scan.scan_id}>
+                {scan.scan_name?.trim() || scan.project_id || scan.scan_id}
+              </div>
+            </div>
             <span className="text-sm text-slate-400">
               {scan.status === "cancelled"
                 ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")
@@ -3301,9 +3301,16 @@ function CapabilityStatusCard({
 
 type ScanSidebarTool = "info" | "feedback" | "skill" | "models" | "reports" | "logs";
 
+function ScanBrandButton({ onClick }: { onClick: () => void }) {
+  return <button type="button" onClick={onClick} aria-label="DeepHole 2.0，返回扫描列表"
+    className="shrink-0 rounded-md text-lg font-bold text-white transition-colors hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70">
+    DeepHole 2.0
+  </button>;
+}
+
 interface ScanDetailSidebarProps {
   mobileOpen: boolean;
-  scanLabel: string;
+  onScanList: () => void;
   flow: ProcessFlowModel;
   activeTab: MainTab;
   issueCount: number;
@@ -3357,7 +3364,7 @@ function ScanDetailSidebar(props: ScanDetailSidebarProps) {
 }
 
 function ScanSidebarContent({
-  scanLabel,
+  onScanList,
   flow,
   activeTab,
   issueCount,
@@ -3387,11 +3394,8 @@ function ScanSidebarContent({
   };
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-4">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-slate-100">扫描导航</div>
-          <div className="mt-1 truncate text-xs text-slate-500" title={scanLabel}>{scanLabel}</div>
-        </div>
+      <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-4">
+        <ScanBrandButton onClick={onScanList} />
         {showClose && (
           <button
             type="button"

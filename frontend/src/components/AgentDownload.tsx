@@ -7,6 +7,7 @@ import {
 import type { AgentInfo } from "../types";
 import { agentOwnerLabel } from "../agentPresentation";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 
 interface Props {
   onBack: () => void;
@@ -91,19 +92,8 @@ export default function AgentDownload({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-gray-100">
+      <PageHeader title="客户端" onBack={onBack} description="下载、更新并启动 Agent 客户端。" actions={<ThemeToggle />} />
       <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
-        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
-          <div className="flex min-w-0 items-start gap-4">
-            <button onClick={onBack} className="mt-1 shrink-0 text-sm text-slate-400 transition-colors hover:text-white">
-              ← 返回
-            </button>
-            <div className="min-w-0">
-              <h1 className="text-xl font-bold text-white">客户端下载</h1>
-              <p className="mt-1 text-sm text-slate-400">客户端配置已迁移到独立的“客户端配置”页面。</p>
-            </div>
-          </div>
-          <ThemeToggle />
-        </div>
 
         <div className="mb-5 rounded-xl border border-slate-700 bg-slate-800/60 p-5">
           <p className="text-sm leading-relaxed text-slate-300">

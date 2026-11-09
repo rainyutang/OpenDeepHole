@@ -23,6 +23,7 @@ import type {
   CheckerInfo,
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 import { agentOwnerLabel } from "../agentPresentation";
 import ModelEditor from "./ModelEditor";
 import { includeUnscheduledLlmModels, savedLlmConfig, validateLlmProviders } from "../llmApiConfig";
@@ -507,19 +508,16 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   };
 
   return <div className="min-h-screen bg-slate-900 text-white">
-    <header className="border-b border-slate-700 bg-slate-800/90 px-4 py-4 sm:px-6">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
-        <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
-        <h1 className="text-lg font-bold whitespace-nowrap">客户端配置</h1>
-        <select disabled={saving} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} title={selectedAgent ? agentOwnerLabel(selectedAgent) : undefined} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+    <PageHeader title="客户端配置" onBack={onBack} actions={<>
+        <select disabled={saving} className={`${input} order-last min-w-0 max-w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:w-96`} title={selectedAgent ? agentOwnerLabel(selectedAgent) : undefined} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无客户端</option>}
           {agents.map((agent) => <option key={agent.agent_key || agent.agent_id} value={agent.agent_key} title={agentOwnerLabel(agent)}>{agent.machine_name || agent.name} / {agent.ip} / {agentOwnerLabel(agent)} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
         <ThemeToggle />
         <button disabled={!dirty || saving} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
-      </div>
-      {message && <p role="status" className="mx-auto mt-3 max-w-7xl text-sm text-amber-300">{message}</p>}
-    </header>
+    </>}>
+      {message && <p role="status" className="mt-3 text-sm text-amber-300">{message}</p>}
+    </PageHeader>
     <main className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-6 sm:px-6 lg:flex-row lg:gap-6">
       <nav aria-label="客户端配置分区" className="flex w-full shrink-0 gap-1 overflow-x-auto pb-1 lg:block lg:w-44 lg:space-y-1 lg:overflow-visible lg:pb-0">{sections.map((item) => <button key={item.id} onClick={() => setSection(item.id)} aria-current={section === item.id ? "page" : undefined} className={`w-auto shrink-0 whitespace-nowrap rounded-lg px-4 py-2.5 text-left text-sm lg:w-full ${section === item.id ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-slate-800"}`}>{item.label}</button>)}</nav>
       <section className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-800/60 p-4 sm:p-6">

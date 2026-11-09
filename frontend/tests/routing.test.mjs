@@ -79,7 +79,14 @@ function installApi(intercept = () => undefined) {
     if (url.endsWith("/index-status")) return response(config, { status: "skipped" });
     if (url.endsWith("/git_history")) return response(config, []);
     if (/\/(candidates|vulnerabilities|events|event-history|threat-audit-tasks|threat-pattern-audit-tasks|validations|tasks)$/.test(url)) return response(config, emptyPage);
-    if (url === "/api/v2/checker-dashboard") return response(config, { checkers: [], totals: {} });
+    if (url === "/api/v2/checker-dashboard") return response(config, {
+      checkers: [], products: [], has_unconfigured_product: false,
+      summary: { scan_count: 0, suspected_issue_count: 0, human_confirmed_count: 0, ticket_submitted_count: 0 },
+      token_usage: { scan_count: 0, tracked_scan_count: 0, agents: [], usage: {
+        total_tokens: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0,
+        cache_read_tokens: 0, cache_write_tokens: 0, complete: true,
+      } },
+    });
     assert.fail(`Unexpected request: ${url}`);
   };
 }
@@ -163,6 +170,49 @@ test("homepage scan links open a new tab while ordinary page navigation supports
   assert.equal(router.state.location.pathname, "/agents/config");
 });
 
+test("functional page titles match their entry buttons and retain the common return action", async () => {
+  stored.set("auth_user", JSON.stringify({ ...user, role: "admin" }));
+  installApi((config) => {
+    if (["/api/review-notes", "/api/auth/users"].includes(config.url)) return [];
+    if (config.url === "/api/agent/runtime/manifest") return { hash: "runtime" };
+    if (["/api/threat-analysis-methods", "/api/fp-review-methods"].includes(config.url)) return { methods: [] };
+    return undefined;
+  });
+  const { root, router } = await mount();
+  for (const [title, path] of [
+    ["结果看板", "/dashboard"], ["SKILL市场", "/checkers"], ["问题判定依据", "/review-notes"],
+    ["客户端", "/agents/download"], ["客户端配置", "/agents/config"], ["新建扫描", "/scans/new"],
+    ["用户管理", "/admin/users"],
+  ]) {
+    await click(root, title);
+    assert.equal(router.state.location.pathname, path);
+    assert.deepEqual(root.root.findAllByType("h1").map(content), [title]);
+    await click(root, "← 返回");
+    assert.equal(router.state.location.pathname, "/");
+  }
+});
+
+test("online skill creation keeps its entry title and unsaved return confirmation", async () => {
+  const { root, router } = await mount("/checkers");
+  await click(root, "在线创建");
+  assert.equal(content(root.root.findByType("h1")), "在线创建");
+  await act(async () => root.root.findByProps({ placeholder: "例如：auth_bypass_audit" }).props.onChange({ target: { value: "draft" } }));
+  const previousConfirm = window.confirm;
+  let confirmations = 0;
+  try {
+    window.confirm = () => { confirmations += 1; return false; };
+    await click(root, "← 返回");
+    assert.equal(content(root.root.findByType("h1")), "在线创建");
+    window.confirm = () => { confirmations += 1; return true; };
+    await click(root, "← 返回");
+    assert.equal(content(root.root.findByType("h1")), "SKILL市场");
+    assert.equal(router.state.location.pathname, "/checkers");
+    assert.equal(confirmations, 2);
+  } finally {
+    window.confirm = previousConfirm;
+  }
+});
+
 test("BrowserRouter follows native popstate events and page Back uses the tab history", async () => {
   // Exercise the real BrowserRouter rather than relying only on the memory router.
   const previousHistory = window.history, previousLocation = window.location;
@@ -242,7 +292,10 @@ test("direct detail URLs restore engines, result categories and the home fallbac
   assert.equal(root.root.findByType(ThreatAnalysisPanel).props.resultTab, "attackTrees");
   await go(router, "/scans/s/mining?engine=threat_audit");
   assert.ok(current(root, THREAT_AUDIT_ENGINE_LABEL));
-  await click(root, "返回");
+  // A real tab has history after switching sections; the brand must not go back one section.
+  window.history.state = { idx: 2 };
+  assert.equal(root.root.findAllByType("button").some((node) => content(node) === "返回"), false);
+  await click(root, "DeepHole 2.0");
   assert.equal(router.state.location.pathname, "/");
 });
 
@@ -356,6 +409,22 @@ for (const kind of ["shared", "public"]) {
       assert.ok(call.url.startsWith(`/api/${kind}/scans/s/`), call.url);
       assert.equal(call.params.token, "access-token");
     }
+    window.history.state = { idx: 2 };
+    await click(root, "DeepHole 2.0");
+    assert.equal(router.state.location.pathname, "/login");
+    assert.equal(router.state.location.search, "");
+    assert.equal(router.state.location.state.returnTo, "/");
+  });
+
+  test(`authenticated ${kind} brand returns to the scan list after switching sections`, async () => {
+    const { root, router } = await mount(`/${kind}-scan/s/overview?token=access-token`);
+    await select(root, "疑似问题");
+    await select(root, "首页");
+    window.history.state = { idx: 2 };
+    await click(root, "DeepHole 2.0");
+    assert.equal(router.state.location.pathname, "/");
+    assert.equal(router.state.location.search, "");
+    assert.ok(calls.some((config) => config.url === "/api/v2/scans"));
   });
 }
 

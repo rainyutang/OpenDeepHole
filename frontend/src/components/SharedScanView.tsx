@@ -3,8 +3,8 @@ import type { PublicScanAccess } from "../api/client";
 import type { ScanNavigation } from "../routing";
 import ScanStatus from "./ScanStatus";
 
-export default function SharedScanView({ access, onBack, onHome = onBack, navigation }: {
-  access: PublicScanAccess; onBack: () => void; onHome?: () => void; navigation?: ScanNavigation;
+export default function SharedScanView({ access, onHome, navigation }: {
+  access: PublicScanAccess; onHome: () => void; navigation?: ScanNavigation;
 }) {
   const [unavailable, setUnavailable] = useState(!access.scanId || !access.token);
   useLayoutEffect(() => {
@@ -23,5 +23,5 @@ export default function SharedScanView({ access, onBack, onHome = onBack, naviga
     </div>
   </div>;
 
-  return <ScanStatus scanId={access.scanId} onBack={onBack} navigation={navigation} sharedView />;
+  return <ScanStatus scanId={access.scanId} onHome={onHome} navigation={navigation} sharedView />;
 }

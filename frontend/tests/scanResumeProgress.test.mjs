@@ -104,7 +104,7 @@ function installApi(initial = overview()) {
 async function mount() {
   let root;
   await act(async () => {
-    root = create(createElement(ThemeProvider, null, createElement(ScanStatus, { scanId: "s", onBack() {} })));
+    root = create(createElement(ThemeProvider, null, createElement(ScanStatus, { scanId: "s", onHome() {} })));
   });
   roots.push(root);
   return root;

@@ -51,7 +51,6 @@ function ScanDetailRoute({ access, publicView = false }: { access?: PublicScanAc
   const location = useLocation();
   const navigate = useNavigate();
   const action = useNavigationType();
-  const onBack = useBack();
   const state = parseScanRoute(section, location.search);
   const onNavigate = useCallback((next: ScanRouteState) => {
     const to = scanPath(scanId, next, access);
@@ -64,9 +63,9 @@ function ScanDetailRoute({ access, publicView = false }: { access?: PublicScanAc
   const navigation = { state, onNavigate, locationKey: location.key, action };
   const identity = `${access?.kind || "owner"}:${scanId}:${access?.token || ""}`;
   return <RuntimeErrorBoundary name={publicView ? "public-scan-detail" : "scan-detail"} resetKey={identity} fullscreen>
-    {access?.kind === "shared" ? <SharedScanView key={identity} access={access} onBack={onBack}
+    {access?.kind === "shared" ? <SharedScanView key={identity} access={access}
       onHome={() => navigate("/")} navigation={navigation} />
-      : <ScanStatusView key={identity} scanId={scanId} onBack={onBack} navigation={navigation}
+      : <ScanStatusView key={identity} scanId={scanId} onHome={() => navigate("/")} navigation={navigation}
         onCopyScan={publicView ? undefined : (id) => navigate(`/scans/new?${new URLSearchParams({ copyFrom: id })}`)} />}
   </RuntimeErrorBoundary>;
 }

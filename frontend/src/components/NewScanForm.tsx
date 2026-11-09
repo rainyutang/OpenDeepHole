@@ -28,6 +28,7 @@ import {
   miningEngineRequiresThreatAnalysis,
 } from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 import { agentOwnerLabel } from "../agentPresentation";
 import ScanPathList from "./ScanPathList";
 
@@ -370,7 +371,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
   };
 
   return <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-    <header className="border-b border-slate-700 bg-slate-800/80 px-4 py-4 backdrop-blur sm:px-6"><div className="mx-auto flex max-w-5xl items-center justify-between gap-4"><div><h1 className="text-lg font-bold">新建扫描</h1><p className="mt-0.5 text-sm text-slate-400">先填写扫描范围和产品，再配置本次扫描能力</p></div><div className="flex gap-2"><ThemeToggle /><button onClick={onBack} className="rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-600">返回</button></div></div></header>
+    <PageHeader title="新建扫描" onBack={onBack} description="先填写扫描范围和产品，再配置本次扫描能力" actions={<ThemeToggle />} />
     <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
       {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : loadError ? <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">{loadError}<button type="button" onClick={() => setLoadAttempt((value) => value + 1)} className="ml-3 rounded border border-red-400/40 px-3 py-1.5">重试</button></div> : <form onSubmit={handleSubmit} className="space-y-6">
         {sourceScanId && <p className="text-sm text-slate-400">已复制原扫描配置，请填写新扫描的名称。</p>}

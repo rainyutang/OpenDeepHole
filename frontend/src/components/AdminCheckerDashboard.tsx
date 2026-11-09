@@ -10,6 +10,7 @@ import type {
   User,
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
+import PageHeader from "./PageHeader";
 
 interface Props {
   onBack: () => void;
@@ -65,48 +66,35 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
-          <div className="flex min-w-0 items-center gap-4">
-            <button
-              onClick={onBack}
-              className="text-sm text-slate-400 hover:text-white transition-colors"
-            >
-              &larr; 返回
-            </button>
-            <div>
-              <h1 className="text-lg font-bold text-white">结果看板</h1>
-              <p className="text-sm text-slate-400 mt-0.5">
-                {user.role === "admin"
-                  ? "汇总全部用户的扫描结果、问题确认和 Token 用量"
-                  : "汇总你创建的扫描结果、问题确认和 Token 用量"}
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <select
-              value={productFilter}
-              onChange={(e) => handleProductFilterChange(e.target.value)}
-              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-            >
-              <option value="">全部产品</option>
-              {data?.has_unconfigured_product && <option value={UNCONFIGURED_PRODUCT}>未配置</option>}
-              {(data?.products || []).map((product) => (
-                <option key={product} value={product}>
-                  {product}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => refresh()}
-              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-            >
-              刷新
-            </button>
-            <ThemeToggle />
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        title="结果看板"
+        onBack={onBack}
+        description={user.role === "admin"
+          ? "汇总全部用户的扫描结果、问题确认和 Token 用量"
+          : "汇总你创建的扫描结果、问题确认和 Token 用量"}
+        actions={<>
+          <select
+            value={productFilter}
+            onChange={(e) => handleProductFilterChange(e.target.value)}
+            className="min-w-0 max-w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">全部产品</option>
+            {data?.has_unconfigured_product && <option value={UNCONFIGURED_PRODUCT}>未配置</option>}
+            {(data?.products || []).map((product) => (
+              <option key={product} value={product}>
+                {product}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => refresh()}
+            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
+          >
+            刷新
+          </button>
+          <ThemeToggle />
+        </>}
+      />
 
       <div className="flex-1 px-4 py-6 sm:px-6">
         {loading ? (
