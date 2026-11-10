@@ -524,3 +524,130 @@ for (const action of ["停止扫描", "续扫"]) {
     assetCount(root, 2);
   });
 }
+
+function requestTimeout(config) {
+  assert.equal(config.timeout, 30_000);
+  return new AxiosError("timeout of 30000ms exceeded", "ECONNABORTED", config);
+}
+
+test("a timed-out shared overview is released and a new read can recover", async () => {
+  let reject;
+  let failed = false;
+  const pending = new Promise((_, fail) => { reject = fail; });
+  const calls = installApi([fixture()], async (config) => {
+    if (config.url === "/api/v2/scans/s/overview" && !failed) return pending;
+  });
+  const first = client.getScanOverviewRequest("s");
+  const coalesced = client.getScanOverviewRequest("s");
+  assert.equal(first, coalesced);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const settled = Promise.allSettled([first.promise, coalesced.promise]);
+  failed = true;
+  reject(requestTimeout(calls[0]));
+  assert.ok((await settled).every((result) => result.status === "rejected"));
+  const recovered = await client.getScanOverviewRequest("s").promise;
+  assert.equal(recovered.scan_id, "s");
+  assert.equal(calls.length, 2);
+});
+
+test("initial scan timeout shows retry and retry hydrates the scan and results", async () => {
+  let failed = true;
+  const calls = installApi([fixture()], async (config) => {
+    if (failed && config.url === "/api/v2/scans/s/overview") throw requestTimeout(config);
+  });
+  const root = await mount();
+  assert.ok(text(root.toJSON()).includes("扫描详情加载失败，请重试。"));
+  assert.equal(root.root.findAllByProps({ "aria-label": "加载扫描详情" }).length, 0);
+  failed = false;
+  await act(async () => button(root, "重试加载扫描").props.onClick());
+  assetCount(root, 2);
+  assert.ok(!text(root.toJSON()).includes("扫描详情加载失败"));
+  for (const suffix of ["/overview", "/candidates", "/vulnerabilities", "/threat-audit-tasks", "/threat-pattern-audit-tasks", "/validations", "/threat-analysis"]) {
+    const read = calls.find((request) => request.url.endsWith(suffix));
+    assert.ok(read, suffix);
+    assert.equal(read.timeout, 30_000, suffix);
+  }
+});
+
+test("threat artifact timeout is a fetch error and retry restores artifacts without changing lifecycle", async () => {
+  const value = fixture();
+  let failed = true;
+  installApi([value], async (config) => {
+    if (failed && config.url.endsWith("/threat-analysis")) throw requestTimeout(config);
+  });
+  const root = await mount();
+  assert.ok(text(root.toJSON()).includes("威胁分析结果获取失败"));
+  failed = false;
+  await act(async () => button(root, "重试获取威胁分析结果").props.onClick());
+  assetCount(root, 2);
+  assert.ok(!text(root.toJSON()).includes("威胁分析结果获取失败"));
+
+  failed = true;
+  await notify(threatNotice);
+  assetCount(root, 2);
+  assert.ok(text(root.toJSON()).includes("威胁分析结果获取失败"));
+  failed = false;
+  value.analysis = analysis(4);
+  await poll();
+  assetCount(root, 4);
+  assert.ok(!text(root.toJSON()).includes("威胁分析结果获取失败"));
+});
+
+test("overview refresh timeout preserves data and polling resumes authoritative status", async () => {
+  const value = fixture();
+  value.overview.status = "auditing";
+  let failed = false;
+  installApi([value], async (config) => {
+    if (failed && config.url === "/api/v2/scans/s/overview") throw requestTimeout(config);
+  });
+  const root = await mount();
+  failed = true;
+  await poll();
+  assetCount(root, 2);
+  assert.ok(text(root.toJSON()).includes("扫描状态更新失败"));
+  failed = false;
+  value.overview.status = "complete";
+  await act(async () => button(root, "重试更新扫描状态").props.onClick());
+  assert.ok(!text(root.toJSON()).includes("扫描状态更新失败"));
+  assetCount(root, 2);
+  assert.equal(root.root.findAllByType("button").some((node) => text(node) === "停止扫描"), false);
+});
+
+test("audit timeout keeps loaded findings and retry replaces them with new authoritative findings", async () => {
+  const { useThreatAuditResults, ThreatAuditResults } = await server.ssrLoadModule("/src/features/threatAudit/ThreatAuditResults.tsx");
+  const scan = { scan_id: "s", threat_audit_tasks: [], vulnerabilities: [] };
+  const finding = (index) => ({ vuln_index: index, verdict: "confirmed", verdict_source: "audit", severity: "high", description: "reported issue", file: "src/a.c", line: 1 });
+  let results = [{ task_id: "task-a", findings: [finding(207)], confirmed_issue_count: 1, association_complete: true }];
+  let failed = false;
+  installApi([fixture()], async (config) => {
+    if (config.url.endsWith("/threat-audit-results")) {
+      assert.equal(config.timeout, 30_000);
+      if (failed) throw requestTimeout(config);
+      return results;
+    }
+  });
+  function Probe({ revision }) {
+    const value = useThreatAuditResults(scan, ["task-a"], null, revision);
+    return createElement(ThreatAuditResults, { result: value.results.get("task-a"), status: "completed", loading: value.loading, error: value.error, onRetry: value.retry });
+  }
+  let root;
+  await act(async () => { root = create(createElement(Probe, { revision: 0 })); });
+  roots.push(root);
+  assert.ok(text(root.toJSON()).includes("#207"));
+  failed = true;
+  await act(async () => {
+    root.update(createElement(Probe, { revision: 1 }));
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.ok(text(root.toJSON()).includes("审计结果读取失败"));
+  assert.ok(text(root.toJSON()).includes("#207"));
+  failed = false;
+  results = [{ ...results[0], findings: [finding(208)] }];
+  await act(async () => {
+    button(root, "重试").props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  });
+  assert.ok(!text(root.toJSON()).includes("审计结果读取失败"));
+  assert.ok(!text(root.toJSON()).includes("#207"));
+  assert.ok(text(root.toJSON()).includes("#208"));
+});

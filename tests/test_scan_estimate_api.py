@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from backend.api import scan as api
 from backend.models import OpenCodePoolStatus, ScanMeta, ScanStatus, User, VulnerabilityValidation
@@ -6,7 +7,40 @@ from backend.store.sqlite import SqliteScanStore
 
 
 async def direct(store, operation, *args, **kwargs):
-    return getattr(store, operation)(*args, **kwargs)
+    return (operation if callable(operation) else getattr(store, operation))(*args, **kwargs)
+
+
+def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(tmp_path, monkeypatch):
+    store = SqliteScanStore(tmp_path / "slow-estimate.db")
+    store.save_scan(ScanStatus(scan_id="s", status="auditing", progress=0, total_candidates=0,
+                              processed_candidates=0, vulnerabilities=[]),
+                    ScanMeta(user_id="owner", scan_items=[], created_at="2026-11-10T00:00:00Z"))
+    monkeypatch.setattr(api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(api, "run_store_call", direct)
+    monkeypatch.setattr(api, "_running_scans", {})
+    monkeypatch.setattr("backend.api.agent.reconcile_offline_agent_scan_state", lambda _, scan: scan)
+    read_tasks = store.get_scan_estimation_tasks
+
+    def delayed(scan_id):
+        time.sleep(1.05)
+        return read_tasks(scan_id)
+
+    monkeypatch.setattr(store, "get_scan_estimation_tasks", delayed)
+    owner = User(user_id="owner", username="owner", role="user")
+    try:
+        overview = asyncio.run(api.get_scan_overview_v2("s", owner))
+        assert overview.progress_estimate is not None
+        assert overview.status == "auditing"
+
+        def failure(_):
+            raise RuntimeError("estimation read failed")
+
+        monkeypatch.setattr(store, "get_scan_estimation_tasks", failure)
+        overview = asyncio.run(api.get_scan_overview_v2("s", owner))
+        assert overview.scan_id == "s" and overview.status == "auditing"
+        assert overview.progress_estimate is None
+    finally:
+        store.close()
 
 
 def test_detail_and_lightweight_overview_return_same_estimate(tmp_path, monkeypatch):
@@ -25,10 +59,6 @@ def test_detail_and_lightweight_overview_return_same_estimate(tmp_path, monkeypa
     monkeypatch.setattr(api, "_running_scans", {})
     monkeypatch.setattr("backend.api.agent.reconcile_offline_agent_scan_state",
                         lambda _, scan: scan.model_copy(update={"agent_online": True}))
-    # Sufficient current samples should avoid the historical query entirely.
-    def unexpected_history(*args, **kwargs):
-        raise AssertionError("history is unnecessary with three current samples")
-    monkeypatch.setattr(store, "get_agent_estimation_samples", unexpected_history)
     owner = User(user_id="owner", username="owner", role="user")
     try:
         detail = asyncio.run(api.get_scan_status("s", owner))

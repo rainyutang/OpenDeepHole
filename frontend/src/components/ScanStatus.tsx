@@ -735,6 +735,8 @@ interface Props {
 
 export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = isSharedScan(scanId), navigation }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
+  const [scanLoadFailed, setScanLoadFailed] = useState(false);
+  const [scanLoadAttempt, setScanLoadAttempt] = useState(0);
   const [localRoute, setLocalRoute] = useState(DEFAULT_SCAN_ROUTE);
   const route = navigation?.state ?? localRoute;
   const { tab: activeTab, engineId: activeEngineId, threatResult: threatAnalysisResultTab } = route;
@@ -846,6 +848,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   const [gitHistory, setGitHistory] = useState<HistoryPattern[]>([]);
   const {
     loading: threatAnalysisLoading,
+    error: threatAnalysisFailed,
     refresh: refreshThreatAnalysis,
     acceptAnalysis: acceptThreatAnalysis,
   } = useThreatAnalysisResult(scanId, scan, setScan);
@@ -1045,6 +1048,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   // Initial full-state hydration on mount
   useEffect(() => {
     let cancelled = false;
+    setScanLoadFailed(false);
     pendingInitialOpenCodePoolRef.current = undefined;
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
@@ -1079,7 +1083,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         });
         setSelectedFeedbackIds(new Set(data.feedback_ids ?? []));
       })
-      .catch(() => {});
+      .catch(() => { if (!cancelled) setScanLoadFailed(true); });
     getFpReview(scanId)
       .then((job) => {
         if (!cancelled && job?.scan_id === scanId) setFpReview(job);
@@ -1101,7 +1105,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
     return () => {
       cancelled = true;
     };
-  }, [scanId]);
+  }, [scanId, scanLoadAttempt]);
 
   // SSE event handlers — update state incrementally
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
@@ -1567,7 +1571,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
     setIndexStatus,
   }), []);
 
-  const { failedResources: refreshFailures, refreshDetails } = useScanSSE(scanId, sseHandlers, sseStateSetters);
+  const { failedResources: refreshFailures, refreshDetails, overviewFailed, refreshOverview } = useScanSSE(scanId, sseHandlers, sseStateSetters);
 
   const requiredDetailResources = useMemo(() => {
     const resources = detailResourcesForTab(activeTab, activeEngineId);
@@ -1926,7 +1930,10 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         <div className="absolute right-4 top-4">
           <ThemeToggle />
         </div>
-        <div role="status" aria-label="加载扫描详情" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />
+        {scanLoadFailed ? <div role="alert" className="text-center text-sm text-slate-300">
+          <p>扫描详情加载失败，请重试。</p>
+          <button type="button" className="mt-3 text-blue-300 underline" onClick={() => setScanLoadAttempt((value) => value + 1)}>重试加载扫描</button>
+        </div> : <div role="status" aria-label="加载扫描详情" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />}
       </div>
     );
   }
@@ -2257,6 +2264,14 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         >
         <>
         <StaticAnalysisFailures scan={scan} />
+        {overviewFailed && <div role="alert" className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          扫描状态更新失败，已保留当前内容。
+          <button type="button" className="ml-3 underline" onClick={refreshOverview}>重试更新扫描状态</button>
+        </div>}
+        {threatAnalysisFailed && <div role="alert" className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          威胁分析结果获取失败，已保留当前内容。
+          <button type="button" disabled={threatAnalysisLoading} className="ml-3 underline disabled:opacity-50" onClick={() => refreshThreatAnalysis(true)}>{threatAnalysisLoading ? "正在重试…" : "重试获取威胁分析结果"}</button>
+        </div>}
         {refreshFailures.size > 0 && (
           <div role="status" className="fixed bottom-4 right-4 z-30 rounded-lg border border-amber-500/30 bg-slate-900 px-4 py-3 text-sm text-amber-100 shadow-lg">
             详情更新失败，已保留当前内容。

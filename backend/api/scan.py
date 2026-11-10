@@ -101,7 +101,7 @@ from backend.scan_metrics import (
     latest_fp_review_result_map,
 )
 from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS, terminal_opencode_pool_status
-from backend.scan_estimate import estimate_scan_progress, needs_history_samples
+from backend.scan_estimate import estimate_scan_progress_from_store
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
 from backend.store.base import DuplicateScanNameError
@@ -1483,34 +1483,17 @@ def _apply_task_progress(scan: ScanStatus | ScanSummary, pool=None) -> None:
 
 
 async def _scan_progress_estimate(store, scan: ScanStatus, counts: dict | None = None):
-    # These are metadata-only reads: overview never loads task bodies or all
-    # validation reports simply to estimate remaining work.
-    completed, validations = await asyncio.gather(
-        run_store_call(store, "get_scan_estimation_tasks", scan.scan_id),
-        run_store_call(store, "get_vulnerability_validation_states", scan.scan_id),
-    )
-    history = []
-    if needs_history_samples(scan, completed):
-        history = await run_store_call(
-            store, "get_agent_estimation_samples", scan.scan_id,
-            since=(datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
-        )
-    if counts is None:
-        counts = await run_store_call(store, "get_scan_detail_counts", scan.scan_id)
-    pending_counts = {
-        category: sum(counts.get(f"{kind}_{state}", 0) for state in ("pending", "queued", "running"))
-        for kind, category in (("candidate_audit", "static_candidate"), ("threat_audit", "threat_audit"),
-                               ("threat_pattern_audit", "threat_pattern_audit"))
-    }
-    validation_count = sum(running or status in {"pending", "queued", "running"}
-                           for status, running in validations.values())
-    pending_counts["vulnerability_validation"] = validation_count
-    return estimate_scan_progress(
-        scan, completed, history,
-        validation_active=validation_count > 0,
-        unfinished=any(pending_counts.values()),
-        pending_counts=pending_counts,
-    )
+    # Read and compute on the store worker, keeping large task-history
+    # processing off the HTTP/heartbeat event loop.
+    snapshot = scan.model_copy(update={
+        "opencode_pool": scan.opencode_pool.model_copy(deep=True) if scan.opencode_pool else None,
+    })
+    try:
+        return await run_store_call(store, estimate_scan_progress_from_store, store, snapshot,
+                                    dict(counts) if counts is not None else None)
+    except Exception:
+        logger.exception("Scan progress estimate unavailable scan_id=%s", scan.scan_id)
+    return None
 
 
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:

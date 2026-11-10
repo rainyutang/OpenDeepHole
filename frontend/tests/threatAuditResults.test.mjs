@@ -67,7 +67,8 @@ test("missing historical links, failed audits, and loading never claim no issues
   const failed = renderResult(result(), { error: "审计结果读取失败" });
   assert.match(failed, /role="alert"/);
   assert.match(failed, /重试/);
-  assert.doesNotMatch(failed, /#207/);
+  assert.match(failed, /已保留当前结果/);
+  assert.match(failed, /#207/);
 });
 
 test("renders stored descriptions safely and explains missing descriptions", () => {

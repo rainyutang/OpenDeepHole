@@ -27,8 +27,8 @@ def scan(*, running=(), queued=(), planned=(), models=None, **kwargs):
     return ScanStatus(**defaults)
 
 
-def estimate(value, completed=(), history=(), **kwargs):
-    return estimate_scan_progress(value, list(completed), list(history), now=NOW, **kwargs)
+def estimate(value, completed=(), **kwargs):
+    return estimate_scan_progress(value, list(completed), now=NOW, **kwargs)
 
 
 def test_weighted_progress_counts_execution_time_and_shared_concurrency():
@@ -41,14 +41,13 @@ def test_weighted_progress_counts_execution_time_and_shared_concurrency():
     assert value.progress == 0.25
 
 
-def test_cold_start_and_history_supplements_only_until_three_samples():
-    samples = [task("old-1", duration=200), task("old-2", duration=300), task("old-3", duration=9000)]
-    assert duration_means([task("current")], samples)["threat_analysis"] == 200
-    assert duration_means([task(str(i)) for i in range(3)], samples)["threat_analysis"] == 100
+def test_cold_start_waits_for_current_scan_samples_and_uses_all_of_them():
+    assert duration_means([task("current")])["threat_analysis"] == 100
+    assert duration_means([task(str(i), duration=100 * (i + 1)) for i in range(4)])["threat_analysis"] == 250
     value = scan(queued=[task("waiting")])
     assert estimate(value).state == "estimating"
     assert estimate(value).remaining_seconds is None
-    assert estimate(value, history=samples).remaining_seconds == pytest.approx(9500 / 3)
+    assert estimate(value, [task("current")]).remaining_seconds == 100
 
 
 def test_mixed_unknown_type_uses_count_progress_without_fabricating_eta():
@@ -145,8 +144,8 @@ def test_large_history_and_invalid_samples():
     assert estimate(scan(queued=[task("last")]), completed).progress == 0.99
     bad = [task("nan", duration=float("nan")), task("negative", duration=-10), task("inf", duration=float("inf")),
            task("boolean", duration=True), task("invalid-logical", logical_duration_seconds=0)]
-    assert duration_means(bad, []) == {}
-    assert duration_means([{"status": "success", "task_type": "fp_review", "duration_seconds": 12}], []) == {"fp_review": 12}
+    assert duration_means(bad) == {}
+    assert duration_means([{"status": "success", "task_type": "fp_review", "duration_seconds": 12}]) == {"fp_review": 12}
 
 
 def test_non_pool_stages_and_missing_reports_do_not_show_zero_remaining():

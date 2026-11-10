@@ -53,9 +53,11 @@ function useAuditResults<K extends string | number, R>(
           loading: false, error: "",
         });
       } catch {
-        if (!controller.signal.aborted) setState({
-          scanId, key, results: new Map(), loading: false, error: "审计结果读取失败",
-        });
+        if (!controller.signal.aborted) setState((previous) => ({
+          scanId, key,
+          results: previous.scanId === scanId && previous.key === key ? previous.results : new Map(),
+          loading: false, error: "审计结果读取失败",
+        }));
       } finally {
         inFlight = false;
         if (dirty) schedule();

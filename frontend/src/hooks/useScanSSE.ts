@@ -214,7 +214,7 @@ async function refreshFullState(
   { getScan, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
   isCurrent: () => boolean,
 ) {
-  try {
+  const results = await Promise.allSettled([(async () => {
     const request = getScanOverviewRequest(scanId, getScan());
     const data = await request.promise;
     if (!isCurrent() || data.scan_id !== scanId) return;
@@ -223,27 +223,18 @@ async function refreshFullState(
       if (!previous || previous.scan_id !== scanId) return data;
       return mergeScanOverview(previous, data, request.requestedFrom);
     });
-  } catch {
-    // transient — SSE will keep pushing
-  }
-  if (!isCurrent()) return;
-  try {
+  })(), (async () => {
     const job = await getFpReviewOverview(scanId);
     if (!isCurrent()) return;
     if (job) setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
-  } catch {
-    // Retain loaded results on transient failures.
-  }
-  if (!isCurrent()) return;
-  try {
+  })(), (async () => {
     const index = await getAgentIndexStatus(scanId);
     if (!isCurrent()) return;
     setIndexStatus(index);
-  } catch {
-    // transient — index_status SSE may still arrive later
-  }
-  if (!isCurrent()) return;
-
+  })()]);
+  // Independent reads share one timeout window; retain each loaded resource
+  // when its refresh fails, without delaying the other responses.
+  return results[0].status === "fulfilled";
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -377,8 +368,9 @@ export function useScanSSE(
   scanId: string,
   handlers: ScanSSEHandlers,
   stateSetters: SSEStateSetters,
-): { connected: boolean; failedResources: ReadonlySet<ScanDetailResource>; refreshDetails: (resources?: readonly ScanDetailResource[]) => void } {
+): { connected: boolean; overviewFailed: boolean; refreshOverview: () => void; failedResources: ReadonlySet<ScanDetailResource>; refreshDetails: (resources?: readonly ScanDetailResource[]) => void } {
   const [connected, setConnected] = useState(false);
+  const [overviewFailed, setOverviewFailed] = useState(false);
   const [failedResources, setFailedResources] = useState<Set<ScanDetailResource>>(new Set());
   const requestDetailsRef = useRef<(resources: readonly ScanDetailResource[]) => void>(() => {});
   const refreshDetails = useCallback((resources: readonly ScanDetailResource[] = SCAN_DETAIL_RESOURCES) => {
@@ -403,13 +395,16 @@ export function useScanSSE(
       scanId,
       stateSettersRef.current,
       () => activeScanIdRef.current === scanId,
-    ).finally(() => {
+    ).then((ok) => {
+      if (activeScanIdRef.current === scanId) setOverviewFailed(!ok);
+    }).finally(() => {
       if (refreshInFlight.current === scanId) refreshInFlight.current = null;
       if (activeScanIdRef.current === scanId) handlersRef.current.onStateRefresh?.();
     });
   }, [scanId]);
 
   useEffect(() => {
+    setOverviewFailed(false);
     const url = scanSSEUrl(scanId);
     const es = new EventSource(url);
     es.addEventListener("share_unavailable", () => {
@@ -737,5 +732,5 @@ export function useScanSSE(
     };
   }, [scanId, refreshState]);
 
-  return { connected, failedResources, refreshDetails };
+  return { connected, overviewFailed, refreshOverview: refreshState, failedResources, refreshDetails };
 }

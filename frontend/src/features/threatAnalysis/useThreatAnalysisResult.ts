@@ -22,6 +22,7 @@ export function useThreatAnalysisResult(
   setScan: Dispatch<SetStateAction<ScanStatus | null>>,
 ) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
   const scanRef = useRef(scan);
   scanRef.current = scan;
   const requestRef = useRef<ResultRequestState | null>(null);
@@ -32,6 +33,7 @@ export function useThreatAnalysisResult(
     };
     requestRef.current = state;
     setLoading(false);
+    setError(false);
     return () => {
       state.disposed = true;
       state.controller?.abort();
@@ -75,6 +77,7 @@ export function useThreatAnalysisResult(
           try {
             const analysis = await getScanThreatAnalysis(scanId, state.controller.signal);
             if (!isCurrent()) return;
+            if (version === state.version) setError(false);
             if (version === state.version && analysis) {
               state.needsRefresh = !isThreatAnalysisResultReady(analysis);
               setScan((previous) => isCurrent() && previous?.scan_id === scanId
@@ -82,6 +85,7 @@ export function useThreatAnalysisResult(
                 : previous);
             }
           } catch {
+            if (isCurrent() && version === state.version && !state.controller.signal.aborted) setError(true);
             // Empty results and failures leave any existing artifacts intact;
             // the 30-second fallback can retry without reloading every resource.
           }
@@ -101,6 +105,7 @@ export function useThreatAnalysisResult(
     state.rerun = false;
     state.needsRefresh = !isThreatAnalysisResultReady(analysis);
     state.controller?.abort();
+    setError(false);
     setScan((previous) => !state.disposed && previous?.scan_id === scanId
       ? { ...previous, threat_analysis: analysis }
       : previous);
@@ -112,5 +117,5 @@ export function useThreatAnalysisResult(
     refresh();
   }, [refresh, scan?.scan_id, scan?.threat_analysis_enabled, scan?.threat_analysis_run?.status]);
 
-  return { loading, refresh, acceptAnalysis };
+  return { loading, error, refresh, acceptAnalysis };
 }

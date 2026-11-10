@@ -16,6 +16,7 @@ import {
 } from "../scanRuntime";
 
 export const api = axios.create({ baseURL: "/" });
+export const SCAN_READ_TIMEOUT_MS = 30_000;
 
 export interface PublicScanAccess {
   scanId: string;
@@ -59,7 +60,7 @@ function scanV2Path(scanId: string, path: string): string {
 
 export async function getScanTasksPage(scanId: string, cursor?: string | null, taskName?: string, signal?: AbortSignal) {
   const { data } = await api.get<{ items: Record<string, unknown>[]; next_cursor: string | null }>(
-    scanV2Path(scanId, "/tasks"), { params: { ...(isPublicScan(scanId) ? publicParams() : {}), cursor, limit: 50, task_name: taskName }, signal },
+    scanV2Path(scanId, "/tasks"), { params: { ...(isPublicScan(scanId) ? publicParams() : {}), cursor, limit: 50, task_name: taskName }, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   return data;
 }
@@ -71,7 +72,7 @@ export function isInvalidTaskCursorError(error: unknown): boolean {
 export async function getScanTaskDetail(scanId: string, task: Record<string, unknown>, signal?: AbortSignal) {
   const { data } = await api.get<Record<string, unknown>>(
     scanV2Path(scanId, `/tasks/${encodeURIComponent(String(task.task_id))}`),
-    { params: { ...(isPublicScan(scanId) ? publicParams() : {}), revision: task.revision, record_id: task.record_id }, signal },
+    { params: { ...(isPublicScan(scanId) ? publicParams() : {}), revision: task.revision, record_id: task.record_id }, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   return data;
 }
@@ -321,11 +322,11 @@ export async function getAgentIndexStatus(scanId: string): Promise<IndexStatus> 
   if (isPublicScan(scanId)) {
     const { data } = await api.get<IndexStatus>(
       publicScanPath("/index-status"),
-      { params: publicParams() },
+      { params: publicParams(), timeout: SCAN_READ_TIMEOUT_MS },
     );
     return data;
   }
-  const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`);
+  const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`, { timeout: SCAN_READ_TIMEOUT_MS });
   return data;
 }
 
@@ -461,7 +462,7 @@ export function getScanOverviewRequest(
   if (pending) return pending;
   const promise = (async () => {
     try {
-      const { data } = await api.get<unknown>(path, { params });
+      const { data } = await api.get<unknown>(path, { params, timeout: SCAN_READ_TIMEOUT_MS });
       const normalized = normalizeScanStatus(data);
       if (!normalized || normalized.scan_id !== scanId) throw new Error("扫描概览响应无效");
       return normalized;
@@ -481,7 +482,7 @@ export async function getScanCandidatesPage(
 ): Promise<ScanCandidatePage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/candidates"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(after == null ? {} : { after }) },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("候选点分页响应无效");
   return {
@@ -508,7 +509,7 @@ export async function getScanVulnerabilitiesPage(
         ...(after == null ? {} : { after }),
         ...(limit == null ? {} : { limit }),
       },
-      signal,
+      signal, timeout: SCAN_READ_TIMEOUT_MS,
     },
   );
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("漏洞分页响应无效");
@@ -529,7 +530,7 @@ export async function getScanEventsPage(
 ): Promise<ScanEventPage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/events"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(before == null ? {} : { before }) },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("日志分页响应无效");
   return {
@@ -564,7 +565,7 @@ async function getAuditTaskResults(
     publicAccess
       ? publicScanPath(`/${kind}-results`)
       : `/api/v2/scans/${scanId}/${kind}-results`,
-    { params, signal },
+    { params, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   if (!Array.isArray(data) || data.length !== ids.length || data.some((item) => (
     !isRecord(item) || !ids.includes(item.task_id) || !validAuditResult(item)
@@ -590,7 +591,7 @@ export async function getScanCandidateAuditResults(
   if (publicAccess) params.set("token", publicParams()!.token);
   const { data } = await api.get<CandidateAuditTaskResult[]>(
     publicAccess ? publicScanPath("/candidate-audit-results") : `/api/v2/scans/${scanId}/candidate-audit-results`,
-    { params, signal },
+    { params, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   if (!Array.isArray(data) || data.length !== indexes.length || data.some((item) => (
     !isRecord(item) || !indexes.includes(item.candidate_index)
@@ -623,7 +624,7 @@ export async function getScanVulnerabilityAuditSource(
   const suffix = `/vulnerabilities/${index}/audit-source`;
   const { data } = await api.get<VulnerabilityAuditSource>(
     publicAccess ? publicScanPath(suffix) : `/api/v2/scans/${scanId}${suffix}`,
-    { params: publicAccess ? publicParams() : undefined, signal },
+    { params: publicAccess ? publicParams() : undefined, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   if (!isRecord(data) || data.vuln_index !== index
     || !["resolved", "missing", "ambiguous", "unsupported"].includes(data.status)
@@ -654,7 +655,7 @@ export async function getScanThreatTasksPage(
 ): Promise<ThreatAuditTaskPage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/threat-audit-tasks"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(cursor ? { cursor } : {}) },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("威胁审计任务分页响应无效");
   return {
@@ -671,7 +672,7 @@ export async function getScanPatternTasksPage(
 ): Promise<ThreatPatternAuditTaskPage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/threat-pattern-audit-tasks"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(cursor ? { cursor } : {}) },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("攻击模式审计任务分页响应无效");
   return {
@@ -688,7 +689,7 @@ export async function getScanValidationsPage(
 ): Promise<VulnerabilityValidationPage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/validations"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(after == null ? {} : { after }) },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("漏洞验证分页响应无效");
   return {
@@ -1226,7 +1227,7 @@ export function isMissingOptionalResult(error: unknown, details: readonly string
 export async function getFpReviewOverview(scanId: string, signal?: AbortSignal): Promise<FpReviewJob | null> {
   const { data } = await api.get(scanV2Path(scanId, "/fp-review/overview"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), allow_missing: true },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   }).catch((error) => {
     if (isMissingOptionalResult(error, ["No FP review found", "No FP review found for this scan"])) return { data: null };
     throw error;
@@ -1240,7 +1241,7 @@ export async function getFpReviewOverview(scanId: string, signal?: AbortSignal):
 export async function getScanDetailItem(scanId: string, resource: string, index: number, includeBody = true, signal?: AbortSignal) {
   const { data } = await api.get(scanV2Path(scanId, `/details/${resource}/${index}`), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), include_body: includeBody },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   return data;
 }
@@ -1260,7 +1261,7 @@ export async function getScanFpReviewResult(scanId: string, index: number, signa
 export async function getFpReviewResultsPage(scanId: string, after = -1, limit = 50, signal?: AbortSignal) {
   const { data } = await api.get(scanV2Path(scanId, "/fp-review/results"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), after, limit },
-    signal,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   const normalized = normalizeFpReviewJob({ review_id: "", scan_id: scanId, results: data.items });
   return {
@@ -1282,11 +1283,11 @@ export async function getScanGitHistory(scanId: string): Promise<HistoryPattern[
   if (isPublicScan(scanId)) {
     const { data } = await api.get<HistoryPattern[]>(
       publicScanPath("/git_history"),
-      { params: publicParams() },
+      { params: publicParams(), timeout: SCAN_READ_TIMEOUT_MS },
     );
     return data;
   }
-  const { data } = await api.get<HistoryPattern[]>(`/api/scan/${scanId}/git_history`);
+  const { data } = await api.get<HistoryPattern[]>(`/api/scan/${scanId}/git_history`, { timeout: SCAN_READ_TIMEOUT_MS });
   return data;
 }
 

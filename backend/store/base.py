@@ -192,10 +192,6 @@ class ScanStoreBase(ABC):
         """Return all current terminal task metadata, without report bodies."""
         raise NotImplementedError
 
-    def get_agent_estimation_samples(self, scan_id: str, *, since: str) -> list[dict]:
-        """Return recent successful tasks from the same owner and actual Agent."""
-        raise NotImplementedError
-
     def get_vulnerability_indexes_by_source_task(
         self,
         scan_id: str,

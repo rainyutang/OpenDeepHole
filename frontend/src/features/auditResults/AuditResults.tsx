@@ -43,14 +43,15 @@ export function AuditResults({
   onRetry: () => void;
   onOpenIssue?: (index: number) => void;
 }) {
-  if (error) return (
+  const failure = error ? (
     <div role="alert" className="text-sm text-amber-300">
-      {error}。<button type="button" onClick={onRetry} className="ml-2 underline">重试</button>
+      {error}。{result ? "已保留当前结果。" : ""}<button type="button" onClick={onRetry} className="ml-2 underline">重试</button>
     </div>
-  );
-  if (!result) return <div className="text-xs text-slate-500">{loading ? "正在读取审计结果…" : "未读取到审计结果"}</div>;
+  ) : null;
+  if (!result) return failure ?? <div className="text-xs text-slate-500">{loading ? "正在读取审计结果…" : "未读取到审计结果"}</div>;
   return (
     <div className="space-y-3" aria-busy={loading}>
+      {failure}
       {!result.association_complete && (
         <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
           历史记录不足或关联失效，无法还原完整审计结果。{result.findings.length > 0 ? "以下为已关联的结果。" : ""}

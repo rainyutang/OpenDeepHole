@@ -40,28 +40,13 @@ def _category(task: dict) -> str:
     return token_category(task, legacy=True)[0]
 
 
-def duration_means(current: list[dict], history: list[dict]) -> dict[str, float]:
+def duration_means(current: list[dict]) -> dict[str, float]:
     samples: dict[str, list[float]] = defaultdict(list)
     for task in current:
         duration = task_duration(task)
         if task.get("outcome", task.get("status")) == "success" and duration is not None:
             samples[_category(task)].append(duration)
-    # History is newest first. It supplements, never overwhelms, this scan.
-    for task in history:
-        category = _category(task)
-        duration = task_duration(task)
-        if len(samples[category]) < 3 and task.get("outcome", task.get("status")) == "success" and duration is not None:
-            samples[category].append(duration)
     return {key: sum(values) / len(values) for key, values in samples.items() if values}
-
-
-def needs_history_samples(scan: ScanStatus, completed: list[dict]) -> bool:
-    tasks = _known_tasks(scan, completed)
-    counts: dict[str, int] = defaultdict(int)
-    for state, task in tasks:
-        if state == "done" and task.get("outcome", task.get("status")) == "success" and task_duration(task) is not None:
-            counts[_category(task)] += 1
-    return any(counts[_category(task)] < 3 for _, task in tasks)
 
 
 def _known_tasks(scan: ScanStatus, completed: list[dict]) -> list[tuple[str, dict]]:
@@ -101,7 +86,6 @@ def _known_tasks(scan: ScanStatus, completed: list[dict]) -> list[tuple[str, dic
 def estimate_scan_progress(
     scan: ScanStatus,
     completed: list[dict],
-    history: list[dict],
     *,
     validation_active: bool = False,
     unfinished: bool = False,
@@ -131,7 +115,7 @@ def estimate_scan_progress(
     if scan.status == "complete" and not active and not unfinished:
         return result.model_copy(update={"progress": 1.0, "remaining_seconds": 0.0, "state": "complete"})
 
-    means = duration_means([task for state, task in tasks if state == "done"], history)
+    means = duration_means([task for state, task in tasks if state == "done"])
     missing = any(_category(task) not in means for _, task in tasks)
     pool = scan.opencode_pool
     # A terminal report can arrive after its pool counter. Count it, but don't
@@ -204,3 +188,23 @@ def estimate_scan_progress(
     result.remaining_seconds = max(bounds)
     result.state = "ready"
     return result
+
+
+def estimate_scan_progress_from_store(store, scan: ScanStatus, counts: dict | None = None):
+    """Read and compute an optional estimate entirely on the store worker."""
+    completed = store.get_scan_estimation_tasks(scan.scan_id)
+    validations = store.get_vulnerability_validation_states(scan.scan_id)
+    if counts is None:
+        counts = store.get_scan_detail_counts(scan.scan_id)
+    pending_counts = {
+        category: sum(counts.get(f"{kind}_{state}", 0) for state in ("pending", "queued", "running"))
+        for kind, category in (("candidate_audit", "static_candidate"), ("threat_audit", "threat_audit"),
+                               ("threat_pattern_audit", "threat_pattern_audit"))
+    }
+    validation_count = sum(running or status in {"pending", "queued", "running"}
+                           for status, running in validations.values())
+    pending_counts["vulnerability_validation"] = validation_count
+    return estimate_scan_progress(
+        scan, completed, validation_active=validation_count > 0,
+        unfinished=any(pending_counts.values()), pending_counts=pending_counts,
+    )

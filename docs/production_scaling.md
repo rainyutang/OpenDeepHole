@@ -166,6 +166,8 @@ location ~ ^/api/agent-configs/[^/]+/opencode-models$ {
 - `stream_events.queue`、`queue_peak`、`dropped` 与 `persisted`；
 - 日志中的 `Slow request`、`Slow store operation`、Agent command 重试和 notification listener 重连。
 
+存储操作等待 5 秒仍未完成时，`Store operation still pending` 会输出操作名、`phase=queued/running`、排队与执行耗时，此后每 30 秒重复。它只记录诊断信息，不中断操作。HTTP 调用方取消后，正在执行的数据库工作仍计入 pending，直至实际结束。SQLite 使用单个存储工作线程；Agent 心跳正常并不说明数据库队列畅通。
+
 建议初始告警线：事件循环延迟持续超过 250 ms、SSE `dropped` 增长、存储队列持续增长，或请求 p95 持续超过 1 秒。一次瞬时峰值不等同于故障，应结合持续时间和数据库慢查询判断。
 
 ## 回滚

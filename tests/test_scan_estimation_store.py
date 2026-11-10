@@ -1,4 +1,4 @@
-"""ETA samples use complete, lightweight, owner-scoped logical task history."""
+"""ETA samples use complete, lightweight, scan-scoped logical task history."""
 
 import json
 import os
@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from backend.models import OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, VulnerabilityValidation
+from backend.scan_estimate import estimate_scan_progress_from_store
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -91,31 +92,35 @@ def test_full_current_history_is_metadata_only_and_latest_revision(sample_store,
     assert store.get_scan_estimation_tasks("missing") == []
 
 
-def test_history_samples_use_actual_agent_owner_valid_duration_and_completion_window(sample_store):
-    store, current, scan, report, now, _, other_agent, other_owner = sample_store
-    past = scan("past")
-    moved = scan("moved", key=other_agent)
-    foreign = scan("foreign", user=other_owner)
-    report(current, "self")
-    report(past, "valid", logical_duration_seconds=30)
-    report(moved, "actual-agent", finished_at=(now - timedelta(hours=1)).isoformat())
-    report(foreign, "other-owner")
-    report(past, "other-agent", key=other_agent)
-    report(past, "revised", revision=1)
-    report(past, "revised", revision=2, outcome="failure")
-    report(past, "late-old-report", finished_at=(now - timedelta(days=31)).isoformat())
-    report(past, "future", finished_at=(now + timedelta(days=1)).isoformat())
-    report(past, "missing-date", finished_at="")
-    for i, invalid in enumerate((None, 0, -1, "NaN", "Infinity", True, "bad")):
-        report(past, f"invalid-{i}", duration_seconds=invalid)
-    report(past, "invalid-logical", logical_duration_seconds=0)
-    since = (now - timedelta(days=30)).isoformat()
-    tasks = store.get_agent_estimation_samples(current, since=since)
-    assert [task["task_id"] for task in tasks] == ["actual-agent", "valid"]
-    assert all("prompt" not in task and "session_events" not in task for task in tasks)
-    assert tasks[1]["logical_duration_seconds"] == 30
-    assert store.get_agent_estimation_samples("missing", since=since) == []
-    assert store.get_agent_estimation_samples(current, since="invalid") == []
+def _queued_scan(store, scan_id, task_type="threat_analysis"):
+    return store.load_scan_runtime(scan_id)[0].model_copy(update={
+        "agent_online": True,
+        "opencode_pool": OpenCodePoolStatus(
+            queued_tasks=[{"task_id": "waiting", "task_type": task_type}],
+            models=[{"id": "model", "enabled": True, "available": True,
+                     "capability": "high", "max_concurrency": 1}],
+        ),
+    })
+
+
+@pytest.mark.parametrize("local_duration", [None, 10])
+def test_estimate_uses_only_current_scan_even_with_same_agent_history(sample_store, local_duration):
+    store, current, scan, report, now, *_ = sample_store
+    if local_duration is not None:
+        report(current, "local", duration_seconds=local_duration)
+    current_scan = _queued_scan(store, current)
+    before = estimate_scan_progress_from_store(store, current_scan, {})
+    past = scan("same-agent-history")
+    store.update_opencode_pool_status(past, OpenCodePoolStatus(completed_tasks=[
+        {"task_id": f"foreign-{i}", "task_type": "threat_analysis", "outcome": "success",
+         "duration_seconds": 10000, "finished_at": now.isoformat()}
+        for i in range(1000)
+    ]))
+    after = estimate_scan_progress_from_store(store, current_scan, {})
+    assert after.model_dump(exclude={"calculated_at"}) == before.model_dump(exclude={"calculated_at"})
+    assert after.state == ("estimating" if local_duration is None else "ready")
+    assert after.progress == (0 if local_duration is None else 0.5)
+    assert after.remaining_seconds == local_duration
 
 
 def test_legacy_tasks_without_ids_are_distinct_without_loading_bodies(sample_store):
@@ -131,23 +136,23 @@ def test_legacy_tasks_without_ids_are_distinct_without_loading_bodies(sample_sto
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_snapshot_only_history_uses_stable_agent_key_and_keeps_legacy_durations(sample_store, legacy):
-    store, current, scan, _, now, _, other_agent, _ = sample_store
-    past = scan("snapshot")
-    foreign = scan("wrong-agent", key=other_agent)
-    task = {"task_id": "legacy", "task_type": "candidate_audit", "outcome": "success", "duration_seconds": 12,
-            "finished_at": (now - timedelta(days=2)).isoformat(), "prompt": "private body" * 1000}
-    for scan_id in (past, foreign):
+def test_current_snapshot_durations_are_used_without_other_scan_snapshots(sample_store, legacy):
+    store, current, scan, _, now, *_ = sample_store
+    past = scan("same-agent-snapshot")
+    for scan_id, duration in ((current, 12), (past, 12000)):
+        task = {"task_id": "snapshot-task", "task_type": "candidate_audit", "outcome": "success",
+                "duration_seconds": duration, "finished_at": (now - timedelta(days=2)).isoformat(),
+                "prompt": "private body" * 1000}
         if legacy:
             store._conn.execute("UPDATE scans SET history_version = 0, opencode_pool = ? WHERE scan_id = ?",
                                 (json.dumps({"completed_tasks": [task]}), scan_id))
             store._conn.commit()
         else:
             store.update_opencode_pool_status(scan_id, OpenCodePoolStatus(completed_tasks=[task]))
-    tasks = store.get_agent_estimation_samples(current, since=(now - timedelta(days=30)).isoformat())
-    assert len(tasks) == 1 and tasks[0]["scope_id"] == past
-    assert tasks[0]["duration_seconds"] == 12
-    assert "prompt" not in tasks[0]
+    result = estimate_scan_progress_from_store(store, _queued_scan(store, current, "candidate_audit"), {})
+    assert result.state == "ready"
+    assert result.progress == 0.5
+    assert result.remaining_seconds == 12
 
 
 def test_terminal_scan_keeps_only_current_independent_validation_tasks(sample_store):
