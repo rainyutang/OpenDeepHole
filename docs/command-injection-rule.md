@@ -37,20 +37,21 @@
 - 不是编译器级符号解析或跨过程数据流引擎：复杂模板推导、任意指针传播、动态生成的函数名、宏拼接不做猜测。
 - 遍历条件编译分支，但不代替完整预处理器；不推断缺失的编译参数、外部 include 搜索路径或条件宏值。
 - 无法确定的接收者、宏分支、构造形式及语法错误写入 `Analyzer.diagnostics`，日志输出原因计数和有限示例。不能据无候选结论声称不存在命令注入。
-- 当前实现保留解析树和作用域用于头文件与别名关联，内存随扫描规模增长；该选择优化本任务的运行时间，不保证比 Semgrep 更省内存。
+- 逐目标文件加载其精确的递归头文件依赖，每轮完成后主动释放源码、解析树、作用域和宏缓存。每个头文件也独立作为目标处理一次，重复加载产生的诊断按位置和原因去重；未包含的源文件赋值不会污染其他文件的符号状态。
+- 解析内存取决于最大的单文件及其依赖范围，候选结果和诊断仍随数量增长；不承诺固定内存上限。大量文件共用大头文件会重复解析，可能明显增加耗时。内存不足时仍让当前规则失败，错误包含目标、当前文件、文件字节数和读取/解析/索引/关联/匹配阶段，不自动跳过或返回成功。
 
 ## 验证与性能复现
 
 分析器测试覆盖词表所有名称、正反例、作用域、宏、源码坐标、聚合及解析限制；集成测试覆盖 worker、规则包、Skill 隔离、统一 Prompt 和报告保留。模型调用使用 Mock，验证一次调用及多问题字段不丢失，不代表已完成真实 LLM 的漏洞确认能力评估。
 
 ```bash
-PYTHONPATH=. python3 -m pytest -q tests/test_command_injection_analyzer.py tests/test_command_injection_integration.py
+PYTHONPATH=. python3 -m pytest -q tests/test_command_injection_analyzer.py tests/test_command_injection_memory.py tests/test_command_injection_integration.py
 PYTHONPATH=. python3 scripts/benchmark_command_injection.py --files 100 --functions 240 --repeat 3 --jobs 1
 ```
 
 基准每个样本启动新进程。共同语料仅包含 `system`、`popen`、`execve`、`posix_spawnp` 的直接调用，两种实现都必须输出预期位置数且无诊断；稀疏集仅 10% 文件包含调用，密集集所有函数包含调用。完整规则语料增加取地址、指针别名调用、Qt 成员调用和 Boost 构造，仅单测 Tree-sitter 吞吐，不将不等价规则做性能对照。
 
-`median_cold_seconds` 包含启动、导入、扫描和结果解析时间；这不是清空文件系统缓存后的冷盘测试。`peak_process_rss_kb` 是自身及子进程高水位的最大值，不是整个进程树的同时内存总和。脚本的 `--tree-only` 可跳过 Semgrep；Semgrep 可能需要写入用户目录设置。
+`median_cold_seconds` 包含启动、导入、扫描、结果指纹计算和结果解析时间；这不是清空文件系统缓存后的冷盘测试。`median_scan_seconds` 和 `median_peak_process_rss_kb` 在计算指纹前采集，适合分析此次改造的耗时和内存变化。Linux/macOS 的 `peak_process_rss_kb` 是自身及子进程高水位的最大值，不是整个进程树的同时内存总和；Windows 使用当前 Tree-sitter worker 的峰值工作集，Semgrep 子进程的该指标返回 `null`。脚本的 `--tree-only` 可跳过 Semgrep；Semgrep 可能需要写入用户目录设置。
 
 ### 本地对照结果
 
@@ -63,3 +64,35 @@ PYTHONPATH=. python3 scripts/benchmark_command_injection.py --files 100 --functi
 | 完整规则语料，3,805,000 字节 | 96,000 | 7.981 s | 不作对照 | 587.7 MiB | 不作对照 |
 
 RSS 列为各次样本进程高水位的中位数。两组共同语料的位置数一致、无诊断；Tree-sitter 用时分别约为 Semgrep 的 1/2.0 和 1/9.5，但内存更高。基于本任务的精确匹配、函数聚合、可复用语法解析依赖及该对照的耗时，选用 Tree-sitter；该合成测试不代表所有实际项目、并发配置或语义规则下的普遍优劣，也不测量 LLM 审计耗时。
+
+### 2026-11-10 内存优化对照
+
+Linux / Python 3.12.3、Tree-sitter 0.25.2、tree-sitter-cpp 0.23.4，基线为 `2a5c28f`。修改前后使用同一份生成语料和新版基准脚本，每组各启动 3 次独立进程取中位数；下表为排除结果指纹计算的扫描时间。每个样本均校验预期位置数，并比较完整候选字段与诊断的 SHA256，七组修改前后结果一致、无诊断。
+
+| 语料 | 扫描秒：旧 → 新 | 时间变化 | 峰值 MiB：旧 → 新 |
+| --- | ---: | ---: | ---: |
+| 稀疏调用，100 × 240 函数 | 1.762 → 1.519 | −13.8% | 216.22 → 51.35 |
+| 密集调用，100 × 240 函数 | 2.781 → 2.784 | +0.1% | 284.36 → 100.85 |
+| 完整规则，100 × 240 函数 | 7.459 → 7.211 | −3.3% | 588.66 → 134.97 |
+| 无命中，10 × 240 函数 | 0.149 → 0.142 | −4.7% | 60.59 → 45.62 |
+| 无命中，100 × 240 函数 | 1.637 → 1.374 | −16.0% | 208.85 → 45.85 |
+| 共用大头文件，100 × 240 函数 | 3.598 → 17.396 | +383.4% | 354.59 → 119.82 |
+| 单文件，24,000 函数 | 1.762 → 1.801 | +2.2% | 216.93 → 216.95 |
+
+常规三组内存下降约 65%–77%，时间基本持平或略降。共享头文件包含 2,400 个结构体声明：每个目标重建依赖解析数据，内存下降约 66%，增加约 13.80 秒，耗时约为原来的 4.83 倍。无命中文件增加十倍时新实现内存基本稳定；单个大文件的内存未降低。实际项目的时间变化取决于头文件复用程度，不能用常规语料的平均值代替。
+
+复现时 `--baseline-root` 指向同一环境可导入的完整旧版本检出目录；两版均使用当前基准脚本，避免计时口径差异：
+
+```bash
+PYTHONPATH=. python3 scripts/benchmark_command_injection.py \
+  --files 100 --functions 240 --repeat 3 --tree-only \
+  --memory-scenarios --baseline-root /path/to/baseline-checkout
+```
+
+Windows / Python 3.12.10 64 位已运行 `--files 3 --functions 4 --repeat 1 --tree-only --memory-scenarios`：七组语料通过预期位置数检查，无诊断，峰值工作集采集正常。这是本机小规模兼容验证，尚未在报错的 Windows Agent 和原始项目上重现或验收。
+
+新增回归覆盖依赖闭包、路径优先级和读取失败回退、循环包含、诊断去重、禁用自动 GC 时的对象释放及内存异常清理。现有基线另有两项失败：报告 fixture 缺少 `remediation`，空规则结果断言未包含 `scan_scope`；两项均在未修改版本复现，与此次内存改造分开记录。
+
+### 更新与已有扫描
+
+报错堆栈中的 `scans/<id>/rules/command_injection/analyzer.py` 来自服务端分发的规则包。需更新实际供包的服务端规则内容，确认新静态扫描使用更新后的规则；仅更新 Agent 源码不保证该规则包改变。已有 `candidates.json` 的续扫会复用候选和静态阶段摘要，不自动重跑失败规则。此次不改写历史扫描、候选缓存或编号，无数据库迁移。
