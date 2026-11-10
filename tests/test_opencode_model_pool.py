@@ -26,6 +26,7 @@ from task_agent.model_pool import (
     wait_for_model_pool_update,
 )
 from task_agent.token_usage import TokenCounters, attribute_token_usage, token_usage_from_models
+from task_agent.task_service import _task_priority
 
 
 @pytest.fixture(autouse=True)
@@ -1542,6 +1543,71 @@ def test_priority_queue_runs_higher_priority_before_earlier_lower_priority() -> 
         low = await asyncio.wait_for(low_task, timeout=1)
         assert low is not None and low.task_id == "task-low"
         await release_model_lease(low, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("audit_type", ["vulnerability_mining", "threat_analysis"])
+def test_fp_review_precedes_queued_audit_without_preempting_running_audit(audit_type: str) -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "only", "model": "only-model", "capability": "high", "max_concurrency": 1,
+        }])
+        occupied = await acquire_model_lease(
+            cfg,
+            task_id="running-audit",
+            task_context={"task_type": audit_type},
+            priority=_task_priority(audit_type),
+        )
+        audit_queued = asyncio.Event()
+        review_queued = asyncio.Event()
+        audit_task = asyncio.create_task(acquire_model_lease(
+            cfg,
+            task_id="queued-audit",
+            task_context={"task_type": audit_type},
+            priority=_task_priority(audit_type),
+            on_queued=audit_queued.set,
+        ))
+        review_task = None
+        review = None
+        audit = None
+        try:
+            await asyncio.wait_for(audit_queued.wait(), timeout=1)
+            review_task = asyncio.create_task(acquire_model_lease(
+                cfg,
+                task_id="queued-review",
+                task_context={"task_type": "fp_review"},
+                priority=_task_priority("fp_review"),
+                on_queued=review_queued.set,
+            ))
+            await asyncio.wait_for(review_queued.wait(), timeout=1)
+            snapshot = model_pool_snapshot()
+            assert [item["task_id"] for item in snapshot["queued_tasks"]] == [
+                "queued-review", "queued-audit",
+            ]
+            assert [item["task_id"] for item in snapshot["models"][0]["active_tasks"]] == [
+                "running-audit",
+            ]
+            assert not review_task.done()
+            assert not audit_task.done()
+
+            await release_model_lease(occupied, outcome="success", duration_seconds=0.1)
+            occupied = None
+            review = await asyncio.wait_for(review_task, timeout=1)
+            assert review is not None and review.task_id == "queued-review"
+            assert not audit_task.done()
+            await release_model_lease(review, outcome="success", duration_seconds=0.1)
+            review = None
+            audit = await asyncio.wait_for(audit_task, timeout=1)
+            assert audit is not None and audit.task_id == "queued-audit"
+        finally:
+            tasks = [task for task in (audit_task, review_task) if task is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for lease in (occupied, review, audit):
+                await release_model_lease(lease, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())
 

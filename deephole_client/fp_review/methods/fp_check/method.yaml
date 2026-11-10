@@ -1,7 +1,7 @@
 label: Trail of Bits fp-check 复核
 description: 对单个确认问题执行主张重述、标准或深度验证以及六道门证据复核。
 default: false
-max_concurrency: 4
+max_concurrency: 0
 stages:
   - key: claim_context
     label: 主张与上下文

@@ -72,6 +72,12 @@ Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、
 展示方法说明；方法目录中的 `skills/<skill-name>/SKILL.md` 会自动加入该任务的 Skill 搜索路径，
 业务 Prompt 应通过 `/<skill-name>` 调用，不应读取后再拼接 Skill 正文。
 
+`max_concurrency` 接受非负整数：`0` 表示单扫描复核并发跟随审计的
+`config.opencode_concurrency`（已启用且配置有效的模型并发总和，最低为 1），正整数
+表示方法的固定并发上限。两个内置方法均使用 `0`。Worker 在每次补位时读取当前容量，
+降低容量不会打断已有复核；所有扫描和审计仍共享模型池额度，由模型池约束实际运行并发。
+去误报各阶段及重试使用优先级 80，优先于审计的 50，不抢占已经运行的任务。
+
 ```bash
 python -m deephole_client.fp_review --method adversarial \
   --project-path /src/project --code-scan-path /src/project/src \

@@ -68,47 +68,201 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server._fp_review_execution_revisions["review-stale"], 3)
         self.assertNotIn(("review-stale", 8), server._fp_review_active_items)
 
-    async def test_manifest_controls_worker_concurrency(self) -> None:
-        original_config = server._config
-        original_reporter = server._reporter
-        server._config = SimpleNamespace()
+    async def _assert_worker_capacity(self, method, config, expected_capacity):
+        """Keep a whole launch window blocked so its bound is observable."""
         reporter = SimpleNamespace(
             push_fp_progress=AsyncMock(),
             finish_fp_review=AsyncMock(),
         )
-        server._reporter = reporter
+        release = asyncio.Event()
+        window_started = asyncio.Event()
         active = 0
         maximum = 0
+        review_id = f"capacity-{method}-{expected_capacity}"
+        scan_id = f"scan-{review_id}"
 
         async def run_item(item):
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
-            await asyncio.sleep(0.01)
-            active -= 1
-            return {"status": "success", "verdict": "true_positive"}
+            if active == expected_capacity:
+                window_started.set()
+            try:
+                await release.wait()
+                return {"status": "success", "verdict": "true_positive"}
+            finally:
+                active -= 1
 
-        try:
-            with patch(
+        with (
+            patch.object(server, "_config", config),
+            patch.object(server, "_reporter", reporter),
+            patch(
                 "deephole_client.server._run_single_fp_review_item",
                 new=run_item,
-            ):
+            ),
+        ):
+            worker = None
+            try:
                 await server.handle_fp_review(
-                    scan_id="scan-1",
-                    review_id="review-1",
-                    method="fp_check",
+                    scan_id=scan_id,
+                    review_id=review_id,
+                    method=method,
                     project_path="/repo",
                     code_scan_path="/repo/src",
-                    vulnerabilities=[{"index": index} for index in range(5)],
+                    vulnerabilities=[
+                        {"index": index} for index in range(expected_capacity + 1)
+                    ],
                 )
-                await server._fp_review_tasks["review-1"]
+                worker = server._fp_review_tasks[review_id]
+                await asyncio.wait_for(window_started.wait(), 1)
+                self.assertEqual(active, expected_capacity)
+                self.assertEqual(len(server._fp_review_queues[review_id]), 1)
+            finally:
+                release.set()
+                if worker is not None:
+                    await asyncio.wait_for(worker, 1)
 
-            self.assertEqual(maximum, 4)
-            self.assertEqual(reporter.finish_fp_review.await_args.args[2], "complete")
-            self.assertEqual(server._fp_review_queues, {})
-        finally:
-            server._config = original_config
-            server._reporter = original_reporter
+        self.assertEqual(maximum, expected_capacity)
+        self.assertEqual(reporter.finish_fp_review.await_args.args[2], "complete")
+        self.assertNotIn(review_id, server._fp_review_queues)
+
+    async def test_builtin_methods_follow_agent_capacity(self) -> None:
+        for method in ("adversarial", "fp_check"):
+            for capacity in (1, 8):
+                with self.subTest(method=method, capacity=capacity):
+                    await self._assert_worker_capacity(
+                        method, SimpleNamespace(opencode_concurrency=capacity), capacity,
+                    )
+
+    async def test_auto_capacity_keeps_one_worker_without_configured_capacity(self) -> None:
+        for config in (SimpleNamespace(), SimpleNamespace(opencode_concurrency=0)):
+            with self.subTest(config=config):
+                await self._assert_worker_capacity("adversarial", config, 1)
+
+    async def test_custom_manifest_preserves_fixed_worker_limit(self) -> None:
+        with patch("deephole_client.fp_review.load_fp_review_methods", return_value={
+            "custom": SimpleNamespace(manifest=SimpleNamespace(max_concurrency=3)),
+        }):
+            await self._assert_worker_capacity(
+                "custom", SimpleNamespace(opencode_concurrency=8), 3,
+            )
+
+    async def test_capacity_decrease_keeps_running_items_and_limits_refill(self) -> None:
+        config = SimpleNamespace(opencode_concurrency=3)
+        started = [asyncio.Event() for _ in range(4)]
+        release = [asyncio.Event() for _ in range(4)]
+        completed = [asyncio.Event() for _ in range(4)]
+        cancelled = []
+
+        async def progress(_scan, _review, index, processed, _running):
+            if processed is not None:
+                completed[index].set()
+
+        reporter = SimpleNamespace(
+            push_fp_progress=AsyncMock(side_effect=progress),
+            finish_fp_review=AsyncMock(),
+        )
+
+        async def run_item(item):
+            index = item.vulnerability["index"]
+            started[index].set()
+            try:
+                await release[index].wait()
+            except asyncio.CancelledError:
+                cancelled.append(index)
+                raise
+            return {"status": "success", "verdict": "true_positive"}
+
+        with patch("deephole_client.server._run_single_fp_review_item", new=run_item):
+            worker = None
+            try:
+                for index in range(4):
+                    await server.enqueue_fp_review(
+                        config=config, reporter=reporter, scan_id="decrease-scan",
+                        review_id="decrease-review", method="adversarial",
+                        project_path="/repo", code_scan_path="/repo/src",
+                        vulnerability={"index": index},
+                    )
+                worker = server._fp_review_tasks["decrease-review"]
+                await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started[:3])), 1)
+                config.opencode_concurrency = 1
+                for index in range(2):
+                    release[index].set()
+                    await asyncio.wait_for(completed[index].wait(), 1)
+                    self.assertFalse(started[3].is_set())
+                    self.assertEqual(cancelled, [])
+                release[2].set()
+                await asyncio.wait_for(started[3].wait(), 1)
+                self.assertTrue(completed[2].is_set())
+                self.assertEqual(cancelled, [])
+            finally:
+                for event in release:
+                    event.set()
+                if worker is not None:
+                    await asyncio.wait_for(worker, 1)
+
+    async def test_multiple_reviews_share_actual_model_pool_capacity(self) -> None:
+        import task_agent.model_pool as pool
+
+        cli_config = SimpleNamespace(models=[{
+            "id": "fp-shared-capacity", "model": "p/fp-shared-capacity",
+            "max_concurrency": 2,
+        }])
+        config = SimpleNamespace(opencode_concurrency=2)
+        reporter = SimpleNamespace(push_fp_progress=AsyncMock(), finish_fp_review=AsyncMock())
+        release = asyncio.Event()
+        windows_submitted = asyncio.Event()
+        requests = 0
+        active = 0
+        maximum = 0
+
+        async def run_item(item):
+            nonlocal requests, active, maximum
+            requests += 1
+            if requests == 4:
+                windows_submitted.set()
+            lease = await pool.acquire_model_lease(
+                cli_config, stats_scope_id=item.scan_id,
+                task_context={"planned_task_id": item.planned_task_id, "task_type": "fp_review"},
+            )
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                await release.wait()
+                return {"status": "success", "verdict": "true_positive"}
+            finally:
+                active -= 1
+                await pool.release_model_lease(lease, outcome="success")
+
+        with patch.object(pool, "_condition", asyncio.Condition()), patch(
+            "deephole_client.server._run_single_fp_review_item", new=run_item,
+        ):
+            workers = []
+            try:
+                for scan_id in ("shared-scan-a", "shared-scan-b"):
+                    for index in range(3):
+                        await server.enqueue_fp_review(
+                            config=config, reporter=reporter, scan_id=scan_id,
+                            review_id=f"review-{scan_id}", method="adversarial",
+                            project_path="/repo", code_scan_path="/repo/src",
+                            vulnerability={"index": index},
+                        )
+                    workers.append(server._fp_review_tasks[f"review-{scan_id}"])
+                await asyncio.wait_for(windows_submitted.wait(), 1)
+                self.assertEqual(active, 2)
+                snapshots = [pool.model_pool_snapshot(scan_id) for scan_id in ("shared-scan-a", "shared-scan-b")]
+                self.assertEqual(sum(len(snapshot["queued_tasks"]) for snapshot in snapshots), 2)
+                self.assertEqual(sum(len(snapshot["planned_tasks"]) for snapshot in snapshots), 2)
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*workers), 1)
+            self.assertEqual(maximum, 2)
+            self.assertEqual(requests, 6)
+            for scan_id in ("shared-scan-a", "shared-scan-b"):
+                snapshot = pool.model_pool_snapshot(scan_id)
+                self.assertEqual(snapshot["planned_tasks"], [])
+                self.assertEqual(snapshot["queued_tasks"], [])
+                self.assertEqual(snapshot["global_running"], 0)
 
     async def test_review_only_publishes_backlog_then_model_queue_and_cleans_up(self) -> None:
         import task_agent.model_pool as pool
@@ -245,6 +399,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server._fp_review_active_items, set())
 
     async def test_incremental_item_fills_free_slot_before_first_finishes(self) -> None:
+        config = SimpleNamespace(opencode_concurrency=2)
         reporter = SimpleNamespace(
             push_fp_progress=AsyncMock(),
             finish_fp_review=AsyncMock(),
@@ -271,7 +426,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
             new=run_item,
         ):
             queued = await server.enqueue_fp_review(
-                config=SimpleNamespace(),
+                config=config,
                 reporter=reporter,
                 scan_id="scan-1",
                 review_id="review-sliding-window",
@@ -284,7 +439,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(first_started.wait(), timeout=1)
 
             queued = await server.enqueue_fp_review(
-                config=SimpleNamespace(),
+                config=config,
                 reporter=reporter,
                 scan_id="scan-1",
                 review_id="review-sliding-window",
@@ -300,7 +455,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
 
             queued = await server.enqueue_fp_review(
-                config=SimpleNamespace(),
+                config=config,
                 reporter=reporter,
                 scan_id="scan-1",
                 review_id="review-sliding-window",
@@ -359,6 +514,8 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server._fp_review_queues, {})
 
     async def test_explicit_stop_still_cancels_the_review_queue(self) -> None:
+        import task_agent.model_pool as pool
+
         reporter = SimpleNamespace(
             push_fp_progress=AsyncMock(),
             finish_fp_review=AsyncMock(),
@@ -398,6 +555,64 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finish[3], "用户手动停止")
         self.assertNotIn("review-user-stop", server._fp_review_queues)
         self.assertEqual(server._fp_review_active_items, set())
+        self.assertEqual(pool.model_pool_snapshot("scan-1")["planned_tasks"], [])
+
+    async def test_stop_clears_model_waiters_and_unlaunched_backlog(self) -> None:
+        import task_agent.model_pool as pool
+
+        cli_config = SimpleNamespace(models=[{
+            "id": "fp-cancel-waiters", "model": "p/fp-cancel-waiters", "max_concurrency": 1,
+        }])
+        config = SimpleNamespace(opencode_concurrency=2)
+        reporter = SimpleNamespace(push_fp_progress=AsyncMock(), finish_fp_review=AsyncMock())
+        window_submitted = asyncio.Event()
+        submitted = 0
+
+        async def run_item(item):
+            nonlocal submitted
+            submitted += 1
+            if submitted == 2:
+                window_submitted.set()
+            lease = await pool.acquire_model_lease(
+                cli_config, stats_scope_id=item.scan_id, cancel_event=item.cancel_event,
+                task_context={"planned_task_id": item.planned_task_id, "task_type": "fp_review"},
+            )
+            await pool.release_model_lease(lease, outcome="success")
+            self.fail("The occupied model must not admit this review")
+
+        with patch.object(pool, "_condition", asyncio.Condition()), patch(
+            "deephole_client.server._run_single_fp_review_item", new=run_item,
+        ):
+            occupied = await pool.acquire_model_lease(cli_config, stats_scope_id="cancel-blocker")
+            worker = None
+            try:
+                for index in range(3):
+                    await server.enqueue_fp_review(
+                        config=config, reporter=reporter, scan_id="cancel-waiting-scan",
+                        review_id="cancel-waiting-review", method="adversarial",
+                        project_path="/repo", code_scan_path="/repo/src",
+                        vulnerability={"index": index},
+                    )
+                worker = server._fp_review_tasks["cancel-waiting-review"]
+                await asyncio.wait_for(window_submitted.wait(), 1)
+                snapshot = pool.model_pool_snapshot("cancel-waiting-scan")
+                self.assertEqual(len(snapshot["queued_tasks"]), 2)
+                self.assertEqual(len(snapshot["planned_tasks"]), 1)
+                await server.handle_fp_review_stop("cancel-waiting-scan", "cancel-waiting-review")
+                with self.assertRaises(asyncio.CancelledError):
+                    await worker
+                snapshot = pool.model_pool_snapshot("cancel-waiting-scan")
+                self.assertEqual(snapshot["queued_tasks"], [])
+                self.assertEqual(snapshot["planned_tasks"], [])
+                self.assertEqual(submitted, 2)
+                self.assertEqual(server._fp_review_active_items, set())
+                self.assertNotIn("cancel-waiting-review", server._fp_review_queues)
+                self.assertEqual(reporter.finish_fp_review.await_args.args[2], "cancelled")
+            finally:
+                if worker is not None and not worker.done():
+                    worker.cancel()
+                    await asyncio.gather(worker, return_exceptions=True)
+                await pool.release_model_lease(occupied, outcome="success")
 
     async def test_adapter_passes_one_vulnerability_and_pushes_one_result(self) -> None:
         reporter = SimpleNamespace(

@@ -77,7 +77,7 @@ class FpReviewMethodManifest:
     label: str
     description: str
     default: bool
-    max_concurrency: int
+    max_concurrency: int  # 0 follows the scan worker capacity; positive values are fixed limits.
     stages: tuple[FpReviewStage, ...]
     documents: tuple[FpReviewDocument, ...]
     directory: Path
@@ -256,9 +256,9 @@ def _read_manifest(directory: Path) -> FpReviewMethodManifest:
     if not isinstance(default, bool):
         raise ValueError("default must be a boolean")
     if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
-        raise ValueError("max_concurrency must be a positive integer")
-    if max_concurrency < 1:
-        raise ValueError("max_concurrency must be a positive integer")
+        raise ValueError("max_concurrency must be a non-negative integer (0 follows scan concurrency)")
+    if max_concurrency < 0:
+        raise ValueError("max_concurrency must be a non-negative integer (0 follows scan concurrency)")
     return FpReviewMethodManifest(
         method_id=directory.name,
         label=_non_empty_string(raw["label"], "label"),

@@ -643,7 +643,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
     [
         ("vulnerability_validation", 90),
         ("threat_analysis", 50),
-        ("fp_review", 60),
+        ("fp_review", 80),
         ("vulnerability_mining", 50),
         ("skill_create", 70),
         ("git_history", 50),

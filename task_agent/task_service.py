@@ -73,7 +73,7 @@ _TASK_TYPE_PRIORITIES = {
     "vulnerability_validation": 90,
     "threat_analysis": 50,
     "skill_create": 70,
-    "fp_review": 60,
+    "fp_review": 80,
     "vulnerability_mining": 50,
 }
 _JSON_FORMAT_UNRELATED_SENTINEL = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"

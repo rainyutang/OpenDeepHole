@@ -824,6 +824,13 @@ async def _run_fp_review_worker(review_id: str) -> None:
                     concurrency = 1
                 else:
                     concurrency = loaded.manifest.max_concurrency
+                    if concurrency == 0:
+                        try:
+                            concurrency = max(
+                                1, int(getattr(first.config, "opencode_concurrency", 1) or 1),
+                            )
+                        except (TypeError, ValueError):
+                            concurrency = 1
 
                 launched: list[_FpReviewQueueItem] = []
                 while queue and len(in_flight) < concurrency:

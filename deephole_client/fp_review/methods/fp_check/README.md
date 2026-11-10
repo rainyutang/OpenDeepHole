@@ -14,5 +14,6 @@
 `skills/fp-check/SKILL.md` 中，同一 Schema 也通过 `output_schema` 供 Task Agent 校验和纠正最终
 JSON。
 
-Agent 根据清单中的 `max_concurrency: 4` 并行调度不同漏洞，但每个方法调用仍保持漏洞粒度，
-产物写入当前漏洞的 `<work_dir>/artifacts/`。
+清单中的 `max_concurrency: 0` 让 Agent 按扫描的模型配置总容量并行调度不同漏洞，
+实际运行仍受共享模型池额度约束。每个方法调用保持漏洞粒度，产物写入当前漏洞的
+`<work_dir>/artifacts/`。

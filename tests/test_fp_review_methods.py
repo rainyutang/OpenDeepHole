@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from backend.api import scan as scan_api
 from backend.models import (
     CreateScanRequest,
+    FpReviewMethodCatalog,
     FpReviewMethodSelection,
     FpReviewResult,
     FpReviewStageConfig,
@@ -31,6 +32,7 @@ def _write_method(
     method_id: str,
     *,
     default: bool,
+    max_concurrency: str = "2",
     entry: str = "async def run(**kwargs):\n    return {'status': 'cancelled'}\n",
 ) -> None:
     directory = root / method_id
@@ -40,7 +42,7 @@ def _write_method(
             f"label: {method_id}",
             "description: test method",
             f"default: {'true' if default else 'false'}",
-            "max_concurrency: 2",
+            f"max_concurrency: {max_concurrency}",
             "stages:",
             "  - key: verify",
             "    label: Verify",
@@ -74,12 +76,16 @@ class FpReviewMethodDiscoveryTests(unittest.TestCase):
         methods = {item["method_id"]: item for item in catalog["methods"]}
         self.assertEqual(set(methods), {"adversarial", "fp_check"})
         self.assertTrue(methods["adversarial"]["default"])
-        self.assertEqual(methods["adversarial"]["max_concurrency"], 2)
+        self.assertEqual(methods["adversarial"]["max_concurrency"], 0)
         self.assertEqual(
             [stage["key"] for stage in methods["adversarial"]["stages"]],
             ["prove_bug", "prove_fp", "final_judge"],
         )
-        self.assertEqual(methods["fp_check"]["max_concurrency"], 4)
+        self.assertEqual(methods["fp_check"]["max_concurrency"], 0)
+        self.assertTrue(all(
+            item.max_concurrency == 0
+            for item in FpReviewMethodCatalog.model_validate(catalog).methods
+        ))
         self.assertIn(
             "gate_review",
             {stage["key"] for stage in methods["fp_check"]["stages"]},
@@ -94,6 +100,27 @@ class FpReviewMethodDiscoveryTests(unittest.TestCase):
             document.path.name == "SKILL.md"
             for document in adversarial.manifest.documents
         ))
+
+    def test_manifest_accepts_scan_capacity_and_fixed_limits(self) -> None:
+        for value in (0, 1, 4):
+            with self.subTest(max_concurrency=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _write_method(root, "custom", default=True, max_concurrency=str(value))
+                manifests, errors = discover_fp_review_method_manifests(root)
+
+                self.assertEqual(errors, [])
+                self.assertEqual(len(manifests), 1)
+                self.assertEqual(manifests[0].max_concurrency, value)
+
+    def test_manifest_rejects_invalid_concurrency(self) -> None:
+        for value in ("-1", "true", "false", "1.5", '"0"', "null"):
+            with self.subTest(max_concurrency=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _write_method(root, "custom", default=True, max_concurrency=value)
+                manifests, errors = discover_fp_review_method_manifests(root)
+
+                self.assertEqual(manifests, [])
+                self.assertTrue(any("max_concurrency" in error for error in errors))
 
     def test_discovery_is_strict_and_loader_requires_async_kwargs_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
