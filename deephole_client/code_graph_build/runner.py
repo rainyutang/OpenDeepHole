@@ -14,6 +14,7 @@ from typing import Any
 from .code_database import CodeDatabase
 from .cpp_analyzer import CppAnalyzer
 from .index_store import IndexStore
+from .path_access import io_path, resolved_path
 
 
 PROCESS_NAME = "code_graph_build"
@@ -85,10 +86,10 @@ def _cancelled(cancel_event: Any) -> bool:
 
 
 def _directory(value: Any, key: str, *, create: bool = False) -> Path:
-    path = Path(value).expanduser().resolve()
+    path = resolved_path(Path(value).expanduser())
     if create:
-        path.mkdir(parents=True, exist_ok=True)
-    if not path.is_dir():
+        io_path(path).mkdir(parents=True, exist_ok=True)
+    if not io_path(path).is_dir():
         raise FileNotFoundError(f"{key} is not a directory: {path}")
     return path
 
@@ -96,27 +97,28 @@ def _directory(value: Any, key: str, *, create: bool = False) -> Path:
 def _remove_sqlite_files(path: Path) -> None:
     for suffix in ("", "-wal", "-shm"):
         try:
-            path.with_name(path.name + suffix).unlink(missing_ok=True)
+            io_path(path.with_name(path.name + suffix)).unlink(missing_ok=True)
         except OSError:
             pass
 
 
 def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
-    if temp_path.parent.resolve() != final_path.parent.resolve():
+    if resolved_path(temp_path.parent) != resolved_path(final_path.parent):
         raise ValueError(
             "code graph staging DB must share the final DB directory"
         )
     for suffix in ("-wal", "-shm"):
-        final_path.with_name(final_path.name + suffix).unlink(missing_ok=True)
-    os.replace(temp_path, final_path)
+        io_path(final_path.with_name(final_path.name + suffix)).unlink(missing_ok=True)
+    os.replace(io_path(temp_path), io_path(final_path))
     _remove_sqlite_files(temp_path)
 
 
 def _read_complete_index(path: Path) -> tuple[bool, dict[str, int]]:
     database: CodeDatabase | None = None
     try:
-        database = CodeDatabase(path)
-        if not database.is_index_complete():
+        database = CodeDatabase(io_path(path))
+        if (not database.is_index_complete()
+                or database.get_metadata("coverage_complete") == "false"):
             return False, {}
         return True, database.get_index_stats()
     except Exception:
@@ -182,6 +184,7 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
     if output is not None and not callable(output):
         raise TypeError("output must be callable or None")
     cancel_event = kwargs.get("cancel_event")
+    coverage = {"skipped_files": 0, "coverage_complete": False}
     if _cancelled(cancel_event):
         return {
             "status": "cancelled",
@@ -189,13 +192,14 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             "cache_hit": False,
             "stats": {},
             "indexer_version": CodeDatabase.INDEXER_VERSION,
+            **coverage,
         }
 
     default_path = IndexStore().db_path(scan_root)
-    index_path = Path(kwargs.get("index_db_path") or default_path).expanduser().resolve()
-    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path = resolved_path(Path(kwargs.get("index_db_path") or default_path).expanduser())
+    io_path(index_path.parent).mkdir(parents=True, exist_ok=True)
     reuse_cache = bool(kwargs.get("reuse_cache", True))
-    if reuse_cache and index_path.is_file():
+    if reuse_cache and io_path(index_path).is_file():
         complete, stats = _read_complete_index(index_path)
         if complete:
             await _emit(
@@ -211,6 +215,8 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
                 "cache_hit": True,
                 "stats": stats,
                 "indexer_version": CodeDatabase.INDEXER_VERSION,
+                "skipped_files": 0,
+                "coverage_complete": True,
             }
         await _emit(
             output,
@@ -229,6 +235,7 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     local_cancel = threading.Event()
     progress_gate = _StageProgressGate()
+    pending_events: list[asyncio.Task[Any]] = []
 
     def schedule(kind: str, message: str, **data: Any) -> None:
         if kind == "progress":
@@ -244,17 +251,41 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
                 return
 
         def create_event_task() -> None:
-            loop.create_task(_emit(output, kind, message, **data))
+            pending_events.append(loop.create_task(_emit(output, kind, message, **data)))
 
         loop.call_soon_threadsafe(create_event_task)
 
+    async def flush_events() -> None:
+        # Deliver source diagnostics before returning, including on build
+        # failure. Otherwise asyncio.run() can cancel a slow output callback.
+        await asyncio.sleep(0)
+        if pending_events:
+            if local_cancel.is_set():
+                for task in pending_events:
+                    task.cancel()
+            results = await asyncio.gather(*pending_events, return_exceptions=True)
+            pending_events.clear()
+            for result in results:
+                if isinstance(result, Exception):
+                    loop.call_exception_handler({
+                        "message": "Code graph event callback failed",
+                        "exception": result,
+                    })
+
     def build() -> dict[str, int] | None:
         database: CodeDatabase | None = None
+        analyzer: CppAnalyzer | None = None
         try:
-            database = CodeDatabase(temp_path)
+            database = CodeDatabase(io_path(temp_path))
             analyzer = CppAnalyzer(
                 database,
                 ctags_executable=str(kwargs.get("ctags_executable") or "ctags"),
+            )
+            analyzer.on_warning = lambda path, reason: schedule(
+                "warning",
+                f"Code graph source warning: {path}: {reason}",
+                path=path,
+                reason=reason,
             )
             analyzer.analyze_directory(
                 scan_root,
@@ -276,28 +307,50 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             )
             if local_cancel.is_set() or _cancelled(cancel_event):
                 return None
+            coverage.update(
+                skipped_files=len(analyzer.skipped_files),
+                coverage_complete=analyzer.coverage_complete,
+            )
             schedule(
                 "progress",
                 "Finalizing code graph",
                 current=0,
                 total=1,
             )
+            # Processing is complete and the index can serve this scan. Source
+            # coverage is separate: a partial index must be rebuilt next time.
+            database.set_metadata("skipped_files", str(coverage["skipped_files"]))
+            database.set_metadata("coverage_complete", str(coverage["coverage_complete"]).lower())
             database.mark_index_complete()
             database.checkpoint()
             stats = database.get_index_stats()
             database.close()
+            if local_cancel.is_set() or _cancelled(cancel_event):
+                return None
             _replace_sqlite_db(temp_path, index_path)
             return stats
         finally:
+            if analyzer is not None:
+                coverage["skipped_files"] = len(analyzer.skipped_files)
             if database is not None:
                 try:
                     database.close()
                 except Exception:
                     pass
+            if local_cancel.is_set() or _cancelled(cancel_event):
+                _remove_sqlite_files(temp_path)
 
     await _emit(output, "progress", "Code graph build started")
     try:
-        stats = await _run_in_daemon_thread(build)
+        try:
+            stats = await _run_in_daemon_thread(build)
+        except asyncio.CancelledError:
+            # Signal the worker before awaiting callbacks: a slow reporter
+            # must not let a cancelled build reach index publication.
+            local_cancel.set()
+            raise
+        finally:
+            await flush_events()
         if stats is None or _cancelled(cancel_event):
             _remove_sqlite_files(temp_path)
             return {
@@ -306,6 +359,8 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
                 "cache_hit": False,
                 "stats": {},
                 "indexer_version": CodeDatabase.INDEXER_VERSION,
+                **coverage,
+                "coverage_complete": False,
             }
     except asyncio.CancelledError:
         local_cancel.set()
@@ -331,8 +386,19 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             "stats": {},
             "indexer_version": CodeDatabase.INDEXER_VERSION,
             "error": error,
+            **coverage,
+            "coverage_complete": False,
         }
 
+    if not coverage["coverage_complete"]:
+        await _emit(
+            output,
+            "warning",
+            f"Code graph coverage is incomplete: indexed {stats.get('files', 0)} files, "
+            f"skipped {coverage['skipped_files']} files; see source warnings. "
+            "The index will be rebuilt on the next run.",
+            **coverage,
+        )
     await _emit(
         output,
         "progress",
@@ -346,6 +412,7 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
         "Code graph build completed",
         path=str(index_path),
         stats=stats,
+        **coverage,
     )
     return {
         "status": "success",
@@ -353,4 +420,5 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
         "cache_hit": False,
         "stats": stats,
         "indexer_version": CodeDatabase.INDEXER_VERSION,
+        **coverage,
     }

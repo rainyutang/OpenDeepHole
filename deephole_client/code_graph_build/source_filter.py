@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator, MutableSequence
+from collections.abc import Callable, Iterable, Iterator, MutableSequence
 from pathlib import Path
+
+from .path_access import display_path, io_path
 
 
 OP_DEEP_HOLE_DIR = ".opendeephole"
@@ -71,6 +73,7 @@ def iter_source_files(
     *,
     skip_dirs: Iterable[str] = DEFAULT_SOURCE_SKIP_DIRS,
     skip_prefixes: Iterable[str] = DEFAULT_SOURCE_SKIP_DIR_PREFIXES,
+    on_error: Callable[[OSError], None] | None = None,
 ) -> Iterator[Path]:
     root = Path(root)
     if should_skip_source_dir_name(
@@ -80,13 +83,13 @@ def iter_source_files(
     ):
         return
     normalized_exts = {ext.lower() for ext in extensions}
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(io_path(root), onerror=on_error):
         prune_source_dirnames(
             dirnames,
             skip_dirs=skip_dirs,
             skip_prefixes=skip_prefixes,
         )
         for filename in filenames:
-            path = Path(dirpath) / filename
+            path = display_path(Path(dirpath) / filename)
             if path.suffix.lower() in normalized_exts:
                 yield path

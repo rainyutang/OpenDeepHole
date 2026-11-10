@@ -23,6 +23,7 @@ import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
 from .code_database import CodeDatabase
+from .path_access import display_path, io_path, needs_short_tool_path, resolved_path
 from .source_filter import iter_source_files
 
 INDEXER_VERSION = CodeDatabase.INDEXER_VERSION
@@ -214,6 +215,24 @@ class CppAnalyzer:
         self._file_id_cache: dict[str, int] = {}
         self._pending_calls: list[tuple[int, str, int | None, int, int, int]] = []
         self._pending_global_refs: list[tuple[int, str, int, int | None, int, int, str, str]] = []
+        self.on_warning: Callable[[str, str], None] | None = None
+        self.skipped_files: set[str] = set()
+        self.coverage_complete = True
+        self._source_texts: dict[str, str] = {}
+        self._source_names: dict[Path, str] = {}
+
+    def _warn(self, path: str, reason: str) -> None:
+        if self.on_warning is not None:
+            self.on_warning(path, reason)
+
+    def _skip_source(self, path: str, reason: str) -> None:
+        self.coverage_complete = False
+        self.skipped_files.add(path)
+        self._warn(path, reason)
+
+    def _source_walk_error(self, error: OSError) -> None:
+        self.coverage_complete = False
+        self._warn(str(display_path(Path(error.filename))) if error.filename else "", str(error))
 
     def _get_file_id(self, rel_path: str) -> int:
         """get_or_create_file with an in-memory cache (one DB roundtrip per path)."""
@@ -243,11 +262,17 @@ class CppAnalyzer:
         on_stage_progress: IndexStageProgressCallback | None = None,
     ) -> None:
         """Index all C/C++ files under *directory* using ctags and tree-sitter."""
-        project_root = Path(directory).resolve()
+        self.skipped_files.clear()
+        self.coverage_complete = True
+        self._source_texts.clear()
+        self._source_names.clear()
+        project_root = resolved_path(Path(directory))
         files = self._collect_source_files(project_root)
         total = len(files)
 
         if not files:
+            if not self.coverage_complete:
+                raise CodeIndexToolError("源码目录无法读取，未能发现可索引的源文件。")
             if on_progress:
                 on_progress(0, 0)
             self.db.set_metadata("indexer", INDEXER_VERSION)
@@ -260,28 +285,55 @@ class CppAnalyzer:
             self._ensure_tools_available(self.ctags_executable)
 
         source_cache: dict[str, list[str]] = {}
+        readable_files: list[Path] = []
+        snapshot_all = self._needs_short_temp_root(project_root)
         if on_progress:
             on_progress(0, total)
         for idx, filepath in enumerate(files):
             if cancel_check and cancel_check():
                 return
-            rel_path = self._relative_path(project_root, filepath)
-            self._get_file_id(rel_path)
-            source_cache[rel_path] = filepath.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
+            # Preserve the discovered path for diagnostics even when resolving a
+            # broken link fails or its target escapes the selected source root.
+            try:
+                report_path = display_path(filepath).relative_to(project_root).as_posix()
+            except ValueError:
+                report_path = str(display_path(filepath))
+            try:
+                rel_path = self._relative_path(project_root, filepath)
+                source = io_path(filepath).read_text(encoding="utf-8", errors="replace")
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._skip_source(report_path, f"{type(exc).__name__}: {exc}")
+            else:
+                source_cache[rel_path] = source.splitlines()
+                if snapshot_all or needs_short_tool_path(project_root / rel_path):
+                    self._source_texts[rel_path] = source
+                self._source_names[filepath] = rel_path
+                readable_files.append(filepath)
             if on_progress and (idx % 10 == 0 or idx == total - 1):
                 on_progress(idx + 1, total)
 
+        if not readable_files:
+            raise CodeIndexToolError("发现的源文件均无法读取，代码索引未生成。")
+
         with self._project_temp_dir(project_root) as tmp:
-            work_dir = Path(tmp)
+            work_dir = display_path(Path(tmp))
             if on_stage_progress:
                 on_stage_progress("ctags scan", 0, 1)
-            ctags_entries = self._run_ctags_json(project_root, files, work_dir)
+            try:
+                ctags_entries = self._run_ctags_json(project_root, readable_files, work_dir)
+            finally:
+                self._source_texts.clear()
             if on_stage_progress:
                 on_stage_progress("ctags scan", 1, 1)
             if cancel_check and cancel_check():
                 return
+
+            for path in self.skipped_files:
+                source_cache.pop(path, None)
+            if not source_cache:
+                raise CodeIndexToolError("发现的源文件均无法读取，代码索引未生成。")
+            for rel_path in source_cache:
+                self._get_file_id(rel_path)
 
             self._index_ctags_entries(
                 project_root,
@@ -375,17 +427,30 @@ class CppAnalyzer:
         return False
 
     @staticmethod
+    def _needs_short_temp_root(project_root: Path) -> bool:
+        probe = project_root / (".opendeephole-index-" + "x" * 16) / "f000000000.cpp"
+        return needs_short_tool_path(probe)
+
+    @staticmethod
     def _project_temp_dir(project_root: Path) -> tempfile.TemporaryDirectory:
+        # Keep the usual project-relative ctags invocation. If even a short
+        # alias beneath this root would exceed the Windows limit, stage the
+        # inputs in the system temporary directory and run ctags there instead.
+        short_root_required = CppAnalyzer._needs_short_temp_root(project_root)
         try:
-            return tempfile.TemporaryDirectory(
-                prefix=".opendeephole-index-",
-                dir=project_root,
+            temporary = tempfile.TemporaryDirectory(
+                prefix="odh-idx-" if short_root_required else ".opendeephole-index-",
+                dir=None if short_root_required else io_path(project_root),
             )
         except OSError as exc:
             raise CodeIndexToolError(
-                "无法在源码目录创建代码索引中间目录，请确认源码目录可写: "
+                "无法创建代码索引中间目录，请确认目录可写: "
                 + str(exc)
             ) from exc
+        if needs_short_tool_path(display_path(Path(temporary.name)) / "f000000000.cpp"):
+            temporary.cleanup()
+            raise CodeIndexToolError("无法为 ctags 创建足够短的临时路径，请缩短系统临时目录路径。")
+        return temporary
 
     def _run_ctags_json(
         self,
@@ -394,24 +459,59 @@ class CppAnalyzer:
         work_dir: Path,
     ) -> list[dict]:
         list_path = work_dir / "ctags.files"
-        list_path.write_text(
-            "\n".join(self._relative_path(project_root, path) for path in files) + "\n",
+        try:
+            work_dir.relative_to(project_root)
+        except ValueError:
+            run_root = work_dir
+            snapshot_all = True
+        else:
+            run_root = project_root
+            snapshot_all = False
+
+        input_paths: dict[str, str] = {}
+        snapshots: set[str] = set()
+        for index, path in enumerate(files):
+            rel_path = self._source_names.get(path)
+            if rel_path is None:
+                rel_path = self._relative_path(project_root, path)
+            if snapshot_all or needs_short_tool_path(project_root / rel_path):
+                alias = work_dir / f"f{index:09d}{Path(rel_path).suffix}"
+                if needs_short_tool_path(alias):
+                    raise CodeIndexToolError("无法为 ctags 创建足够短的源码快照路径。")
+                source = self._source_texts.get(rel_path)
+                if source is None:
+                    raise CodeIndexToolError("ctags 长路径源码快照缺少已读取的内容: " + rel_path)
+                # Preserve the exact decoded text and its original line layout;
+                # joining splitlines() would change embedded form-feed etc.
+                with io_path(alias).open("w", encoding="utf-8", newline="") as target:
+                    target.write(source)
+                input_path = alias.relative_to(run_root).as_posix()
+                snapshots.add(input_path)
+            else:
+                input_path = rel_path
+            input_paths[input_path] = rel_path
+
+        io_path(list_path).write_text(
+            "\n".join(input_paths) + "\n",
             encoding="utf-8",
         )
 
+        executable = self.ctags_executable
+        if snapshot_all and not Path(executable).is_absolute() and ("/" in executable or "\\" in executable):
+            executable = str(resolved_path(project_root / executable))
         cmd = [
-            self.ctags_executable,
+            executable,
             "--output-format=json",
             "--fields=+n+e+S+K+Z+s+t",
             "--languages=C,C++",
             "-f",
             "-",
             "-L",
-            self._relative_path(project_root, list_path),
+            list_path.relative_to(run_root).as_posix(),
         ]
         proc = subprocess.run(
             cmd,
-            cwd=project_root,
+            cwd=run_root,
             capture_output=True,
             check=False,
         )
@@ -428,6 +528,30 @@ class CppAnalyzer:
                 "ctags 代码索引失败: 无法读取 ctags 输出，请检查 ctags 输出编码或安装是否正常。"
             )
 
+        def input_key(raw: str) -> str:
+            path = display_path(Path(raw))
+            if path.is_absolute():
+                try:
+                    path = path.relative_to(run_root)
+                except ValueError:
+                    return ""
+            return path.as_posix().replace("\\", "/").removeprefix("./")
+
+        # Universal Ctags can return zero after failing to open an input. Those
+        # failures must not become a silently complete, reusable index.
+        for diagnostic in stderr.splitlines():
+            if not diagnostic.strip():
+                continue
+            if "cannot open input file" not in diagnostic.casefold():
+                self._warn("", diagnostic)
+                continue
+            match = re.search(r'cannot open input file\s+"(.*?)"', diagnostic, re.IGNORECASE)
+            failed_input = input_key(match.group(1)) if match else ""
+            original = input_paths.get(failed_input)
+            if original is None or failed_input in snapshots:
+                raise CodeIndexToolError("ctags 代码索引失败: " + diagnostic)
+            self._skip_source(original, diagnostic)
+
         entries: list[dict] = []
         for line in stdout.splitlines():
             if not line.strip():
@@ -437,6 +561,11 @@ class CppAnalyzer:
             except json.JSONDecodeError:
                 continue
             if payload.get("_type", "tag") == "tag":
+                original = input_paths.get(input_key(str(payload.get("path") or "")))
+                if original is not None:
+                    payload["path"] = original
+                if payload.get("path") in self.skipped_files:
+                    continue
                 entries.append(payload)
         return entries
 
@@ -988,18 +1117,18 @@ class CppAnalyzer:
     # Source helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _collect_source_files(directory: Path) -> list[Path]:
+    def _collect_source_files(self, directory: Path) -> list[Path]:
         return sorted(iter_source_files(
             directory,
             _C_CPP_EXTS,
             skip_dirs=_SKIP_DIRS,
             skip_prefixes=_SKIP_DIR_PREFIXES,
+            on_error=self._source_walk_error,
         ))
 
     @staticmethod
     def _relative_path(project_root: Path, filepath: Path) -> str:
-        return str(filepath.resolve().relative_to(project_root)).replace("\\", "/")
+        return resolved_path(filepath).relative_to(project_root).as_posix()
 
     @staticmethod
     def _slice_lines(lines: list[str], start_line: int, end_line: int) -> str:
@@ -1075,7 +1204,7 @@ class CppAnalyzer:
         path = Path(raw)
         if path.is_absolute():
             try:
-                return str(path.resolve().relative_to(project_root)).replace("\\", "/")
+                return resolved_path(path).relative_to(project_root).as_posix()
             except ValueError:
                 return ""
         return raw.replace("\\", "/")
