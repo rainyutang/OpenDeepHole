@@ -160,9 +160,7 @@ export function isAuthenticated(): boolean {
 // --- Announcements ---
 
 export async function getAnnouncements(): Promise<Announcement[]> {
-  const { data } = await api.get<Announcement[]>("/api/announcements", {
-    params: { limit: 3 },
-  });
+  const { data } = await api.get<Announcement[]>("/api/announcements");
   return data;
 }
 

@@ -39,7 +39,7 @@ def _announcement_text(title: str, content: str) -> tuple[str, str]:
 
 @router.get("/api/announcements", response_model=list[Announcement])
 async def list_published_announcements(
-    limit: int = Query(default=3, ge=1, le=20),
+    limit: int | None = Query(default=None, ge=1, le=20),
     _current_user: User = Depends(get_current_user),
 ) -> list[Announcement]:
     return await run_store_call(

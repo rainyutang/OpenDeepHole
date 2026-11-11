@@ -586,7 +586,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
             />
             <NavButton
               label="公告"
-              description="查看最近发布的平台更新公告"
+              description="查看全部已发布的平台更新公告"
               onClick={openAnnouncements}
               unread={hasUnreadAnnouncement}
             />

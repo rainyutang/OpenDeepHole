@@ -4,8 +4,18 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+import pytest
+from fastapi import FastAPI
+
 from backend.api import announcements as announcement_api
-from backend.models import AnnouncementCreateRequest, AnnouncementUpdateRequest, User
+from backend.auth import get_current_user
+from backend.models import (
+    Announcement,
+    AnnouncementCreateRequest,
+    AnnouncementUpdateRequest,
+    User,
+)
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -34,6 +44,101 @@ def test_announcement_migration_seeds_once_and_does_not_restore_deleted_rows(
         assert reopened.list_announcements() == []
     finally:
         reopened.close()
+
+
+@pytest.fixture
+def announcement_feed(tmp_path: Path, monkeypatch):
+    store = SqliteScanStore(tmp_path / "feed.db")
+    for item in store.list_announcements():
+        store.delete_announcement(item.announcement_id)
+    published = []
+    for index in range(25):
+        timestamp = f"2026-11-{index + 1:02d}T00:00:00+00:00"
+        announcement = Announcement(
+            announcement_id=f"published-{index}",
+            title=f"公告 {index}",
+            content=f"公告正文 {index}",
+            published=True,
+            published_at=timestamp,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        store.create_announcement(announcement)
+        published.append(announcement)
+    store.create_announcement(
+        published[-1].model_copy(
+            update={"announcement_id": "draft", "published": False, "published_at": ""},
+        )
+    )
+    monkeypatch.setattr(announcement_api, "get_scan_store", lambda: store)
+    app = FastAPI()
+    app.include_router(announcement_api.router)
+
+    async def current_user():
+        return _user(role="user")
+
+    app.dependency_overrides[get_current_user] = current_user
+    try:
+        yield app, store, list(reversed(published))
+    finally:
+        store.close()
+
+
+def test_published_feed_defaults_to_all_and_excludes_offline_announcements(announcement_feed):
+    app, store, published = announcement_feed
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.get("/api/announcements")
+            assert response.status_code == 200
+            assert response.json() == [item.model_dump() for item in published]
+
+            offline = published[0].model_copy(update={"published": False, "published_at": ""})
+            store.update_announcement(offline)
+            response = await client.get("/api/announcements")
+            assert response.status_code == 200
+            assert response.json() == [item.model_dump() for item in published[1:]]
+
+            for item in published[1:]:
+                store.update_announcement(
+                    item.model_copy(update={"published": False, "published_at": ""}),
+                )
+            response = await client.get("/api/announcements")
+            assert response.status_code == 200
+            assert response.json() == []
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("limit", [3, 20])
+def test_published_feed_preserves_explicit_limit(announcement_feed, limit):
+    app, _store, published = announcement_feed
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.get("/api/announcements", params={"limit": limit})
+            assert response.status_code == 200
+            assert response.json() == [item.model_dump() for item in published[:limit]]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("limit", [0, 21, "invalid"])
+def test_published_feed_rejects_invalid_explicit_limit(announcement_feed, limit):
+    app, _store, _published = announcement_feed
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.get("/api/announcements", params={"limit": limit})
+            assert response.status_code == 422
+
+    asyncio.run(exercise())
 
 
 def test_announcement_admin_crud_and_published_feed(tmp_path: Path) -> None:

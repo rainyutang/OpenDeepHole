@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:routing": "node tests/routing.test.mjs",
+    "test:announcements": "node tests/announcements.test.mjs",
     "test:scan-paths": "node tests/scanPathValidation.test.mjs",
     "test:scan-copy": "node tests/scanCopy.test.mjs",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
