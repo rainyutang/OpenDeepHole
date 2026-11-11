@@ -321,7 +321,10 @@ test("a coalesced overview started before save preserves renamed labels and acce
   holdOverview = true;
   const request = client.getScanOverviewRequest("s", requestedFrom).promise;
   await flush();
-  await act(async () => streams[0].onopen());
+  await act(async () => {
+    streams[0].onopen();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
   await click(button(root, "编辑名称"));
   await change(root, "扫描名称", "Renamed scan");
   await change(root, "产品名", "Renamed product");

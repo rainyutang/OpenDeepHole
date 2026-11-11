@@ -92,6 +92,10 @@ class ScanEstimateCache:
         if event_type == "resync_required":
             self.invalidate_scan(scan_id)
             return
+        if event_type == "resource_changed" and data.get("resource") == "overview":
+            # Oversized scan_status events carry the same lifecycle fields in
+            # their durable invalidation. Ordinary telemetry still obeys TTL.
+            event_type = "scan_status"
         if event_type in {"fp_review_started", "fp_review_finish", "scan_finish", "scan_status"}:
             for key, entry in list(self._entries.items()):
                 if key[1] != scan_id:

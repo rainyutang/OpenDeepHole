@@ -209,12 +209,19 @@ export interface SSEStateSetters {
   setIndexStatus: React.Dispatch<React.SetStateAction<IndexStatus | null>>;
 }
 
+type StateResource = "overview" | "fp-review" | "index-status";
+const STATE_RESOURCES: readonly StateResource[] = ["overview", "fp-review", "index-status"];
+
 async function refreshFullState(
   scanId: string,
   { getScan, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
   isCurrent: () => boolean,
+  resources: ReadonlySet<StateResource>,
+  signal: AbortSignal,
+  reviewRequest?: Promise<FpReviewJob | null>,
 ) {
   const results = await Promise.allSettled([(async () => {
+    if (!resources.has("overview")) return;
     const request = getScanOverviewRequest(scanId, getScan());
     const data = await request.promise;
     if (!isCurrent() || data.scan_id !== scanId) return;
@@ -224,11 +231,13 @@ async function refreshFullState(
       return mergeScanOverview(previous, data, request.requestedFrom);
     });
   })(), (async () => {
-    const job = await getFpReviewOverview(scanId);
+    if (!resources.has("fp-review")) return;
+    const job = await (reviewRequest ?? getFpReviewOverview(scanId, signal));
     if (!isCurrent()) return;
     if (job) setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
   })(), (async () => {
-    const index = await getAgentIndexStatus(scanId);
+    if (!resources.has("index-status")) return;
+    const index = await getAgentIndexStatus(scanId, signal);
     if (!isCurrent()) return;
     setIndexStatus(index);
   })()]);
@@ -386,22 +395,8 @@ export function useScanSSE(
 
   const activeScanIdRef = useRef(scanId);
   activeScanIdRef.current = scanId;
-
-  const refreshInFlight = useRef<string | null>(null);
-  const refreshState = useCallback(() => {
-    if (document.hidden || refreshInFlight.current === scanId) return;
-    refreshInFlight.current = scanId;
-    void refreshFullState(
-      scanId,
-      stateSettersRef.current,
-      () => activeScanIdRef.current === scanId,
-    ).then((ok) => {
-      if (activeScanIdRef.current === scanId) setOverviewFailed(!ok);
-    }).finally(() => {
-      if (refreshInFlight.current === scanId) refreshInFlight.current = null;
-      if (activeScanIdRef.current === scanId) handlersRef.current.onStateRefresh?.();
-    });
-  }, [scanId]);
+  const requestStateRef = useRef<(resources: readonly StateResource[]) => void>(() => {});
+  const refreshState = useCallback(() => requestStateRef.current(STATE_RESOURCES), []);
 
   useEffect(() => {
     setOverviewFailed(false);
@@ -517,14 +512,46 @@ export function useScanSSE(
     let fullRefresh = false;
     let resourceRunning = false;
     let coverageIssuesDirty = false;
+    let connectionRefresh = false;
+    let connectionInterrupted = false;
+    const pendingState = new Set<StateResource>();
+    let pendingResultRefresh = false;
+    let stateRunning = false;
+    const startStateRefresh = (resources: ReadonlySet<StateResource>, reviewRequest?: Promise<FpReviewJob | null>) => {
+      if (!resources.size || stateRunning) return;
+      resources.forEach((resource) => pendingState.delete(resource));
+      const refreshResults = resources.has("overview") && pendingResultRefresh;
+      if (resources.has("overview")) pendingResultRefresh = false;
+      stateRunning = true;
+      const isCurrent = () => !disposed && activeScanIdRef.current === scanId;
+      void refreshFullState(scanId, stateSettersRef.current, isCurrent,
+        resources, resourceController.signal, reviewRequest).then((ok) => {
+        if (isCurrent() && resources.has("overview")) {
+          setOverviewFailed(!ok);
+          if (refreshResults) handlersRef.current.onStateRefresh?.();
+        }
+      }).finally(() => {
+        stateRunning = false;
+        if (!disposed && pendingState.size) scheduleResources();
+      });
+    };
     const reloadResources = async () => {
       resourceTimer = null;
-      if (disposed || document.hidden || resourceRunning) return;
+      if (disposed || document.hidden) return;
+      if (resourceRunning) {
+        // Progress and time estimates must keep advancing while a large
+        // finding collection is still paging in the background.
+        startStateRefresh(new Set(pendingState));
+        return;
+      }
       resourceRunning = true;
       const reloadAll = fullRefresh;
       fullRefresh = false;
       const refreshCoverageIssues = coverageIssuesDirty;
       coverageIssuesDirty = false;
+      const refreshConnectionArtifacts = connectionRefresh;
+      connectionRefresh = false;
+      const stateResources = stateRunning ? new Set<StateResource>() : new Set(pendingState);
       const notices = [...pendingResources.values()];
       pendingResources.clear();
       const collections = reloadAll ? [...SCAN_DETAIL_RESOURCES] : Array.from(new Set(
@@ -533,22 +560,27 @@ export function useScanSSE(
       const versions = new Map(collections.map((resource) => [resource, resourceVersions.get(resource)]));
       // Artifact invalidations also apply when another notice requires a full
       // scan refresh. The overview itself intentionally has no artifact body.
-      if (reloadAll || notices.some((notice) => notice.resource === "threat-analysis")) {
+      if (reloadAll || refreshConnectionArtifacts || notices.some((notice) => notice.resource === "threat-analysis")) {
         handlersRef.current.onThreatAnalysisRefresh?.(true);
       }
-      if (reloadAll || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
+      if (reloadAll || refreshConnectionArtifacts || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
         handlersRef.current.onThreatCoverageRefresh?.();
       }
-      if (reloadAll || refreshCoverageIssues || notices.some((notice) => notice.resource === "file-inventory")) {
+      if (reloadAll || refreshConnectionArtifacts || refreshCoverageIssues || notices.some((notice) => notice.resource === "file-inventory")) {
         handlersRef.current.onCoverageIssuesRefresh?.();
       }
       handlersRef.current.onDetailRefreshState?.(collections, true);
+      // Share only within this batch: the same scan-owned signal cancels both
+      // consumers, without letting another component cancel a shared request.
+      const source = stateSettersRef.current.getScan();
+      const review = stateSettersRef.current.getFpReview();
+      const reviewRequest = stateResources.has("fp-review") || (source?.scan_id === scanId && collections.includes("fp-review"))
+        ? getFpReviewOverview(scanId, resourceController.signal) : undefined;
+      startStateRefresh(stateResources, reviewRequest);
       try {
-        const source = stateSettersRef.current.getScan();
-        const review = stateSettersRef.current.getFpReview();
         if (source?.scan_id === scanId && collections.length) {
           const results = await Promise.allSettled(collections.map((resource) => (
-            refreshScanResource(resource, source, review, resourceController.signal)
+            refreshScanResource(resource, source, review, resourceController.signal, reviewRequest)
           )));
           if (disposed) return;
           const failed = new Set(collections.filter((_, index) => results[index].status === "rejected"));
@@ -595,22 +627,36 @@ export function useScanSSE(
         resourceRunning = false;
         if (!disposed) {
           handlersRef.current.onDetailRefreshState?.(collections, false);
-          refreshState();
-          if (fullRefresh || pendingResources.size || coverageIssuesDirty) scheduleResources();
+          if (fullRefresh || pendingResources.size || pendingState.size || coverageIssuesDirty || connectionRefresh) scheduleResources();
         }
       }
     };
-    const scheduleResources = () => { if (!resourceRunning && resourceTimer == null) resourceTimer = window.setTimeout(reloadResources, 150); };
+    const scheduleResources = () => {
+      const detailsReady = !resourceRunning && (fullRefresh || pendingResources.size || coverageIssuesDirty || connectionRefresh);
+      if (resourceTimer == null && (detailsReady || (!stateRunning && pendingState.size))) {
+        resourceTimer = window.setTimeout(reloadResources, 150);
+      }
+    };
+    const requestState = (resources: readonly StateResource[]) => {
+      for (const resource of resources) pendingState.add(resource);
+      if (resources.includes("fp-review")) pendingResultRefresh = true;
+      scheduleResources();
+    };
+    requestStateRef.current = requestState;
     const requestCollections = (resources: readonly ScanDetailResource[]) => {
       for (const resource of resources) {
         resourceVersions.set(resource, (resourceVersions.get(resource) ?? 0) + 1);
         pendingResources.set(`${resource}:collection`, { resource });
       }
+      pendingState.add("overview");
+      pendingResultRefresh = true;
+      if (resources.includes("fp-review")) pendingState.add("fp-review");
       scheduleResources();
     };
     requestDetailsRef.current = requestCollections;
     const requestFullRefresh = () => {
       fullRefresh = true;
+      STATE_RESOURCES.forEach((resource) => pendingState.add(resource));
       requestCollections(SCAN_DETAIL_RESOURCES);
     };
     const queueCoverageIssues = () => { coverageIssuesDirty = true; scheduleResources(); };
@@ -618,6 +664,15 @@ export function useScanSSE(
       try {
         const notice = JSON.parse(event.data);
         if (!isRecord(notice) || typeof notice.resource !== "string") throw new Error("Invalid resource notice");
+        // A large task-pool update invalidates the overview only. It does not
+        // imply that finding, review, validation or audit collections changed.
+        if (notice.resource === "overview") {
+          requestState(["overview"]);
+          return;
+        }
+        pendingState.add("overview");
+        pendingResultRefresh = true;
+        if (notice.resource === "fp-review") pendingState.add("fp-review");
         if (notice.resource === "vulnerabilities" || (notice.resource === "fp-review" && notice.change !== "stage_output")) {
           coverageIssuesDirty = true;
         }
@@ -633,7 +688,16 @@ export function useScanSSE(
       } catch { requestFullRefresh(); }
     }) as EventListener);
     es.addEventListener("resync_required", requestFullRefresh);
-    const onVisible = () => { if (!document.hidden) { requestFullRefresh(); refreshState(); } };
+    const onVisible = () => {
+      if (document.hidden) return;
+      if (connectionInterrupted) requestFullRefresh();
+      // Hidden tabs keep their dirty notices. A healthy connection needs only
+      // those resources, while an explicit resync still reloads every detail.
+      requestState(STATE_RESOURCES);
+      // The artifact loader also retains invalidations received while hidden
+      // (for example a typed threat-analysis completion event).
+      handlersRef.current.onThreatAnalysisRefresh?.();
+    };
     document.addEventListener("visibilitychange", onVisible);
 
     // Register typed event listeners
@@ -700,14 +764,15 @@ export function useScanSSE(
 
     es.onopen = () => {
       setConnected(true);
+      if (connectionInterrupted) requestFullRefresh();
+      connectionInterrupted = false;
+      connectionRefresh = true;
       refreshState();
-      handlersRef.current.onThreatAnalysisRefresh?.(true);
-      handlersRef.current.onThreatCoverageRefresh?.();
-      handlersRef.current.onCoverageIssuesRefresh?.();
     };
 
     es.onerror = () => {
       setConnected(false);
+      connectionInterrupted = true;
     };
 
     // Fallback poll every 30s as safety net
@@ -720,6 +785,7 @@ export function useScanSSE(
       disposed = true;
       resourceController.abort();
       requestDetailsRef.current = () => {};
+      requestStateRef.current = () => {};
       document.removeEventListener("visibilitychange", onVisible);
       if (resourceTimer != null) window.clearTimeout(resourceTimer);
       es.close();

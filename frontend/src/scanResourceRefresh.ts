@@ -79,6 +79,7 @@ const byTask = (a: { created_at?: string; task_id: string }, b: { created_at?: s
 
 export async function refreshScanResource(
   resource: ScanDetailResource, scan: ScanStatus, review: FpReviewJob | null, signal: AbortSignal,
+  reviewRequest?: Promise<FpReviewJob | null>,
 ): Promise<RefreshedScanResource> {
   const id = scan.scan_id;
   const pages = scan.detail_pages;
@@ -142,7 +143,7 @@ export async function refreshScanResource(
   }
   const before = capture(review?.results ?? []);
   const beforeVulnerabilities = capture(review?.result_vulnerabilities ?? []);
-  const job = await getFpReviewOverview(id, signal);
+  const job = await (reviewRequest ?? getFpReviewOverview(id, signal));
   if (!job) return {};
   const vulnerabilities: NonNullable<FpReviewJob["result_vulnerabilities"]> = [];
   const page = await loadRange(async (cursor: number | null) => {

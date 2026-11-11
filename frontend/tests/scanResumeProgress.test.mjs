@@ -120,6 +120,7 @@ async function poll(delay) {
     const callbacks = [...timers.values()].filter((timer) => timer.delay === delay);
     assert.ok(callbacks.length, "Missing poll: " + delay);
     callbacks.forEach(({ callback }) => callback());
+    await new Promise((resolve) => setTimeout(resolve, 200));
   });
 }
 
@@ -428,7 +429,10 @@ test("coalesced overview consumers keep the physical request baseline after newe
   state.overview = overview(81, 2);
   await notify(["scan_status", { execution_revision: 2, processed_candidates: 81, total_candidates: 100 }]);
   assertProgress(root, 81);
-  await act(async () => streams.at(-1).onopen());
+  await act(async () => {
+    streams.at(-1).onopen();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
   assert.equal(state.overviewRequestCount, initialRequests + 1, "reconnect joins the pending summary GET");
   await act(async () => resolve(overview(80, 2)));
   assertProgress(root, 81);

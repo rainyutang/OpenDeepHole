@@ -186,7 +186,10 @@ test("an old coalesced overview cannot undo a successful toggle but can complete
   hold = true;
   const request = client.getScanOverviewRequest("s", original).promise;
   await flush();
-  await act(async () => streams[0].onopen());
+  await act(async () => {
+    streams[0].onopen();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
   await click(button(root, "启用 CodeGraph"));
   await act(async () => pending.resolve({ ...original, status: "complete", processed_candidates: 10 }));
   await request;

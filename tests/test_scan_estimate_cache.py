@@ -69,6 +69,60 @@ def test_delayed_previous_scan_finish_cannot_invalidate_current_execution():
     asyncio.run(scenario())
 
 
+def test_large_status_relay_preserves_eta_ttl_and_terminal_invalidation(monkeypatch):
+    now = [0.0]
+    cache = ScanEstimateCache(clock=lambda: now[0])
+    monkeypatch.setattr(sse, "observe_scan_estimate_event", cache.observe_event)
+
+    async def scenario():
+        store, value, calls = Store(), scan(execution_revision=2), []
+
+        async def compute():
+            calls.append(1)
+            return estimate(2)
+
+        first = await cache.get(store, value, compute)
+        payload = {"execution_revision": 2, "opencode_pool": {"planned_tasks": [
+            {"planned_task_id": f"task-{index}", "task_name": "x" * 200}
+            for index in range(200)
+        ]}}
+        # Simulate another worker receiving the persisted projection, with no
+        # browser subscribers. Heartbeats must not defeat the minute cache.
+        event, notice = sse.storage_notification("scan_status", payload)
+        assert notice == {"resource": "overview", "execution_revision": 2}
+        for elapsed in (10, 30, 59):
+            now[0] = elapsed
+            sse.publish_local("scan", event, notice)
+            assert await cache.get(store, value, compute) is first
+        assert len(calls) == 1
+        now[0] = 60
+        await cache.get(store, value, compute)
+        assert len(calls) == 2
+
+        old_event, old_notice = sse.storage_notification("scan_status", {
+            **payload, "status": "complete", "execution_revision": 1,
+        })
+        sse.publish_local("scan", old_event, old_notice)
+        await cache.get(store, value, compute)
+        assert len(calls) == 2
+
+        terminal_event, terminal_notice = sse.storage_notification("scan_status", {
+            **payload, "status": "complete",
+        })
+        sse.publish_local("scan", terminal_event, terminal_notice)
+        entry = next(iter(cache._entries.values()))
+        assert entry.lifecycle[0] == "complete"
+        assert entry.expires_at == 0
+        value.status = "complete"
+        await cache.get(store, value, compute)
+        assert len(calls) == 3
+        sse.publish_local("scan", terminal_event, terminal_notice)
+        await cache.get(store, value, compute)
+        assert len(calls) == 3
+
+    asyncio.run(scenario())
+
+
 def test_parallel_requests_share_work_and_client_cancel_does_not_cancel_it(monkeypatch):
     cache = ScanEstimateCache()
     monkeypatch.setattr(api, "scan_estimate_cache", cache)

@@ -1,6 +1,7 @@
 """History delivery must survive 404s without holding up scan results."""
 
 import asyncio
+import json
 import logging
 from unittest.mock import AsyncMock, patch
 
@@ -139,6 +140,8 @@ def test_capability_welcome_recovers_old_blocked_and_paused_reports(tmp_path):
         box = ReportOutbox(path)
         old = enqueue_history(box, "blocked")
         box.block(old, "HTTP 404: Not Found")
+        delayed = enqueue_history(box, "delayed")
+        box.defer(delayed, "HTTP 404: Not Found", retry_after=900.0)
         enqueue_history(box, "paused")
         box.close()
         reporter = Reporter("http://server", outbox_path=path)
@@ -155,7 +158,7 @@ def test_capability_welcome_recovers_old_blocked_and_paused_reports(tmp_path):
                 pending = box.claim_ready("http://server")[0]
                 await reporter._deliver_outbox_report(pending)
                 assert delivered == []
-                assert box.pending_count() == 2
+                assert box.pending_count() == 3
                 reporter.set_agent_id("new-agent")
                 reporter.set_capabilities({"incremental_opencode_task_reports": True})
                 reporter.start_outbox_worker()
@@ -165,9 +168,142 @@ def test_capability_welcome_recovers_old_blocked_and_paused_reports(tmp_path):
                         await asyncio.sleep(0.005)
 
                 await asyncio.wait_for(drained(), timeout=3)
-                assert len(delivered) == 2
+                assert len(delivered) == 3
                 assert all(url.endswith("/new-agent/opencode-task-report") for url, _ in delivered)
                 assert all(payload["agent_session_id"] == "original-session" for _, payload in delivered)
+        finally:
+            await reporter.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("jitter", [0.8, 1.0])
+def test_task_404_backoff_grows_and_other_errors_keep_short_retries(tmp_path, caplog, jitter):
+    caplog.set_level(logging.WARNING, logger="deephole_client.reporter")
+
+    async def run():
+        reporter = Reporter("http://server", outbox_path=tmp_path / "backoff.db")
+        reporter.set_agent_id("agent")
+        reporter.capabilities = {"incremental_opencode_task_reports": True}
+        box = reporter._outbox
+        try:
+            reporter._capture_opencode_task_report({"scope_id": "scan", "task_id": "task", "revision": 1})
+            original = box.ready("http://server")[0]
+            response = httpx.Response(404, json={"detail": {"code": "scan_not_found"}})
+            with patch("deephole_client.report_outbox.time.time", return_value=1000.0) as clock, \
+                 patch("deephole_client.reporter.random.uniform", return_value=jitter), \
+                 patch.object(reporter._client, "post", return_value=response) as post:
+                for attempts, base in enumerate([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 900, 900]):
+                    pending = box.claim_ready("http://server")[0]
+                    assert pending.attempts == attempts
+                    assert pending.payload == original.payload
+                    await reporter._deliver_outbox_report(pending)
+                    row = box._conn.execute("SELECT * FROM pending_reports").fetchone()
+                    due = clock.return_value + base * jitter
+                    assert row["next_attempt_at"] == pytest.approx(due)
+                    assert row["attempts"] == attempts + 1
+                    assert row["blocked"] == 0
+                    assert row["last_error"].startswith("HTTP 404:")
+                    clock.return_value = due - 0.01
+                    assert box.claim_ready("http://server") == []
+                    clock.return_value = due
+                assert post.await_count == 12
+                assert sum("reason=scan_not_found " in item.message for item in caplog.records) == 1
+                assert f"next_retry_seconds={jitter}" in caplog.text
+
+                # Total persisted attempts remain useful across errors, but the
+                # current response selects the cap; a past 404 cannot slow 503s.
+                post.return_value = httpx.Response(503, json={"detail": "unavailable"})
+                await reporter._deliver_outbox_report(box.claim_ready("http://server")[0])
+                row = box._conn.execute("SELECT * FROM pending_reports").fetchone()
+                assert row["next_attempt_at"] == clock.return_value + 60.0
+                assert "reason=http_503 " in caplog.text
+                assert "next_retry_seconds=60.0" in caplog.text
+                clock.return_value = row["next_attempt_at"]
+                post.side_effect = httpx.ConnectError("offline")
+                await reporter._deliver_outbox_report(box.claim_ready("http://server")[0])
+                row = box._conn.execute("SELECT * FROM pending_reports").fetchone()
+                assert row["next_attempt_at"] == clock.return_value + 60.0
+                clock.return_value = row["next_attempt_at"]
+                post.side_effect = None
+                post.return_value = httpx.Response(403, json={"detail": "denied"})
+                await reporter._deliver_outbox_report(box.claim_ready("http://server")[0])
+                assert box._conn.execute("SELECT blocked FROM pending_reports").fetchone()[0] == 1
+                assert box.pending_count() == 1
+                business = box.enqueue(
+                    target_url="http://server", stream_key="scan:scan", dedupe_key="finish",
+                    path="/api/agent/scan/scan/finish", payload={"result": "finish"},
+                )
+                box._conn.execute("UPDATE pending_reports SET attempts = 20 WHERE id = ?", (business.row_id,))
+                box._conn.commit()
+                post.return_value = response
+                await reporter._deliver_outbox_report(box.claim_ready("http://server")[0])
+                row = box._conn.execute("SELECT * FROM pending_reports WHERE id = ?", (business.row_id,)).fetchone()
+                assert row["next_attempt_at"] == clock.return_value + 60.0
+        finally:
+            await reporter.close()
+
+    asyncio.run(run())
+
+
+def test_task_404_staggered_schedule_survives_restart_and_drains_in_order(tmp_path):
+    async def run():
+        path = tmp_path / "persistent-backoff.db"
+        reporter = Reporter("http://server", outbox_path=path)
+        reporter.set_agent_id("agent")
+        reporter.capabilities = {"incremental_opencode_task_reports": True}
+        box = reporter._outbox
+        try:
+            with patch("deephole_client.report_outbox.time.time", return_value=1000.0) as clock, \
+                 patch("deephole_client.reporter.random.uniform", side_effect=[0.8, 1.0]), \
+                 patch.object(reporter._client, "post", return_value=httpx.Response(404, json={"detail": "Not Found"})):
+                for task_id in ("first", "second"):
+                    for revision in (1, 2):
+                        reporter._capture_opencode_task_report({
+                            "scope_id": "scan", "task_id": task_id, "revision": revision,
+                            "prompt": "original evidence",
+                        })
+                box._conn.execute("UPDATE pending_reports SET attempts = 10 WHERE json_extract(payload_json, '$.revision') = 1")
+                box._conn.commit()
+                for pending in box.claim_ready("http://server"):
+                    await reporter._deliver_outbox_report(pending)
+                before = [dict(row) for row in box._conn.execute("SELECT * FROM pending_reports ORDER BY id")]
+                assert [row["next_attempt_at"] for row in before if row["attempts"] == 11] == [1720.0, 1900.0]
+                assert box.ready("http://server") == []
+                await reporter.close()
+                reporter = Reporter("http://server", outbox_path=path)
+                reporter.set_agent_id("new-agent")
+                reporter.capabilities = {"incremental_opencode_task_reports": True}
+                box = reporter._outbox
+                assert [dict(row) for row in box._conn.execute("SELECT * FROM pending_reports ORDER BY id")] == before
+
+                delivered = []
+
+                async def post(url, **kwargs):
+                    delivered.append((url, kwargs["json"]))
+                    return httpx.Response(200, json={"ok": True})
+
+                with patch.object(reporter._client, "post", side_effect=post):
+                    for suffix in ("vulnerability", "threat-analysis", "finish"):
+                        response = await reporter._queue_post(
+                            stream_key="scan:scan", dedupe_key=suffix,
+                            path=f"/api/agent/scan/scan/{suffix}", payload={"result": suffix},
+                        )
+                        assert response.status_code == 200
+                    assert box.pending_count() == 4
+                    for task_id, due in (("first", 1720.0), ("second", 1900.0)):
+                        clock.return_value = due - 0.01
+                        assert box.claim_ready("http://server") == []
+                        clock.return_value = due
+                        for revision in (1, 2):
+                            pending = box.claim_ready("http://server")
+                            assert len(pending) == 1
+                            assert pending[0].payload["task_id"] == task_id
+                            assert pending[0].payload["revision"] == revision
+                            await reporter._deliver_outbox_report(pending[0])
+                    assert box.pending_count() == 0
+                    assert [payload for _, payload in delivered[3:]] == [json.loads(row["payload_json"]) for row in before]
+                    assert all(url.endswith("/new-agent/opencode-task-report") for url, _ in delivered[3:])
         finally:
             await reporter.close()
 

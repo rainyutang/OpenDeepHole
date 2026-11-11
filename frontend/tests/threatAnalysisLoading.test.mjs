@@ -152,7 +152,10 @@ async function notify(...events) {
     await new Promise((resolve) => setTimeout(resolve, 200));
   });
 }
-async function poll() { await act(async () => { [...polls.values()].forEach((callback) => callback()); }); }
+async function poll() { await act(async () => {
+  [...polls.values()].forEach((callback) => callback());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}); }
 const threatNotice = ["resource_changed", { resource: "threat-analysis", index: null }];
 
 function coverageFixture() {
@@ -383,6 +386,26 @@ for (const publicAccess of [false, true]) {
   });
 }
 
+test("visibility recovery completes a threat artifact invalidated by a hidden lifecycle event", async () => {
+  const value = fixture();
+  const calls = installApi([value]);
+  const root = await mount();
+  const before = calls.length;
+  document.hidden = true;
+  value.analysis = analysis(3);
+  await notify(["threat_analysis_run", { run: { status: "success" } }]);
+  assert.equal(calls.length, before);
+  await act(async () => {
+    document.hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  assetCount(root, 3);
+  const refreshed = calls.slice(before);
+  assert.equal(refreshed.filter((call) => call.url.endsWith("/threat-analysis")).length, 1);
+  assert.equal(refreshed.filter((call) => /\/(vulnerabilities|candidates|results|validations|threat-audit-tasks|threat-pattern-audit-tasks)$/.test(call.url)).length, 0);
+});
+
 test("mixed resource notifications fetch the new threat result", async () => {
   const value = fixture();
   installApi([value]);
@@ -607,7 +630,10 @@ test("overview refresh timeout preserves data and polling resumes authoritative 
   assert.ok(text(root.toJSON()).includes("扫描状态更新失败"));
   failed = false;
   value.overview.status = "complete";
-  await act(async () => button(root, "重试更新扫描状态").props.onClick());
+  await act(async () => {
+    button(root, "重试更新扫描状态").props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
   assert.ok(!text(root.toJSON()).includes("扫描状态更新失败"));
   assetCount(root, 2);
   assert.equal(root.root.findAllByType("button").some((node) => text(node) === "停止扫描"), false);

@@ -146,6 +146,14 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
                 for model in data["opencode_pool"].get("models", []) if isinstance(model, dict)
             ]
     if len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 32768:
+        if event_type == "scan_status" and isinstance(data, dict):
+            # A large live task queue only invalidates the overview. Preserve
+            # lifecycle fields so other workers can retire stale ETA caches
+            # without invalidating them on every ordinary pool heartbeat.
+            return "resource_changed", {
+                "resource": "overview",
+                **{key: data[key] for key in ("status", "execution_revision") if key in data},
+            }
         return "resync_required", {"reason": "large_resource_changed"}
     return event_type, data
 

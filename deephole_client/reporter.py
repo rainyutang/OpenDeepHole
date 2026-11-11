@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -842,6 +843,14 @@ class Reporter:
                 self._wake_outbox()
                 return response
             error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
+            retryable = self._retryable_response(response) or (is_task_report and response.status_code == 404)
+            delay = None
+            if retryable:
+                delay = min(60.0, 2.0 ** min(report.attempts, 6))
+                if is_task_report and response.status_code == 404:
+                    # Keep evidence queued while spreading persistent failures out.
+                    # Other failures retain the shorter recovery window below.
+                    delay = min(900.0, 2.0 ** min(report.attempts, 10)) * random.uniform(0.8, 1.0)
             if is_task_report:
                 detail = _response_detail(response)
                 reason = str(detail.get("code") or "") if isinstance(detail, dict) else ""
@@ -851,9 +860,11 @@ class Reporter:
                         "scan not found": "scan_not_found",
                         "not found": "route_not_found",
                     }.get(detail.strip().lower(), "")
-                self._log_task_report_failure(report, reason or f"http_{response.status_code}", delivery_agent_id)
-            if self._retryable_response(response) or (is_task_report and response.status_code == 404):
-                delay = min(60.0, 2.0 ** min(report.attempts, 6))
+                self._log_task_report_failure(
+                    report, reason or f"http_{response.status_code}", delivery_agent_id,
+                    next_retry_seconds=delay,
+                )
+            if retryable:
                 await asyncio.to_thread(self._outbox.defer, report, error, retry_after=delay)
                 self._resolve_outbox_stream_waiters(report.stream_key)
             else:
@@ -867,9 +878,11 @@ class Reporter:
                 )
             return None
         except Exception as exc:
-            if is_task_report:
-                self._log_task_report_failure(report, type(exc).__name__, delivery_agent_id)
             delay = min(60.0, 2.0 ** min(report.attempts, 6))
+            if is_task_report:
+                self._log_task_report_failure(
+                    report, type(exc).__name__, delivery_agent_id, next_retry_seconds=delay,
+                )
             await asyncio.to_thread(
                 self._outbox.defer,
                 report,
@@ -879,20 +892,30 @@ class Reporter:
             self._resolve_outbox_stream_waiters(report.stream_key)
             return None
 
-    def _log_task_report(self, report: PendingReport, reason: str, agent_id: str, *, level: int) -> None:
+    def _log_task_report(
+        self, report: PendingReport, reason: str, agent_id: str, *, level: int,
+        next_retry_seconds: float | None = None,
+    ) -> None:
         logger.log(
             level,
             "OPENCODE_TASK_REPORT reason=%s agent_id=%s scope_id=%s task_id=%s "
-            "revision=%s agent_session_id=%s attempts=%s",
+            "revision=%s agent_session_id=%s attempts=%s next_retry_seconds=%s",
             reason, agent_id, report.payload.get("scope_id", ""),
             report.payload.get("task_id", ""), report.payload.get("revision", 1),
             report.payload.get("agent_session_id", ""), report.attempts,
+            round(next_retry_seconds, 3) if next_retry_seconds is not None else None,
         )
 
-    def _log_task_report_failure(self, report: PendingReport, reason: str, agent_id: str) -> None:
+    def _log_task_report_failure(
+        self, report: PendingReport, reason: str, agent_id: str, *,
+        next_retry_seconds: float | None = None,
+    ) -> None:
         if self._task_report_failures.get(report.dedupe_key) != reason:
             self._task_report_failures[report.dedupe_key] = reason
-            self._log_task_report(report, reason, agent_id, level=logging.WARNING)
+            self._log_task_report(
+                report, reason, agent_id, level=logging.WARNING,
+                next_retry_seconds=next_retry_seconds,
+            )
 
     async def _run_outbox_worker(self) -> None:
         assert self._outbox is not None

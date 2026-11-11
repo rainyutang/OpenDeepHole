@@ -318,15 +318,15 @@ export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
   return data;
 }
 
-export async function getAgentIndexStatus(scanId: string): Promise<IndexStatus> {
+export async function getAgentIndexStatus(scanId: string, signal?: AbortSignal): Promise<IndexStatus> {
   if (isPublicScan(scanId)) {
     const { data } = await api.get<IndexStatus>(
       publicScanPath("/index-status"),
-      { params: publicParams(), timeout: SCAN_READ_TIMEOUT_MS },
+      { params: publicParams(), signal, timeout: SCAN_READ_TIMEOUT_MS },
     );
     return data;
   }
-  const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`, { timeout: SCAN_READ_TIMEOUT_MS });
+  const { data } = await api.get<IndexStatus>(`/api/agent/scan/${scanId}/index-status`, { signal, timeout: SCAN_READ_TIMEOUT_MS });
   return data;
 }
 

@@ -40,6 +40,38 @@ def test_durable_notifications_strip_bodies_and_overflow_requests_resync():
         sse.unsubscribe("storage-sse", queue)
 
 
+def test_large_pool_invalidates_only_overview_and_preserves_lifecycle():
+    payload = {
+        "status": "auditing", "execution_revision": 3,
+        "opencode_pool": {"planned_tasks": [
+            {"planned_task_id": f"task-{index}", "task_name": "audit " + "x" * 180}
+            for index in range(200)
+        ]},
+    }
+    queue = sse.subscribe("large-pool")
+    try:
+        sse.configure_distributed_sse(None, "")
+        for _ in range(3):
+            sse.publish("large-pool", "scan_status", payload)
+            notice = queue.get_nowait()
+            assert notice["event"] == "resource_changed"
+            assert notice["data"] == {
+                "resource": "overview", "status": "auditing", "execution_revision": 3,
+            }
+            assert sse.storage_notification(notice["event"], notice["data"]) == (
+                notice["event"], notice["data"],
+            )
+        assert len(payload["opencode_pool"]["planned_tasks"]) == 200
+    finally:
+        sse.unsubscribe("large-pool", queue)
+
+
+def test_large_unknown_event_still_requires_full_resync():
+    assert sse.storage_notification("scan_event", {"event": {"message": "x" * 40000}}) == (
+        "resync_required", {"reason": "large_resource_changed"},
+    )
+
+
 def test_distributed_event_is_not_visible_before_durable_commit():
     class Store:
         distributed = True
