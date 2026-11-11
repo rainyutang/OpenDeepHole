@@ -71,7 +71,8 @@ flowchart TD
 实际调度遵循以下规则：
 
 1. `quick` 与 `standard` 固定启用威胁分析、`static_candidate`、`threat_pattern_audit` 和自动去误报；
-   `custom` 使用创建请求中的原有开关与引擎选择。三个模式分别读取 Agent 高级配置中的
+   新建 `standard` 使用 `deephole_compact_threat_analysis`，`quick` 使用 `opencode_lightweight_threat_analysis`；
+   `custom` 使用创建请求中的原有开关与引擎选择。续扫沿用已保存的方法。三个模式分别读取 Agent 高级配置中的
    Checker 排除列表，并在创建时固化实际规则快照。
 2. 只有本轮运行 `static_candidate` 或 `multi_version` 时才构建代码图谱；构建失败时，
    不启动后续分析。未运行静态分析消费者时直接跳过该过程。
@@ -132,8 +133,9 @@ flowchart TD
 ### 3.1 威胁分析方法的原生契约
 
 威胁分析方法按目录自动发现，一个扫描固化并执行一个方法。`method_id` 直接使用目录名；
-`method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。Web 新建扫描优先选择 `opencode_lightweight_threat_analysis`，
-独立运行适配器未传方法 ID 时默认 `deephole_threat_analysis`。
+`method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。新建标准模式扫描
+固定使用 `deephole_compact_threat_analysis`；快速模式和自定义模式未指定方法时优先选择
+`opencode_lightweight_threat_analysis`。独立运行适配器未传方法 ID 时默认 `deephole_threat_analysis`。
 
 每个方法在 `threat_analysis.py` 定义同步入口，并由 `__init__.py` 导出：
 
@@ -330,7 +332,8 @@ Codex 上下文窗口；无法读取时使用 `128000`，自动压缩阈值按 `
 目录会被清理，用户配置与非托管文件保持原样。扫描只读取已经固定的默认配置，不再逐扫描探测或
 切换模型。
 
-新建扫描默认使用 OpenCode 轻量级方法，Codex 轻量级方法需显式选择。所选轻量级方法的 CLI、
+新建标准模式扫描使用 DeepHole精简威胁分析；快速模式和自定义模式未指定方法时使用 OpenCode
+轻量级方法，Codex 轻量级方法需显式选择。所选轻量级方法的 CLI、
 模型或配置不可用，以及初轮执行或产物校验失败时，编排层只执行一次 clean DeepHole 威胁分析回退；
 取消不回退，显式选择 DeepHole 也不会为了威胁分析探测或调用 Codex；另行选择的
 `requires_codex` 漏洞挖掘引擎仍按自身契约准备 Codex。第三方威胁分析方法不自动套用该策略。

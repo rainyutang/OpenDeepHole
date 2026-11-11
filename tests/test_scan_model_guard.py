@@ -202,6 +202,7 @@ def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
     assert command["knowledge_base_mcp"] is None
 
 
+@pytest.mark.parametrize("scan_mode", ["quick", "standard"])
 @pytest.mark.parametrize(
     ("override", "expected"),
     [
@@ -209,10 +210,12 @@ def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
         ({"auto_fp_review": False}, "自动去误报"),
         ({"checkers": ["npd"]}, "高级配置"),
         ({"threat_analysis_method": "other"}, "默认威胁分析方法"),
+        ({"threat_analysis_method": "deephole_threat_analysis"}, "默认威胁分析方法"),
         ({"fp_review_method": "fp_check"}, "默认去误报方法"),
     ],
 )
 def test_fixed_scan_modes_reject_conflicting_overrides(
+    scan_mode: str,
     override: dict[str, object],
     expected: str,
 ) -> None:
@@ -233,7 +236,7 @@ def test_fixed_scan_modes_reject_conflicting_overrides(
     body = CreateScanRequest(
         agent_key=client.agent_key,
         project_path="/repo/project",
-        scan_mode="quick",
+        scan_mode=scan_mode,
         **override,
     )
 
@@ -262,8 +265,20 @@ def test_fixed_scan_modes_reject_conflicting_overrides(
     assert expected in str(exc_info.value.detail)
 
 
-@pytest.mark.parametrize("scan_mode", ["quick", "standard"])
-def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
+@pytest.mark.parametrize(
+    ("scan_mode", "expected_method", "expected_label"),
+    [
+        ("quick", "opencode_lightweight_threat_analysis", "轻量级威胁分析（OpenCode）"),
+        ("standard", "deephole_compact_threat_analysis", "DeepHole精简威胁分析"),
+    ],
+)
+@pytest.mark.parametrize("explicit_method", [False, True])
+def test_fixed_modes_snapshot_pipeline_defaults(
+    scan_mode: str,
+    expected_method: str,
+    expected_label: str,
+    explicit_method: bool,
+) -> None:
     user = User(user_id="user-1", username="alice", role="user")
     client = AgentInfo(
         agent_id="session-1",
@@ -337,6 +352,7 @@ def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
                 project_path="/repo/project",
                 code_scan_path="/repo/project/src",
                 scan_mode=scan_mode,
+                threat_analysis_method=expected_method if explicit_method else None,
             ),
             SimpleNamespace(base_url="http://testserver/"),
             user,
@@ -350,9 +366,12 @@ def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
     assert scan.project_path == meta.project_path == "/repo/project"
     assert scan.code_scan_path == meta.code_scan_path == "/repo/project/src"
     assert scan.threat_analysis_enabled is True
-    assert scan.threat_analysis_method == "opencode_lightweight_threat_analysis"
-    assert meta.threat_analysis_method == "opencode_lightweight_threat_analysis"
-    assert command["threat_analysis_method"] == "opencode_lightweight_threat_analysis"
+    assert scan.threat_analysis_method == expected_method
+    assert meta.threat_analysis_method == expected_method
+    assert command["threat_analysis_method"] == expected_method
+    assert scan.threat_analysis_method_selection.method_id == expected_method
+    assert scan.threat_analysis_method_selection.method_label == expected_label
+    assert meta.threat_analysis_method_selection == scan.threat_analysis_method_selection
     assert scan.auto_fp_review is True
     assert [item.engine_id for item in scan.mining_engines] == [
         "static_candidate",

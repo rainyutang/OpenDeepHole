@@ -46,4 +46,4 @@ Task Agent 在回复结束后异步执行 `supplement.py --context <程序内部
 `remaining_uncovered_files` 是未被高风险范围覆盖的文件数，`pending_files` 进一步扣除已明确判为
 非高风险的文件。非高风险判定不提高覆盖图的高风险覆盖率；未完成范围保留为缺口。
 
-本方法需更新后端及 Agent 并重启，默认选择仍为原 OpenCode 轻量级方法。
+本方法需更新后端及 Agent 并重启，可在自定义模式显式选择；自定义模式的默认选择仍为原 OpenCode 轻量级方法。

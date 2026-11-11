@@ -202,7 +202,7 @@ sandbox_permissions = ["disk-full-read-access"]
 
 ## 轻量级威胁分析与回退
 
-Web 新建扫描默认优先 OpenCode 轻量级方法；它与 Codex 轻量级方法共用业务 Prompt，但执行通道不同：
+新建标准模式扫描固定使用 DeepHole精简威胁分析；快速模式和自定义模式未指定方法时仍优先 OpenCode 轻量级方法。OpenCode 与 Codex 轻量级方法共用业务 Prompt，但执行通道不同：
 
 | 方法 | 执行通道 |
 | --- | --- |

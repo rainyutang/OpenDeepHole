@@ -3,8 +3,9 @@
 威胁分析按目录自动发现。每个方法占用
 `deephole_client/threat_analysis/methods/<method_id>/` 一个目录；新建扫描时用户只能选择其中
 一个方法，扫描创建后会固化方法 ID、名称和说明快照。原生方法 ID 是
-`deephole_threat_analysis`，界面名称是“DeepHole威胁分析”；Web 新建扫描默认优先
-`opencode_lightweight_threat_analysis`。
+`deephole_threat_analysis`，界面名称是“DeepHole威胁分析”；新建标准模式扫描固定使用
+`deephole_compact_threat_analysis`（DeepHole精简威胁分析）。快速模式和自定义模式未指定方法时
+仍优先 `opencode_lightweight_threat_analysis`；已有扫描续扫沿用已保存的方法。
 
 `deephole_compact_threat_analysis`，界面名称“DeepHole精简威胁分析”，完整复制 DeepHole
 多阶段方法，保留四类价值资产与五类高风险模块的并行识别、合并和逐资产攻击树分析。
@@ -85,7 +86,7 @@
 并不表示该模块已存在漏洞；模式不适用或无法确认真实漏洞时，审计正常返回 `[]`。
 这会增加缺失组合的审计任务数，最多为每模块 15 个；AI 已选的其他模式仍参与审计。
 任务 ID 和成功结果复用规则保持不变，重复处理不会累积补充项。已有扫描不迁移、不安排补审；
-旧产物缺少新字段时继续按原逻辑读取。其他方法与新建扫描默认方法保持不变。
+旧产物缺少新字段时继续按原逻辑读取。其他方法不补充这些固定审计模式。
 上线需更新后端、前端和 Agent 运行包并重启 Agent，无需数据库迁移。
 
 仓库还提供三个轻量级方法：
@@ -93,11 +94,11 @@
 - `codex_goal_threat_analysis`，界面名称“轻量级威胁分析（Codex）”，通过
   `codex_sdk` 启动可恢复 Goal。
 - `opencode_lightweight_threat_analysis`，界面名称“轻量级威胁分析（OpenCode）”，通过一次
-  逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是新建扫描的默认选择。
+  逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是快速模式和自定义模式未指定方法时的默认选择。
 - `opencode_coverage_guided_lightweight_threat_analysis`，界面名称
   “覆盖率引导的轻量级威胁分析（OpenCode）”，初轮沿用 OpenCode 轻量级流程，随后根据文件清单
   最多定向补查两次，每次最多五个未覆盖路径。独立增量通过脚本试合并校验后由代码合入累计结果；
-  每次补查作为独立计划任务显示在扫描队列中。原默认方法不变。
+  每次补查作为独立计划任务显示在扫描队列中。
 
 三个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
 和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，
@@ -147,9 +148,10 @@ label: 我的威胁分析
 description: 生成价值资产、高风险模块和攻击树。
 ```
 
-方法 ID 已由目录名唯一确定，因此不需要 `package_name`。清单不需要 `default`：新建扫描由后端与
-前端优先选择 `opencode_lightweight_threat_analysis`，而运行时在调用方没有显式传入方法时仍以
-`deephole_threat_analysis` 作为安全兜底。未知字段会使当前方法无效。
+方法 ID 已由目录名唯一确定，因此不需要 `package_name`。清单不需要 `default`：后端为新建标准扫描
+固定选择 `deephole_compact_threat_analysis`，快速模式和自定义模式未指定方法时优先选择
+`opencode_lightweight_threat_analysis`，前端自定义模式的初始选择也与此一致。运行时在调用方没有
+显式传入方法时仍以 `deephole_threat_analysis` 作为安全兜底。未知字段会使当前方法无效。
 
 ## 唯一原生入口
 

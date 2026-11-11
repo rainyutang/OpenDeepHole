@@ -1661,12 +1661,15 @@ async def create_agent_scan(
         selections=mining_engine_selections,
     )
     scan_mode = requested_scan_mode
+    requested_threat_analysis_method = body.threat_analysis_method
+    if requested_scan_mode == SCAN_MODE_STANDARD:
+        requested_threat_analysis_method = "deephole_compact_threat_analysis"
+    elif requested_scan_mode == SCAN_MODE_MULTI_VERSION:
+        requested_threat_analysis_method = "deephole_threat_analysis"
+    elif fixed_profile:
+        requested_threat_analysis_method = None
     threat_analysis_method, threat_analysis_method_selection = (
-        _resolve_threat_analysis_method(
-            "deephole_threat_analysis"
-            if requested_scan_mode == SCAN_MODE_MULTI_VERSION
-            else None if fixed_profile else body.threat_analysis_method
-        )
+        _resolve_threat_analysis_method(requested_threat_analysis_method)
     )
     if (
         fixed_profile
