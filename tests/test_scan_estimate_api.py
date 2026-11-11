@@ -36,6 +36,7 @@ def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(
             raise RuntimeError("estimation read failed")
 
         monkeypatch.setattr(store, "get_scan_estimation_tasks", failure)
+        api.scan_estimate_cache.invalidate_scan("s")
         overview = asyncio.run(api.get_scan_overview_v2("s", owner))
         assert overview.scan_id == "s" and overview.status == "auditing"
         assert overview.progress_estimate is None

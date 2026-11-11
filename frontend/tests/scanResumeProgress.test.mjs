@@ -146,6 +146,75 @@ function overallProgress(root) {
   return root.root.findByProps({ role: "progressbar", "aria-label": "整体进度" }).props["aria-valuenow"];
 }
 
+test("initial estimates load immediately and minute refreshes coexist with cached fallback updates", async () => {
+  const state = installApi({ ...overview(80, 2),
+    progress_estimate: progressEstimate({ state: "estimating", remaining_seconds: null }) });
+  const root = await mount();
+  assert.ok(state.overviewRequestCount > 0, "mount must fetch without waiting for the interval");
+  assert.match(text(root.toJSON()), /预计剩余时间 估算中/);
+  const minuteTimer = [...timers.entries()].find(([, timer]) => timer.delay === 60_000)?.[0];
+  assert.ok(minuteTimer);
+  assert.equal([...timers.values()].some((timer) => timer.delay === 10_000), false);
+
+  // The normal 30-second fallback still updates other state. Its overview
+  // carries the same server-cached estimate until the next calculation.
+  state.overview = { ...state.overview, processed_candidates: 81 };
+  await poll(30_000);
+  assertProgress(root, 81);
+  assert.match(text(root.toJSON()), /预计剩余时间 估算中/);
+  assert.ok(timers.has(minuteTimer), "fallback refresh must not restart the minute timer");
+  state.overview.progress_estimate = progressEstimate({ progress: 0.7,
+    calculated_at: "2026-11-09T01:01:00Z" });
+  await poll(60_000);
+  assert.equal(overallProgress(root), 70);
+  assert.match(text(root.toJSON()), /预计剩余时间 约 10 分钟/);
+
+  state.overview = { ...state.overview, processed_candidates: 82 };
+  await notify(["scan_status", { execution_revision: 2, processed_candidates: 82, total_candidates: 100 }]);
+  assertProgress(root, 82);
+  await poll(30_000);
+  assert.equal(overallProgress(root), 70);
+  assert.match(text(root.toJSON()), /预计剩余时间 约 10 分钟/);
+  assert.ok(timers.has(minuteTimer));
+
+  state.overview.progress_estimate = progressEstimate({ progress: 0.5, remaining_seconds: 1200,
+    calculated_at: "2026-11-09T01:02:00Z" });
+  await poll(60_000);
+  assert.equal(overallProgress(root), 50, "new predicted work may reduce progress");
+  assert.match(text(root.toJSON()), /预计剩余时间 约 20 分钟/);
+});
+
+for (const status of ["error", "cancelled"]) {
+  test(`${status} immediately suppresses a cached ETA before the next overview arrives`, async () => {
+    const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
+    const root = await mount();
+    let resolve;
+    state.intercept = () => new Promise((done) => { resolve = done; });
+    await notify(["scan_finish", { execution_revision: 2, status, error_message: null }]);
+    assert.match(text(root.toJSON()), /预计剩余时间 暂无法估算/);
+    assert.doesNotMatch(text(root.toJSON()), /预计剩余时间 约 10 分钟/);
+    assert.ok(resolve, "terminal events immediately refresh the overview");
+    await act(async () => resolve({ ...state.overview, status,
+      progress_estimate: progressEstimate({ state: "unavailable", active: false, remaining_seconds: null,
+        calculated_at: "2026-11-09T01:00:10Z" }) }));
+  });
+}
+
+test("scan completion refreshes the estimate immediately without waiting for the minute timer", async () => {
+  const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
+  const root = await mount();
+  const before = state.overviewRequestCount;
+  state.overview = { ...overview(100, 2), status: "complete",
+    mining_engine_runs: [{ engine_id: "static_candidate", engine_label: "static", status: "success" }],
+    progress_estimate: progressEstimate({ state: "complete", active: false, progress: 1, remaining_seconds: 0,
+      calculated_at: "2026-11-09T01:00:10Z" }) };
+  await notify(["scan_finish", { execution_revision: 2, status: "complete", error_message: null }]);
+  assert.ok(state.overviewRequestCount > before);
+  assert.equal(overallProgress(root), 100);
+  assert.match(text(root.toJSON()), /预计剩余时间 0 分钟/);
+  assert.equal([...timers.values()].some((timer) => timer.delay === 60_000), false);
+});
+
 test("overall estimate survives sparse and reordered SSE updates then clears on a new execution", async () => {
   const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
   const root = await mount();
@@ -157,12 +226,12 @@ test("overall estimate survives sparse and reordered SSE updates then clears on 
     ["scan_status", { execution_revision: 2, progress_estimate: progressEstimate({ progress: 0.5 }) }],
   );
   assert.equal(overallProgress(root), 70);
-  await poll(10_000);
+  await poll(60_000);
   assert.equal(overallProgress(root), 70, "an older GET summary must not undo live progress");
   await notify(["scan_status", { execution_revision: 3, status: "auditing", processed_candidates: 90 }]);
   assert.equal(overallProgress(root), undefined);
   state.overview = { ...overview(90, 3), progress_estimate: progressEstimate({ execution_revision: 3, progress: 0.3 }) };
-  await poll(10_000);
+  await poll(60_000);
   assert.equal(overallProgress(root), 30);
 });
 
@@ -178,7 +247,7 @@ for (const work of ["review", "validation", "planned"]) {
     const before = state.overviewRequestCount;
     state.overview.progress_estimate = progressEstimate({ execution_revision: 1, progress: 0.8,
       calculated_at: "2026-11-09T01:03:00Z" });
-    await poll(10_000);
+    await poll(60_000);
     assert.ok(state.overviewRequestCount > before);
     assert.equal(overallProgress(root), 80);
   });
@@ -188,18 +257,18 @@ test("a completed overview clears the previous active estimate and stops overvie
   const state = installApi({ ...overview(80, 2), progress_estimate: progressEstimate() });
   const root = await mount();
   assert.equal(overallProgress(root), 40);
-  assert.ok([...timers.values()].some((timer) => timer.delay === 10_000));
+  assert.ok([...timers.values()].some((timer) => timer.delay === 60_000));
   state.overview = { ...overview(100, 2), status: "complete",
     mining_engine_runs: [{ engine_id: "static_candidate", engine_label: "static", status: "success" }],
     progress_estimate: progressEstimate({ progress: 1, state: "complete", remaining_seconds: 0,
       active: false, calculated_at: "2026-11-09T01:10:00Z" }) };
-  await poll(10_000);
+  await poll(60_000);
   assert.equal(overallProgress(root), 100);
   assert.match(text(root.toJSON()), /预计剩余时间 0 分钟/);
-  assert.equal([...timers.values()].some((timer) => timer.delay === 10_000), false);
+  assert.equal([...timers.values()].some((timer) => timer.delay === 60_000), false);
   await notify(["scan_status", { execution_revision: 2, progress_estimate: progressEstimate() }]);
   assert.equal(overallProgress(root), 100, "a late active estimate cannot undo completion");
-  assert.equal([...timers.values()].some((timer) => timer.delay === 10_000), false);
+  assert.equal([...timers.values()].some((timer) => timer.delay === 60_000), false);
 });
 
 for (const enabled of [false, true]) {
@@ -355,7 +424,7 @@ test("coalesced overview consumers keep the physical request baseline after newe
   const initialRequests = state.overviewRequestCount;
   let resolve;
   state.intercept = () => new Promise((done) => { resolve = done; });
-  await poll(10_000);
+  await poll(60_000);
   state.overview = overview(81, 2);
   await notify(["scan_status", { execution_revision: 2, processed_candidates: 81, total_candidates: 100 }]);
   assertProgress(root, 81);
@@ -448,7 +517,7 @@ test("fresh authoritative overviews can lower progress within the same execution
   const root = await mount();
   assertProgress(root, 81);
   state.overview = overview(80, 2);
-  await poll(10_000);
+  await poll(60_000);
   assertProgress(root, 80);
 });
 
@@ -466,7 +535,7 @@ test("overview polling advances both views when SSE is lost and details are not 
   const state = installApi(overview(80, 2));
   const root = await mount();
   state.overview = overview(81, 2);
-  await poll(10_000);
+  await poll(60_000);
   assertProgress(root, 81);
   state.overview = overview(82, 2);
   await poll(30_000);

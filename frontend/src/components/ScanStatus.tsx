@@ -1653,14 +1653,17 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
     return () => controller.abort();
   }, [activeTab, scanId, fpReview?.scan_id, fpReview?.review_id, fpReview?.execution_revision, fpReview?.next_cursor, fpReviewPageRetry, fpReviewRefreshing, fpReviewRefreshFailed]);
 
-  const progressActive = Boolean(isRunning) || hasActiveScanProgress(scan, fpReview);
+  const progressPolling = Boolean(scan?.detail_counts)
+    && (Boolean(isRunning) || hasActiveScanProgress(scan, fpReview));
   useEffect(() => {
-    if (!progressActive || !scan?.detail_counts) return;
+    if (!progressPolling) return;
+    // Hydration fetches immediately; normal estimates are cached for one minute
+    // by the server, including overview refreshes triggered by live events.
     const interval = window.setInterval(() => {
       if (!document.hidden) void refreshOverviewSummary();
-    }, 10_000);
+    }, 60_000);
     return () => window.clearInterval(interval);
-  }, [progressActive, refreshOverviewSummary, scan?.detail_counts]);
+  }, [progressPolling, refreshOverviewSummary]);
 
   const handleFpReview = async () => {
     setFpReviewLoading(true);

@@ -48,7 +48,19 @@ test("legacy scans, unknown averages and unavailable estimates do not invent a r
     const result = render(scan({ status }));
     assert.match(result.text, /暂无法估算/);
     assert.doesNotMatch(result.text, /100%|已完成/);
+    const cached = render(scan({ status, progress_estimate: estimate() }));
+    assert.match(cached.text, /暂无法估算/, "terminal state overrides a cached active estimate immediately");
+    assert.doesNotMatch(cached.text, /约 1 小时/);
   }
+});
+
+test("a newer forecast may lower overall progress and extend the remaining duration", () => {
+  const previous = scan({ progress_estimate: estimate({ progress: 0.6, remaining_seconds: 600 }) });
+  const larger = scan({ progress_estimate: estimate({ progress: 0.45, remaining_seconds: 1800,
+    calculated_at: "2026-11-09T01:01:00Z" }) });
+  const merged = runtime.mergeScanOverview(previous, larger, previous);
+  assert.equal(render(merged).bar["aria-valuenow"], 45);
+  assert.match(render(merged).text, /预计剩余时间 约 30 分钟/);
 });
 
 test("completion and continuing independent work have distinct progress states", () => {

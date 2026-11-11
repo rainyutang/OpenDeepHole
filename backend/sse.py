@@ -9,6 +9,7 @@ from typing import Any
 
 from backend.logger import get_logger
 from backend.runtime_metrics import runtime_metrics
+from backend.scan_estimate_cache import observe_scan_estimate_event
 from backend.store.async_ops import run_store_call
 
 
@@ -63,6 +64,7 @@ def publish_local(
 
     Non-blocking. A full queue is replaced with a resynchronization notice.
     """
+    observe_scan_estimate_event(scan_id, event_type, data)
     subs = _scan_subscribers.get(scan_id)
     if not subs:
         return
@@ -80,6 +82,7 @@ def publish_local(
 def publish(scan_id: str, event_type: str, data: Any) -> None:
     """Publish locally and durably fan out when PostgreSQL is configured."""
     global _last_drop_log_at
+    observe_scan_estimate_event(scan_id, event_type, data)
     event_type, data = storage_notification(event_type, data)
     queue = _distributed_event_queue
     if _distributed_store is None or queue is None:
@@ -123,6 +126,9 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
             detail = detail if isinstance(detail, dict) else {}
             index = data.get("index", detail.get("vuln_index", detail.get("idx")))
             notice = {"resource": resource, "index": index}
+            if event_type == "vulnerability_validation":
+                notice.update({key: detail[key] for key in ("status", "running", "execution_revision")
+                               if key in detail})
             if event_type in {"fp_review_result", "fp_review_stage_output"}:
                 notice["change"] = "result" if event_type == "fp_review_result" else "stage_output"
             return "resource_changed", notice

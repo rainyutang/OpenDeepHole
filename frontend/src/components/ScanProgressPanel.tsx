@@ -8,7 +8,7 @@ export function ScanProgressPanel({ scan, active }: { scan: ScanStatus; active: 
   const progress = complete ? 100 : estimate ? Math.min(99, Math.round(estimate.progress * 100)) : null;
   const remaining = complete ? "0 分钟"
     : estimate?.state === "unavailable" || scan.agent_online === false
-      || ["error", "cancelled"].includes(scan.status) && !active ? "暂无法估算"
+      || ["error", "cancelled"].includes(scan.status) ? "暂无法估算"
     : estimate?.state === "ready" && estimate.remaining_seconds !== null
       ? formatRemainingTime(estimate.remaining_seconds) : "估算中";
   return <section aria-label="整体进度" className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">

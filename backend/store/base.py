@@ -192,6 +192,10 @@ class ScanStoreBase(ABC):
         """Return all current terminal task metadata, without report bodies."""
         raise NotImplementedError
 
+    def get_scan_estimation_business_stats(self, scan_id: str, counts: dict | None = None) -> dict:
+        """Return scan-local audit yield and review units without report bodies."""
+        raise NotImplementedError
+
     def get_vulnerability_indexes_by_source_task(
         self,
         scan_id: str,

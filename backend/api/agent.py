@@ -5185,6 +5185,8 @@ from backend.models import AgentValidationDelta
 
 @router.post("/v2/scan/{scan_id}/validation")
 async def agent_report_validation_delta(scan_id: str, body: AgentValidationDelta) -> dict:
+    from backend.sse import publish
+
     try:
         result = await run_store_call(get_scan_store(), "apply_validation_delta", scan_id, body.state.model_dump(),
             [change.model_dump() for change in body.changes], body.sequence)
@@ -5192,7 +5194,11 @@ async def agent_report_validation_delta(scan_id: str, body: AgentValidationDelta
         _scan_not_found(scan_id, endpoint="validation-delta", store=get_scan_store())
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    publish(scan_id, "resource_changed", {"resource": "validations", "index": body.state.vuln_index})
+    publish(scan_id, "resource_changed", {
+        "resource": "validations", "index": body.state.vuln_index,
+        "status": body.state.status, "running": body.state.running,
+        "execution_revision": body.state.execution_revision,
+    })
     return result
 
 

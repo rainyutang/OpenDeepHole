@@ -102,6 +102,7 @@ from backend.scan_metrics import (
 )
 from backend.scan_runtime import AGENT_RECOVERY_IN_PROGRESS, terminal_opencode_pool_status
 from backend.scan_estimate import estimate_scan_progress_from_store
+from backend.scan_estimate_cache import scan_estimate_cache
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
 from backend.store.base import DuplicateScanNameError
@@ -1483,17 +1484,20 @@ def _apply_task_progress(scan: ScanStatus | ScanSummary, pool=None) -> None:
 
 
 async def _scan_progress_estimate(store, scan: ScanStatus, counts: dict | None = None):
-    # Read and compute on the store worker, keeping large task-history
-    # processing off the HTTP/heartbeat event loop.
-    snapshot = scan.model_copy(update={
-        "opencode_pool": scan.opencode_pool.model_copy(deep=True) if scan.opencode_pool else None,
-    })
-    try:
-        return await run_store_call(store, estimate_scan_progress_from_store, store, snapshot,
-                                    dict(counts) if counts is not None else None)
-    except Exception:
-        logger.exception("Scan progress estimate unavailable scan_id=%s", scan.scan_id)
-    return None
+    async def compute():
+        # Only cache misses enqueue work. Snapshot copying and all history
+        # reads remain outside the cache-hit path.
+        snapshot = scan.model_copy(update={
+            "opencode_pool": scan.opencode_pool.model_copy(deep=True) if scan.opencode_pool else None,
+        })
+        try:
+            return await run_store_call(store, estimate_scan_progress_from_store, store, snapshot,
+                                        dict(counts) if counts is not None else None)
+        except Exception:
+            logger.exception("Scan progress estimate unavailable scan_id=%s", scan.scan_id)
+        return None
+
+    return await scan_estimate_cache.get(store, scan, compute, counts)
 
 
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:

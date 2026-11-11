@@ -470,6 +470,99 @@ class ScanHistoryMixin:
                 tasks[identity] = task
         return list(tasks.values())
 
+    def get_scan_estimation_business_stats(self, scan_id: str, counts: dict | None = None) -> dict:
+        """Two bounded projections; reuse overview counts and never hydrate bodies.
+
+        Discovery yield uses findings linked to successful business audits, not
+        the number of model attempts. One audit can discover several findings.
+        Review units are findings, each of which can require several model tasks.
+        """
+        from .summaries import EFFECTIVE_FP, LLM_ISSUE
+
+        counts = self.get_scan_detail_counts(scan_id) if counts is None else counts
+        audits = {}
+        for category, prefix, success_state in (
+            ("static_candidate", "candidate_audit", "success"),
+            ("threat_audit", "threat_audit", "completed"),
+            ("threat_pattern_audit", "threat_pattern_audit", "completed"),
+        ):
+            success = max(0, int(counts.get(f"{prefix}_{success_state}", 0)))
+            audits[category] = {
+                "success": success,
+                "done": success + sum(max(0, int(counts.get(f"{prefix}_{state}", 0)))
+                                      for state in ("failed", "cancelled")),
+                "remaining": sum(max(0, int(counts.get(f"{prefix}_{state}", 0)))
+                                 for state in ("pending", "queued", "running")),
+                "findings": 0,
+                "remaining_findings": 0,
+            }
+        # Match audit_source_kind's precedence, including old threat rows whose
+        # category was recorded only in engine_id or vuln_type.
+        category_sql = (
+            "CASE WHEN v.analysis_source = 'threat_pattern_audit' OR v.engine_id = 'threat_pattern_audit' "
+            "THEN 'threat_pattern_audit' "
+            "WHEN v.analysis_source = 'threat_audit' OR v.engine_id = 'threat_audit' OR v.vuln_type = 'threat_audit' "
+            "THEN 'threat_audit' "
+            "WHEN COALESCE(NULLIF(v.analysis_source, ''), 'static_candidate') = 'static_candidate' "
+            "THEN 'static_candidate' ELSE '' END"
+        )
+        eligible_sql = f"v.provisional = 0 AND v.fp_review_eligible = 1 AND ({LLM_ISSUE}) = 1"
+        findings = self._conn.execute(
+            "WITH eligible AS (SELECT v.idx, v.audit_index, v.source_task_id, "
+            f"{category_sql} AS category FROM vulnerabilities v WHERE v.scan_id = ? AND {eligible_sql}), "
+            "associated AS ("
+            "SELECT v.category, v.idx, CASE WHEN c.audit_state = 'success' THEN 1 ELSE 0 END AS completed "
+            "FROM eligible v JOIN scan_candidates c ON c.idx = v.audit_index "
+            "WHERE c.scan_id = ? AND c.audit_state IN ('success', 'pending', 'queued', 'running') "
+            "AND v.category = 'static_candidate' "
+            "UNION ALL SELECT v.category, v.idx, CASE WHEN c.audit_state = 'success' THEN 1 ELSE 0 END AS completed "
+            "FROM eligible v JOIN scan_candidates c ON c.vulnerability_idx = v.idx "
+            "WHERE c.scan_id = ? AND c.audit_state IN ('success', 'pending', 'queued', 'running') AND v.audit_index IS NULL "
+            "AND v.category = 'static_candidate' "
+            "UNION ALL SELECT v.category, v.idx, CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END AS completed "
+            "FROM eligible v JOIN threat_audit_tasks t ON t.task_id = v.source_task_id "
+            "WHERE t.scan_id = ? AND t.status IN ('completed', 'pending', 'queued', 'running', 'analyzing', 'auditing') "
+            "AND v.category = 'threat_audit' "
+            "UNION ALL SELECT v.category, v.idx, CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END AS completed "
+            "FROM eligible v JOIN threat_pattern_audit_tasks t ON t.task_id = v.source_task_id "
+            "WHERE t.scan_id = ? AND t.status IN ('completed', 'pending', 'queued', 'running', 'analyzing', 'auditing') "
+            "AND v.category = 'threat_pattern_audit') "
+            "SELECT category, SUM(completed) AS findings, SUM(1 - completed) AS remaining_findings "
+            "FROM (SELECT category, idx, MAX(completed) AS completed FROM associated GROUP BY category, idx) unique_findings "
+            "GROUP BY category",
+            (scan_id,) * 5,
+        ).fetchall()
+        for row in findings:
+            audits[row["category"]]["findings"] = int(row["findings"])
+            audits[row["category"]]["remaining_findings"] = int(row["remaining_findings"])
+
+        # Rank only effective results: a newer incomplete retry must not erase
+        # an earlier usable conclusion. The CTE is shared by both projections.
+        reviews = self._conn.execute(
+            "WITH ranked AS (SELECT r.review_id, r.execution_revision, r.vuln_index, "
+            "r.created_at AS finished_at, j.method, "
+            "ROW_NUMBER() OVER (PARTITION BY r.vuln_index "
+            "ORDER BY j.created_at DESC, r.created_at DESC, r.id DESC) AS n "
+            "FROM fp_review_jobs j JOIN fp_review_results r ON r.review_id = j.review_id "
+            f"WHERE j.scan_id = ? AND {EFFECTIVE_FP}), "
+            "latest AS (SELECT review_id, execution_revision, vuln_index, finished_at, method FROM ranked WHERE n = 1) "
+            "SELECT 'completed' AS kind, review_id, execution_revision, vuln_index, finished_at, method FROM latest "
+            "UNION ALL SELECT 'pending' AS kind, '' AS review_id, 0 AS execution_revision, "
+            "v.idx AS vuln_index, '' AS finished_at, '' AS method "
+            "FROM vulnerabilities v LEFT JOIN latest r ON r.vuln_index = v.idx "
+            f"WHERE v.scan_id = ? AND {eligible_sql} "
+            "AND COALESCE(v.user_verdict, '') NOT IN ('confirmed', 'false_positive') AND r.vuln_index IS NULL "
+            "ORDER BY kind, vuln_index",
+            (scan_id, scan_id),
+        ).fetchall()
+        return {
+            "audits": audits,
+            "completed_reviews": [{key: row[key] for key in (
+                "review_id", "execution_revision", "vuln_index", "finished_at", "method",
+            )} for row in reviews if row["kind"] == "completed"],
+            "fp_pending_indexes": [int(row["vuln_index"]) for row in reviews if row["kind"] == "pending"],
+        }
+
     def list_task_page(self, scan_id: str, *, limit: int = 50, before_sort_time: str | None = None,
                        before_task_id: str = "",
                        task_name: str | None = None) -> list[dict]:
