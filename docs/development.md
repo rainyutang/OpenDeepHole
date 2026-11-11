@@ -38,11 +38,12 @@ npm --prefix frontend run build
 | 新建扫描 | `/scans/new` |
 | 扫描详情 | `/scans/{scan_id}/{section}` |
 | Agent 下载、配置 | `/agents/download`、`/agents/config?agent={agent_key}` |
-| 检查器目录、结果看板 | `/checkers`、`/dashboard` |
+| SKILL 市场、结果看板 | `/checkers`、`/dashboard` |
+| 问题判定依据库 | `/review-notes` |
 | 用户管理 | `/admin/users`，仅管理员 |
 | 匿名分享、外部集成 | `/shared-scan/{scan_id}/{section}?token=...`、`/public-scan/{scan_id}/{section}?token=...` |
 
-`section` 为 `overview`、`index`、`static`、`threat`、`mining`、`validation`、`fp-review` 或 `issues`。省略栏目时进入 `overview`；`mining` 用 `engine` 查询参数记录引擎，`threat` 用 `view` 记录结果类别，例如 `/scans/123/threat?view=attackTrees`。弹窗、筛选和展开状态不进入 URL。同一扫描切换栏目不重新挂载详情或建立新的 SSE 连接。
+`section` 为 `overview`、`index`、`static`、`threat`、`mining`、`validation`、`fp-review`、`issues` 或 `review-notes`。省略栏目时进入 `overview`；`mining` 用 `engine` 查询参数记录引擎，`threat` 用 `view` 记录结果类别，例如 `/scans/123/threat?view=attackTrees`。问题判定依据栏目只对扫描所有者或管理员开放，公开和分享页不提供该栏目。弹窗、筛选和展开状态不进入 URL。同一扫描切换栏目不重新挂载详情或建立新的 SSE 连接。
 
 浏览器前进、后退遵循当前页签的历史；页面内“返回”在没有站内历史时回首页。受保护页面在登录后恢复原目标地址。旧 `/#/shared-scan/...`、`/#/public-scan/...` 链接自动转换并保留令牌，外部集成接口新返回的 `result_url` 使用路径式地址。
 

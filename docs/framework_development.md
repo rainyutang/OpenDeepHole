@@ -91,12 +91,13 @@ flowchart TD
 10. 续扫按持久化阶段生命周期定向执行。依赖引擎需要结果时，Agent 先校验并恢复服务端保存的
     成功威胁分析产物，不重置成功生命周期，也不创建新 Session；结果缺失或非法时才新建任务。
     轻量级方法可以在 `is_resume=True` 时识别本地完整成功产物，但不得续接失败 Session。
-    `threat_pattern_audit` 和多版本引擎同样只复用通过结构校验的成功 Session 结果，失败、取消或
-    超时的单项任务使用新 Session 重跑，不做 Session 内续接。
+    `threat_pattern_audit` 和多版本引擎同样只复用已校验的成功结果；缺失、损坏、失败、取消或
+    超时的单项任务通常新建 Session。攻击模式审计的历史成功缓存若路径非法，会先撤销成功标记，
+    优先在原 Session 修正同一结果文件，详见该引擎 README。
 
 ## 3. 现有组件和返回结果
 
-下面列出 Agent 当前协调的七个业务过程。过程之间只通过参数、文件产物和返回值传递数据，
+下面列出 Agent 当前协调的业务过程与攻击模式引擎入口。过程之间只通过参数、文件产物和返回值传递数据，
 不应直接导入其它业务过程的内部实现。
 
 | 过程 | 公开入口 | 主要输入 | 主要返回 |
@@ -106,7 +107,7 @@ flowchart TD
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 带扫描内 `idx` 的候选点、规则 Skill、代码索引 | `status`、单候选唯一 `vulnerabilities`、`processed_candidate_indexes` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
-| 攻击模式审计 | `threat_pattern_audit.run(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`vulnerabilities` |
+| 攻击模式审计 | `threat_pattern_audit.engine.run(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、计数；漏洞通过回调上报 |
 | 去误报方法 | `run_fp_review(**kwargs)` | 方法 ID、代码路径、单个漏洞、历史反馈 | 单项 `status`、二元 `verdict`、`reason` 和阶段证据 |
 | 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、方法 ID、漏洞批次、全局策略快照和方法 field 值 | `status`、`validations`，或验证方法目录 `catalog` |
 
@@ -131,8 +132,8 @@ flowchart TD
 ### 3.1 威胁分析方法的原生契约
 
 威胁分析方法按目录自动发现，一个扫描固化并执行一个方法。`method_id` 直接使用目录名；
-`method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。平台
-缺省固定选择 `deephole_threat_analysis`。
+`method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。Web 新建扫描优先选择 `opencode_lightweight_threat_analysis`，
+独立运行适配器未传方法 ID 时默认 `deephole_threat_analysis`。
 
 每个方法在 `threat_analysis.py` 定义同步入口，并由 `__init__.py` 导出：
 
@@ -148,9 +149,9 @@ def run_threat_analysis(
     ...
 ```
 
-成功结果必须设置 `result=True`，并返回 `output_path` 内三份有效 JSON 的
+成功结果必须设置 `result=True`，并返回 `output_path` 内三类有效 JSON 产物的
 `value_asset_path`、`attack_tree_path`、`high_risk_modules_path`；对应顶层结构分别为数组、
-含 `attack_trees` 数组的对象、数组。失败结果必须设置 `result=False` 并提供非空 `reason`。
+含 `attack_trees` 数组的对象（或含 `index.json` 和逐树 JSON 的目录）、数组。失败结果必须设置 `result=False` 并提供非空 `reason`。
 异常或失败原因会保存到 `ThreatAnalysisRunStatus.error_message`，通过 SSE 和刷新继续显示；
 取消使用独立状态。
 
@@ -159,7 +160,7 @@ def run_threat_analysis(
 以 `project_path` 绑定的项目总路径。子目录扫描的最终高风险模块由外层转换为项目根相对
 `代码目录`，转换副本与原生续扫产物分离。
 
-更新内置实现时，可把 `ThreatAnalysis/src/threat_analysis_harness/.` 直接复制到
+迁移外部实现前需核对当前签名、扫描范围和产物契约；符合要求时可把 `ThreatAnalysis/src/threat_analysis_harness/.` 复制到
 `deephole_client/threat_analysis/methods/deephole_threat_analysis/`，保留该目录的平台
 `method.yaml`。原生 `threat_analysis_harness` 绝对导入无需修改。新增方法也沿用相同目录和入口，
 只需换目录名并提供清单。完整参数、返回示例和 Skill 注册规则见
@@ -329,8 +330,8 @@ Codex 上下文窗口；无法读取时使用 `128000`，自动压缩阈值按 `
 目录会被清理，用户配置与非托管文件保持原样。扫描只读取已经固定的默认配置，不再逐扫描探测或
 切换模型。
 
-内置 Codex 威胁分析方法的实现契约保持不变；新建扫描默认由外层编排优先调用它。Codex CLI、
-模型或配置不可用，以及方法执行或产物校验失败时，编排层只执行一次 clean DeepHole 威胁分析回退；
+新建扫描默认使用 OpenCode 轻量级方法，Codex 轻量级方法需显式选择。所选轻量级方法的 CLI、
+模型或配置不可用，以及初轮执行或产物校验失败时，编排层只执行一次 clean DeepHole 威胁分析回退；
 取消不回退，显式选择 DeepHole 也不会为了威胁分析探测或调用 Codex；另行选择的
 `requires_codex` 漏洞挖掘引擎仍按自身契约准备 Codex。第三方威胁分析方法不自动套用该策略。
 
@@ -408,7 +409,7 @@ async def run(**kwargs):
 - [外部 CLI 引擎示例](../deephole_client/vulnerability_mining/examples/example_cli/engine.py)
 - [Codex 引擎示例](../deephole_client/vulnerability_mining/examples/example_codex/engine.py)
 
-示例位于 `examples/`，不会自动加载；复制到 `engines/<engine_id>/` 后才会进入生产发现。
+示例位于 `examples/`，不会自动加载；复制到 `engines/<engine_id>/` 后才会进入生产发现。当前示例只传递单个 `code_scan_path`，用于单文件或多路径扫描前需补齐选择并集的传递与结果校验。
 
 ## 6. 新增 static_candidate Checker
 
@@ -487,8 +488,8 @@ Analyzer 契约：
 | `related_functions` | `list[str]` | 可选关联函数 |
 | `metadata` | `dict` | 可选结构化上下文 |
 
-建议在 `metadata.subject` 中记录要判断的变量或表达式，它会参与候选合并、Prompt 构造和
-同模式过滤；`metadata.problem` 可用于保留统一的问题类型说明。不要把静态规则细节或
+建议在 `metadata.subject` 中记录要判断的变量或表达式，用于审计 Prompt 和规则特有的聚合；
+公共静态去重和同模式过滤不以它作为键，详见[Checker 开发参考](checker-development.md#候选去重与同模式过滤)。`metadata.problem` 可用于保留统一的问题类型说明。不要把静态规则细节或
 未经确认的漏洞结论写进 `description`。
 
 ### 6.2 发现、同步和测试
@@ -574,8 +575,8 @@ methods/
     └── skills/             # 可选，自动加入当前任务的 Skill 搜索路径
 ```
 
-`method.yaml` 必须声明非空 `label`、`description`，布尔值 `default`，正整数
-`max_concurrency`，以及 `stages` 和 `documents` 列表。仓库中必须恰好有一个可加载方法设置
+`method.yaml` 必须声明非空 `label`、`description`，布尔值 `default`，非负整数
+`max_concurrency`（`0` 跟随扫描模型容量，正数为固定上限），以及 `stages` 和 `documents` 列表。仓库中必须恰好有一个可加载方法设置
 `default: true`；非法方法会被隔离并出现在目录接口的错误列表中。阶段 key、页面名称、说明文档
 和 Agent 并发度全部来自该清单，新增方法不修改中央枚举或前端组件。
 

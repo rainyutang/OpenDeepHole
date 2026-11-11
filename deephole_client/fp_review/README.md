@@ -32,6 +32,7 @@ async def run(**kwargs) -> dict:
 | `review_id` | 是 | str | 本轮去误报标识 |
 | `vuln_index` | 是 | int | 漏洞在扫描结果中的索引 |
 | `vulnerability` | 是 | dict | 单个漏洞对象 |
+| `review_notes_dir` | 否 | path | 已同步的问题判定依据目录，提示模型按需读取；不内嵌正文 |
 | `feedback_entries` | 否 | `list[dict]` | 兼容输入；内置方法不传入模型 Prompt |
 | `history` | 否 | `list[dict]` | 兼容输入；内置方法不传入模型 Prompt |
 | `required_capability` | 否 | `low\|high` | 默认 `high` |
@@ -70,7 +71,7 @@ Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、
 `method.yaml` 严格接受 `label`、`description`、`default`、`max_concurrency`、`stages`
 和 `documents`。仓库内必须恰好有一个可用方法设置 `default: true`。`documents` 用于扫描详情页
 展示方法说明；方法目录中的 `skills/<skill-name>/SKILL.md` 会自动加入该任务的 Skill 搜索路径，
-业务 Prompt 应通过 `/<skill-name>` 调用，不应读取后再拼接 Skill 正文。
+业务 Prompt 应通过 `/<skill-name>` 调用，不应读取后再拼接 Skill 正文。完整 Agent 使用统一安装目录，任务 Skill 路径仅检查所需名称；独立模式保留路径注册。
 
 `max_concurrency` 接受非负整数：`0` 表示单扫描复核并发跟随审计的
 `config.opencode_concurrency`（已启用且配置有效的模型并发总和，最低为 1），正整数

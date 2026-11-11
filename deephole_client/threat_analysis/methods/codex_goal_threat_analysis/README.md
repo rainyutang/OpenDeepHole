@@ -1,6 +1,6 @@
 # Codex Goal 威胁分析
 
-该方法保持平台规定的五参数同步入口，只调用一次 `CodexController.goal()` 完成威胁建模。
+该方法使用五个基础参数加可选 `code_paths` 的同步入口，通过一次 Goal 执行完成威胁建模。
 
 ## 输入
 
@@ -8,7 +8,8 @@
 | --- | --- |
 | `code_path` | 必填、必须存在的源码目录；作为只读绝对路径交给 Goal |
 | `output_path` | 必填；用于三份最终产物、Goal 状态、扫描上下文、提示词和日志 |
-| `is_resume` | 已有产物有效时直接复用，否则按保存的 Thread ID 恢复 Goal |
+| `is_resume` | 仅复用范围匹配且带成功状态的完整产物；否则清理残留并新建 Thread/Goal，不续接失败线程 |
+| `code_paths` | 可选目录/文件列表，省略时使用 `code_path`；列表并集为实际分析范围 |
 | `product_mcp` | 写入运行上下文，供 Goal 判断是否使用产品知识 |
 | `attack_modes` | 写入运行上下文，供 Goal 生成攻击模式关联 |
 
@@ -52,5 +53,6 @@ codex app-server --listen stdio://
 
 本方法不向 app-server、Thread 或 Goal 传入模型 ID 或 profile，模型与认证完全使用当前
 Codex 默认配置。`codex-goal-state.json` 保存 `thread_id`、`goal_status` 和用于避免复用旧校验
-流程产物的 `validation_policy_version`。工具不修改
-用户的 `$CODEX_HOME/config.toml` 或 Codex 默认模型；Codex CLI 不可用时直接返回配置错误。
+流程产物的 `validation_policy_version`。方法本身不修改
+用户的 `$CODEX_HOME/config.toml` 或 Codex 默认模型；Agent 的独立配置准备层仍可能维护受管默认配置，
+详见[Codex 运行配置](../../../../docs/configuration.md#codex-运行配置)。Codex CLI 不可用时方法返回错误，平台编排按轻量方法规则回退。

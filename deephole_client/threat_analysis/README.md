@@ -2,8 +2,9 @@
 
 威胁分析按目录自动发现。每个方法占用
 `deephole_client/threat_analysis/methods/<method_id>/` 一个目录；新建扫描时用户只能选择其中
-一个方法，扫描创建后会固化方法 ID、名称和说明快照。内置方法 ID 是
-`deephole_threat_analysis`，界面名称是“DeepHole威胁分析”。
+一个方法，扫描创建后会固化方法 ID、名称和说明快照。原生方法 ID 是
+`deephole_threat_analysis`，界面名称是“DeepHole威胁分析”；Web 新建扫描默认优先
+`opencode_lightweight_threat_analysis`。
 
 `deephole_compact_threat_analysis`，界面名称“DeepHole精简威胁分析”，完整复制 DeepHole
 多阶段方法，保留四类价值资产与五类高风险模块的并行识别、合并和逐资产攻击树分析。
@@ -100,18 +101,18 @@
 
 三个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
 和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，
-只携带路径和关键约束；完整
+只携带路径和关键约束；覆盖率引导方法的补查使用单独的增量 Prompt。完整
 接口契约与三份字段 Schema 都来自 Codex 方法目录下的只读 `references/*.json`，校验器也继续位于
 该目录，以保持 Prompt 中的既有路径不变。完整 Agent 会把这个精确方法目录作为稳定只读根写入
-OpenCode 的受管 Serve 配置，同时保留当前 Session 的窄化只读授权；因此主 Agent 可以读取
-`analysis-guidance.json`、攻击模式和三份 Schema，但不能编辑该目录，也不会连带开放整个 Agent。
+OpenCode 的受管 Serve 配置，并声明当前 Session 的只读资源意图。当前文件读取全局允许访问运行账户可读路径，
+这些资源声明不构成读取沙箱；方法资源不获得写权限。
 缺少该规则的旧受管配置会在下次准备 workspace 时自动重写。OpenCode 方法复用 Agent 当前
 `threat_analysis.model_policy` 的超时和全新 Session 重试；Task Agent 只开放 Prompt 内精确的
 校验命令，但不要求 OpenCode 执行它，也不会产生“未执行校验命令”的完成失败。每次 Session 消息
-完整结束后，宿主使用实际 `sys.executable` argv 校验三份产物；首次失败会把校验诊断追加到原
-Session，要求修正产物但不要求模型自行运行命令，第二次仍失败才进入阶段策略已有的 fresh Session
-重试。Prompt 中的命令在所有平台都直接以 `python` 开头；Windows 参数继续使用双引号，Session 的
-`PATH` 临时前置当前 Python 目录，而宿主校验不经 shell。Codex Goal 仍要求在 Goal 内执行同一条
+完整结束后，宿主使用实际 `sys.executable` argv 校验三类产物；首次失败会把校验诊断追加到原
+Session，要求修正产物并执行当前已绑定的校验命令，通过后再结束回复；第二次仍失败才进入阶段策略已有的 fresh Session
+重试。命令执行本身不加入必需命令审计，最终仍以宿主复验为准。OpenCode 在非 Windows 上使用宿主 Python
+绝对路径；Windows 使用 `python`，参数使用双引号，Session 的 `PATH` 临时前置当前 Python 目录。宿主校验不经 shell。Codex Goal 仍要求在 Goal 内执行同一条
 提示命令并通过。标准重试耗尽后，外层扫描编排归档失败产物并仅 clean 执行一次
 `deephole_threat_analysis`；取消不重试也不回退，历史扫描不迁移方法选择。
 
@@ -160,7 +161,7 @@ from .threat_analysis import run_threat_analysis
 __all__ = ["run_threat_analysis"]
 ```
 
-函数签名必须完全一致：
+新方法应使用以下签名；历史五参数入口仍只兼容单目录，详见末尾的范围兼容说明：
 
 ```python
 def run_threat_analysis(
@@ -185,11 +186,10 @@ def run_threat_analysis(
 
 `project_path`、`scan_mode`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
 不会传给原生入口。
-需要模型的方法可以像内置实现一样调用 `task_agent.run_opencode_task()`；平台会把当前所选方法
-`skills/` 下所有包含 `SKILL.md` 的 Skill 根仅注册到本方法的任务上下文，不再全局注入其它
-威胁分析方法的 Skill。
+需要模型的方法可以像内置实现一样调用 `task_agent.run_opencode_task()`；平台把当前所选方法的 Skill 根声明到任务上下文。独立模式据此注册路径；完整 Agent 已统一安装
+全部业务 Skill，任务上下文仅检查所需名称，不按方法切换全局 Skill 目录。
 
-## 返回值和三份 JSON 产物
+## 返回值和三类 JSON 产物
 
 成功必须返回：
 
@@ -202,17 +202,17 @@ return {
 }
 ```
 
-三个路径都必须指向 `output_path` 内已存在、可读取的 UTF-8 JSON 文件：
+三类产物都必须位于 `output_path` 内并可读取。价值资产与模块是 UTF-8 JSON 文件，攻击树也支持目录：
 
 | 返回字段 | JSON 顶层结构 | 用途 |
 | --- | --- | --- |
 | `value_asset_path` | 数组 | 价值资产列表 |
-| `attack_tree_path` | 对象，且 `attack_trees` 为数组 | 攻击树列表及其节点、边和攻击路径 |
+| `attack_tree_path` | 单文件：对象中 `attack_trees` 为数组；目录：`index.json` 加逐树 JSON | 攻击树列表及其节点、边和攻击路径 |
 | `high_risk_modules_path` | 数组 | 高风险模块列表 |
 
-扩展方法应尽可能沿用内置方法的字段结构，因为当前详情页和 `threat_audit` 引擎直接消费这三份
+扩展方法应尽可能沿用内置方法的字段结构，因为当前详情页和 `threat_audit` 引擎直接消费这三类
 产物。平台会拒绝缺少路径、路径越出方法输出目录、文件不存在、JSON 非法或顶层结构不一致的
-成功结果。
+成功结果。OpenCode 轻量与覆盖率引导方法使用目录形式；上传包保留合并后的 `content` 及清单/树文件的 `files` 快照，续扫还原同一布局，不要求额外生成合并文件。
 
 失败必须返回可直接展示给用户的非空原因：
 
@@ -229,7 +229,7 @@ return {
 
 ## 续扫与失败恢复
 
-首次扫描调用原生入口时传入 `is_resume=False`。扫描成功后，平台把三份 JSON 内容、相对路径和
+首次扫描调用原生入口时传入 `is_resume=False`。扫描成功后，平台把三类产物的 JSON 内容、相对路径和
 扫描范围作为不透明结果包保存到服务端。用户续扫时，如果威胁分析已经成功，Agent 会先按同一
 `scan_id` 取回结果包，校验扫描范围、必需产物、JSON 顶层结构和相对路径安全性，再原子恢复到
 当前扫描目录并直接提供给依赖引擎；这一过程不会注册模型任务、上报 `running` 或重置成功状态。
@@ -251,11 +251,11 @@ Session。其它方法直接以 `is_resume=False` 新建任务，业务层也不
 `methods/deephole_threat_analysis/` 内的原生实现。威胁分析失败只会阻塞消费其结果的
 `threat_audit` 和 `threat_pattern_audit`；其它漏洞挖掘引擎按各自生命周期独立运行和续扫。
 
-## 从现有 ThreatAnalysis 工程覆盖内置方法
+## 从现有 ThreatAnalysis 工程迁移内置方法
 
-`ThreatAnalysis/src/threat_analysis_harness` 已经包含符合上述约定的 `__init__.py`、
-`threat_analysis.py`、阶段代码和 Skill。迁移后可直接把其内容复制到内置方法目录，保留平台
-自有的 `method.yaml`：
+若外部 `ThreatAnalysis/src/threat_analysis_harness` 实现符合当前入口与产物契约，可将其作为迁移来源，
+保留平台的 `method.yaml`。该工程不随本仓库分发；复制前核对版本、`code_paths` 支持和随包资源，
+复制后执行方法契约与扫描范围测试，不能假定任意上游版本可直接覆盖：
 
 ```bash
 cp -a ThreatAnalysis/src/threat_analysis_harness/. \

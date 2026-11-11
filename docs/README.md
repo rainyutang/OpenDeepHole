@@ -15,6 +15,8 @@
 | [威胁分析覆盖率](threat-coverage.md) | 文件清单、覆盖口径与模块路径匹配 |
 | [扫描分享](scan-sharing.md) | 分享链接、权限与撤销 |
 | [Token 分类统计](scan-token-categories.md) | 扫描、模型和任务的 Token 统计口径 |
+| [整体进度与预计剩余时间](scan-progress-estimate.md) | 当前扫描任务的加权进度、估算条件与刷新 |
+| [问题判定依据](review-notes.md) | 个人依据库、扫描选择及 Agent 同步 |
 
 ## 开发与扩展
 
@@ -23,6 +25,7 @@
 | [开发指南](development.md) | 开发服务器、测试与贡献约定 |
 | [框架开发指南](framework_development.md) | 扫描流程、组件边界和扩展类型选择 |
 | [Checker 开发参考](checker-development.md) | 规则目录、Analyzer、测试工具、去重与过滤 |
+| [命令注入规则](command-injection-rule.md) | 匹配边界、资源限制及性能复现 |
 | [Task Agent 公共接口](opencode_task_service.md) | 模型任务、Session、权限与重试 |
 | [漏洞验证方法](vulnerability_validation.md) | 产品验证器的清单、入参和结果契约 |
 
@@ -33,6 +36,8 @@
 - [威胁分析方法](../deephole_client/threat_analysis/README.md)
 - [漏洞挖掘引擎](../deephole_client/vulnerability_mining/README.md)
 - [去误报方法](../deephole_client/fp_review/README.md)
+- [漏洞验证过程](../deephole_client/vulnerability_validation/README.md)
+- [威胁分析前端](../frontend/src/features/threatAnalysis/README.md)
 - [独立 Task Agent](../task_agent/README.md)
 
 ## 部署与维护

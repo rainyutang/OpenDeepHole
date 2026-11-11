@@ -16,7 +16,7 @@
 平台入口均为 `async`，只接受 `**kwargs`，未知 key 会报错。框架自有过程通过各目录 README
 记录输入契约并可按需提供 `__main__.py`；每个威胁分析方法目录保留原生同步入口，平台发现、
 选择和适配代码位于方法目录外。业务过程不导入 `backend`、`reporter`、`server` 或其它业务
-过程；需要模型时只调用 `task_agent.run_opencode_task()`。
+过程的业务编排；OpenCode 模型调用通过 `task_agent.run_opencode_task()`，Codex 方法使用自己的 SDK 通道。
 
 平台 Agent 对权威审计结果使用持久化补传：候选审计、漏洞、威胁审计、去误报、验证及扫描
 终态会先写入 `~/.opendeephole/report_outbox.sqlite3`，后端 2xx 确认后立即删除。数据库不保存
@@ -52,13 +52,14 @@ Session 历史。每个逻辑任务完成时只单独上报一次其最终状态
 “运行中”；已配置模型会在扫描首次取得租约前以零运行/零排队行出现在扫描级快照中。
 
 扫描任务调用这些入口时都会提供 `kwargs["scan_mode"]`，值为 `quick`、`standard` 或
-`custom`；历史模式在组件边界映射为 `custom`。威胁分析原生五参数入口保持不变，模式只进入
+`custom`；历史模式在组件边界映射为 `custom`。威胁分析原生入口在五个基础参数之外支持可选 `code_paths`，模式只进入
 外层适配器 kwargs 和 Task Agent 任务元数据。
 
-单独提取普通过程时复制目标过程目录即可；提取静态分析或候选点审计时复制整个
-`vulnerability_mining/engines/static_candidate/`，以同时保留两个过程的公共规则树。需要模型的
-过程还要让通用 `task_agent` 包可导入，并可通过 `task_agent_config` 指向自己的
-`task-agent.yaml`。不调用模型的代码图谱构建和静态规则分析无需 Task Agent 配置。
+独立运行示例默认使用完整源码检出。`task_agent/` 可独立安装，代码图谱构建也支持单目录提取；
+其它过程已有共享依赖，不能假定只复制本目录即可使用。例如静态分析依赖 `scan_paths`，候选
+审计依赖上层 `report_schema` 和任务计划适配，威胁审计复用攻击树产物读取器，验证依赖
+`call_chain`。提取前需保留这些依赖及对应规则/Skill，并运行独立导入测试。OpenCode 过程可通过
+`task_agent_config` 指向自己的 `task-agent.yaml`；代码图谱构建和纯静态规则分析无需模型配置。
 
 接入已有实现时，实现可以直接占用对应过程目录，平台适配器放在目录外，只负责参数校验、
 上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用
@@ -67,12 +68,12 @@ Session 历史。每个逻辑任务完成时只单独上报一次其最终状态
 Skill。完整 Agent 会在首次启动 Serve 前将所有业务 Skill 及引用资源统一安装到
 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`，此时上下文中的 Skill 根
 只用于缺失检查，不再改变配置路径。服务端下发的规则包在模型任务开始前同步；内容有变化时
-等待已有会话完成并刷新 Serve，本地续扫复用统一目录的当前版本。内置
-`threat_analysis/methods/deephole_threat_analysis/` 可由
-`ThreatAnalysis/src/threat_analysis_harness` 的内容直接覆盖；相邻的
-`threat_analysis_runner.py` 将所选方法按原包名加载，不修改原生绝对导入。
+等待已有会话完成并刷新 Serve，本地续扫复用统一目录的当前版本。相邻的
+`threat_analysis_runner.py` 将所选方法按原包名加载，不修改原生绝对导入。迁入外部
+`ThreatAnalysis/src/threat_analysis_harness` 时，需先核对入口签名、Task Agent 调用、路径范围及
+产物契约；本仓库未附带该外部项目，不能保证任意上游版本直接覆盖后兼容。
 
-完整的威胁分析方法目录、清单、原生五参数入口和三份 JSON 返回契约见
+完整的威胁分析方法目录、清单、五个基础参数及可选 `code_paths`、三类产物返回契约见
 [威胁分析方法扩展](threat_analysis/README.md)。
 
 威胁审计过程及专用输出 Schema 由 `vulnerability_mining/engines/threat_audit/` 直接拥有，
@@ -96,7 +97,10 @@ result = await run_threat_analysis(
 | key | 必填 | 类型 | 说明 |
 |---|---:|---|---|
 | `method_id` | 否 | str | 威胁分析方法目录名，默认 `deephole_threat_analysis` |
-| `code_path` | 是 | path | 待分析代码目录 |
+| `project_path` | 否 | path | 项目总路径，默认 `code_path` |
+| `scan_mode` | 否 | str | 组件模式，默认 `custom` |
+| `code_path` | 是 | path | 待分析的公共启动目录 |
+| `code_paths` | 否 | `list[path]` | 实际选择的目录/文件并集；省略时使用 `code_path` |
 | `output_path` | 是 | path | 原生产物输出目录；不存在时创建 |
 | `is_resume` | 否 | bool | 是否复用原生阶段产物，默认 `false` |
 | `product_mcp` | 否 | str 或 null | 原生预留参数，原样传入 |
@@ -104,6 +108,8 @@ result = await run_threat_analysis(
 | `task_agent_config` | 否 | path | 脱离平台运行时使用的 Task Agent YAML |
 | `output` | 否 | callable | 同步或异步事件回调 |
 | `cancel_event` | 否 | event | 提供 `is_set()` 的取消信号 |
+
+攻击树可为单 JSON 文件，也可为含 `index.json` 的目录；范围、恢复与产物契约详见[方法说明](threat_analysis/README.md)。
 
 成功时必须包含 `result=true`、`value_asset_path`、`attack_tree_path` 和
 `high_risk_modules_path`；失败时必须包含 `result=false` 与非空 `reason`。外层适配器保留原生
@@ -124,7 +130,7 @@ result = await run_threat_analysis(
 `code_scan_path` 构建或复用该扫描路径下的 `code_index.db`；未选择静态分析引擎时跳过该过程。
 随后按扫描快照启动独立威胁分析和所选漏洞挖掘引擎；无需威胁产物的引擎可与威胁分析并发。
 静态分析只读取协调器返回的扫描路径索引，候选点审计只消费静态
-分析结果。威胁分析保持原生三份 JSON 产物和原生返回值，使用独立开关及生命周期，协调器
+分析结果。威胁分析保持价值资产、攻击树、高风险模块三类 JSON 产物和原生返回值，使用独立开关及生命周期，协调器
 只在上报时把文件装入透明 artifact bundle。威胁审计不是威胁分析的一部分：选择它时必须
 同时启用威胁分析，并等待分析成功后再读取攻击树和高风险模块文件。任务按最终攻击树实例隔离，
 仅以该树内的“叶子节点 + 关联攻击模式”拆分；不同树复用局部 ID 时也不会合并。每个任务携带

@@ -8,7 +8,7 @@
 | --- | --- |
 | 根目录 `config.yaml` | 服务端存储、认证、日志、知识库连接等 |
 | Agent 的 `agent.yaml` | 本机服务地址、名称和用户令牌，以及服务端下发的配置副本 |
-| Web「客户端配置」 | Agent 可执行文件、模型池、各阶段策略和 Checker 选择 |
+| Web「客户端配置」 | Agent 可执行文件、LLM API、模型池、各阶段策略和 Checker 选择 |
 | 新建扫描表单 | 本次扫描的模式、引擎、方法、路径及 MCP/验证快照 |
 | Agent 本机 OpenCode 配置 | Provider、模型定义、访问地址和凭据 |
 | 独立 `task-agent.yaml` | 脱离平台使用 Task Agent 时的项目上下文、Serve 和模型池 |
@@ -48,14 +48,15 @@ logging:
 
 ## Agent 配置
 
-根目录 [agent.yaml](../agent.yaml) 是 v10 模板。主要字段示例：
+根目录 [agent.yaml](../agent.yaml) 是 v11 模板。主要字段示例：
 
 ```yaml
 server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 10
+schema_version: 11
+llm_providers: {}
 base:
   tool: "opencode"
   executable: "opencode"
@@ -84,10 +85,10 @@ checker_selection:
 - 总容量为有效启用模型的 `max_concurrency` 之和，各扫描共享额度；旧 `global_concurrency` / `opencode_concurrency` 不再构成独立全局上限。
 - 模型能力可标记低/中/高，任务要求归一为 `low` 或 `high`。阶段级能力、超时和重试策略优先于模型行的相应覆盖。
 - 模型 `time_windows` 按 Agent 本地时间判断，ISO 星期 `1..7` 为周一至周日；多段取并集，未设置时全天可用。跨夜窗口按当前日期判断，例如周一至周六 `22:00–06:00` 包括这些日期的凌晨与晚间，不包含周日。
-- 时间窗口只限制取得新模型 Lease，不会打断已运行任务。新阶段按派生容量创建工作协程，已有阶段不会随配置变化自动扩充协程。
+- 时间窗口只限制取得新模型 Lease，不会打断已运行任务。一般阶段按启动时派生容量创建工作协程；去误报在每次补位时重新读取容量，降低上限不打断在途复核。
 - 模型消息超时不包含排队时间。四个阶段分别配置总超时和 `idle_timeout_seconds`（默认 1200 秒/20 分钟）；各类总超时见下表。新文本、推理及工具进展刷新无新内容计时；心跳和重试状态不刷新。同 Session JSON 纠正和产物校验重试每次独立计时，默认新 Session 重试 2 次；根目录 `agent.yaml` 的威胁分析模板写的是 5 次，实际运行应以 Web 保存并下发的值为准。
 - 工具参数生成（`pending`）期间暂停无新内容检测，总时限及主动取消仍生效；当前调用和关联子 Session 的全部待生成参数完成后，恢复完整的无新内容计时。此阶段真正停滞也由总时限终止，工具进入 `running` 后继续按原有进展规则检测。
-- 任务类型固定优先级：漏洞验证 90、去误报 60、威胁分析与挖掘 50；相同优先级按 FIFO 调度。
+- 任务类型固定优先级：漏洞验证 90、去误报 80、威胁分析与挖掘 50；相同优先级按 FIFO 调度，不抢占已运行任务。
 
 | 位置 / 字段 | 用途 | 默认秒数 |
 | --- | --- | ---: |
@@ -140,7 +141,7 @@ Agent 按以下顺序合并配置，后面的受管项覆盖前面的对应字�
 
 受管字段包括技能路径、权限、Hook 与压缩策略 `auto: true`、`prune: true`、`reserved: 20000`。已有 Provider 模型缺少 `limit.context` 时补 131072，此时缺少 `limit.output` 则补 32768；不从平台模型池反向创建 Provider 模型定义。
 
-完整 Agent 使用 `~/.opendeephole/opencode_workspace/opencode.json`。配置变化先更新受管源，等 Serve 空闲后的下一次启动再原子写入最终配置；POSIX 文件权限为 `0600`。配置通过专用目录隔离，受管 Hook 追加到已有 Plugin 列表。
+完整 Agent 使用 `~/.opendeephole/opencode_workspace/opencode.json`，在安全的 Serve 启动边界原子发布最终配置，POSIX 文件权限为 `0600`。Web LLM API 变更由上述配置协调器等待已有逻辑任务结束后主动重启并检查；其它受管资源更新遵循各自的空闲重载规则。配置通过专用目录隔离，受管 Hook 追加到已有 Plugin 列表。
 
 ### Serve 生命周期与权限
 
@@ -206,9 +207,11 @@ Web 新建扫描默认优先 OpenCode 轻量级方法；它与 Codex 轻量级�
 | 方法 | 执行通道 |
 | --- | --- |
 | `opencode_lightweight_threat_analysis` | `run_opencode_task(task_type="threat_analysis")`，复用 Agent 的阶段模型策略 |
+| `opencode_coverage_guided_lightweight_threat_analysis` | OpenCode 轻量初轮后，按完整文件清单最多定向补查两次 |
 | `codex_goal_threat_analysis` | Codex SDK，通过 `codex app-server --listen stdio://` 使用全局默认模型 |
 | `deephole_threat_analysis` | DeepHole 原生威胁分析方法 |
+| `deephole_compact_threat_analysis` | DeepHole 多阶段流程，使用 51 项精简模式库，并补齐每模块缺失的 15 项固定审计模式 |
 
-OpenCode 轻量级任务要求产物最终写入后执行指定校验命令并成功退出。轻量级方法失败、Codex 不可用或产物无效时，外层编排在未取消的前提下自动且仅一次以干净模式回退到 DeepHole；用户主动取消不触发回退。显式选择 DeepHole 时直接执行它。
+OpenCode 轻量初轮由宿主在回复结束后校验实际产物；模型可执行绑定命令自检，但执行命令不是完成审计条件。校验失败先回传原 Session 修正，再沿用阶段重试。Codex Goal 则要求在 Goal 内执行校验命令并通过。轻量级方法初轮失败、Codex 不可用或产物无效时，外层编排在未取消的前提下自动且仅一次以干净模式回退到 `deephole_threat_analysis`；覆盖率引导方法的补查失败保留最近有效结果。用户主动取消不触发回退，显式选择原生或精简 DeepHole 方法时直接执行所选方法。
 
 用户自有 Codex 默认模型运行失败时不覆盖配置换模型重试，而是按上述规则回退。完整原生输入输出契约见[威胁分析方法扩展](../deephole_client/threat_analysis/README.md)。

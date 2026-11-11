@@ -23,12 +23,13 @@
 | --- | --- | --- |
 | GET | `/overview` | 当前状态及汇总 |
 | GET | `/events`、`/event-history` | SSE 实时通知、历史日志分页 |
-| GET | `/candidates`、`/vulnerabilities`、`/threat-audit-tasks`、`/validations` | 当前扫描结果分页 |
+| GET | `/candidates`、`/vulnerabilities`、`/threat-audit-tasks`、`/threat-pattern-audit-tasks`、`/validations` | 当前扫描结果分页 |
 | GET | `/details/{resource}/{index}` | 问题、候选、验证和复核正文 |
 | GET | `/tasks`、`/tasks/{task_id}` | 执行任务分页及历史详情 |
 | GET | `/fp-review/overview`、`/fp-review/results`、`/fp_review` | 复核状态和结果 |
-| GET | `/candidate-audit-results`、`/threat-audit-results`、`/vulnerabilities/{idx}/audit-source` | 审计摘要及问题来源 |
+| GET | `/candidate-audit-results`、`/threat-audit-results`、`/threat-pattern-audit-results`、`/vulnerabilities/{idx}/audit-source` | 审计摘要及问题来源 |
 | GET | `/threat-analysis`、`/git_history`、`/index-status` | 威胁分析、历史模式和索引状态 |
+| GET | `/threat-coverage`、`/threat-coverage/issues` | 威胁覆盖图及关联问题 |
 | GET | `/checkers`、`/skill/{vuln_type}`、`/fp-review/skill`、`/skill-reports` | 本次扫描的规则信息和报告 |
 | GET | `/report`、`/report.zip`、`/vulnerability/{idx}/report` | CSV、ZIP、单个问题报告 |
 | POST | `/mark`、`/unmark`、`/batch-mark`、`/batch-unmark` | 沿用登录扫描接口的人工标记请求和响应格式 |

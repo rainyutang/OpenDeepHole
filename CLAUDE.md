@@ -1,264 +1,172 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-DeepHole 2.0 is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then submits every model-backed operation through a unified OpenCode task/session service with specialized skills and MCP tools.
+This file provides guidance to Claude Code when working in this repository.
+For user-facing instructions, start with [README.md](README.md) and the
+[documentation index](docs/README.md). Treat current code and manifests as the
+source of truth for defaults and supported parameters.
 
 ## Architecture
 
-```
-Browser  ──HTTP──►  Backend (FastAPI, port 8000)
-                        │  serves API + frontend static files
-                        │  SQLite scan store
-                        │  WS /api/agent/ws  ◄──WebSocket── Agent Daemon
-                        │                                       │
-                        │                                       ├── tree-sitter indexer
-                        │                                       ├── static analyzers
-                        │                                       ├── optional per-scan code graph MCP
-                        │                                       └── OpenCode serve/session service
-                        │
-                   Optional MCP Server (manual/externally managed)
-                        └── code query tools for model tasks
-```
+OpenDeepHole (Web UI name: DeepHole 2.0) audits C/C++ source using static
+candidates, threat analysis, model-backed auditing, false-positive review, and
+optional product-specific validation.
 
-- **Frontend**: React + TypeScript + Vite + Tailwind CSS (builds to `backend/static/`)
-- **Backend**: Python FastAPI (port 8000) — serves API + frontend static files, stores scan records in SQLite, manages WebSocket connections to agents
-- **Agent**: Python daemon (`deephole_client/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
-- **MCP Server**: `mcp_server/` remains available for standalone/manual source queries; the Agent does not auto-start or inject it, and only an explicitly enabled scan MCP is connected
-- **Deployment**: `start.sh` builds frontend and restarts uvicorn; Docker via `docker-compose.yml`
+- **Frontend**: React, TypeScript, Vite and Tailwind CSS; builds to `backend/static/`.
+  BrowserRouter routes and backend HTML fallback are described in
+  [development.md](docs/development.md#页面路由).
+- **Backend**: FastAPI APIs, authentication, scan metadata, Agent connections,
+  result storage and SSE. SQLite supports one Worker; PostgreSQL supports
+  coordinated multiple Workers. The backend discovers component metadata and
+  distributes resources but does not execute source analysis.
+- **Agent**: `deephole_client/` runs where the source lives. It receives commands
+  over an outbound WebSocket and reports events/results over HTTP.
+- **Task Agent**: `task_agent/` owns OpenCode Serve, scheduling, model leases,
+  Sessions, retries, permissions and usage. OpenCode-backed business operations
+  call the public `run_opencode_task()` facade. The Codex threat-analysis method
+  and explicitly Codex-dependent engines use their separate Codex integration.
+- **MCP**: CodeGraph and knowledge-base connections are optional per-scan
+  capabilities. The Agent does not automatically start `mcp_server/` as a fallback.
 
-## Agent — Connection Model (v2)
+See [architecture.md](docs/architecture.md) for data locations and source-data
+boundaries. Local source access does not imply that model requests or uploaded
+reports contain no source code. The checked-in Docker files currently cannot
+provide a working deployment without correction; see the
+[documented limitations](docs/getting-started.md#现有-docker-文件的限制).
 
-Agents connect **outward** to the web server via WebSocket; the server never opens connections to agents.
+## Agent protocol and recovery
 
-```
-Agent startup:
-  1. WebSocket connect to ws://<server>/api/agent/ws
-  2. Send  {"type": "hello", "name": "<agent-name>"}
-  3. Receive  {"type": "welcome", "agent_id": "...", "config": {...}}
-  4. Wait for commands
+The WebSocket endpoint is `/api/agent/ws`. The hello includes stable client
+identity, owner token, process session, capabilities, active executions and
+pending terminal reports; the welcome returns the assigned identity and managed
+configuration. Do not implement clients from a simplified name-only handshake.
+The Agent sends application heartbeats and expects ACKs; multi-Worker state and
+recovery use persistent execution ownership and revisions.
 
-Server → Agent commands (JSON over WebSocket):
-  {"type": "task",   "scan_id": "...", "project_path": "...", "checkers": [...], "scan_name": "..."}
-  {"type": "stop",   "scan_id": "..."}
-  {"type": "resume", "scan_id": "...", "project_path": "...", "checkers": [...], "scan_name": "..."}
-  {"type": "config", "config": {...}}   ← pushed immediately when config is saved in UI
+Web configuration changes are saved and pushed to a live Agent, or applied on
+reconnection. Provider changes drain existing logical tasks, publish the latest
+configuration, restart Serve and check health/model visibility before admitting
+new work. Running logical tasks retain their configuration through internal
+retries. CodeGraph changes similarly apply at future task-start boundaries.
 
-Agent → Server (HTTP POST, scan results):
-  POST /api/agent/scan/{id}/event         progress events
-  POST /api/agent/scan/{id}/vulnerability  one result per candidate
-  POST /api/agent/scan/{id}/finish         final status
-  POST /api/agent/scan/{id}/processed      resume checkpoint
-```
+Authoritative reports use `~/.opendeephole/report_outbox.sqlite3` until backend
+acknowledgement. Progress/logs are best effort. Preserve execution identity and
+revision checks when changing reconnect, resume or result delivery. See
+[client overview](deephole_client/README.md) and
+[production scaling](docs/production_scaling.md).
 
-**Online status** = WebSocket connection alive (no heartbeat needed).  
-Config update via `PUT /api/agent/{id}/config` is also pushed to the agent's live WS connection.
+## Scan execution
 
-## Agent — Scan Pipeline (`deephole_client/scanner.py`)
+`deephole_client/scanner.py` coordinates independent processes and mining engines:
 
-`scanner.py` is a platform coordinator only. It does not implement indexing,
-analysis, prompting, auditing, review, or validation logic:
+1. Resolve the selected files/directories. `code_scan_paths` is the actual union;
+   `code_scan_path` is their common startup directory.
+2. If this execution needs static analysis (`static_candidate` or `multi_version`),
+   build/reuse `<code_scan_path>/code_index.db`. The index covers the common
+   directory; candidates and checkpoints must still respect the selected union.
+3. Run enabled threat analysis alongside engines that do not depend on it.
+4. `static_candidate` runs static analysis then candidate auditing.
+5. `threat_pattern_audit` and the compatible `threat_audit` engine wait for valid
+   threat-analysis artifacts. The former groups by module/pattern; the latter
+   derives per-tree leaf/pattern tasks.
+6. Stream accepted results through `report_vulnerabilities()`. Confirmed issues
+   may enqueue independent FP-review and validation work before scanning finishes.
 
-```
-1. when a static-analysis engine runs, `run_code_graph_build()` creates/reuses
-   `<code_scan_path>/code_index.db`; other scans skip this step
-2. start the scan-local MCP gateway for source queries
-3. start `run_threat_analysis()` in the background when enabled
-4. `run_static_analysis()` consumes the existing index and returns candidates
-5. `run_candidate_audit()` consumes candidates and returns audit results
-6. `run_threat_audit()` consumes the threat-analysis result
-7. translate process JSON/events to backend DTOs and upload them
-```
+The default new-scan threat method is `opencode_lightweight_threat_analysis`.
+Native, compact, Codex lightweight and coverage-guided methods remain selectable.
+Native methods accept five base parameters plus optional `code_paths`; legacy
+five-parameter methods only support a single directory. Artifact formats and
+resume/fallback behavior are specified in the
+[threat-analysis README](deephole_client/threat_analysis/README.md).
 
-The `multi_version` engine is a combined special case: it scans and groups
-static candidates across 2--5 source trees, runs threat analysis on the first
-(baseline) tree, and passes those artifacts to the unchanged
-`threat_pattern_audit` engine for the baseline's single-version threat audit.
-Its generic `multi-version-vulnerability-audit` Skill must not be used for that
-baseline audit.  The existing cross-version root-cause matching and per-comparison
-version new/changed-threat audits remain part of the multi-version engine.
-Multi-version static candidate tasks resolve `checker.yaml.skill_name` through
-the same checker catalog as `static_candidate`, invoke that vulnerability-type
-Skill, and add inline multi-version guard/call-path comparison guidance; they do
-not invoke the generic multi-version Skill.
+Multi-version mode accepts 2–5 version scopes. Static groups use each Checker's
+vulnerability-specific Skill; baseline threat auditing reuses
+`threat_pattern_audit`. Comparison-version threat differences and cross-version
+root-cause matching use the multi-version Skill. Scan-level MCP is disabled.
 
-The business processes are independently runnable, expose exactly one public
-async `run_<process>(**kwargs)` entry, reject unknown keys, and document their
-accepted keys in their local README. Static analysis and candidate audit are
-implementation subpackages owned by
-`vulnerability_mining/engines/static_candidate/`, not top-level client
-packages. A process may import only its engine-owned modules, third-party
-packages, and the public `task_agent.run_opencode_task()` facade.
+Successful artifact/checkpoint reuse requires compatible scope and valid output.
+Scan/review work directories are retained; cancellation does not delete them.
+Do not confuse a completed main scan with completion of its independent review
+and validation queues. See [framework_development.md](docs/framework_development.md).
 
-**Static candidate controls**: DB-backed analyzers should use
-`scoped_functions(db, project_path)` so `code_scan_path` subdirectory scans do
-not parse whole-repo functions. Candidate descriptions should stay minimal;
-`pattern_filter` is owned by the candidate-audit process.
+## Component ownership and extension contracts
 
-**Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
-**Index storage**: `code_index.db` is stored directly in the resolved scan root
-(`<code_scan_path>/code_index.db`) and contains only that directory. It is built
-only when the current execution runs `static_candidate` or `multi_version`.
-Subdirectory scans ignore (and never delete) a legacy project-root index;
-re-scanning the same source scope reuses the complete scan-local index.
+- Keep source-index construction in `code_graph_build/`. Consumers use their own
+  read-only index readers. Universal Ctags with JSON support is required;
+  Windows Agent bundles include Ctags. Incomplete-coverage indexes are usable for
+  the current run but rebuilt on the next use.
+- Static analysis, candidate auditing and unified rules belong to
+  `vulnerability_mining/engines/static_candidate/`.
+- Keep methods, schemas and Skills in their owning process/engine directories.
+  Platform adapters bind context and report results. New standalone processes
+  must not depend on backend orchestration or other processes' internals.
+- Process facades expose `async run_<process>(**kwargs)` with strict accepted
+  keys. Engine/method/validator manifests and signatures are documented in their
+  local READMEs. Engines report vulnerabilities through the callback; a legacy
+  `run()` return field named `vulnerabilities` is ignored.
+- FP-review methods process exactly one vulnerability. `adversarial` uses
+  `prove_bug`, `prove_fp`, `final_judge`; `fp_check` uses its manifest stages.
+  Both manifests use `max_concurrency: 0` to follow current scan model capacity.
+  Only valid final TP/FP verdicts count as completed review results.
 
-## Agent — FP Review Process (`deephole_client/fp_review/`)
+### Checker rules
 
-FP-review methods are directory-owned under `fp_review/methods/<method_id>/`.
-Each directory contains `method.yaml`, one exact `async def run(**kwargs)` entry
-in `method.py`, and its own optional `skills/`. The runtime discovers valid
-directories and exposes the common `run_fp_review(**kwargs)` facade.
+A rule lives at `rules/<name>/` with `checker.yaml`, optional `analyzer.py` and
+`skills/<skill-name>/SKILL.md`. Backend discovery is metadata-only. Transport
+archives retain `static/` and `audit/` roots; current Agents reconstruct a unified
+rule tree. Flat rule-root `SKILL.md` is not discovered.
 
-- **Auto-trigger on completion**: when a scan finishes with status `complete` and ≥1 confirmed vulnerability, the backend automatically starts FP review at the end of `agent_finish_scan` (no manual click). Gated by config `fp_review.auto_on_complete` (default `true`) and skipped if the scan already has an FP review job (avoids duplicate triggers on resume/repeat finish). The shared trigger logic lives in `backend/api/scan.py::_start_fp_review` (used by both the manual `POST /api/scan/{id}/fp_review` endpoint and the auto path; `raise_on_error=False` on the auto path so a blocked review never breaks scan finish). The manual button is retained for re-runs / catching up unreviewed candidates.
-- **Vulnerability-grained contract**: every method call receives exactly one `vulnerability`, its `vuln_index`, `project_path`, and the scan's `code_scan_path`. The platform owns the scan-level queue and methods must not aggregate or modify other vulnerabilities.
-- **Manifest-driven behavior**: `method.yaml` owns the label, description, default selection, maximum concurrency, stage keys, and user-facing documents. The backend publishes the discovered catalog, freezes a method snapshot into each scan, and the frontend renders that snapshot instead of hard-coded method metadata.
-- **Built-ins**: `adversarial` runs optional `history_match`, then `prove_bug` → `prove_fp` → `final_judge`; `fp_check` independently applies claim/context, standard or deep verification, and gate review to each vulnerability.
-- **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
-- **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
-- **Detail UI** (`frontend/src/components/VulnerabilityList.tsx`): master-detail layout — left a compact issue list (file:line / function / type / severity + AI & FP-review status badges, variant/match markers) with severity & type filters on top; right the selected issue's detail, rendering `description`, `ai_analysis`, and manifest-declared FP stage output as Markdown. **Default view shows only "issues"** — candidates that AI audit left unconfirmed (`confirmed=false`) or that FP review marked `fp` are hidden by default; a "显示全部" toggle reveals them.
+An Analyzer must inherit `BaseAnalyzer`, be named `Analyzer`, and use a
+`vuln_type` matching its manifest. `find_candidates(project_path, db=None)` returns
+`Iterable[Candidate]`; DB-backed rules should use `scoped_functions(db, project_path)`.
+Keep descriptions neutral and place the relevant expression in `metadata.subject`
+for the audit prompt. The shared static dedup key is
+`(file, line, function, vuln_type)`; it does not merge by family or subject.
+The audit pattern filter has separate keys described in
+[checker-development.md](docs/checker-development.md).
 
-## Unified Static Candidate Rules
+## Task Agent conventions
 
-Built-in static recall and candidate auditing share one rule directory:
+- Use `from task_agent import run_opencode_task`; business code must not manage
+  Serve or Session API calls directly. Synchronous implementations can be bridged
+  with `run_sync_component()`.
+- Put first-response format requirements in the user prompt. `output_schema`
+  governs local validation and does not automatically rewrite the initial prompt.
+  File-authoritative workflows instead use `post_session_validator`.
+- Use `file_write_allowlist` for extra writable/retained paths (`writable_paths`
+  is a compatibility alias). Local reads are globally allowed for paths accessible
+  to the process; writes are constrained by stable artifact roots and explicit
+  allowances. Artifact roots are not a per-scan write sandbox. Shell commands
+  require explicit binding and `question` is disabled.
+- Model capacity is the sum of enabled, valid model rows' `max_concurrency`.
+  There is no separate global concurrency gate. Priority is validation 90,
+  FP review 80, threat analysis/mining 50; equal priority uses FIFO without
+  preempting running work. Capability, time windows and temporary quota state
+  constrain eligibility.
+- Managed Agent configuration is v11, including `llm_providers`; standalone
+  Task Agent YAML has its own v2 schema. Keep credentials out of scan snapshots
+  and reports.
 
-```
-deephole_client/vulnerability_mining/engines/static_candidate/rules/<name>/
-├── checker.yaml
-├── analyzer.py
-├── optional static rule files
-└── skills/<skill-name>/
-    ├── SKILL.md
-    ├── optional SCENARIOS.md
-    └── optional references/
-```
+Detailed API parameters, return fields, lifecycle and retry contracts live in
+[opencode_task_service.md](docs/opencode_task_service.md).
 
-The backend registry is metadata-only. It creates a transport archive with
-explicit `static/` and `audit/` roots for rolling compatibility with older
-Agents; current clients reconstruct one scan-local rule tree. Backend code must
-never import an analyzer or process Skill. Discovery accepts only nested
-`skills/<skill-name>/SKILL.md`; legacy rule-root `SKILL.md` files are ignored.
-
-### analyzer.py conventions
-
-- Class name **must** be `Analyzer`
-- **Must** inherit `deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base.BaseAnalyzer`
-- `vuln_type` string **must** match the `name` field in `checker.yaml`
-- `find_candidates(project_path: Path, db=None) -> Iterable[Candidate]`; `db`
-  is a read-only `CodeIndexReader`
-- Inside a rule package use `from ...static_analysis.base import BaseAnalyzer,
-  Candidate, scoped_functions`
-- `Candidate.file` should be relative to project root, `Candidate.description` is passed to AI as context
-- DB-backed analyzers should iterate `scoped_functions(db, project_path)` rather than `db.get_all_functions()`
-- Put the root variable/expression/function into `Candidate.metadata["subject"]` when possible; it drives cross-rule description merging and same-pattern filtering
-- No `analyzer.py` = emit one project-level candidate for an OpenCode checker
-
-## Development Commands
+## Development and changes
 
 ```bash
-# Backend
-pip install -r requirements.txt
-python3 -m mcp_server.server                              # Start MCP Server standalone
-uvicorn backend.main:app --reload --host 0.0.0.0          # Start backend (hot reload)
-
-# Agent (separate machine or same machine)
-pip install -r requirements-agent.txt
-python3 -m deephole_client.main --server http://localhost:8000      # Connect to backend
-
-# Local checker development without backend
+python3 -m pip install -r requirements.txt -r requirements-agent.txt
+python3 -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+python3 -m deephole_client.main --server http://localhost:8000
+npm --prefix frontend ci
+npm --prefix frontend run dev
+npm --prefix frontend run build
 PYTHONPATH=. python3 tools/checker_test.py memleak /path/to/source --min-candidates 1
-PYTHONPATH=. python3 tools/checker_test.py memleak /path/to/source --audit --audit-limit 1
-
-# Frontend
-cd frontend && npm install
-npm run dev                   # Dev server with API proxy to localhost:8000
-npm run build                 # Build to ../backend/static/
-
-# One-shot build + restart (Linux)
-./start.sh                    # Builds frontend, stops uvicorn, starts uvicorn
-
-# Docker
-docker-compose up --build
-
-# Logs
-tail -f logs/opendeephole.log
+PYTHONPATH=. python3 -m pytest -q tests/test_scan_model_guard.py
+git diff --check
 ```
 
-## Key Conventions
-
-- All file path parameters in MCP tools must be validated with `pathlib.Path.resolve()` + prefix check to prevent directory traversal
-- Config is loaded from `config.yaml` at project root, accessed via `backend/config.py`
-- Logging uses `backend/logger.py` — get logger with `get_logger(__name__)`
-- Pydantic models for all API request/response in `backend/models.py`
-- `vuln_type` is a plain string (not enum) matching the checker directory name
-- One Agent-wide OpenCode workspace lives at `~/.opendeephole/opencode_workspace`; scans/reviews/validators bind scope and permissions per task, while API `directory` points at the real code root
-- The self-contained Task Agent framework lives in `task_agent/`; the seven backend-free business processes live under `deephole_client/`, and `backend/` must not own client execution
-- OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, raw permissions, CLI config, or global concurrency; `run_opencode_task(file_write_allowlist=...)` is the preferred caller-facing path permission and retention override, with `writable_paths` kept as a compatibility alias, while the Agent computes the stable boundary centrally
-- JSON Schema rules are appended to the user prompt instead of the system prompt; framework-generated model instructions are Chinese, and Schema failures are corrected in the same session first; `attempt` counts fresh-session retries that release and reacquire a model Lease
-- Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
-- Model-pool scheduling (`task_agent/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
-- **Always update both README.md and CLAUDE.md when making structural or architectural changes**
-
-## Code Graph Build
-
-`deephole_client/code_graph_build/` owns all writable index-building code.
-Its only public entry is `run_code_graph_build(**kwargs)`. Static analysis
-reads the finished SQLite database through its own read-only
-`vulnerability_mining/engines/static_candidate/static_analysis/index_reader.py`;
-MCP tools use `mcp_server/index_reader.py`.
-Neither consumer imports the graph-build implementation.
-
-Indexing requires `ctags` from Universal Ctags with JSON output support. The Windows Agent package includes `ctags-p6.2.20260517.0-x64/ctags.exe`; `run_agent.bat` and Git Bash/MSYS/Cygwin runs of `run_agent.sh` prepend that directory to `PATH`. Linux/macOS still require a system Universal Ctags install. Missing or incompatible tools are treated as hard indexing errors.
-
-The client indexes the resolved `code_scan_path` on demand only when the current
-execution includes a static-analysis consumer. Static analysis opens the
-returned index path read-only. The standalone MCP server remains an optional,
-separate consumer and is not loaded by the Agent by default.
-
-The legacy `POST /api/upload` endpoint only stores and extracts source archives;
-it does not execute code-graph construction in the backend.
-
-## Project Structure
-
-```
-backend/
-  api/
-    agent.py      — WebSocket endpoint, agent registry, scan event receivers
-    scan.py       — Scan CRUD, dispatches commands to agents via WebSocket; report export (CSV `/report`, per-vuln Markdown `/vulnerability/{idx}/report`, all-confirmed zip `/report.zip`)
-    checkers.py   — GET /api/checkers
-    upload.py     — POST /api/upload (legacy server-hosted scan flow)
-    feedback.py   — Feedback CRUD
-  registry.py     — Checker metadata and transport resource locations only
-  store/          — SQLite scan store (scans, vulnerabilities, events, feedback, processed keys)
-  models.py       — All Pydantic models
-  config.py       — AppConfig loaded from config.yaml
-  logger.py       — Rotating file + console logger
-
-task_agent/                — Installable task/model/session/Serve framework
-
-deephole_client/
-  main.py         — Entry point; WebSocket client loop with auto-reconnect
-  server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
-  scanner.py      — Coordinates indexing, standalone processes, and platform reporting
-  code_graph_build/, threat_analysis/, fp_review/, vulnerability_validation/
-                  — Backend-free async processes with standalone CLIs
-  vulnerability_mining/engines/static_candidate/
-    static_analysis/, candidate_audit/, rules/
-                  — Static-candidate implementation and unified rule tree
-  vulnerability_mining/engines/threat_audit/
-    runner.py, audit_schema.py, engine.py
-                  — Threat-audit process and platform engine adapter
-  git_history.py  — Mines git-history security-fix patterns (one LLM call per commit)
-  variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
-  reporter.py     — HTTP client: pushes events/results/git-history to backend
-  task_manager.py — In-memory task registry with cancel_event per scan
-  config.py       — AgentConfig, load_config(), apply_remote_config()
-  opencode_integration.py — Generic Task Agent host/runtime adapter
-  skills/         — Only non-process client skills
-
-mcp_server/       — Standalone/manual MCP source-query tools and project-id routing
-frontend/         — React + TypeScript + Vite + Tailwind CSS
-config.yaml       — Server-side settings (ports, storage, logging, opencode, git_history, fp_review)
-agent.yaml        — Agent-side settings (server_url, agent_name, opencode, fp_review_cli, git_history)
-```
+Use focused tests for the changed layer; real model/MCP and PostgreSQL tests need
+their corresponding environment. `start.sh` rebuilds the frontend and stops
+matching Uvicorn processes before restarting; use it only when a restart is intended.
+Always update README.md and CLAUDE.md for structural or architectural changes,
+and keep detailed contracts in the owning documentation. Preserve unrelated work
+and limit staging to the requested change. Documentation-only work must not alter
+runtime Skill prompts, code or configuration files.

@@ -53,10 +53,11 @@ python -m venv .venv
 
 仓库保留了 [Dockerfile](../Dockerfile) 和 [docker-compose.yml](../docker-compose.yml)，Compose 声明 PostgreSQL 16、持久卷、8000 端口和 4 个后端 Worker，但当前镜像的 `COPY` 清单未覆盖完整后端运行及 Agent 分发所需资源：
 
+- `COPY skills/ ./skills/` 引用的根目录 `skills/` 已不存在，按当前源码直接构建会在复制阶段失败。
 - 缺少 `deephole_client/`、`task_agent/`、`codex_sdk/`；其中后端扫描 API 已直接导入 `deephole_client.scan_modes`。
 - 缺少 `agent.yaml`、`run_agent.sh`、`run_agent.bat`、`requirements-agent.txt` 和包内 Windows Ctags 目录，无法生成完整 Agent 下载包。
 
-因此当前版本不能仅运行 `docker compose up --build` 就完成可用部署。本文使用完整源码部署；自建镜像时需补齐上述资源，并为多个 Worker 配置共享的 `auth.secret_key`。
+因此当前版本不能仅运行 `docker compose up --build` 就完成可用部署。本文使用完整源码部署；自建镜像时需修正失效的复制路径、补齐上述资源，并为多个 Worker 配置共享的 `auth.secret_key`。
 
 Compose 的 `OPENDEEPHOLE_POSTGRES_PASSWORD` 与连接串中的密码是两个独立配置，修改时必须保持一致。Compose 中保留的 `OPENCODE_MODEL` 不能代替 Web 中的 Agent 模型池配置。
 
@@ -88,7 +89,7 @@ brew install universal-ctags
 
 Windows 下载包包含 `ctags-p6.2.20260517.0-x64/ctags.exe`，启动脚本优先使用它。Git Bash/MSYS/Cygwin 下的 `run_agent.sh` 同样优先使用包内版本。启动脚本会检查 Ctags 版本与 JSON 输出能力，检查失败会退出。
 
-在 Agent 上安装并配置可用的 OpenCode 兼容程序。可执行文件可以是 `opencode`、`nga` 或完整路径；通过「客户端配置」的 `base.executable` 选择。模型地址和凭据从 Agent 本机的有效 OpenCode 配置读取，配置发现与合并规则见[配置参考](configuration.md#opencode-运行配置)。
+在 Agent 上安装可用的 OpenCode 兼容程序。可执行文件可以是 `opencode`、`nga` 或完整路径；通过「客户端配置」的 `base.executable` 选择。模型地址和凭据可来自 Agent 本机 OpenCode 配置，也可在 Web 添加 LLM API 并下发至 Agent 私有配置；配置发现、合并和应用规则见[配置参考](configuration.md#opencode-运行配置)。
 
 ### 启动
 

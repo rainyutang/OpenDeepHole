@@ -30,8 +30,8 @@
 准备两个全新的专用测试数据库和一个基线代码目录。以下环境变量只能填写测试库地址：
 
 ```console
-OPENDEEPHOLE_STORAGE_BENCHMARK_DSN=<空测试库A> python scripts/benchmark_scan_storage.py --source <基线目录> --legacy --output before.json
-OPENDEEPHOLE_STORAGE_BENCHMARK_DSN=<空测试库B> python scripts/benchmark_scan_storage.py --output after.json
+OPENDEEPHOLE_STORAGE_BENCHMARK_DSN='<空测试库A>' python scripts/benchmark_scan_storage.py --source '<基线目录>' --legacy --output before.json
+OPENDEEPHOLE_STORAGE_BENCHMARK_DSN='<空测试库B>' python scripts/benchmark_scan_storage.py --output after.json
 ```
 
 Windows PowerShell 先设置 `$env:OPENDEEPHOLE_STORAGE_BENCHMARK_DSN`，再运行后面的 Python 命令。脚本拒绝已存在业务表的目标，不清空已有数据库。输出 JSON 同时保存样本数、中位数、p95、客户端 CPU、数据规模及 PostgreSQL 版本。原始测量附后：

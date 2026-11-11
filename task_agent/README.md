@@ -59,7 +59,7 @@ result = await run_opencode_task(
 | 参数 | 类型 | 必填/默认值 | 说明 |
 | --- | --- | --- | --- |
 | `task_name` | `str` | 必填 | 任务名称，去除首尾空白后不能为空。它会用于队列记录、日志、Serve 会话标题及看板中的细分任务识别。 |
-| `task_type` | `str` | 必填 | 任务类型，用于选择对应的模型策略、调度优先级和超时配置；仅接受下文列出的值。 |
+| `task_type` | `str` | 必填 | 任务类型，用于选择对应的模型策略、调度优先级和超时配置；稳定类型与内部辅助类型见下文。 |
 | `prompt` | `str` | 必填 | 发送给模型的任务提示词，不能是空字符串或只包含空白。组件会原样发送该字符串，不会因 `output_schema` 自动追加或改写内容。 |
 | `required_capability` | `Literal["low", "high"]` | 必填 | 模型池所需的能力等级，只接受 `low` 或 `high`。 |
 | `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会先解析模型最终文本，必要时再检查本次消息由内置文件工具写入的文件，并将匹配值写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
@@ -82,7 +82,7 @@ result = await run_opencode_task(
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 使用当前执行上下文 | 可选的本次调用取消信号覆盖。 |
 
-返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`。即使 `structured` 来自文件，`text` 也始终是 LLM 最后一次文本输出，不会替换成文件内容。
+返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`，以及可选的 `token_usage` 用量快照。即使 `structured` 来自文件，`text` 也始终是 LLM 最后一次文本输出，不会替换成文件内容。
 
 已有业务实现若提供同步入口，不需要为了接入平台改成异步，也不要在同步代码里感知宿主事件
 循环。外层异步门面使用 `await run_sync_component(sync_entry, **kwargs)` 即可；该桥会在独立
@@ -156,9 +156,9 @@ Task Agent 任务及其 Session，不会停止由其它扫描共享的 Serve 或
 
 `json_repair_output_prompt` 只在独立格式匹配 Session 中使用：非空文本追加在 Schema 和原始结果之前，说明 JSON 字段的内容表达格式；JSON 外层仍只返回一个 JSON 值，字段内可以保留要求的 Markdown。该要求不允许补写缺失事实。组件不会将原始任务、系统提示词或 `invalid_json_retry_prompt` 自动传入格式匹配 Session，也不会据此修改任何业务提示词。未设置时修复提示词保持原文；未启用 `output_schema` 或关闭 JSON 恢复时，此参数不触发任何额外调用。
 
-`task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型只有 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；未知值会在提交前被拒绝。Agent 自身使用的辅助任务类型属于内部实现，不作为公共调用指导的一部分。
+`task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型为 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；实现还接受内部辅助类型 `git_history`、`variant_hunt`、`memory_api_discovery`、`skill_create`，其它值会在提交前被拒绝。新业务应优先使用稳定类型。
 
-任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`fp_review=60`、`threat_analysis=50`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行，因此威胁分析和漏洞挖掘可以按实际入队顺序共享模型容量。
+任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`fp_review=80`、`threat_analysis=50`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行，因此威胁分析和漏洞挖掘可以按实际入队顺序共享模型容量。
 
 漏洞挖掘中的候选点审计、项目级审计、威胁审计和漏洞根因去重都传
 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、

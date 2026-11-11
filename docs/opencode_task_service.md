@@ -1,20 +1,32 @@
 # Task Agent 公共任务接口
 
-DeepHole 2.0 中所有模型任务统一调用 `task_agent.run_opencode_task()`。业务组件不直接启动 CLI，不访问任务队列，也不自行创建、查询、取消或删除 OpenCode Session。
+DeepHole 2.0 的 OpenCode 模型任务统一调用 `task_agent.run_opencode_task()`。业务调用方不直接启动 Serve，也不自行创建、查询、取消或删除 OpenCode Session。Codex 威胁分析和声明 `requires_codex` 的引擎使用独立 Codex 通道，见[配置参考](configuration.md#codex-运行配置)。
 
-> 模型任务只使用 OpenCode 兼容 serve 与 OpenCode Session，没有 LLM API 降级路径。
+> 此接口只使用 OpenCode 兼容 serve 与 OpenCode Session，没有直接调用 LLM API 的降级路径。
 
 Agent 启动时只注册一次 DeepHole 2.0 的后端配置、workspace 与 MCP/SKILL 适配，不创建 Serve 进程。首次 `run_opencode_task()` 会惰性创建共享任务服务和 Serve 管理单例；组件在真正发送 prompt 前检查 Serve，按现有规则启动、复用兼容进程或恢复异常进程。没有后端宿主绑定时，公共函数改从组件自己的 YAML 配置自举，仍不存在额外的组件 CLI。
 
 ## 唯一调用接口
+
+以下示例假定宿主已绑定项目和工作目录；独立使用时设置 `config_path`。候选位置与输出 Schema 应替换为实际业务契约。
 
 ```python
 import json
 
 from task_agent import run_opencode_task
 
+RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confirmed": {"type": "boolean"},
+        "report": {"type": "string"},
+    },
+    "required": ["confirmed", "report"],
+    "additionalProperties": False,
+}
+
 prompt = (
-    "使用 `npd` 技能审计指定候选点。"
+    "使用 `npd` 技能审计 src/parser.c:42 的 parse_request 指针解引用候选点。"
     "\n\n请只返回符合下方 JSON Schema 的 JSON：\n"
     + json.dumps(RESULT_SCHEMA, ensure_ascii=False, indent=2)
 )
@@ -42,6 +54,7 @@ result = await run_opencode_task(
     required_bash_success_markers=None,
     post_session_validator=None,
     post_session_validation_retry_count=0,
+    lease_state_callback=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -71,16 +84,17 @@ result = await run_opencode_task(
 | `required_bash_success_markers` | `Mapping[str, str] \| None` | `None` | 可选的完整命令到单行成功标记映射；只在 Hook 无法取得退出码时使用，键必须属于必需命令 |
 | `post_session_validator` | 无参数 callable 或 `None` | `None` | 每次 Session 消息结束后执行；`None`/空白为通过，非空字符串为失败诊断，awaitable 会被等待 |
 | `post_session_validation_retry_count` | `int` | `0` | 宿主校验失败后向原 Session 回传诊断并请求修正的次数；耗尽后才进入 fresh Session 重试 |
+| `lease_state_callback` | callable 或 `None` | `None` | 真实进入模型等待队列时接收 `queued`，取得租约后接收 `running`；立即取得租约不会先发虚假排队状态，回调异常只记录日志 |
 | `session_id` | `str \| None` | `None` | 为空时创建 Session；非空时续写已有 Session |
 | `config_path` | `str \| PathLike \| None` | `None` | 仅独立模式使用的组件 YAML 路径；后端模式禁止覆盖宿主配置 |
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`allowed_bash_commands` 与 `required_bash_commands` 是仅有的 shell 例外入口：两者都只执行声明的完整命令，前者不要求执行，后者还执行完成审计；`bash_command_match_mode` 控制识别方式，其它 `required_bash_*` 参数只控制必需命令恢复。`post_session_validator` 独立于模型是否执行命令，在每次消息结束后由宿主校验产物并可把诊断回传同一 Session。上述参数都不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只声明只读意图，当前全局读取权限不依赖该参数。`allowed_bash_commands` 与 `required_bash_commands` 是仅有的 shell 例外入口：两者都只执行声明的完整命令，前者不要求执行，后者还执行完成审计；`bash_command_match_mode` 控制识别方式，其它 `required_bash_*` 参数只控制必需命令恢复。`post_session_validator` 独立于模型是否执行命令，在每次消息结束后由宿主校验产物并可把诊断回传同一 Session。上述参数都不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。其中 `serve_session_id` 始终回填为生成该结果的最终 OpenCode `session_id`；问题详情页会把它直接显示在对应输出来源中，历史结果缺少该字段时保持兼容。
 
-`task_type` 直接传字符串，不提供枚举。面向业务调用者的稳定类型如下；其它公共调用值会立即抛出 `ValueError`：
+`task_type` 直接传字符串，不提供枚举。面向业务调用者的稳定类型如下。实现还接受内部辅助类型 `git_history`、`variant_hunt`、`memory_api_discovery`、`skill_create`；除此之外的值会抛出 `ValueError`：
 
 | 字符串 | 用途 |
 | --- | --- |
@@ -205,7 +219,7 @@ model_pool:
 | `schema_version` | 必填，当前为 `2` | standalone YAML 的 Schema 版本。v1 会按下述兼容规则迁移；其它版本拒绝加载。 |
 | `context` | 必填 | 固定本次 standalone 组件生命周期使用的目录上下文。 |
 | `serve` | 必填 | Serve 进程、默认执行策略和原生 OpenCode 配置。 |
-| `model_pool` | 必填 | 显式模型列表及全局调度上限。 |
+| `model_pool` | 必填 | 显式模型列表；总容量由有效模型的并发额度求和。 |
 | `context.project_dir` | 必填，必须是已有目录 | OpenCode Session 的 `directory`，也是真实源码根目录。模型可读取该目录，但 Task Agent 不允许文件编辑工具写入。 |
 | `context.work_dir` | 必填，不存在时创建 | 本次独立组件固定的可写任务目录。模型生成的补丁、PoC、报告等任务产物应写在这里。 |
 | `context.workspace_dir` | 必填，不存在时创建 | Serve 的稳定启动目录和组件 workspace。运行时会在这里生成 `opencode.json`，也适合保存共享 Skill；不要把每次任务的业务产物写在这里。 |
@@ -263,9 +277,9 @@ Skill 有两种常用放置方式：
 1. 项目专用 Skill 放在 `<project_dir>/.opencode/skills/<skill-name>/SKILL.md`，由以 `project_dir` 为 Session 目录的 OpenCode 按项目发现。
 2. 多个任务共享的 standalone Skill 推荐放在 `<workspace_dir>/.opencode/skills/<skill-name>/SKILL.md`，并将 `<workspace_dir>/.opencode/skills` 的绝对路径写入 `serve.opencode_config.skills.paths`。
 
-standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导读取权限，使 Skill 内的引用资源一并可读。
+standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Skill 内的引用资源随当前全局本地读取策略可读，`skills.paths` 负责 Skill 发现，不构成读取沙箱。
 
-完整 DeepHole 2.0 Agent 在首次启动 Serve 前（包括模型列表触发的启动）自动安装全部业务 Skill，固定位置为 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。当前随包提供 28 个：18 个候选审计、4 个去误报、4 个威胁分析、1 个多版本审计和 1 个 Skill 创建功能；数量随业务目录新增自动变化，不读取开发机的历史安装清单。安装按 `SKILL.md` frontmatter 名称组织，保留 `references/`、`agents/`、`assets/`、`scripts/` 等运行资源，并排除各层目录中的 `SCENARIOS.md` 介绍文件；源目录和下发包仍保留该文件用于介绍页。启动或规则同步时会一并清理本次安装 Skill 的旧 `SCENARIOS.md`，保留同步版本和本地续扫的版本选择规则。启动日志中的 `OpenCode Skills ready` 会显示内置数量与绝对目录。
+完整 DeepHole 2.0 Agent 在首次启动 Serve 前（包括模型列表触发的启动）自动安装全部业务 Skill，固定位置为 `~/.opendeephole/opencode_workspace/.opencode/skills/<name>/`。安装范围由 `deephole_client/skill_catalog.py::builtin_skill_sources()` 从规则、复核方法、威胁分析方法、挖掘引擎和内置创建器目录发现；数量随目录变化，不读取开发机的历史安装清单。安装按 `SKILL.md` frontmatter 名称组织，保留 `references/`、`agents/`、`assets/`、`scripts/` 等运行资源，并排除各层目录中的 `SCENARIOS.md` 介绍文件；源目录和下发包仍保留该文件用于介绍页。启动或规则同步时会一并清理本次安装 Skill 的旧 `SCENARIOS.md`，保留同步版本和本地续扫的版本选择规则。启动日志中的 `OpenCode Skills ready` 会显示内置数量与绝对目录。
 
 宿主通过 `OpenCodeHostBindings.fixed_skill_root` 绑定固定目录，此时任务上下文中的 `skill_paths` 只检查所需名称已经安装，不向运行配置追加路径。任务之间切换 Skill 不改变 `skills.paths`，不会因此重启 Serve。服务端新下发的规则包在模型任务进入前安装；内容变化时暂停新的 Serve 会话进入，等待已有会话完成，再发布完整目录并让下一次调用重新启动 Serve、发现更新后的 Skill。相同内容不会重复刷新。本地续扫仅补齐缺失 Skill，使用统一目录的当前版本，不将旧扫描快照覆盖回来。
 
@@ -357,7 +371,7 @@ Task Agent 的进度行统一使用下面三个头字段：
 
 ## 返回值
 
-接口只返回以下字段：
+`OpenCodeResult` 返回以下字段：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -366,6 +380,8 @@ Task Agent 的进度行统一使用下面三个头字段：
 | `text` | 成功时始终为 LLM 最后一次文本输出，即使 `structured` 来自文件也不会替换为文件内容；失败或超时时为可直接展示的原因 |
 | `structured` | 匹配 `output_schema` 的解析值；未传 Schema 或未成功时固定为 `None` |
 | `model` | 最终实际响应的 `provider/model` |
+| `output_source` | 可序列化的输出来源，含最终业务 `serve_session_id` 等信息 |
+| `token_usage` | 可选 Token 用量快照；未采集时为 `None` |
 
 ```python
 if result.status == "success":
@@ -388,7 +404,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，但命令必须在最后一次受管文件写入后完成，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。
 - `bash_command_match_mode`：默认 `exact`。轻量分析显式选择 `bound_python_script`，允许 `python`、`python3`、对应 `.exe` 名称或宿主 Python 绝对路径直接调用绑定脚本；脚本绝对路径按宿主平台规范化匹配，同名其它路径不能命中。前置 Hook 将命令原地替换为当前任务的标准命令，所有产物路径和参考目录均使用宿主已绑定的值，模型遗漏或改写的参数不会参与实际执行；父子 Session 继承同一绑定，并发任务各自独立。同一脚本不能声明多个不同的标准命令，旧绑定默认精确匹配。
 - `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
-- `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令、无需模型执行校验命令。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
+- `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令。提供了 `allowed_bash_commands` 时，纠正提示要求模型修改产物后执行这些绑定命令并通过；未提供时仅由宿主复验。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
 - `scan_id`、`execution_kind` / `execution_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。执行身份只用于精确取消一个扫描、去误报或验证作业；共享同一 Serve 的其它任务不会被终止。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，并保留任务路径合并兼容性。
 - `skill_paths`：完整 Agent 只用它检查固定目录中是否已安装所需 Skill；独立 Task Agent 未绑定 `fixed_skill_root` 时仍提供任务级路径注册。
@@ -439,7 +455,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 完成记录上报与模型额度释放分开执行：释放时在内存保留待上报记录并唤醒后续任务，后台线程再写入 Agent 的持久 outbox；写入失败保留记录并重试，日志输出 `OpenCode completion report pending`。尚未写入 outbox 的记录仍依赖当前 Agent 进程，正常退出最多等待 10 秒落盘，失败会明确记录。outbox 的入队、领取、确认和重试操作均离开事件循环执行；领取或发送被取消时归还该次领取，迟到清理不能影响后续领取。相同 Lease 的重复或迟到释放不重复计数，也不能释放下一次尝试的额度。Task Service 的收尾异常会记录错误并结束结果与 Session 等待，不留下永远运行的任务。
 
-扫描级模型池发布器由主扫描和各去误报任务共同持有，最后一个持有者结束后才停止。复核入队立即登记 `planned_tasks`，申请模型时进入 `queued_tasks` 并隐藏计划占位，取得额度后消费占位并进入 `active_tasks`；失败、取消及没有实际发起模型调用也会清理占位。每个任务携带 `execution_kind`、`execution_id`、`execution_revision` 和 `agent_session_id`，复核发布器以 `execution_owner={kind: "fp_review", id: review_id, revision: ...}` 校验自身身份。服务端在主扫描完成、出错或续扫时只移除主扫描的运行状态，保留仍有效的独立复核；用户停止整个扫描或 Agent 离线取消复核时同步清除。GET/SSE 顶层仍使用主扫描版本，防止独立复核版本误触发前端的旧轮次过滤。此协议需同步更新后端和 Agent，不需要数据库迁移。
+扫描级模型池发布器由主扫描、各去误报和独立验证任务共同持有，最后一个持有者结束后才停止。复核入队立即登记 `planned_tasks`，申请模型时进入 `queued_tasks` 并隐藏计划占位，取得额度后消费占位并进入 `active_tasks`；失败、取消及没有实际发起模型调用也会清理占位。每个任务携带 `execution_kind`、`execution_id`、`execution_revision` 和 `agent_session_id`，复核发布器以 `execution_owner={kind: "fp_review", id: review_id, revision: ...}` 校验自身身份。服务端在主扫描完成、出错或续扫时只移除主扫描的运行状态，保留仍有效的独立复核与验证；对应执行终止时才清理其瞬时任务。GET/SSE 顶层仍使用主扫描版本，防止独立复核版本误触发前端的旧轮次过滤。此协议需同步更新后端和 Agent，不需要数据库迁移。
 
 JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invalid_json`、`schema_mismatch`，独立格式匹配判定无法无损转换时另记 `source_unrelated`。诊断不会持久化模型原始回复、目标 Schema 或字段路径；普通终态错误会保存 Task Agent 已规范化且长度受限的安全错误说明。旧模型池历史没有 `session_events` 时继续使用最终 `serve_session_id` 兼容展示，无法反推已丢失的中间 Session。
 
@@ -471,9 +487,9 @@ OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Tas
 
 fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
 
-Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；威胁分析外层仍只保留一次增量恢复加一次 clean fallback，不额外叠加业务层循环。
+Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；轻量级威胁分析外层仍只保留一次所选方法执行（可复用完整成功检查点）及失败后的一次 clean fallback，不额外叠加业务层循环。
 
-只有预算耗尽后的超时、主动取消和没有可用模型会成为终止结果：
+重试耗尽或遇到不可重试错误后结束任务；主动取消直接传播：
 
 - 最后一次仍超时时返回 `status="timeout"`，原因位于 `text`，并保留最后创建的 Session ID。
 - 最终失败返回 `status="failure"`，原因位于 `text`。
@@ -511,16 +527,20 @@ continued = await run_opencode_task(
 
 ## 并发调用
 
-独立任务可直接用 `asyncio.gather()` 并发；它们各自创建 Session，并受同一个模型池限制：
+独立任务可直接用 `asyncio.gather()` 并发；它们各自创建 Session，并受同一个模型池限制。下面复用上例的 `RESULT_SCHEMA`，实际调用应提供待验证报告和各自的输出契约：
 
 ```python
-code_prompt += (
+import asyncio
+
+code_prompt = (
+    "分析 src/parser.c 中 parse_request 的代码可达性。"
     "\n\n请只返回符合下方 JSON Schema 的 JSON：\n"
-    + json.dumps(CODE_SCHEMA, ensure_ascii=False, indent=2)
+    + json.dumps(RESULT_SCHEMA, ensure_ascii=False, indent=2)
 )
-exploit_prompt += (
+exploit_prompt = (
+    "分析 src/parser.c 中 parse_request 的漏洞利用条件。"
     "\n\n请只返回符合下方 JSON Schema 的 JSON：\n"
-    + json.dumps(EXPLOIT_SCHEMA, ensure_ascii=False, indent=2)
+    + json.dumps(RESULT_SCHEMA, ensure_ascii=False, indent=2)
 )
 
 code_result, exploit_result = await asyncio.gather(
@@ -529,14 +549,14 @@ code_result, exploit_result = await asyncio.gather(
         task_type="vulnerability_validation",
         prompt=code_prompt,
         required_capability="high",
-        output_schema=CODE_SCHEMA,
+        output_schema=RESULT_SCHEMA,
     ),
     run_opencode_task(
         task_name="利用条件分析",
         task_type="vulnerability_validation",
         prompt=exploit_prompt,
         required_capability="high",
-        output_schema=EXPLOIT_SCHEMA,
+        output_schema=RESULT_SCHEMA,
     ),
 )
 ```
