@@ -82,6 +82,8 @@ export function VulnListItem({
     <li>
       <button
         type="button"
+        ref={focusRef}
+        aria-current={active ? "true" : undefined}
         onClick={onClick}
         className={itemClassName}
       >

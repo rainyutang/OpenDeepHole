@@ -5,7 +5,7 @@ import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
 
 const { act, create } = TestRenderer;
-const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
+const server = await createServer({ root: process.env.OPENDEEPHOLE_FRONTEND_TEST_ROOT, appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { default: NewScanForm } = await server.ssrLoadModule("/src/components/NewScanForm.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
@@ -370,6 +370,33 @@ test("copied knowledge-base access can be turned off without fetching a new proj
   assert.deepEqual(submissions[0].knowledge_base, { enabled: false, project_id: "", project_name: "" });
   assert.ok(requests.every((request) => !request.url.includes("probe")));
 });
+
+for (const invalidate of ["switch agent", "disable knowledge"]) {
+  test(`a late knowledge probe cannot restore projects after ${invalidate}`, async () => {
+    const pendingProbe = deferred();
+    const { root, requests } = await mount({
+      source: fixture({ knowledge_base: { enabled: true, project_id: "old-project", project_name: "Original knowledge project" } }),
+      handleRequest: (config) => config.url.includes("mcp-probe/scan_knowledge_base") ? pendingProbe.promise : undefined,
+    });
+    const probe = root.root.findAllByType("button").find((item) => content(item) === "检测并拉取项目");
+    assert.ok(probe);
+    await act(async () => probe.props.onClick());
+    assert.equal(requests.filter((request) => request.url.includes("mcp-probe/scan_knowledge_base")).length, 1);
+    if (invalidate === "switch agent") {
+      await act(async () => root.root.findAllByProps({ type: "radio" })[0].props.onChange());
+      await flush();
+    } else {
+      await act(async () => root.root.findByProps({ "aria-label": "启用知识库" }).props.onClick());
+    }
+    await act(async () => root.root.findByProps({ "aria-label": "启用知识库" }).props.onClick());
+    await act(async () => pendingProbe.resolve({
+      success: true, error: "", projects: [{ id: "stale-project", name: "Stale probe project", path: "", current: true }],
+    }));
+    await flush();
+    assert.doesNotMatch(content(root.toJSON()), /Stale probe project|连接成功/);
+    assert.equal(root.root.findAllByType("button").find((item) => content(item) === "检测并拉取项目")?.props.disabled, false);
+  });
+}
 
 test("copy waits for the private note library before accepting a preselected note", async () => {
   const pendingNotes = deferred();

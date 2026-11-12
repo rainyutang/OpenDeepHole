@@ -87,6 +87,12 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
 
   const [knowledgeProbe, setKnowledgeProbe] = useState<AgentMcpProbeResult | null>(null);
   const [probingKnowledge, setProbingKnowledge] = useState(false);
+  const knowledgeProbeGeneration = useRef(0);
+
+  useEffect(() => {
+    setProbingKnowledge(false);
+    return () => { knowledgeProbeGeneration.current += 1; };
+  }, [selectedAgent, knowledgeEnabled]);
 
   const [reviewNotesReady, setReviewNotesReady] = useState(true);
 
@@ -194,12 +200,14 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
 
   const probeKnowledge = async () => {
     if (!selectedAgent || probingKnowledge || !knowledgeEnabled) return;
+    const generation = ++knowledgeProbeGeneration.current;
     setProbingKnowledge(true); setError(null);
     setKnowledgeProbe(null);
     setKnowledgeProjects([]);
     setKnowledgeProjectId("");
     try {
       const result = await probeScanKnowledgeBaseMcp(selectedAgent);
+      if (generation !== knowledgeProbeGeneration.current) return;
       setKnowledgeProbe(result);
       setKnowledgeProjects(result.success ? result.projects : []);
       if (result.success) {
@@ -214,8 +222,14 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
         setKnowledgeProjectId("");
       }
     }
-    catch (probeError: unknown) { setError((probeError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "知识库连接检测失败"); }
-    finally { setProbingKnowledge(false); }
+    catch (probeError: unknown) {
+      if (generation === knowledgeProbeGeneration.current) {
+        setError((probeError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "知识库连接检测失败");
+      }
+    }
+    finally {
+      if (generation === knowledgeProbeGeneration.current) setProbingKnowledge(false);
+    }
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
