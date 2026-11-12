@@ -1,14 +1,14 @@
 """Lifetime model accounting across resumes and Agent process restarts."""
 
-import asyncio
-import concurrent.futures
-import os
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
-
+import asyncio
+import concurrent.futures
+import os
 import pytest
-
+import backend.api.agent_routes.scan_completion as backend_api_agent_routes_scan_completion
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
 from backend.models import AgentScanFinish, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 
@@ -204,20 +204,19 @@ def test_concurrent_snapshots_are_atomic_and_monotonic(env):
 
 
 def test_pool_and_finish_events_use_lifetime_projection(env):
-    from backend.api import agent as agent_api
     write(env)
     resume(env, "second")
     raw = snapshot(env, "second", total=2, success=2, failure=0)
     events = []
     with (
-        patch("backend.api.agent.get_scan_store", return_value=env.store),
-        patch("backend.api.scan.get_scan_store", return_value=env.store),
-        patch("backend.sse.publish", side_effect=lambda scan, kind, data: events.append((kind, data))),
+        patch("backend.application.default_store_factory", return_value=env.store),
+        patch("backend.application.default_store_factory", return_value=env.store),
+        patch("backend.application.default_publisher", side_effect=lambda scan, kind, data: events.append((kind, data))),
     ):
-        asyncio.run(agent_api.agent_push_opencode_pool(env.scan_id, raw))
+        asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.scan_id, raw))
         assert events[-1][1]["opencode_pool"]["models"][0]["total"] == 7
         for final_snapshot in (raw, raw, None):
-            asyncio.run(agent_api.agent_finish_scan(env.scan_id, AgentScanFinish(
+            asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(env.scan_id, AgentScanFinish(
                 status="error", error_message="test end", vulnerabilities=[], total_candidates=0,
                 processed_candidates=0, agent_session_id="second", execution_revision=raw.execution_revision,
                 opencode_pool=final_snapshot,
@@ -228,8 +227,7 @@ def test_pool_and_finish_events_use_lifetime_projection(env):
 
 
 def test_independent_review_resume_uses_the_same_scan_ledger(env):
-    from backend.api import agent as agent_api
-    from fastapi import HTTPException
+    from backend.application import ApplicationError as HTTPException
 
     write(env)
     env.store.update_scan_progress(env.scan_id, status=ScanItemStatus.COMPLETE)
@@ -243,8 +241,8 @@ def test_independent_review_resume_uses_the_same_scan_ledger(env):
     raw = snapshot(env, "second", total=2, success=0, failure=0, cancelled=1,
                    global_running=1, execution_owner=owner,
                    model_fields={"running": 1, "active_tasks": [task]})
-    with patch("backend.api.agent.get_scan_store", return_value=env.store), patch("backend.sse.publish"):
-        asyncio.run(agent_api.agent_push_opencode_pool(env.scan_id, raw))
+    with patch("backend.application.default_store_factory", return_value=env.store), patch("backend.application.default_publisher"):
+        asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.scan_id, raw))
         current = env.store.get_opencode_pool_status(env.scan_id)
         assert current.models[0].total == 7
         assert current.models[0].cancelled == 1
@@ -256,10 +254,10 @@ def test_independent_review_resume_uses_the_same_scan_ledger(env):
         env.store.update_fp_review_job(review_id, status="running")
         next_pool = snapshot(env, "third", total=1, success=1, failure=0,
                              execution_owner={**owner, "revision": next_revision})
-        asyncio.run(agent_api.agent_push_opencode_pool(env.scan_id, next_pool))
+        asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.scan_id, next_pool))
         assert env.store.get_opencode_pool_status(env.scan_id).models[0].total == 8
         with pytest.raises(HTTPException) as rejected:
-            asyncio.run(agent_api.agent_push_opencode_pool(env.scan_id, raw))
+            asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.scan_id, raw))
         assert rejected.value.status_code == 409
         assert env.store.get_opencode_pool_status(env.scan_id).models[0].total == 8
 

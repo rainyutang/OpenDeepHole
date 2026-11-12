@@ -1,13 +1,14 @@
+
+import backend.api.agent_routes.queries as backend_api_agent_routes_queries
+import backend.api.agent_routes.scan_results as backend_api_agent_routes_scan_results
 import asyncio
 import logging
 import sqlite3
 import threading
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
 import httpx
 import pytest
-
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
@@ -954,7 +955,7 @@ def test_store_task_report_is_idempotent(tmp_path: Path) -> None:
 def test_task_report_endpoint_acknowledges_replay_without_duplicate_history(
     tmp_path: Path,
 ) -> None:
-    from backend.api import agent as agent_api
+    import backend.scans.ingestion.artifacts as backend_scans_ingestion_artifacts
     from backend.store.sqlite import SqliteScanStore
 
     async def direct_store_call(store, operation, *args, **kwargs):
@@ -1015,23 +1016,23 @@ def test_task_report_endpoint_acknowledges_replay_without_duplicate_history(
 
     async def exercise():
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent.resolve_agent_id_connection_async",
+                "backend.agents.directory.resolve_agent_id_connection_async",
                 new=AsyncMock(return_value=("agent-1", agent)),
             ),
             patch(
-                "backend.api.agent.run_store_call",
+                "backend.application.default_store_runner",
                 side_effect=direct_store_call,
             ),
             patch(
-                "backend.api.agent._ensure_running_scan",
+                "backend.scans.ingestion.state._ensure_running_scan",
                 new=AsyncMock(return_value=None),
             ),
-            patch("backend.sse.publish") as publish,
+            patch("backend.application.default_publisher") as publish,
         ):
-            first = await agent_api.report_agent_opencode_task("agent-1", body)
-            replay = await agent_api.report_agent_opencode_task("agent-1", body)
+            first = await backend_api_agent_routes_queries.report_agent_opencode_task("agent-1", body)
+            replay = await backend_api_agent_routes_queries.report_agent_opencode_task("agent-1", body)
         return first, replay, publish
 
     first, replay, publish = asyncio.run(exercise())
@@ -1049,7 +1050,7 @@ def test_task_report_endpoint_acknowledges_replay_without_duplicate_history(
 
 @pytest.mark.parametrize("kind", ["threat_audit", "threat_pattern_audit"])
 def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path, kind: str) -> None:
-    from backend.api import agent as agent_api
+    import backend.scans.ingestion.artifacts as backend_scans_ingestion_artifacts
     from backend.store.sqlite import SqliteScanStore
 
     async def direct_store_call(store, operation, *args, **kwargs):
@@ -1057,7 +1058,7 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path, k
         return function(*args, **kwargs)
 
     store = SqliteScanStore(tmp_path / "server.sqlite3")
-    upsert_task = getattr(agent_api, f"agent_upsert_{kind}_task")
+    upsert_task = getattr(backend_scans_ingestion_artifacts, f"agent_upsert_{kind}_task")
     task_model = ThreatPatternAuditTask if kind == "threat_pattern_audit" else ThreatAuditTask
     store.save_scan(
         ScanStatus(
@@ -1087,16 +1088,16 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path, k
 
     async def exercise() -> int:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent.run_store_call",
+                "backend.application.default_store_runner",
                 side_effect=direct_store_call,
             ),
             patch(
-                "backend.api.agent._ensure_running_scan",
+                "backend.scans.ingestion.state._ensure_running_scan",
                 new=AsyncMock(return_value=None),
             ),
-            patch("backend.sse.publish"),
+            patch("backend.application.default_publisher"),
         ):
             await upsert_task(
                 "scan-1",
@@ -1122,7 +1123,7 @@ def test_threat_task_finding_links_survive_either_report_order(tmp_path: Path, k
                     pattern_id="pattern-after",
                 ).model_dump(),
             )
-            response = await agent_api.agent_report_vulnerability(
+            response = await backend_api_agent_routes_scan_results.agent_report_vulnerability(
                 "scan-1",
                 Vulnerability(
                     file="src/after.c",

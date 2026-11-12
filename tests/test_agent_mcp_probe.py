@@ -1,18 +1,19 @@
 from __future__ import annotations
-
+from backend.application import get_runtime, ApplicationError as HTTPException
+import asyncio as asyncio
+import backend.api.agent_routes.mcp as backend_api_agent_routes_mcp
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.application as application
 import asyncio
 import json
 import sqlite3
 import sys
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-
-import pytest
-from fastapi import HTTPException
-
 from deephole_client import mcp_probe
-from backend.api import agent as agent_api
 from backend.models import AgentInfo, AgentMcpConfig, AgentRemoteConfig, User
 from task_agent.serve_client import OpenCodeServeManager
 from backend.store.sqlite import SqliteScanStore
@@ -51,7 +52,7 @@ async def _direct_store_call(store, operation, *args, **kwargs):
 
 @pytest.fixture(autouse=True)
 def _use_direct_store_calls(monkeypatch):
-    monkeypatch.setattr(agent_api, "run_store_call", _direct_store_call)
+    monkeypatch.setattr(application, 'default_store_runner', _direct_store_call)
 
 
 def test_local_stdio_probe_initializes_and_lists_tools(tmp_path: Path, monkeypatch) -> None:
@@ -256,22 +257,22 @@ def test_v5_retires_global_product_mcp_configuration(
         last_seen="2026-07-17T01:00:00+00:00",
         initial_config_json=config.model_dump_json(),
     )
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: None)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(backend_agents_directory, '_live_agent_for_key', lambda _key: None)
     user = User(user_id="user-1", username="owner", role="user")
 
-    status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
+    status = asyncio.run(backend_api_agent_routes_mcp.get_stable_agent_mcp_status("stable-agent", user))
     assert status.product_info.enabled is False
     assert status.product_info.stale is False
     with pytest.raises(HTTPException) as probe_error:
-        asyncio.run(agent_api.probe_stable_agent_mcp(
+        asyncio.run(backend_api_agent_routes_mcp.probe_stable_agent_mcp(
             "stable-agent",
             "product_info",
             user,
         ))
     assert probe_error.value.status_code == 400
     with pytest.raises(HTTPException) as reload_error:
-        asyncio.run(agent_api.reload_stable_agent_mcp(
+        asyncio.run(backend_api_agent_routes_mcp.reload_stable_agent_mcp(
             "stable-agent",
             "product_info",
             user,
@@ -297,8 +298,8 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
         last_seen="2026-07-17T01:00:00+00:00",
         initial_config_json=AgentRemoteConfig().model_dump_json(),
     )
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_config_factory', _server_knowledge_config)
     live_agent = AgentInfo(
         agent_id="session-1",
         agent_key="stable-agent",
@@ -308,9 +309,7 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
         last_seen="2026-07-17T01:00:00+00:00",
         user_id="user-1",
     )
-    monkeypatch.setattr(
-        agent_api,
-        "_live_agent_for_key",
+    monkeypatch.setattr(backend_agents_directory, '_live_agent_for_key',
         lambda _key: ("session-1", live_agent),
     )
     requested = AgentMcpConfig.model_validate(
@@ -352,7 +351,7 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
             if target == "scan_knowledge_base"
             else ["fake_graph_lookup"]
         )
-        agent_api._mcp_probe_waiters[command["request_id"]].set_result({
+        get_runtime().agents.mcp_probe_waiters[command["request_id"]].set_result({
             "success": True,
             "protocol": "stdio",
             "tool_names": returned_tools,
@@ -360,8 +359,8 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
         })
         return True
 
-    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
-    result = asyncio.run(agent_api.probe_stable_agent_mcp(
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send_result)
+    result = asyncio.run(backend_api_agent_routes_mcp.probe_stable_agent_mcp(
         "stable-agent",
         target,
         User(user_id="user-1", username="owner", role="user"),
@@ -397,8 +396,8 @@ def test_scan_knowledge_probe_requires_a_model_visible_query_tool(
         last_seen="2026-07-17T01:00:00+00:00",
         initial_config_json=AgentRemoteConfig().model_dump_json(),
     )
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_config_factory', _server_knowledge_config)
     live_agent = AgentInfo(
         agent_id="session-1",
         agent_key="stable-agent",
@@ -408,14 +407,12 @@ def test_scan_knowledge_probe_requires_a_model_visible_query_tool(
         last_seen="2026-07-17T01:00:00+00:00",
         user_id="user-1",
     )
-    monkeypatch.setattr(
-        agent_api,
-        "_live_agent_for_key",
+    monkeypatch.setattr(backend_agents_directory, '_live_agent_for_key',
         lambda _key: ("session-1", live_agent),
     )
 
     async def send_result(_agent_id: str, command: dict) -> bool:
-        agent_api._mcp_probe_waiters[command["request_id"]].set_result({
+        get_runtime().agents.mcp_probe_waiters[command["request_id"]].set_result({
             "success": True,
             "protocol": "streamable_http",
             "tool_names": ["xxx_projects", "xxx_set_project"],
@@ -423,8 +420,8 @@ def test_scan_knowledge_probe_requires_a_model_visible_query_tool(
         })
         return True
 
-    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
-    result = asyncio.run(agent_api.probe_stable_agent_mcp(
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send_result)
+    result = asyncio.run(backend_api_agent_routes_mcp.probe_stable_agent_mcp(
         "stable-agent",
         "scan_knowledge_base",
         User(user_id="user-1", username="owner", role="user"),
@@ -448,15 +445,13 @@ def test_scan_knowledge_probe_rejects_missing_server_url(tmp_path: Path, monkeyp
         last_seen="2026-07-17T01:00:00+00:00",
         initial_config_json=AgentRemoteConfig().model_dump_json(),
     )
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(
-        agent_api,
-        "get_config",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_config_factory',
         lambda: _server_knowledge_config(url=""),
     )
 
     with pytest.raises(HTTPException, match="远端 URL 不能为空") as excinfo:
-        asyncio.run(agent_api.probe_stable_agent_mcp(
+        asyncio.run(backend_api_agent_routes_mcp.probe_stable_agent_mcp(
             "stable-agent",
             "scan_knowledge_base",
             User(user_id="user-1", username="owner", role="user"),
@@ -494,15 +489,15 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
         assert timeout == 35
         raise asyncio.TimeoutError
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
-    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
-    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
-    monkeypatch.setattr(agent_api, "send_agent_command", sent)
-    monkeypatch.setattr(agent_api.asyncio, "wait_for", timed_out)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: Store())
+    monkeypatch.setattr(application, 'default_config_factory', _server_knowledge_config)
+    monkeypatch.setattr(backend_agents_directory, '_live_agent_for_key', lambda _key: ("session-1", live_agent))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', sent)
+    monkeypatch.setattr(asyncio, "wait_for", timed_out)
     user = User(user_id="user-1", username="owner", role="user")
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(agent_api.probe_stable_agent_mcp(
+        asyncio.run(backend_api_agent_routes_mcp.probe_stable_agent_mcp(
             "stable-agent",
             "scan_knowledge_base",
             user,
@@ -516,7 +511,7 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
         ))
 
     assert excinfo.value.status_code == 504
-    assert agent_api._mcp_probe_waiters == {}
+    assert get_runtime().agents.mcp_probe_waiters == {}
 
 
 def test_agent_mcp_probe_column_is_added_to_legacy_agents_table(tmp_path: Path) -> None:

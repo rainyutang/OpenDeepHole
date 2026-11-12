@@ -1,25 +1,28 @@
+from fastapi import FastAPI
+from unittest.mock import Mock
+import asyncio
+import httpx
+import os
+import pytest
+import uuid
+from backend import application
+from backend.api import agent, integration, scan
+from backend.auth import get_current_user
+from backend.models import (
+    FpReviewResult,
+    OpenCodePoolStatus,
+    ScanMeta,
+    ScanStatus,
+    User,
+    Vulnerability,
+)
+from backend.store.postgres import PostgresScanStore
+from backend.store.sqlite import SqliteScanStore
 """Overview and pool-rejection contracts shared by SQLite and PostgreSQL.
 
 PostgreSQL cases require OPENDEEPHOLE_TEST_POSTGRES_DSN pointing at an isolated
 test database. Each case deletes only its own randomly named scan and jobs.
 """
-
-import asyncio
-import os
-import uuid
-from unittest.mock import Mock
-
-import httpx
-import pytest
-from fastapi import FastAPI
-
-from backend.api import agent, integration, scan
-from backend.auth import get_current_user
-from backend.models import (
-    FpReviewResult, OpenCodePoolStatus, ScanMeta, ScanStatus, User, Vulnerability,
-)
-from backend.store.postgres import PostgresScanStore
-from backend.store.sqlite import SqliteScanStore
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -74,7 +77,11 @@ def seed_reviews(store, scan_id):
 
 
 @pytest.mark.parametrize("summary_ready", [False, True])
-def test_overview_uses_latest_insert_without_hydrating_results(review_store, monkeypatch, summary_ready):
+def test_overview_uses_latest_insert_without_hydrating_results(
+    review_store,
+    monkeypatch,
+    summary_ready,
+):
     store, scan_id = review_store
     assert store.get_fp_review_overview(scan_id) is None
     now = "2026-09-08T00:00:00+00:00"
@@ -97,8 +104,7 @@ def test_overview_uses_latest_insert_without_hydrating_results(review_store, mon
 
 
 def make_app(monkeypatch, store):
-    for module in (scan, integration, agent):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, "default_store_factory", lambda: store)
     monkeypatch.setattr("backend.report_routes.get_scan_store", lambda: store)
     app = FastAPI()
     app.include_router(scan.router)
@@ -167,7 +173,7 @@ def test_stale_pool_request_cannot_write_usage_pool_or_sse(review_store, monkeyp
         monkeypatch.setattr(store, name, method)
         writes.append(method)
     publish = Mock()
-    monkeypatch.setattr("backend.sse.publish", publish)
+    monkeypatch.setattr("backend.application.default_publisher", publish)
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

@@ -1,12 +1,11 @@
 """Synchronize desired scan CodeGraph settings without restarting tasks."""
 
+from backend.application import get_runtime, get_scan_store, run_store_call, publish
+import backend.agents.directory as agent_directory
+import backend.agents.gateway as agent_gateway
+import backend.scans.agent_binding as scan_agent_binding
 import asyncio
-import uuid
-
 from backend.models import ScanCodeGraphResponse, ScanMeta
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call
-from backend.sse import publish
 
 
 def code_graph_response(scan_id: str, meta: ScanMeta, message: str = "") -> ScanCodeGraphResponse:
@@ -30,7 +29,12 @@ def code_graph_payload(scan_id: str, meta: ScanMeta) -> dict:
     }
 
 
-async def code_graph_for_agent(agent_key: str, reported_revisions: object, *, store=None) -> list[dict]:
+async def code_graph_for_agent(
+    agent_key: str,
+    reported_revisions: object,
+    *,
+    store=None,
+) -> list[dict]:
     if not agent_key:
         return []
     store = store or get_scan_store()
@@ -72,30 +76,24 @@ async def accept_code_graph_result(incoming: dict, agent) -> None:
 
 async def sync_scan_code_graph(scan_id: str) -> str:
     """Return a display message; the durable desired/applied versions are truth."""
-    from backend.api import agent as agent_api
-    from backend.api.scan import _resolve_scan_agent_id
-
     store = get_scan_store()
-    request_id = uuid.uuid4().hex
     try:
         meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is None:
             return "扫描不存在"
-        agent_id = await _resolve_scan_agent_id(meta)
+        agent_id = await scan_agent_binding._resolve_scan_agent_id(meta)
         if agent_id is None:
             return "已保存，等待 Agent 上线同步"
-        resolved = await agent_api.resolve_agent_id_connection_async(agent_id)
-        agent = resolved[1] if resolved else agent_api._registered_agents.get(agent_id)
+        resolved = await agent_directory.resolve_agent_id_connection_async(agent_id)
+        agent = resolved[1] if resolved else get_runtime().agents.registered_agents.get(agent_id)
         if agent is None or not agent.scan_code_graph_updates:
             return "已保存，等待同步；请更新 Agent 以支持运行中切换 CodeGraph"
-        waiter = asyncio.get_running_loop().create_future()
-        agent_api._code_graph_waiters[request_id] = waiter
-        sent = await agent_api.send_agent_command(agent_id, {
-            **code_graph_payload(scan_id, meta), "type": "code_graph_update", "request_id": request_id,
-        })
-        if not sent:
+        response = await agent_gateway.AgentGateway().request(
+            agent_id, {**code_graph_payload(scan_id, meta), "type": "code_graph_update"},
+            response_type="code_graph_result", timeout=10.0,
+        )
+        if response is None:
             return "已保存，等待 Agent 上线同步"
-        response = await agent_api._wait_agent_response(request_id, waiter, timeout=10.0)
         if (response.get("ok") is True and response.get("scan_id") == scan_id
                 and type(response.get("revision")) is int
                 and response["revision"] >= meta.code_graph_mcp_revision):
@@ -108,7 +106,3 @@ async def sync_scan_code_graph(scan_id: str) -> str:
     except Exception:
         # A delivery failure does not undo the durable desired setting.
         return "已保存，Agent 同步失败，可重试同步"
-    finally:
-        waiter = agent_api._code_graph_waiters.pop(request_id, None)
-        if waiter is not None and not waiter.done():
-            waiter.cancel()

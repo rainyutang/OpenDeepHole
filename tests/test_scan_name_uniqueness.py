@@ -1,13 +1,11 @@
+
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 import asyncio
 import tempfile
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
-
-from fastapi import HTTPException
-
-from backend.api import scan as scan_api
+import backend.scans.creation as backend_scans_creation
+from backend.application import ApplicationError as HTTPException, get_runtime
 from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
@@ -60,15 +58,15 @@ class ScanNameUniquenessTests(unittest.TestCase):
         async def probe(_agent_id, _agent, targets):
             return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
                     for target in targets]
-        probe_patch = patch("backend.api.agent.request_agent_scan_paths", side_effect=probe)
+        probe_patch = patch("backend.agents.gateway.request_agent_scan_paths", side_effect=probe)
         probe_patch.start()
         self.addCleanup(probe_patch.stop)
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def tearDown(self) -> None:
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def test_scan_name_is_case_sensitive_and_unique_per_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,34 +135,34 @@ class ScanNameUniquenessTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_mining_engines",
+                    "backend.scans.creation_config._resolve_scan_mining_engines",
                     return_value=[],
                 ),
                 patch(
-                    "backend.api.scan._resolve_threat_analysis_enabled",
+                    "backend.scans.creation_config._resolve_threat_analysis_enabled",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.scan._resolve_threat_analysis_method",
+                    "backend.scans.creation_config._resolve_threat_analysis_method",
                     return_value=("deephole_threat_analysis", None),
                 ),
                 patch(
-                    "backend.api.scan._resolve_fp_review_method",
+                    "backend.scans.creation_config._resolve_fp_review_method",
                     return_value=("adversarial", None),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_connection_async",
+                    "backend.agents.directory.resolve_agent_connection_async",
                     new=AsyncMock(return_value=(agent.agent_id, agent)),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=AgentRemoteConfig(
                         model_pool={"models": [{
                             "id": "ready",
@@ -173,10 +171,10 @@ class ScanNameUniquenessTests(unittest.TestCase):
                         }]},
                     )),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
                 with self.assertRaises(HTTPException) as error:
-                    asyncio.run(scan_api.create_agent_scan(
+                    asyncio.run(backend_scans_creation.create_agent_scan(
                         CreateScanRequest(
                             agent_key=agent.agent_key,
                             project_path="/repo/project",
@@ -184,7 +182,7 @@ class ScanNameUniquenessTests(unittest.TestCase):
                             threat_analysis_enabled=True,
                             mining_engines=[],
                         ),
-                        SimpleNamespace(base_url="http://testserver/"),
+                        'http://testserver',
                         user,
                     ))
 
@@ -208,29 +206,29 @@ class ScanNameUniquenessTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
-                patch("backend.api.scan.secrets.randbelow", return_value=0x00AF),
-                patch("backend.api.scan._resolve_scan_mining_engines", return_value=[]),
-                patch("backend.api.scan._resolve_threat_analysis_enabled", return_value=True),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("secrets.randbelow", return_value=0x00AF),
+                patch("backend.scans.creation_config._resolve_scan_mining_engines", return_value=[]),
+                patch("backend.scans.creation_config._resolve_threat_analysis_enabled", return_value=True),
                 patch(
-                    "backend.api.scan._resolve_threat_analysis_method",
+                    "backend.scans.creation_config._resolve_threat_analysis_method",
                     return_value=("deephole_threat_analysis", None),
                 ),
                 patch(
-                    "backend.api.scan._resolve_fp_review_method",
+                    "backend.scans.creation_config._resolve_fp_review_method",
                     return_value=("adversarial", None),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_connection_async",
+                    "backend.agents.directory.resolve_agent_connection_async",
                     new=AsyncMock(return_value=(agent.agent_id, agent)),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=AgentRemoteConfig(
                         model_pool={"models": [{
                             "id": "ready",
@@ -240,19 +238,19 @@ class ScanNameUniquenessTests(unittest.TestCase):
                     )),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
-                response = asyncio.run(scan_api.create_agent_scan(
+                response = asyncio.run(backend_scans_creation.create_agent_scan(
                     CreateScanRequest(
                         agent_key=agent.agent_key,
                         project_path=r"C:\\work\\service",
                         threat_analysis_enabled=True,
                         mining_engines=[],
                     ),
-                    SimpleNamespace(base_url="http://testserver/"),
+                    'http://testserver',
                     user,
                 ))
 

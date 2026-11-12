@@ -1,7 +1,22 @@
 """External-platform integration APIs for script-driven scans."""
 
 from __future__ import annotations
-
+from backend.application import get_runtime, get_scan_store, run_store_call
+import backend.agents.configuration as agent_configuration
+import backend.agents.directory as agent_directory
+import backend.agents.gateway as agent_gateway
+import backend.scans.creation as scan_creation
+import backend.scans.details as scan_details
+import backend.scans.feedback as scan_feedback
+import backend.scans.fp_review as scan_fp_review
+import backend.scans.fp_review_policy as scan_fp_review_policy
+import backend.scans.ingestion.progress as scan_ingestion_progress
+import backend.scans.lifecycle as scan_lifecycle
+import backend.scans.queries as scan_queries
+import backend.scans.reports as scan_reports
+import backend.scans.results as scan_results
+import backend.scans.skills as scan_skills
+import backend.scans.validation as scan_validation
 import json
 import secrets
 import uuid
@@ -9,10 +24,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-
-from backend.api import checkers as checkers_api
-from backend.api import feedback as feedback_api
-from backend.api import scan as scan_api
+from backend.api import checkers as checkers_api, feedback as feedback_api
+from backend.report_routes import ApplicationRoute
 from backend.auth import hash_password
 from backend.models import (
     CandidateAuditTaskResult,
@@ -40,20 +53,28 @@ from backend.models import (
 )
 from backend.registry import CHECKER_VISIBILITY_PUBLIC, refresh_registry
 from backend.scan_metrics import calculate_issue_metrics
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call
 
-router = APIRouter()
+router = APIRouter(route_class=ApplicationRoute)
 
 
 @router.get("/api/public/scans/{scan_id}/details/{resource}/{index}")
-async def get_public_detail_item(scan_id: str, resource: str, index: int, token: str = Query(...), include_body: bool = True):
-    return await scan_api.get_scan_detail_item(scan_id, resource, index, await _public_user_for_scan_async(scan_id, token), include_body=include_body)
+async def get_public_detail_item(
+    scan_id: str,
+    resource: str,
+    index: int,
+    token: str = Query(...),
+    include_body: bool = True,
+):
+    return await scan_details.get_scan_detail_item(scan_id, resource, index, await _public_user_for_scan_async(scan_id, token), include_body=include_body)
 
 
 @router.get("/api/public/scans/{scan_id}/fp-review/overview")
-async def get_public_fp_overview(scan_id: str, token: str = Query(...), allow_missing: bool = False):
-    return await scan_api.get_fp_review_overview_v2(
+async def get_public_fp_overview(
+    scan_id: str,
+    token: str = Query(...),
+    allow_missing: bool = False,
+):
+    return await scan_fp_review.get_fp_review_overview_v2(
         scan_id, await _public_user_for_scan_async(scan_id, token), allow_missing=allow_missing,
     )
 
@@ -61,61 +82,61 @@ async def get_public_fp_overview(scan_id: str, token: str = Query(...), allow_mi
 @router.get("/api/public/scans/{scan_id}/fp-review/results")
 async def get_public_fp_results(scan_id: str, token: str = Query(...), after: int = -1,
                                limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_fp_review_results_v2(scan_id, after, limit, await _public_user_for_scan_async(scan_id, token))
+    return await scan_fp_review.get_fp_review_results_v2(scan_id, after, limit, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/overview")
 async def get_public_overview(scan_id: str, token: str = Query(...)):
-    overview = await scan_api.get_scan_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+    overview = await scan_queries.get_scan_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
     return overview.model_copy(update={"can_copy_scan": False})
 
 
 @router.get("/api/public/scans/{scan_id}/tasks")
 async def get_public_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
                            limit: int = Query(50, ge=1, le=100), task_name: str | None = None):
-    return await scan_api.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token), task_name=task_name)
+    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token), task_name=task_name)
 
 
 @router.get("/api/public/scans/{scan_id}/tasks/{task_id}")
 async def get_public_task(scan_id: str, task_id: str, token: str = Query(...),
                           revision: int | None = None, record_id: str | None = None):
-    return await scan_api.get_scan_task_detail(scan_id, task_id, revision, record_id, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_task_detail(scan_id, task_id, revision, record_id, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/candidates")
 async def get_public_candidates(scan_id: str, token: str = Query(...), after: int = -1,
                                 limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_candidates_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_candidates_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/event-history")
 async def get_public_event_history(scan_id: str, token: str = Query(...), before: int | None = None,
                                    limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_events_v2(scan_id, limit, before, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_events_v2(scan_id, limit, before, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/threat-audit-tasks")
 async def get_public_threat_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
                                  limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/threat-pattern-audit-tasks")
 async def get_public_threat_pattern_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
                                  limit: int = Query(50, ge=1, le=100), engine_id: str | None = None,
                                  summary: bool = True):
-    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token), engine_id, summary)
+    return await scan_details.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token), engine_id, summary)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-pattern-audit-tasks/{task_id}")
 async def get_public_threat_pattern_task(scan_id: str, task_id: str, token: str = Query(...)):
-    return await scan_api.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/validations")
 async def get_public_validations(scan_id: str, token: str = Query(...), after: int = -1,
                                 limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_validations_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
+    return await scan_details.get_scan_validations_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
 
 INTEGRATION_TOKEN = "opendeephole-integration-token"
 INTEGRATION_USERNAME = "opendeephole_integration"
@@ -253,11 +274,10 @@ async def _require_integration_token_async(
 
 
 def _online_agents_by_name(agent_name: str) -> list[tuple[str, AgentInfo]]:
-    from backend.api import agent as agent_api
 
     matches: list[tuple[str, AgentInfo]] = []
-    for agent_id, agent in agent_api._registered_agents.items():
-        if agent.name == agent_name and agent_api._is_agent_online(agent):
+    for agent_id, agent in get_runtime().agents.registered_agents.items():
+        if agent.name == agent_name and agent_directory._is_agent_online(agent):
             matches.append((agent_id, agent))
     return matches
 
@@ -287,26 +307,25 @@ def _public_checker_names(disabled_checkers: list[str] | None = None) -> list[st
 
 
 async def _sync_agent_config(agent_id: str, config: AgentRemoteConfig) -> None:
-    from backend.api import agent as agent_api
 
-    agent_api._validate_managed_config(config)
-    if not agent_api.agent_config_has_explicit_model(config):
+    agent_configuration._validate_managed_config(config)
+    if not agent_configuration.agent_config_has_explicit_model(config):
         raise HTTPException(
             status_code=400,
             detail="所选客户端尚未配置启用的显式模型，请先完成客户端模型配置",
         )
-    agent = agent_api._registered_agents.get(agent_id)
+    agent = get_runtime().agents.registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    ok = await agent_api.send_agent_command(
+    ok = await agent_gateway.send_agent_command(
         agent_id,
         {"type": "config", "config": config.model_dump()},
     )
     if not ok:
         raise HTTPException(status_code=502, detail="Agent not connected")
-    agent_api._agent_configs[agent.name] = config
+    get_runtime().agents.agent_configs[agent.name] = config
     if agent.agent_key:
-        agent_api._agent_configs[agent.agent_key] = config
+        get_runtime().agents.agent_configs[agent.agent_key] = config
         store = get_scan_store()
         record = await run_store_call(store, "get_agent_record", agent.agent_key)
         if record is not None:
@@ -387,7 +406,7 @@ async def create_integration_scan(
     await _sync_agent_config(agent_id, body.agent_config)
 
     public_access_token = secrets.token_urlsafe(32)
-    response = await scan_api.create_agent_scan(
+    response = await scan_creation.create_agent_scan(
         CreateScanRequest(
             agent_id=agent_id,
             project_path=body.project_path,
@@ -405,7 +424,7 @@ async def create_integration_scan(
             feedback_ids=[],
             code_graph_mcp=code_graph_mcp,
         ),
-        request,
+        str(request.base_url).rstrip("/"),
         current_user,
         checker_names=checker_names,
         public_access_token=public_access_token,
@@ -426,10 +445,10 @@ async def get_public_scan_progress(
     request: Request,
     current_user: User = Depends(_public_user_dependency),
 ) -> PublicScanProgress:
-    scan = await scan_api.get_scan_status(scan_id, current_user)
+    scan = await scan_queries.get_scan_status(scan_id, current_user)
     metrics = calculate_issue_metrics(
         scan.vulnerabilities,
-        scan_api._latest_fp_review_result_map(scan_id),
+        scan_fp_review_policy._latest_fp_review_result_map(scan_id),
     )
     token = request.query_params.get("token", "")
     return PublicScanProgress(
@@ -452,7 +471,7 @@ async def get_public_scan_status(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> ScanStatus:
-    scan = await scan_api.get_scan_status(scan_id, current_user)
+    scan = await scan_queries.get_scan_status(scan_id, current_user)
     return scan.model_copy(update={"can_copy_scan": False})
 
 
@@ -467,7 +486,7 @@ async def get_public_scan_vulnerabilities(
     current_user: User = Depends(_public_user_dependency),
 ) -> VulnerabilityPage:
     """Return the authoritative vulnerability page for a public scan."""
-    return await scan_api.get_scan_vulnerabilities_v2(
+    return await scan_details.get_scan_vulnerabilities_v2(
         scan_id,
         limit,
         after,
@@ -480,7 +499,7 @@ async def stop_public_scan(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.stop_scan(scan_id, current_user)
+    return await scan_lifecycle.stop_scan(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/report")
@@ -488,7 +507,8 @@ async def download_public_report(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> Response:
-    return await scan_api.download_report(scan_id, current_user)
+    artifact = await scan_reports.download_report(scan_id, current_user)
+    return Response(content=artifact.content, media_type=artifact.media_type, headers=artifact.headers)
 
 
 @router.get("/api/public/scans/{scan_id}/vulnerability/{idx}/report")
@@ -497,7 +517,8 @@ async def download_public_vulnerability_report(
     idx: int,
     current_user: User = Depends(_public_user_dependency),
 ) -> Response:
-    return await scan_api.download_vulnerability_report(scan_id, idx, current_user)
+    artifact = await scan_reports.download_vulnerability_report(scan_id, idx, current_user)
+    return Response(content=artifact.content, media_type=artifact.media_type, headers=artifact.headers)
 
 
 @router.post("/api/public/scans/{scan_id}/vulnerability/{idx}/validation")
@@ -507,7 +528,7 @@ async def trigger_public_vulnerability_validation(
     request: Request,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.trigger_vulnerability_validation(scan_id, idx, request, current_user)
+    return await scan_validation.trigger_vulnerability_validation(scan_id, idx, str(request.base_url).rstrip("/"), current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/vulnerability/{idx}/validation/stop")
@@ -516,7 +537,7 @@ async def stop_public_vulnerability_validation(
     idx: int,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.stop_vulnerability_validation(scan_id, idx, current_user)
+    return await scan_validation.stop_vulnerability_validation(scan_id, idx, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/report.zip")
@@ -524,7 +545,8 @@ async def download_public_report_zip(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> Response:
-    return await scan_api.download_report_zip(scan_id, current_user)
+    artifact = await scan_reports.download_report_zip(scan_id, current_user)
+    return Response(content=artifact.content, media_type=artifact.media_type, headers=artifact.headers)
 
 
 @router.post("/api/public/scans/{scan_id}/mark")
@@ -533,7 +555,7 @@ async def mark_public_vulnerability(
     body: MarkRequest,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.mark_vulnerability(scan_id, body, current_user)
+    return await scan_feedback.mark_vulnerability(scan_id, body, current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/unmark")
@@ -542,7 +564,7 @@ async def unmark_public_vulnerability(
     body: UnmarkRequest,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.unmark_vulnerability(scan_id, body, current_user)
+    return await scan_feedback.unmark_vulnerability(scan_id, body, current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/batch-mark")
@@ -551,7 +573,7 @@ async def batch_mark_public_vulnerabilities(
     body: BatchMarkRequest,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.batch_mark_vulnerabilities(scan_id, body, current_user)
+    return await scan_feedback.batch_mark_vulnerabilities(scan_id, body, current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/batch-unmark")
@@ -560,7 +582,7 @@ async def batch_unmark_public_vulnerabilities(
     body: BatchUnmarkRequest,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.batch_unmark_vulnerabilities(scan_id, body, current_user)
+    return await scan_feedback.batch_unmark_vulnerabilities(scan_id, body, current_user)
 
 
 @router.put("/api/public/scans/{scan_id}/feedback")
@@ -569,7 +591,7 @@ async def update_public_scan_feedback(
     body: dict,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.update_scan_feedback(scan_id, body, current_user)
+    return await scan_feedback.update_scan_feedback(scan_id, body, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/skill/{vuln_type}")
@@ -578,7 +600,7 @@ async def get_public_scan_skill(
     vuln_type: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.get_scan_skill(scan_id, vuln_type, current_user)
+    return await scan_skills.get_scan_skill(scan_id, vuln_type, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/skill-reports")
@@ -587,7 +609,7 @@ async def get_public_scan_skill_reports(
     checker_name: str | None = None,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.get_scan_skill_reports(scan_id, checker_name, current_user)
+    return await scan_skills.get_scan_skill_reports(scan_id, checker_name, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/fp-review/skill")
@@ -595,7 +617,7 @@ async def get_public_fp_review_skill(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.get_fp_review_skill(scan_id, current_user)
+    return await scan_skills.get_fp_review_skill(scan_id, current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/fp_review", response_model=dict)
@@ -604,7 +626,7 @@ async def trigger_public_fp_review(
     request: Request,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.trigger_fp_review(scan_id, request, current_user)
+    return await scan_fp_review.trigger_fp_review(scan_id, str(request.base_url).rstrip("/"), current_user)
 
 
 @router.post("/api/public/scans/{scan_id}/fp_review/stop")
@@ -612,7 +634,7 @@ async def stop_public_fp_review(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.stop_fp_review(scan_id, current_user)
+    return await scan_fp_review.stop_fp_review(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/fp_review", response_model=FpReviewJob)
@@ -620,7 +642,7 @@ async def get_public_fp_review(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> FpReviewJob:
-    return await scan_api.get_fp_review(scan_id, current_user)
+    return await scan_fp_review.get_fp_review(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/git_history", response_model=list[HistoryPattern])
@@ -628,7 +650,7 @@ async def get_public_scan_git_history(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
 ) -> list[HistoryPattern]:
-    return await scan_api.get_scan_git_history(scan_id, current_user)
+    return await scan_results.get_scan_git_history(scan_id, current_user)
 
 
 @router.get(
@@ -640,7 +662,7 @@ async def get_public_candidate_audit_results(
     candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100),
     current_user: User = Depends(_public_user_dependency),
 ) -> list[CandidateAuditTaskResult]:
-    return await scan_api.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, current_user)
+    return await scan_details.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, current_user)
 
 
 @router.get(
@@ -652,7 +674,7 @@ async def get_public_vulnerability_audit_source(
     idx: int,
     current_user: User = Depends(_public_user_dependency),
 ) -> VulnerabilityAuditSource:
-    return await scan_api.get_scan_vulnerability_audit_source_v2(scan_id, idx, current_user)
+    return await scan_details.get_scan_vulnerability_audit_source_v2(scan_id, idx, current_user)
 
 
 @router.get(
@@ -664,7 +686,7 @@ async def get_public_threat_audit_results(
     task_ids: list[str] = Query(..., min_length=1, max_length=100),
     current_user: User = Depends(_public_user_dependency),
 ) -> list[ThreatAuditTaskResult]:
-    return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
+    return await scan_details.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
 
 
 @router.get(
@@ -676,7 +698,7 @@ async def get_public_threat_pattern_audit_results(
     task_ids: list[str] = Query(..., min_length=1, max_length=100),
     current_user: User = Depends(_public_user_dependency),
 ) -> list[ThreatAuditTaskResult]:
-    return await scan_api.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, current_user)
+    return await scan_details.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict | None)
@@ -685,21 +707,21 @@ async def get_public_scan_threat_analysis(
     current_user: User = Depends(_public_user_dependency),
     allow_missing: bool = False,
 ) -> dict | None:
-    return await scan_api.get_scan_threat_analysis(scan_id, current_user, allow_missing=allow_missing)
+    return await scan_results.get_scan_threat_analysis(scan_id, current_user, allow_missing=allow_missing)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-coverage", response_model=dict)
 async def get_public_scan_threat_coverage(
     scan_id: str, current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.get_scan_threat_coverage(scan_id, current_user)
+    return await scan_results.get_scan_threat_coverage(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-coverage/issues", response_model=dict)
 async def get_public_scan_threat_coverage_issues(
     scan_id: str, current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    return await scan_api.get_scan_threat_coverage_issues(scan_id, current_user)
+    return await scan_results.get_scan_threat_coverage_issues(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/checkers", response_model=list[CheckerInfo])
@@ -715,9 +737,8 @@ async def get_public_index_status(
     scan_id: str,
     _current_user: User = Depends(_public_user_dependency),
 ) -> dict:
-    from backend.api import agent as agent_api
 
-    return await agent_api.agent_get_index_status(scan_id)
+    return await scan_ingestion_progress.agent_get_index_status(scan_id)
 
 
 @router.get("/api/public/scans/{scan_id}/feedback", response_model=list[FeedbackEntry])

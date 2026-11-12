@@ -1,26 +1,19 @@
 from __future__ import annotations
-
+import backend.scans.configuration as backend_scans_configuration
 import asyncio
 import json
 import shlex
 import sys
 import threading
 import time
+import pytest
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-import pytest
-from fastapi import HTTPException
-
-from backend.api.scan import _resolve_scan_mining_engines
-from backend.models import MiningEngineRequest
-from backend.models import ThreatPatternAuditTask
+from backend.application import ApplicationError as HTTPException
+from backend.models import MiningEngineRequest, ThreatPatternAuditTask
 from task_agent import OpenCodeResult
-
-from deephole_client.vulnerability_mining.engines.threat_pattern_audit import (
-    engine,
-)
+from deephole_client.vulnerability_mining.engines.threat_pattern_audit import engine
 from deephole_client.vulnerability_mining.engines.threat_pattern_audit.prompt import (
     THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA,
     build_threat_pattern_prompt,
@@ -349,7 +342,7 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance(pattern_descri
 
 def test_selection_requires_threat_analysis_and_fixed_modes_use_pattern_audit() -> None:
     with pytest.raises(HTTPException) as raised:
-        _resolve_scan_mining_engines(
+        backend_scans_configuration._resolve_scan_mining_engines(
             scan_overrides=[
                 MiningEngineRequest(engine_id="threat_pattern_audit"),
             ],
@@ -359,7 +352,7 @@ def test_selection_requires_threat_analysis_and_fixed_modes_use_pattern_audit() 
 
     assert raised.value.status_code == 400
     assert "DeepHole基于攻击模式的漏洞挖掘引擎" in raised.value.detail
-    selected = _resolve_scan_mining_engines(
+    selected = backend_scans_configuration._resolve_scan_mining_engines(
         scan_overrides=[
             MiningEngineRequest(engine_id="threat_pattern_audit"),
         ],
@@ -367,7 +360,7 @@ def test_selection_requires_threat_analysis_and_fixed_modes_use_pattern_audit() 
         threat_analysis_enabled=True,
     )
     assert [item.engine_id for item in selected] == ["threat_pattern_audit"]
-    fixed = _resolve_scan_mining_engines(
+    fixed = backend_scans_configuration._resolve_scan_mining_engines(
         scan_overrides=None,
         scan_mode="quick",
     )
@@ -1128,7 +1121,10 @@ def test_scope_valid_file_is_reused_when_only_reporting_failed(tmp_path, monkeyp
     assert next(iter(reporter.tasks.values())).status == "completed"
 
 
-def test_validated_file_uses_canonical_report_identity_without_rewriting_json(tmp_path, monkeypatch):
+def test_validated_file_uses_canonical_report_identity_without_rewriting_json(
+    tmp_path,
+    monkeypatch,
+):
     kwargs, work, _reporter, report = _scoped_audit(tmp_path)
     value = [{**_finding(), "file": "src\\auth\\session.c"}]
 

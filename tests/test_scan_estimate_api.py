@@ -1,7 +1,10 @@
+
 import asyncio
 import time
-
-from backend.api import scan as api
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
+import backend.application as application
+import backend.scan_estimate_cache as backend_scan_estimate_cache
+from backend.application import get_runtime
 from backend.models import OpenCodePoolStatus, ScanMeta, ScanStatus, User, VulnerabilityValidation
 from backend.store.sqlite import SqliteScanStore
 
@@ -10,15 +13,18 @@ async def direct(store, operation, *args, **kwargs):
     return (operation if callable(operation) else getattr(store, operation))(*args, **kwargs)
 
 
-def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(tmp_path, monkeypatch):
+def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(
+    tmp_path,
+    monkeypatch,
+):
     store = SqliteScanStore(tmp_path / "slow-estimate.db")
     store.save_scan(ScanStatus(scan_id="s", status="auditing", progress=0, total_candidates=0,
                               processed_candidates=0, vulnerabilities=[]),
                     ScanMeta(user_id="owner", scan_items=[], created_at="2026-11-10T00:00:00Z"))
-    monkeypatch.setattr(api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(api, "run_store_call", direct)
-    monkeypatch.setattr(api, "_running_scans", {})
-    monkeypatch.setattr("backend.api.agent.reconcile_offline_agent_scan_state", lambda _, scan: scan)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_store_runner', direct)
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr("backend.agents.recovery.reconcile_offline_agent_scan_state", lambda _, scan: scan)
     read_tasks = store.get_scan_estimation_tasks
 
     def delayed(scan_id):
@@ -28,7 +34,7 @@ def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(
     monkeypatch.setattr(store, "get_scan_estimation_tasks", delayed)
     owner = User(user_id="owner", username="owner", role="user")
     try:
-        overview = asyncio.run(api.get_scan_overview_v2("s", owner))
+        overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2("s", owner))
         assert overview.progress_estimate is not None
         assert overview.status == "auditing"
 
@@ -36,8 +42,8 @@ def test_estimation_can_finish_after_one_second_and_errors_do_not_hide_overview(
             raise RuntimeError("estimation read failed")
 
         monkeypatch.setattr(store, "get_scan_estimation_tasks", failure)
-        api.scan_estimate_cache.invalidate_scan("s")
-        overview = asyncio.run(api.get_scan_overview_v2("s", owner))
+        backend_scan_estimate_cache.scan_estimate_cache.invalidate_scan("s")
+        overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2("s", owner))
         assert overview.scan_id == "s" and overview.status == "auditing"
         assert overview.progress_estimate is None
     finally:
@@ -55,15 +61,15 @@ def test_detail_and_lightweight_overview_return_same_estimate(tmp_path, monkeypa
                            models=[{"id": "m", "capability": "high", "max_concurrency": 2}],
                        ))
     store.save_scan(value, ScanMeta(user_id="owner", agent_key="agent", scan_items=[], created_at="2026-11-09T00:00:00Z"))
-    monkeypatch.setattr(api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(api, "run_store_call", direct)
-    monkeypatch.setattr(api, "_running_scans", {})
-    monkeypatch.setattr("backend.api.agent.reconcile_offline_agent_scan_state",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_store_runner', direct)
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr("backend.agents.recovery.reconcile_offline_agent_scan_state",
                         lambda _, scan: scan.model_copy(update={"agent_online": True}))
     owner = User(user_id="owner", username="owner", role="user")
     try:
-        detail = asyncio.run(api.get_scan_status("s", owner))
-        overview = asyncio.run(api.get_scan_overview_v2("s", owner))
+        detail = asyncio.run(backend_api_scan_routes_queries.get_scan_status("s", owner))
+        overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2("s", owner))
         assert detail.progress_estimate.progress == overview.progress_estimate.progress == 0.75
         assert detail.progress_estimate.remaining_seconds == overview.progress_estimate.remaining_seconds == 100
         assert overview.progress_estimate.state == "ready"
@@ -73,18 +79,21 @@ def test_detail_and_lightweight_overview_return_same_estimate(tmp_path, monkeypa
         store.close()
 
 
-def test_fast_overview_detects_independent_validation_without_loading_reports(tmp_path, monkeypatch):
+def test_fast_overview_detects_independent_validation_without_loading_reports(
+    tmp_path,
+    monkeypatch,
+):
     store = SqliteScanStore(tmp_path / "validation.db")
     store.save_scan(ScanStatus(scan_id="s", status="complete", progress=1, total_candidates=0,
                               processed_candidates=0, vulnerabilities=[]), ScanMeta(user_id="owner", scan_items=[], created_at="2026-11-09T00:00:00Z"))
     store.upsert_vulnerability_validation("s", VulnerabilityValidation(vuln_index=0, status="queued", running=True))
-    monkeypatch.setattr(api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(api, "run_store_call", direct)
-    monkeypatch.setattr(api, "_running_scans", {})
-    monkeypatch.setattr("backend.api.agent.reconcile_offline_agent_scan_state",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_store_runner', direct)
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr("backend.agents.recovery.reconcile_offline_agent_scan_state",
                         lambda _, scan: scan.model_copy(update={"agent_online": True}))
     try:
-        overview = asyncio.run(api.get_scan_overview_v2("s", User(user_id="owner", username="owner", role="user")))
+        overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2("s", User(user_id="owner", username="owner", role="user")))
         assert overview.validations == []
         assert overview.progress_estimate.active
         assert overview.progress_estimate.progress < 1

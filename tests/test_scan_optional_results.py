@@ -1,11 +1,9 @@
 """Optional results remain distinguishable from absent or inaccessible scans."""
 
-import asyncio
-
-import pytest
-
-from backend.api import scan
 from test_scan_sharing import client_for, create_share, environment
+import asyncio
+import pytest
+from backend.application import get_runtime
 
 
 @pytest.mark.parametrize("resource", ["threat-analysis", "fp-review/overview"])
@@ -49,7 +47,7 @@ def test_optional_result_contract_across_access_modes(environment, resource):
             missing = await client.get(missing_url, params={"allow_missing": "true"}, headers=env.tokens["admin"])
             assert missing.status_code == 404, missing.text
             assert missing.json()["detail"] == "Scan not found"
-            scan._scan_owners["missing-" + env.scan_id] = env.meta.user_id
+            get_runtime().scans.scan_owners["missing-" + env.scan_id] = env.meta.user_id
             missing = await client.get(missing_url, params={"allow_missing": "true"}, headers=env.tokens["owner"])
             assert missing.status_code == 404, missing.text
             assert (await client.get(routes[0][0], params={"allow_missing": "true"})).status_code == 401

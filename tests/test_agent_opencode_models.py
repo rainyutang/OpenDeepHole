@@ -1,13 +1,15 @@
 from __future__ import annotations
-
+from backend.application import get_runtime, ApplicationError as HTTPException
+import backend.agents.constants as backend_agents_constants
+import backend.api.agent_routes.models as backend_api_agent_routes_models
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.rpc as backend_agents_rpc
+import backend.application as application
 import asyncio
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-
-import pytest
-from fastapi import HTTPException
-
-from backend.api import agent as agent_api
 from backend.models import AgentInfo, User
 from deephole_client import server as agent_server
 
@@ -50,16 +52,16 @@ def _user() -> User:
 
 @pytest.fixture(autouse=True)
 def _reset_model_waiters(monkeypatch):
-    agent_api._opencode_model_waiters.clear()
-    agent_api._registered_agents.clear()
-    agent_api._agent_ws.clear()
-    agent_api._agent_ws_locks.clear()
-    monkeypatch.setattr(agent_api, "run_store_call", _direct_store_call)
+    get_runtime().agents.opencode_model_waiters.clear()
+    get_runtime().agents.registered_agents.clear()
+    get_runtime().agents.agent_ws.clear()
+    get_runtime().agents.agent_ws_locks.clear()
+    monkeypatch.setattr(application, 'default_store_runner', _direct_store_call)
     yield
-    agent_api._opencode_model_waiters.clear()
-    agent_api._registered_agents.clear()
-    agent_api._agent_ws.clear()
-    agent_api._agent_ws_locks.clear()
+    get_runtime().agents.opencode_model_waiters.clear()
+    get_runtime().agents.registered_agents.clear()
+    get_runtime().agents.agent_ws.clear()
+    get_runtime().agents.agent_ws_locks.clear()
 
 
 def test_stable_model_listing_resolves_current_agent_session(monkeypatch) -> None:
@@ -69,7 +71,7 @@ def test_stable_model_listing_resolves_current_agent_session(monkeypatch) -> Non
 
     async def send(agent_id: str, command: dict) -> bool:
         commands.append((agent_id, command))
-        agent_api._opencode_model_waiters[command["request_id"]].set_result({
+        get_runtime().agents.opencode_model_waiters[command["request_id"]].set_result({
             "ok": True,
             "message": "",
             "models": [{
@@ -82,12 +84,12 @@ def test_stable_model_listing_resolves_current_agent_session(monkeypatch) -> Non
         })
         return True
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
     resolver = AsyncMock(return_value=(live_agent.agent_id, live_agent))
-    monkeypatch.setattr(agent_api, "resolve_agent_connection_async", resolver)
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', resolver)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
 
-    result = asyncio.run(agent_api.get_stable_agent_opencode_models(
+    result = asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
         "stable-agent",
         refresh=True,
         current_user=_user(),
@@ -98,7 +100,7 @@ def test_stable_model_listing_resolves_current_agent_session(monkeypatch) -> Non
     assert commands[0][0] == "session-new"
     assert commands[0][1]["refresh"] is True
     resolver.assert_awaited_once_with("stable-agent")
-    assert agent_api._opencode_model_waiters == {}
+    assert get_runtime().agents.opencode_model_waiters == {}
 
 
 def test_stable_model_listing_uses_shared_worker_session(monkeypatch) -> None:
@@ -107,7 +109,7 @@ def test_stable_model_listing_uses_shared_worker_session(monkeypatch) -> None:
 
         def get_live_agent_session(self, *, agent_key: str, stale_seconds: int):
             assert agent_key == "stable-agent"
-            assert stale_seconds == agent_api._WEBSOCKET_AGENT_STALE_SECONDS
+            assert stale_seconds == backend_agents_constants._WEBSOCKET_AGENT_STALE_SECONDS
             return {
                 "agent_id": "remote-session",
                 "agent_key": "stable-agent",
@@ -130,19 +132,19 @@ def test_stable_model_listing_uses_shared_worker_session(monkeypatch) -> None:
 
     async def send(agent_id: str, command: dict) -> bool:
         sent_to.append(agent_id)
-        agent_api._opencode_model_waiters[command["request_id"]].set_result({
+        get_runtime().agents.opencode_model_waiters[command["request_id"]].set_result({
             "ok": True,
             "message": "",
             "models": [],
         })
         return True
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
-    agent_api._registered_agents.clear()
-    agent_api._agent_ws.clear()
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    get_runtime().agents.registered_agents.clear()
+    get_runtime().agents.agent_ws.clear()
 
-    result = asyncio.run(agent_api.get_stable_agent_opencode_models(
+    result = asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
         "stable-agent",
         current_user=_user(),
     ))
@@ -163,21 +165,19 @@ def test_stable_model_listing_timeout_is_detailed_and_cleans_waiter(monkeypatch)
 
     async def timeout(request_id: str, waiter, *, timeout: float):
         assert request_id == command_request_id
-        assert waiter is agent_api._opencode_model_waiters[request_id]
+        assert waiter is get_runtime().agents.opencode_model_waiters[request_id]
         assert timeout == 120.0
         raise asyncio.TimeoutError
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(
-        agent_api,
-        "resolve_agent_connection_async",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async',
         AsyncMock(return_value=(live_agent.agent_id, live_agent)),
     )
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
-    monkeypatch.setattr(agent_api, "_wait_agent_response", timeout)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', timeout)
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(agent_api.get_stable_agent_opencode_models(
+        asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
             "stable-agent",
             current_user=_user(),
         ))
@@ -188,7 +188,7 @@ def test_stable_model_listing_timeout_is_detailed_and_cleans_waiter(monkeypatch)
     assert "控制端已等待 120 秒" in detail
     assert f"请求编号：{command_request_id}" in detail
     assert "当前会话：session-new" in detail
-    assert agent_api._opencode_model_waiters == {}
+    assert get_runtime().agents.opencode_model_waiters == {}
 
 
 def test_agent_model_failure_preserves_multiline_diagnostic(monkeypatch) -> None:
@@ -201,22 +201,20 @@ def test_agent_model_failure_preserves_multiline_diagnostic(monkeypatch) -> None
     )
 
     async def send(_agent_id: str, command: dict) -> bool:
-        agent_api._opencode_model_waiters[command["request_id"]].set_result({
+        get_runtime().agents.opencode_model_waiters[command["request_id"]].set_result({
             "ok": False,
             "message": agent_detail,
             "models": [],
         })
         return True
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(
-        agent_api,
-        "resolve_agent_connection_async",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async',
         AsyncMock(return_value=(live_agent.agent_id, live_agent)),
     )
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
 
-    result = asyncio.run(agent_api.get_stable_agent_opencode_models(
+    result = asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
         "stable-agent",
         current_user=_user(),
     ))
@@ -228,15 +226,13 @@ def test_agent_model_failure_preserves_multiline_diagnostic(monkeypatch) -> None
 
 
 def test_stable_model_listing_reports_offline_agent(monkeypatch) -> None:
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: _AgentStore())
-    monkeypatch.setattr(
-        agent_api,
-        "resolve_agent_connection_async",
+    monkeypatch.setattr(application, 'default_store_factory', lambda: _AgentStore())
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async',
         AsyncMock(return_value=None),
     )
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(agent_api.get_stable_agent_opencode_models(
+        asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
             "stable-agent",
             current_user=_user(),
         ))
@@ -250,7 +246,7 @@ def test_legacy_session_model_listing_route_remains_compatible(monkeypatch) -> N
 
     async def send(agent_id: str, command: dict) -> bool:
         assert agent_id == "legacy-session"
-        agent_api._opencode_model_waiters[command["request_id"]].set_result({
+        get_runtime().agents.opencode_model_waiters[command["request_id"]].set_result({
             "ok": True,
             "message": "",
             "models": [],
@@ -258,11 +254,11 @@ def test_legacy_session_model_listing_route_remains_compatible(monkeypatch) -> N
         return True
 
     resolver = AsyncMock(return_value=("legacy-session", live_agent))
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: _AgentStore())
-    monkeypatch.setattr(agent_api, "resolve_agent_id_connection_async", resolver)
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: _AgentStore())
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_id_connection_async', resolver)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
 
-    result = asyncio.run(agent_api.get_agent_opencode_models(
+    result = asyncio.run(backend_api_agent_routes_models.get_agent_opencode_models(
         "legacy-session",
         current_user=_user(),
     ))

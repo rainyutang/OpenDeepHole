@@ -1,13 +1,11 @@
 """Independent review work remains visible after the parent scan terminates."""
 
+from unittest.mock import patch
 import asyncio
 import os
-from unittest.mock import patch
-
 import pytest
-from fastapi import HTTPException
-
-from backend.api.agent import agent_push_opencode_pool
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
+from backend.application import ApplicationError as HTTPException
 from backend.models import OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 
@@ -165,8 +163,8 @@ def test_review_owner_after_agent_restart_is_accepted_and_sse_keeps_scan_revisio
     store.update_scan_progress("scan", status=ScanItemStatus.COMPLETE)
     value = pool()
     value.execution_revision = 0  # A review-only Agent never received the old scan dispatch.
-    with patch("backend.api.agent.get_scan_store", return_value=store), patch("backend.api.agent.run_store_call", direct_store_call), patch("backend.sse.publish") as publish:
-        assert asyncio.run(agent_push_opencode_pool("scan", value)) == {"ok": True}
+    with patch("backend.application.default_store_factory", return_value=store), patch("backend.application.default_store_runner", direct_store_call), patch("backend.application.default_publisher") as publish:
+        assert asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool("scan", value)) == {"ok": True}
     event = publish.call_args.args[2]
     assert event["execution_revision"] == event["opencode_pool"]["execution_revision"] == 7
     assert event["opencode_pool"]["global_running"] == 1
@@ -178,9 +176,9 @@ def test_old_review_revision_cannot_restore_live_work(store):
     store.persist_opencode_pool("scan", pool())
     store.acquire_fp_review_execution("review", agent_session_id="review-agent", force_new=True)
     assert store.get_opencode_pool_status("scan").global_running == 0
-    with patch("backend.api.agent.get_scan_store", return_value=store), patch("backend.api.agent.run_store_call", direct_store_call):
+    with patch("backend.application.default_store_factory", return_value=store), patch("backend.application.default_store_runner", direct_store_call):
         with pytest.raises(HTTPException) as caught:
-            asyncio.run(agent_push_opencode_pool("scan", pool()))
+            asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool("scan", pool()))
     assert caught.value.status_code == 409
 
 

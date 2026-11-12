@@ -1,10 +1,14 @@
 """Exercise live CodeGraph changes across the configuration/runtime boundary."""
 from __future__ import annotations
-
+from backend.application import get_runtime
+import backend.agents.rpc as backend_agents_rpc
+import backend.api.scan_routes.metadata as backend_api_scan_routes_metadata
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.scans.agent_binding as backend_scans_agent_binding
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
 from backend import code_graph
 from backend.api import agent as agent_api, scan as scan_api
 from backend.models import AgentInfo, ScanMeta, ScanStatus, UpdateScanCodeGraphRequest, User
@@ -32,13 +36,12 @@ def test_saved_toggle_reaches_agent_and_changes_queued_but_not_running_tasks(tmp
     async def direct_store(target, operation, *args, **kwargs):
         return getattr(target, operation)(*args, **kwargs)
 
-    for module in (scan_api, agent_api, code_graph):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
-        monkeypatch.setattr(module, "run_store_call", direct_store)
-    monkeypatch.setattr(scan_api, "_running_scans", {})
-    monkeypatch.setattr(scan_api, "_scan_owners", {})
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value=agent.agent_id))
-    monkeypatch.setattr(agent_api, "resolve_agent_id_connection_async", AsyncMock(return_value=(agent.agent_id, agent)))
+    get_runtime().store = store
+    get_runtime().store_runner = direct_store
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
+    monkeypatch.setattr(backend_scans_agent_binding, '_resolve_scan_agent_id', AsyncMock(return_value=agent.agent_id))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_id_connection_async', AsyncMock(return_value=(agent.agent_id, agent)))
     monkeypatch.setattr(scan_code_graph, "_states", {})
     monkeypatch.setattr("deephole_client.codegraph.prepare_scan_codegraph", AsyncMock(return_value=True))
     monkeypatch.setattr("task_agent.standalone.ensure_opencode_configuration", lambda: None)
@@ -46,10 +49,10 @@ def test_saved_toggle_reaches_agent_and_changes_queued_but_not_running_tasks(tmp
     async def deliver(agent_id, command):
         assert agent_id == agent.agent_id
         response = await agent_main._handle_command(command, None, None, None)
-        await agent_api._complete_agent_response(response, agent_api._code_graph_waiters)
+        await backend_agents_rpc._complete_agent_response(response, get_runtime().agents.code_graph_waiters)
         return True
 
-    monkeypatch.setattr(agent_api, "send_agent_command", deliver)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', deliver)
     user = User(user_id="owner", username="owner", role="user")
 
     async def run():
@@ -94,7 +97,7 @@ def test_saved_toggle_reaches_agent_and_changes_queued_but_not_running_tasks(tmp
             first = service.submit_task(OpenCodeTaskSpec(task_name="first", prompt="test", directory=tmp_path))
             try:
                 await asyncio.wait_for(queued.wait(), timeout=2)
-                enabled = await scan_api.update_scan_code_graph(scan_id, UpdateScanCodeGraphRequest(enabled=True), user)
+                enabled = await backend_api_scan_routes_metadata.update_scan_code_graph(scan_id, UpdateScanCodeGraphRequest(enabled=True), user)
                 assert enabled.code_graph_mcp_sync_status == "synced"
                 assert enabled.code_graph_mcp_applied_revision == enabled.code_graph_mcp_revision == 1
                 admitted.set()
@@ -102,7 +105,7 @@ def test_saved_toggle_reaches_agent_and_changes_queued_but_not_running_tasks(tmp
                     await asyncio.wait_for(running.wait(), timeout=2)
                 except TimeoutError:
                     raise AssertionError(await asyncio.wait_for(first.result(), timeout=1))
-                disabled = await scan_api.update_scan_code_graph(scan_id, UpdateScanCodeGraphRequest(enabled=False), user)
+                disabled = await backend_api_scan_routes_metadata.update_scan_code_graph(scan_id, UpdateScanCodeGraphRequest(enabled=False), user)
                 assert disabled.code_graph_mcp_sync_status == "synced"
                 assert disabled.code_graph_mcp_revision == 2
                 # A delayed original dispatch must not undo the new setting.

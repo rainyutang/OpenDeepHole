@@ -1,25 +1,47 @@
 """Stop/resume execution handoff regressions, using isolated durable storage."""
 from __future__ import annotations
-
-import asyncio
-import json
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
-
-import httpx
-import pytest
-from fastapi import FastAPI, HTTPException
-
-from backend.api import agent as agent_api, scan as scan_api
-from backend.models import (
-    AgentInfo, AgentScanExecutionFailure, Candidate, MiningEngineSelection,
-    OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, User, Vulnerability,
-)
-from backend.store.sqlite import SqliteScanStore
 from deephole_client import main as agent_main, server
 from deephole_client.reporter import Reporter, scan_execution_context
 from deephole_client.task_manager import TaskManager
+from fastapi import FastAPI
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+import asyncio
+import fastapi as fastapi
+import httpx
+import json
+import pytest
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.agents.configuration as backend_agents_configuration
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.recovery as backend_agents_recovery
+import backend.agents.runtime_updates as backend_agents_runtime_updates
+import backend.api.agent_routes.connections as backend_api_agent_routes_connections
+import backend.api.agent_routes.scan_completion as backend_api_agent_routes_scan_completion
+import backend.api.scan_routes.continuation as backend_api_scan_routes_continuation
+import backend.scans.agent_binding as backend_scans_agent_binding
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.continuation as backend_scans_continuation
+import backend.scans.fp_review as backend_scans_fp_review
+import backend.scans.fp_review_policy as backend_scans_fp_review_policy
+from backend import application
+from backend.api import agent as agent_api
+from backend.application import ApplicationError as HTTPException, get_runtime
+from backend.models import (
+    AgentInfo,
+    AgentScanExecutionFailure,
+    Candidate,
+    MiningEngineSelection,
+    OpenCodePoolStatus,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    User,
+    Vulnerability,
+)
+from backend.store.sqlite import SqliteScanStore
 
 
 async def direct_store(store, operation, *args, **kwargs):
@@ -65,28 +87,27 @@ def resume_env(tmp_path, monkeypatch):
         user_id="user", ip="127.0.0.1", last_seen=datetime.now(timezone.utc).isoformat(),
         protocol_version=2,
     )
-    for module in (agent_api, scan_api):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
-        monkeypatch.setattr(module, "run_store_call", direct_store)
-    monkeypatch.setattr(agent_api, "_registered_agents", {"agent": agent})
-    monkeypatch.setattr(agent_api, "_running_scans", {})
-    monkeypatch.setattr(scan_api, "_running_scans", agent_api._running_scans)
-    monkeypatch.setattr(agent_api, "_scan_owners", {})
-    monkeypatch.setattr(scan_api, "_scan_owners", agent_api._scan_owners)
-    monkeypatch.setattr(agent_api, "ensure_agent_accepting_tasks_async", AsyncMock())
-    monkeypatch.setattr(agent_api, "get_scan_agent_config_async", AsyncMock(return_value=object()))
-    monkeypatch.setattr(agent_api, "agent_config_has_explicit_model", lambda _: True)
-    monkeypatch.setattr(agent_api, "agent_explicit_model_ids", lambda _: ["provider/model"])
-    monkeypatch.setattr(scan_api, "_checker_packages_for", lambda _: [])
-    monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
+    monkeypatch.setattr(application, "default_store_factory", lambda: store)
+    monkeypatch.setattr(application, "default_store_runner", direct_store)
+    monkeypatch.setattr(get_runtime().agents, 'registered_agents', {"agent": agent})
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', get_runtime().scans.running_scans)
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', get_runtime().scans.scan_owners)
+    monkeypatch.setattr(backend_agents_runtime_updates, 'ensure_agent_accepting_tasks_async', AsyncMock())
+    monkeypatch.setattr(backend_agents_configuration, 'get_scan_agent_config_async', AsyncMock(return_value=object()))
+    monkeypatch.setattr(backend_agents_configuration, 'agent_config_has_explicit_model', lambda _: True)
+    monkeypatch.setattr(backend_agents_configuration, 'agent_explicit_model_ids', lambda _: ["provider/model"])
+    monkeypatch.setattr(backend_scans_configuration, '_checker_packages_for', lambda _: [])
+    monkeypatch.setattr(backend_agents_artifacts, 'create_agent_task_runtime_update_payload_async', AsyncMock(return_value=None))
     stop = AsyncMock(return_value={"still_active": False, "error": "", "execution_revision": 8})
     send = AsyncMock(return_value=True)
-    real_stop, real_send = agent_api.request_agent_scan_stop, agent_api.send_agent_command
-    monkeypatch.setattr(agent_api, "request_agent_scan_stop", stop)
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
-    monkeypatch.setattr("backend.sse.publish", Mock())
+    real_stop, real_send = backend_agents_gateway.request_agent_scan_stop, backend_agents_gateway.send_agent_command
+    monkeypatch.setattr(backend_agents_gateway, 'request_agent_scan_stop', stop)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    monkeypatch.setattr("backend.application.default_publisher", Mock())
     async def resume():
-        return await scan_api.resume_scan(
+        return await backend_api_scan_routes_continuation.resume_scan(
             "resume-scan", SimpleNamespace(base_url="http://server/"),
             User(user_id="user", username="user", role="admin"),
         )
@@ -132,7 +153,7 @@ def test_multi_path_resume_preserves_full_list_for_capable_agent(resume_env):
     asyncio.run(env.resume())
     command = env.send.await_args.args[1]
     token = command["resume_manifest_url"].rsplit("/", 1)[-1]
-    manifest = asyncio.run(agent_api.agent_get_resume_manifest_v2(token))
+    manifest = asyncio.run(backend_api_agent_routes_scan_completion.agent_get_resume_manifest_v2(token))
     assert json.loads(manifest.body)["code_scan_paths"] == ["/repo/src", "/repo/file.c"]
 
 
@@ -143,7 +164,7 @@ def test_resume_claim_preserves_history_and_rejects_old_manifest(resume_env):
     command = env.send.await_args.args[1]
     assert command["execution_revision"] == 9
     token = command["resume_manifest_url"].rsplit("/", 1)[-1]
-    response = asyncio.run(agent_api.agent_get_resume_manifest_v2(token))
+    response = asyncio.run(backend_api_agent_routes_scan_completion.agent_get_resume_manifest_v2(token))
     assert json.loads(response.body)["execution_revision"] == 9
     stored, meta = env.store.load_scan("resume-scan")
     assert meta.execution_revision == 9
@@ -157,7 +178,7 @@ def test_resume_claim_preserves_history_and_rejects_old_manifest(resume_env):
         expected_revision=9, agent_id="agent", agent_session_id="session",
     ) == 10
     with pytest.raises(HTTPException) as error:
-        asyncio.run(agent_api.agent_get_resume_manifest_v2(token))
+        asyncio.run(backend_api_agent_routes_scan_completion.agent_get_resume_manifest_v2(token))
     assert error.value.status_code == 409
 
 
@@ -201,7 +222,7 @@ def test_start_failure_is_durable_retryable_and_cannot_fail_newer_execution(resu
     env = resume_env
     asyncio.run(env.resume())
     for revision, changed in ((8, False), (9, True), (9, False)):
-        result = asyncio.run(agent_api.agent_scan_execution_failed(
+        result = asyncio.run(backend_api_agent_routes_scan_completion.agent_scan_execution_failed(
             "resume-scan", AgentScanExecutionFailure(
                 agent_session_id="session", execution_revision=revision,
                 error_message="旧扫描清理超时",
@@ -214,7 +235,7 @@ def test_start_failure_is_durable_retryable_and_cannot_fail_newer_execution(resu
     assert scan.processed_candidates == 1
     assert scan.opencode_pool.completed_tasks[0]["task_id"] == "old"
     asyncio.run(env.resume())
-    result = asyncio.run(agent_api.agent_scan_execution_failed(
+    result = asyncio.run(backend_api_agent_routes_scan_completion.agent_scan_execution_failed(
         "resume-scan", AgentScanExecutionFailure(
             agent_session_id="session", execution_revision=9, error_message="late failure",
         ),
@@ -228,8 +249,8 @@ def test_reconnect_old_or_cancelled_inventory_does_not_suppress_recovery(resume_
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.PENDING)
     resume = AsyncMock()
-    monkeypatch.setattr(scan_api, "_continue_scan", resume)
-    asyncio.run(agent_api._recover_missing_agent_work(
+    monkeypatch.setattr(backend_scans_continuation, '_continue_scan', resume)
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work(
         "agent", env.agent,
         {"active_scans": [{"scan_id": "resume-scan", "execution_revision": 7, "cancel_requested": True}]},
         server_url="http://server",
@@ -238,15 +259,18 @@ def test_reconnect_old_or_cancelled_inventory_does_not_suppress_recovery(resume_
     assert resume.await_args.kwargs["claimed_execution_revision"] == 9
 
 
-def test_restart_restores_main_scan_without_being_blocked_by_independent_review(resume_env, monkeypatch):
+def test_restart_restores_main_scan_without_being_blocked_by_independent_review(
+    resume_env,
+    monkeypatch,
+):
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
     env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
     env.store.begin_fp_review_execution("review", agent_session_id="old-session")
     env.store.update_fp_review_job("review", status="running")
     review = AsyncMock(return_value={"status": "running"})
-    monkeypatch.setattr(scan_api, "_start_fp_review", review)
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    monkeypatch.setattr(backend_scans_fp_review, '_start_fp_review', review)
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     scan, meta = env.store.load_scan("resume-scan")
     assert scan.status == ScanItemStatus.PENDING
     assert meta.execution_revision == 9
@@ -263,17 +287,17 @@ def test_recovery_failure_is_reported_and_next_hello_retries(resume_env):
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.AUDITING)
     env.stop.return_value = {"still_active": True, "error": ""}
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     scan, meta = env.store.load_scan("resume-scan")
     assert scan.status == "error"
     assert scan.error_message.startswith(AGENT_RECOVERY_FAILED_PREFIX)
     assert "旧扫描尚未确认退出" in scan.error_message
     assert meta.execution_revision == 9
     env.send.assert_not_awaited()
-    from backend.sse import publish
+    from backend.application import default_publisher as publish
     assert any(call.args[1] == "scan_status" and call.args[2]["status"] == "error" for call in publish.call_args_list)
     env.stop.return_value = {"still_active": False, "error": ""}
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     scan, meta = env.store.load_scan("resume-scan")
     assert scan.status == "pending" and meta.execution_revision == 10
     assert not scan.error_message
@@ -282,7 +306,7 @@ def test_recovery_failure_is_reported_and_next_hello_retries(resume_env):
 
 def test_recovery_skips_user_cancelled_scan(resume_env):
     env = resume_env
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     env.stop.assert_not_awaited()
     env.send.assert_not_awaited()
     scan, meta = env.store.load_scan("resume-scan")
@@ -299,20 +323,20 @@ def test_user_stop_after_recovery_claim_prevents_dispatch(resume_env, monkeypatc
                                        error_message="用户手动停止")
 
     if cancel_phase == "before_load":
-        continue_scan = scan_api._continue_scan
+        continue_scan = backend_scans_continuation._continue_scan
 
         async def stop_before_load(*args, **kwargs):
             cancel()
             return await continue_scan(*args, **kwargs)
 
-        monkeypatch.setattr(scan_api, "_continue_scan", stop_before_load)
+        monkeypatch.setattr(backend_scans_continuation, '_continue_scan', stop_before_load)
     else:
         async def stop_during_prepare(*args, **kwargs):
             cancel()
             return {"still_active": False, "error": ""}
 
         env.stop.side_effect = stop_during_prepare
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     scan, meta = env.store.load_scan("resume-scan")
     assert scan.status == "cancelled" and scan.error_message == "用户手动停止"
     assert meta.execution_revision == 9
@@ -330,8 +354,8 @@ def test_main_recovery_does_not_reopen_user_cancelled_review(resume_env, monkeyp
     env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
     env.store.begin_fp_review_execution("review", agent_session_id="old-session")
     env.store.update_fp_review_job("review", status="cancelled", error_message="用户手动停止")
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value="agent"))
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    monkeypatch.setattr(backend_scans_agent_binding, '_resolve_scan_agent_id', AsyncMock(return_value="agent"))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     assert env.store.load_scan("resume-scan")[0].status == "pending"
     review = env.store.get_fp_review_job("review")
     assert review.status == "cancelled" and review.execution_revision == 1
@@ -348,8 +372,8 @@ def test_review_inventory_recovery_checks_execution_and_cancellation(
     env.store.begin_fp_review_execution("review", agent_session_id="old-session")
     env.store.update_fp_review_job("review", status="running")
     start_review = AsyncMock(return_value={"status": "running"})
-    monkeypatch.setattr(scan_api, "_start_fp_review", start_review)
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {
+    monkeypatch.setattr(backend_scans_fp_review, '_start_fp_review', start_review)
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {
         "active_fp_reviews": [{"scan_id": "resume-scan", "review_id": "review",
                                "execution_revision": revision, "cancel_requested": cancel_requested}],
     }, server_url="http://server"))
@@ -365,19 +389,19 @@ def test_failed_review_recovery_clears_running_state(resume_env, monkeypatch):
     env.store.create_fp_review_job("review", "resume-scan", 1, "2026-09-28T00:00:00Z")
     env.store.begin_fp_review_execution("review", agent_session_id="old-session")
     env.store.update_fp_review_job("review", status="running")
-    monkeypatch.setattr(scan_api, "_start_fp_review", AsyncMock(side_effect=HTTPException(400, "模型配置不可用")))
-    asyncio.run(agent_api._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
+    monkeypatch.setattr(backend_scans_fp_review, '_start_fp_review', AsyncMock(side_effect=HTTPException(400, "模型配置不可用")))
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work("agent", env.agent, {}, server_url="http://server"))
     review = env.store.get_fp_review_job("review")
     assert review.status == "error"
     assert review.error_message == AGENT_RECOVERY_FAILED_PREFIX + "模型配置不可用"
-    assert not scan_api._fp_review_resume_state([], {}, env.store.list_fp_review_states_by_scans(["resume-scan"])["resume-scan"])[0]
+    assert not backend_scans_fp_review_policy._fp_review_resume_state([], {}, env.store.list_fp_review_states_by_scans(["resume-scan"])["resume-scan"])[0]
 
 
 def test_reconnect_adopts_only_matching_execution_before_publishing(resume_env):
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.PENDING)
     env.agent.agent_session_id = "restarted-session"
-    accepted = asyncio.run(agent_api._adopt_reported_agent_work(
+    accepted = asyncio.run(backend_agents_recovery._adopt_reported_agent_work(
         "agent", env.agent,
         {"active_scans": [{"scan_id": "resume-scan", "execution_revision": 8}]},
     ))
@@ -395,8 +419,8 @@ def test_old_pending_terminal_report_does_not_suppress_current_recovery(resume_e
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.PENDING)
     resume = AsyncMock()
-    monkeypatch.setattr(scan_api, "_continue_scan", resume)
-    asyncio.run(agent_api._recover_missing_agent_work(
+    monkeypatch.setattr(backend_scans_continuation, '_continue_scan', resume)
+    asyncio.run(backend_agents_recovery._recover_missing_agent_work(
         "agent", env.agent, {"pending_terminal_reports": {
             "scans": ["resume-scan"],
             "scan_executions": [{"scan_id": "resume-scan", "execution_revision": 7}],
@@ -405,7 +429,10 @@ def test_old_pending_terminal_report_does_not_suppress_current_recovery(resume_e
     resume.assert_awaited_once()
 
 
-def test_websocket_adopts_before_welcome_and_receives_stop_ack_during_recovery(resume_env, monkeypatch):
+def test_websocket_adopts_before_welcome_and_receives_stop_ack_during_recovery(
+    resume_env,
+    monkeypatch,
+):
     env = resume_env
     env.store.update_scan_progress("resume-scan", status=ScanItemStatus.PENDING)
     env.store.upsert_agent_record(
@@ -415,13 +442,13 @@ def test_websocket_adopts_before_welcome_and_receives_stop_ack_during_recovery(r
     with env.store._lock:
         env.store._conn.execute("UPDATE scans SET agent_key = 'stable' WHERE scan_id = 'resume-scan'")
         env.store._conn.commit()
-    monkeypatch.setattr(agent_api, "request_agent_scan_stop", env.real_stop)
-    monkeypatch.setattr(agent_api, "send_agent_command", env.real_send)
-    monkeypatch.setattr(agent_api, "_agent_ws", {})
-    monkeypatch.setattr(agent_api, "_agent_ws_locks", {})
-    monkeypatch.setattr(agent_api, "_schedule_agent_disconnect_cancel", Mock())
-    monkeypatch.setattr(agent_api, "_schedule_agent_touch_persistence", Mock())
-    monkeypatch.setattr(agent_api, "_touch_agent", Mock())
+    monkeypatch.setattr(backend_agents_gateway, 'request_agent_scan_stop', env.real_stop)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', env.real_send)
+    monkeypatch.setattr(get_runtime().agents, 'agent_ws', {})
+    monkeypatch.setattr(get_runtime().agents, 'agent_ws_locks', {})
+    monkeypatch.setattr(backend_agents_recovery, '_schedule_agent_disconnect_cancel', Mock())
+    monkeypatch.setattr(backend_agents_directory, '_schedule_agent_touch_persistence', Mock())
+    monkeypatch.setattr(backend_agents_directory, '_touch_agent', Mock())
 
     async def run():
         received = asyncio.Queue()
@@ -441,7 +468,7 @@ def test_websocket_adopts_before_welcome_and_receives_stop_ack_during_recovery(r
             async def receive_json(self):
                 payload = await received.get()
                 if payload is None:
-                    raise agent_api.WebSocketDisconnect()
+                    raise fastapi.WebSocketDisconnect()
                 return payload
 
             async def send_json(self, payload):
@@ -457,13 +484,13 @@ def test_websocket_adopts_before_welcome_and_receives_stop_ack_during_recovery(r
 
         async def recover(agent_id, *_args, **_kwargs):
             assert sent[0]["type"] == "welcome"
-            result = await agent_api.request_agent_scan_stop(agent_id, "resume-scan", execution_revision=8)
+            result = await backend_agents_gateway.request_agent_scan_stop(agent_id, "resume-scan", execution_revision=8)
             assert result["still_active"] is False
             received.put_nowait(None)
 
         recovery = AsyncMock(side_effect=recover)
-        monkeypatch.setattr(agent_api, "_recover_missing_agent_work", recovery)
-        await asyncio.wait_for(agent_api.agent_websocket(WebSocket()), timeout=2)
+        monkeypatch.setattr(backend_agents_recovery, '_recover_missing_agent_work', recovery)
+        await asyncio.wait_for(backend_api_agent_routes_connections.agent_websocket(WebSocket()), timeout=2)
         recovery.assert_awaited_once()
         assert [payload["type"] for payload in sent] == ["welcome", "stop", "heartbeat_ack"]
 
@@ -589,10 +616,10 @@ def test_resume_http_reports_advance_task_time_progress_and_finish(resume_env, m
 
     env = resume_env
     published = Mock()
-    monkeypatch.setattr("backend.sse.publish", published)
+    monkeypatch.setattr("backend.application.default_publisher", published)
     monkeypatch.setattr(report_routes, "get_scan_store", lambda: env.store)
     monkeypatch.setattr(report_routes, "run_store_call", direct_store)
-    monkeypatch.setattr(scan_api, "_start_fp_review", AsyncMock())
+    monkeypatch.setattr(backend_scans_fp_review, '_start_fp_review', AsyncMock())
     manager = TaskManager()
     monkeypatch.setattr(server, "_task_manager", manager)
     app = FastAPI()

@@ -1,13 +1,17 @@
 """ETA samples use complete, lightweight, scan-scoped logical task history."""
 
-import json
-import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-
+import json
+import os
 import pytest
-
-from backend.models import OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, VulnerabilityValidation
+from backend.models import (
+    OpenCodePoolStatus,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    VulnerabilityValidation,
+)
 from backend.scan_estimate import estimate_scan_progress_from_store
 from backend.store.sqlite import SqliteScanStore
 

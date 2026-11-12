@@ -1,20 +1,18 @@
 from __future__ import annotations
-
+from backend.application import get_runtime
 import asyncio
 import copy
 import os
 import threading
 import uuid
+import httpx
+import pytest
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-
-import httpx
-import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
-
 from backend import auth, report_routes, sse
 from backend.api import agent, integration, scan, sharing
 from backend.file_inventory import FileInventoryUpload, ScanFileInventory
@@ -185,7 +183,11 @@ def test_fixed_audit_targets_match_engine_and_preserve_module_provenance(empty_t
     ("C:\\Project", "C:\\Project\\src", "c:\\PROJECT\\SRC\\auth"),
     ("\\\\server\\share\\project", "\\\\server\\share\\project\\src", "\\\\server\\share\\project\\src\\auth"),
 ])
-def test_paths_match_exact_inventory_entries_across_agent_operating_systems(project, root, module_path):
+def test_paths_match_exact_inventory_entries_across_agent_operating_systems(
+    project,
+    root,
+    module_path,
+):
     bundle = analysis()
     bundle["artifacts"]["high_risk_modules_path"]["content"][0]["代码目录"] = module_path
     data = build_threat_coverage(inventory(project_path=project, scan_root=root), bundle)
@@ -282,11 +284,13 @@ def coverage_env(request, tmp_path, monkeypatch):
     revision = store.begin_scan_execution(scan_id, agent_id="agent-1", agent_session_id="session-1")
     async def store_call(store, operation, *args, **kwargs):
         return (getattr(store, operation) if isinstance(operation, str) else operation)(*args, **kwargs)
-    for module in (auth, scan, sharing, integration, agent, report_routes):
+    get_runtime().store = store
+    get_runtime().store_runner = store_call
+    for module in (auth, sharing, integration, report_routes):
         monkeypatch.setattr(module, "get_scan_store", lambda: store)
         monkeypatch.setattr(module, "run_store_call", store_call)
     monkeypatch.setattr(sse, "_distributed_store", None)
-    monkeypatch.setattr(scan, "_running_scans", {})
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
     app = FastAPI()
     for router in (scan.router, integration.router, sharing.router, agent.router):
         app.include_router(router)
@@ -295,7 +299,10 @@ def coverage_env(request, tmp_path, monkeypatch):
     store.close()
 
 
-def test_final_tp_issue_overlay_is_read_only_all_source_and_available_before_analysis(coverage_env, monkeypatch):
+def test_final_tp_issue_overlay_is_read_only_all_source_and_available_before_analysis(
+    coverage_env,
+    monkeypatch,
+):
     env = coverage_env
     store, sid = env.store, env.scan_id
     store.replace_file_inventory(sid, FileInventoryUpload(
@@ -420,7 +427,12 @@ def test_analysis_can_arrive_before_inventory_and_old_execution_cannot_overwrite
 
 
 @pytest.mark.parametrize("inventory_first,failure", [(True, None), (False, None), (True, "analysis"), (True, "inventory")])
-def test_scanner_uploads_inventory_independently_of_model_completion(tmp_path, monkeypatch, inventory_first, failure):
+def test_scanner_uploads_inventory_independently_of_model_completion(
+    tmp_path,
+    monkeypatch,
+    inventory_first,
+    failure,
+):
     async def run():
         project = tmp_path / "project"
         project.mkdir()
@@ -502,7 +514,10 @@ def test_scanner_uploads_inventory_independently_of_model_completion(tmp_path, m
     asyncio.run(run())
 
 
-def test_resume_inventory_is_frozen_and_transport_does_not_queue_behind_analysis(tmp_path, monkeypatch):
+def test_resume_inventory_is_frozen_and_transport_does_not_queue_behind_analysis(
+    tmp_path,
+    monkeypatch,
+):
     async def run():
         reporter = Reporter("http://server", outbox_path=tmp_path / "outbox.db")
         reporter.set_scan_execution("s", 1)

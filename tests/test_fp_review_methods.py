@@ -1,12 +1,19 @@
-import tempfile
-import unittest
+
 from datetime import datetime, timezone
+from deephole_client.fp_review import (
+    build_fp_review_method_catalog,
+    discover_fp_review_method_manifests,
+    load_fp_review_methods,
+    runtime as fp_runtime,
+)
 from pathlib import Path
 from unittest.mock import Mock, patch
-
-from fastapi import HTTPException
-
-from backend.api import scan as scan_api
+import tempfile
+import unittest
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.fp_review_policy as backend_scans_fp_review_policy
+import backend.scans.report_records as backend_scans_report_records
+from backend.application import ApplicationError as HTTPException, get_runtime
 from backend.models import (
     CreateScanRequest,
     FpReviewMethodCatalog,
@@ -19,12 +26,6 @@ from backend.models import (
     Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
-from deephole_client.fp_review import (
-    build_fp_review_method_catalog,
-    discover_fp_review_method_manifests,
-    load_fp_review_methods,
-)
-from deephole_client.fp_review import runtime as fp_runtime
 
 
 def _write_method(
@@ -232,19 +233,19 @@ class FpReviewRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
 
 class FpReviewMethodBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def test_request_defers_default_to_catalog_and_rejects_unknown_method(self) -> None:
         request = CreateScanRequest(project_path="/repo", checkers=[])
         self.assertIsNone(request.fp_review_method)
 
-        method_id, selection = scan_api._resolve_fp_review_method(None)
+        method_id, selection = backend_scans_configuration._resolve_fp_review_method(None)
         self.assertEqual(method_id, "adversarial")
         self.assertEqual(selection.method_id, method_id)
         self.assertTrue(selection.stages)
         with self.assertRaises(HTTPException) as caught:
-            scan_api._resolve_fp_review_method("not-installed")
+            backend_scans_configuration._resolve_fp_review_method("not-installed")
         self.assertEqual(caught.exception.status_code, 400)
 
     def test_scan_persists_dynamic_method_and_immutable_selection(self) -> None:
@@ -300,8 +301,8 @@ class FpReviewMethodBackendTests(unittest.TestCase):
             fp_review_method_selection=selection,
         )
 
-        with patch("backend.api.scan.get_scan_store", return_value=store):
-            titles = scan_api._fp_review_stage_titles("scan-1")
+        with patch("backend.application.default_store_factory", return_value=store):
+            titles = backend_scans_report_records._fp_review_stage_titles("scan-1")
 
         self.assertEqual(titles, [("custom_stage", "Custom stage")])
 
@@ -339,8 +340,8 @@ class FpReviewMethodBackendTests(unittest.TestCase):
                     created_at=now,
                 ),
             )
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                first = scan_api._ensure_fp_review_job_for_scan(
+            with patch("backend.application.default_store_factory", return_value=store):
+                first = backend_scans_fp_review_policy._ensure_fp_review_job_for_scan(
                     "scan-1",
                     publish_started=False,
                 )
@@ -354,7 +355,7 @@ class FpReviewMethodBackendTests(unittest.TestCase):
                         created_at=now,
                     ),
                 )
-                second = scan_api._ensure_fp_review_job_for_scan(
+                second = backend_scans_fp_review_policy._ensure_fp_review_job_for_scan(
                     "scan-1",
                     publish_started=False,
                 )

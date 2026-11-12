@@ -1,16 +1,16 @@
 from __future__ import annotations
-
-import asyncio
-import tempfile
+from fastapi import FastAPI
 from pathlib import Path
 from unittest.mock import patch
-
+import asyncio
 import httpx
 import pytest
-from fastapi import FastAPI
-
+import tempfile
+import backend.api.agent_routes.scan_candidates as backend_api_agent_routes_scan_candidates
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
+from backend import application
 from backend.api import agent as agent_api
-from backend.api import scan as scan_api
+from backend.application import get_runtime
 from backend.models import (
     AgentCandidateAuditResult,
     Candidate,
@@ -155,10 +155,10 @@ def test_agent_queued_candidate_report_persists_and_publishes_without_advancing_
     store = candidate_store
     live = store.load_scan("scan-1")[0]
     with (
-        patch("backend.api.agent.get_scan_store", return_value=store),
-        patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
-        patch("backend.api.agent._running_scans", {"scan-1": live}),
-        patch("backend.sse.publish") as publish,
+        patch("backend.application.default_store_factory", return_value=store),
+        patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+        patch.object(application.get_runtime().scans, "running_scans", {"scan-1": live}),
+        patch("backend.application.default_publisher") as publish,
     ):
         response = asyncio.run(_post_candidate_audit({
             "candidate_idx": 7,
@@ -213,10 +213,10 @@ def test_invalid_candidate_audit_reports_do_not_change_stored_candidate(
     before = store.list_scan_candidates("scan-1")[0]
     result = _vulnerability(audit_index=7, verdict="not_confirmed") if with_result else None
     with (
-        patch("backend.api.agent.get_scan_store", return_value=store),
-        patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
-        patch("backend.api.agent._running_scans", {}),
-        patch("backend.sse.publish") as publish,
+        patch("backend.application.default_store_factory", return_value=store),
+        patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+        patch.object(application.get_runtime().scans, "running_scans", {}),
+        patch("backend.application.default_publisher") as publish,
     ):
         response = asyncio.run(_post_candidate_audit({
             "candidate_idx": 7,
@@ -474,14 +474,14 @@ def test_engine_success_does_not_mark_pending_candidates_as_audited() -> None:
         store.save_scan(scan, meta)
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.scan.run_store_call",
+                "backend.application.default_store_runner",
                 side_effect=_direct_store_call,
             ),
         ):
-            overview = asyncio.run(scan_api.get_scan_overview_v2(
+            overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2(
                 "scan-1",
                 current_user=User(
                     user_id="admin",
@@ -519,13 +519,13 @@ def test_agent_upserts_candidate_result_by_index() -> None:
         )
 
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent.run_store_call",
+                "backend.application.default_store_runner",
                 side_effect=_direct_store_call,
             ),
         ):
-            response = asyncio.run(agent_api.agent_report_candidate_audit(
+            response = asyncio.run(backend_api_agent_routes_scan_candidates.agent_report_candidate_audit(
                 "scan-1",
                 AgentCandidateAuditResult(
                     candidate_idx=1,
@@ -544,6 +544,6 @@ def test_agent_upserts_candidate_result_by_index() -> None:
         assert candidates[1].audit_result.audit_index == 1
         assert candidates[1].audit_result.description == "candidate one result"
     finally:
-        agent_api._running_scans.pop("scan-1", None)
+        get_runtime().scans.running_scans.pop("scan-1", None)
         store.close()
         temporary.cleanup()

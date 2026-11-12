@@ -1,17 +1,48 @@
-"""Terminal acknowledgements for reports arriving after explicit deletion."""
+"""HTTP adaptation and terminal acknowledgements for historical Agent reports."""
 
+from fastapi import HTTPException
 from fastapi.routing import APIRoute
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from backend.application import (
+    ApplicationError,
+    get_runtime,
+    get_scan_store,
+    run_store_call,
+    runtime_stream,
+    use_runtime,
+)
 
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call
 
+class ApplicationRoute(APIRoute):
+    """Bind request dependencies and translate application failures at the edge."""
 
-class HistoricalReportRoute(APIRoute):
+    def wrap_application_handler(self, handler):
+        return handler
+
     def get_route_handler(self):
-        handler = super().get_route_handler()
+        handler = self.wrap_application_handler(super().get_route_handler())
+
+        async def adapted(request):
+            runtime = getattr(request.app.state, "backend_runtime", None) or get_runtime()
+            with use_runtime(runtime):
+                try:
+                    response = await handler(request)
+                    if isinstance(response, StreamingResponse):
+                        response.body_iterator = runtime_stream(response.body_iterator, runtime)
+                    return response
+                except ApplicationError as exc:
+                    raise HTTPException(exc.status_code, exc.detail, exc.headers) from exc
+
+        return adapted
+
+
+class HistoricalReportRoute(ApplicationRoute):
+    def wrap_application_handler(self, handler):
         is_report = self.path.startswith("/api/agent/") or (
-            "/fp_review/" in self.path and self.path.rsplit("/", 1)[-1] in {"progress", "result", "stage_output", "finish"}
+            "/fp_review/" in self.path
+            and self.path.rsplit("/", 1)[-1] in {
+                "progress", "result", "stage_output", "finish",
+            }
         )
 
         async def protected(request):
@@ -34,8 +65,7 @@ class HistoricalReportRoute(APIRoute):
             try:
                 return await handler(request)
             except Exception:
-                # A deletion may commit between the lookup and the write.
-                # A verified tombstone is the only reason to acknowledge it.
+                # Only a verified tombstone allows acknowledging a failed write.
                 if await deleted():
                     return JSONResponse({"ok": True, "discarded": "scan_deleted", "scan_id": scan_id})
                 raise

@@ -1,19 +1,17 @@
 from __future__ import annotations
-
+from backend.application import get_runtime
+import backend.api.agent_routes.scan_artifacts as backend_api_agent_routes_scan_artifacts
 import asyncio
 import importlib
 import json
 import tempfile
 import threading
+import pytest
+import deephole_client.threat_analysis_runner as threat_analysis_runner
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
-
-import pytest
-
-import deephole_client.threat_analysis_runner as threat_analysis_runner
-from backend.api.agent import agent_push_threat_analysis
 from backend.models import (
     ScanItemStatus,
     ScanMeta,
@@ -23,10 +21,7 @@ from backend.models import (
 )
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
-from deephole_client.process_artifacts import (
-    collect_json_artifacts,
-    restore_json_artifacts,
-)
+from deephole_client.process_artifacts import collect_json_artifacts, restore_json_artifacts
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
     _legacy_non_leaf_tasks,
@@ -37,12 +32,7 @@ from deephole_client.vulnerability_mining.engines.threat_audit.runner import (
     _threat_prompt,
     run_threat_audit,
 )
-from task_agent import (
-    OpenCodeResult,
-    opencode_task_context,
-    run_opencode_task,
-    run_sync_component,
-)
+from task_agent import OpenCodeResult, opencode_task_context, run_opencode_task, run_sync_component
 from task_agent.task_service import get_opencode_execution_context
 
 
@@ -629,22 +619,22 @@ def test_agent_threat_analysis_upload_completes_run_before_publishing_result() -
             return function(*args, **kwargs)
 
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent.run_store_call", new=direct_store_call),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", new=direct_store_call),
             patch.dict(
-                "backend.api.agent._running_scans",
+                get_runtime().scans.running_scans,
                 {"scan-1": scan},
                 clear=True,
             ),
             patch(
-                "backend.sse.publish",
+                "backend.application.default_publisher",
                 side_effect=lambda scan_id, event_type, data: published.append(
                     (scan_id, event_type, data)
                 ),
             ),
         ):
             response = asyncio.run(
-                agent_push_threat_analysis("scan-1", _artifact_bundle())
+                backend_api_agent_routes_scan_artifacts.agent_push_threat_analysis("scan-1", _artifact_bundle())
             )
 
         loaded = store.load_scan("scan-1")

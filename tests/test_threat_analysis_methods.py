@@ -1,23 +1,15 @@
 from __future__ import annotations
-
+import backend.scans.configuration as backend_scans_configuration
 import inspect
 import shutil
 import sqlite3
 import subprocess
 import sys
-from pathlib import Path
-
 import pytest
 import yaml
-from fastapi import HTTPException
-
-from backend.api.scan import _resolve_threat_analysis_method
-from backend.models import (
-    ScanItemStatus,
-    ScanMeta,
-    ScanStatus,
-    ThreatAnalysisMethodSelection,
-)
+from pathlib import Path
+from backend.application import ApplicationError as HTTPException
+from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAnalysisMethodSelection
 from backend.store.sqlite import SqliteScanStore
 from deephole_client.threat_analysis import (
     DEFAULT_THREAT_ANALYSIS_METHOD_ID,
@@ -26,10 +18,7 @@ from deephole_client.threat_analysis import (
     discover_threat_analysis_method_manifests,
     resolve_threat_analysis_method,
 )
-from deephole_client.threat_analysis_runner import (
-    _load_implementation,
-    _validate_native_result,
-)
+from deephole_client.threat_analysis_runner import _load_implementation, _validate_native_result
 
 
 def _write_method(
@@ -98,22 +87,22 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
 
 
 def test_backend_resolves_default_method_and_rejects_unknown_selection() -> None:
-    method_id, selection = _resolve_threat_analysis_method(None)
+    method_id, selection = backend_scans_configuration._resolve_threat_analysis_method(None)
 
     assert method_id == "opencode_lightweight_threat_analysis"
     assert selection.method_label == "轻量级威胁分析（OpenCode）"
-    assert _resolve_threat_analysis_method("  ")[0] == method_id
+    assert backend_scans_configuration._resolve_threat_analysis_method("  ")[0] == method_id
     assert (
-        _resolve_threat_analysis_method("deephole_threat_analysis")[0]
+        backend_scans_configuration._resolve_threat_analysis_method("deephole_threat_analysis")[0]
         == "deephole_threat_analysis"
     )
     with pytest.raises(HTTPException) as raised:
-        _resolve_threat_analysis_method("missing")
+        backend_scans_configuration._resolve_threat_analysis_method("missing")
     assert raised.value.status_code == 400
 
 
 def test_backend_resolves_coverage_guided_method() -> None:
-    method_id, selection = _resolve_threat_analysis_method(
+    method_id, selection = backend_scans_configuration._resolve_threat_analysis_method(
         "opencode_coverage_guided_lightweight_threat_analysis"
     )
 
@@ -123,7 +112,7 @@ def test_backend_resolves_coverage_guided_method() -> None:
 
 
 def test_backend_resolves_compact_deephole_method() -> None:
-    method_id, selection = _resolve_threat_analysis_method(
+    method_id, selection = backend_scans_configuration._resolve_threat_analysis_method(
         "deephole_compact_threat_analysis"
     )
 

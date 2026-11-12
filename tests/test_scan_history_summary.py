@@ -1,16 +1,16 @@
+
+from unittest.mock import patch
 import asyncio
 import unittest
-from unittest.mock import patch
-
-from backend.api.scan import list_scans, list_scans_v2
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
 from backend.models import (
     FpReviewResult,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
     ScanSummary,
-    ThreatAuditTask,
     ThreatAnalysisRunStatus,
+    ThreatAuditTask,
     User,
     Vulnerability,
 )
@@ -80,7 +80,10 @@ class FakeScanStore:
             ),
         ]
 
-    def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
+    def list_fp_review_verdicts_by_scans(
+        self,
+        scan_ids: list[str],
+    ) -> dict[str, list[FpReviewResult]]:
         return {sid: self.list_fp_review_results_by_scan(sid) for sid in scan_ids}
 
     def list_fp_review_states_by_scans(
@@ -213,13 +216,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
         )
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(
-                list_scans(
+                backend_api_scan_routes_queries.list_scans(
                     current_user=User(
                         user_id="admin",
                         username="admin",
@@ -228,7 +231,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
                 )
             )
             page = asyncio.run(
-                list_scans_v2(
+                backend_api_scan_routes_queries.list_scans_v2(
                     limit=50,
                     cursor=None,
                     current_user=User(
@@ -284,13 +287,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
         )
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(
-                list_scans(
+                backend_api_scan_routes_queries.list_scans(
                     current_user=User(user_id="admin", username="admin", role="admin")
                 )
             )
@@ -334,13 +337,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
         store = FakeScanStore(scan, meta)
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             page = asyncio.run(
-                list_scans_v2(
+                backend_api_scan_routes_queries.list_scans_v2(
                     limit=50,
                     cursor=None,
                     current_user=User(
@@ -405,13 +408,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
         )
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=FakeScanStore(scan, meta)),
+            patch("backend.application.default_store_factory", return_value=FakeScanStore(scan, meta)),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(
-                list_scans(
+                backend_api_scan_routes_queries.list_scans(
                     current_user=User(user_id="admin", username="admin", role="admin")
                 )
             )
@@ -419,7 +422,9 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertEqual(response[0].retryable_candidates_count, 1)
         self.assertEqual(response[0].continuable_task_count, 2)
 
-    def test_list_scans_v2_does_not_count_provisional_failures_as_retryable_candidates(self) -> None:
+    def test_list_scans_v2_does_not_count_provisional_failures_as_retryable_candidates(
+        self,
+    ) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project-1",
@@ -452,13 +457,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
         )
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=FakeScanStore(scan, meta)),
+            patch("backend.application.default_store_factory", return_value=FakeScanStore(scan, meta)),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             page = asyncio.run(
-                list_scans_v2(
+                backend_api_scan_routes_queries.list_scans_v2(
                     limit=50,
                     cursor=None,
                     current_user=User(user_id="admin", username="admin", role="admin")
@@ -496,13 +501,13 @@ class ScanHistorySummaryTests(unittest.TestCase):
 
         store = FakeScanStore(scan, meta)
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-            patch("backend.api.agent.is_agent_name_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+            patch("backend.agents.directory.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(
-                list_scans(
+                backend_api_scan_routes_queries.list_scans(
                     current_user=User(
                         user_id="admin",
                         username="admin",

@@ -1,21 +1,28 @@
 """Exercise share capabilities through HTTP and both production store adapters."""
 
+from backend.application import get_runtime
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
 import os
-from types import SimpleNamespace
 import uuid
 import zipfile
-
-from fastapi import FastAPI
 import httpx
 import pytest
-
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from fastapi import FastAPI
 from backend import auth, sse
 from backend.api import agent, integration, scan, sharing
-from backend.models import FpReviewResult, FpReviewStatus, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, Vulnerability
+from backend.models import (
+    FpReviewResult,
+    FpReviewStatus,
+    OpenCodePoolStatus,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    Vulnerability,
+)
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -60,11 +67,13 @@ def environment(request, tmp_path, monkeypatch):
         store.add_fp_review_result(key, FpReviewResult(vuln_index=index, verdict="tp", reason="已确认",
                                                        vulnerability_report=f"# 复核报告 {index}", created_at=status.created_at))
     store.update_fp_review_job(key, status=FpReviewStatus.COMPLETE, processed=2)
-    for module in (auth, scan, sharing, integration, agent):
+    get_runtime().store = store
+    get_runtime().store_runner = direct_store_call
+    for module in (auth, sharing, integration):
         monkeypatch.setattr(module, "get_scan_store", lambda: store)
         monkeypatch.setattr(module, "run_store_call", direct_store_call)
-    monkeypatch.setattr(scan, "_running_scans", {})
-    monkeypatch.setattr(scan, "_scan_owners", {})
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
     monkeypatch.setattr(sse, "_distributed_store", None)
     app = FastAPI()
     app.include_router(scan.router)
@@ -298,7 +307,11 @@ def test_share_reads_and_downloads_real_report_content(environment):
     (ScanItemStatus.COMPLETE, False),
     (ScanItemStatus.COMPLETE, True),
 ], ids=["scan-running", "auto-review-disabled", "no-findings"])
-def test_share_remains_valid_before_and_after_fp_review_creation(environment, status, auto_fp_review):
+def test_share_remains_valid_before_and_after_fp_review_creation(
+    environment,
+    status,
+    auto_fp_review,
+):
     env = environment
     scan_id = env.scan_id + "-without-review"
     env.store.save_scan(

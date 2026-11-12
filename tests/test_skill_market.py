@@ -1,3 +1,4 @@
+from backend.application import get_runtime
 import asyncio
 import base64
 import tempfile
@@ -5,15 +6,20 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
 from backend.api import skills
-from backend.models import SkillCreateJob, SkillCreateRequest, SkillImportFile, SkillImportRequest, User
+from backend.models import (
+    SkillCreateJob,
+    SkillCreateRequest,
+    SkillImportFile,
+    SkillImportRequest,
+    User,
+)
 from backend.registry import refresh_registry
 
 
 class SkillMarketTests(unittest.TestCase):
     def tearDown(self) -> None:
-        skills._jobs.clear()
+        get_runtime().skill_jobs.clear()
         import backend.registry as registry
 
         registry._registry = None
@@ -32,7 +38,7 @@ class SkillMarketTests(unittest.TestCase):
                 agent_id="agent-1",
                 user_id="user-1",
             )
-            skills._jobs[job.job_id] = job
+            get_runtime().skill_jobs[job.job_id] = job
 
             with (
                 patch("backend.api.skills.get_config", return_value=cfg),
@@ -81,7 +87,7 @@ class SkillMarketTests(unittest.TestCase):
             self.assertIn("created_by_username: alice", checker_yaml)
 
     def test_import_rejects_incomplete_job(self) -> None:
-        skills._jobs["job-2"] = SkillCreateJob(
+        get_runtime().skill_jobs["job-2"] = SkillCreateJob(
             job_id="job-2",
             status="running",
             skill_id="running_skill",
@@ -127,7 +133,7 @@ class SkillMarketTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             user_skills_dir = Path(tmp) / "user_skills"
             cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills_dir)))
-            skills._jobs["job-3"] = SkillCreateJob(
+            get_runtime().skill_jobs["job-3"] = SkillCreateJob(
                 job_id="job-3",
                 status="completed",
                 skill_id="unsafe_skill",

@@ -1,15 +1,21 @@
 """Durable scan CodeGraph toggles and acknowledged Agent synchronization."""
 
+from backend.application import get_runtime
+import backend.agents.rpc as backend_agents_rpc
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.projection as backend_scans_projection
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.application as application
+import backend.scans.agent_binding as backend_scans_agent_binding
 import asyncio
 import os
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
 import uuid
-
 import httpx
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from fastapi import FastAPI
-
 from backend import code_graph
 from backend.api import agent as agent_api, scan as scan_api
 from backend.auth import get_current_user
@@ -48,16 +54,15 @@ def graph_env(request, tmp_path, monkeypatch):
                     user_id=owner.user_id, agent_key=agent.agent_key, agent_id=agent.agent_id,
                     project_path="/source/project")
     store.save_scan(scan, meta)
-    for module in (scan_api, agent_api, code_graph):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
-        monkeypatch.setattr(module, "run_store_call", direct_store)
-    monkeypatch.setattr(scan_api, "_running_scans", {scan_id: scan})
-    monkeypatch.setattr(scan_api, "_scan_owners", {})
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value=None))
-    monkeypatch.setattr(agent_api, "resolve_agent_id_connection_async", AsyncMock(return_value=(agent.agent_id, agent)))
+    get_runtime().store = store
+    get_runtime().store_runner = direct_store
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {scan_id: scan})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
+    monkeypatch.setattr(backend_scans_agent_binding, '_resolve_scan_agent_id', AsyncMock(return_value=None))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_id_connection_async', AsyncMock(return_value=(agent.agent_id, agent)))
     publish = Mock()
     monkeypatch.setattr(code_graph, "publish", publish)
-    monkeypatch.setattr(scan_api, "publish_scan_event", publish)
+    monkeypatch.setattr(application, 'default_publisher', publish)
     app = FastAPI()
     app.include_router(scan_api.router)
     app.dependency_overrides[get_current_user] = user_dependency(owner)
@@ -66,7 +71,7 @@ def graph_env(request, tmp_path, monkeypatch):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             return await client.put(f"/api/scan/{scan_id}/code-graph", json=body)
 
-    default = scan_api._scan_code_graph_mcp(AgentMcpConfig(enabled=True))
+    default = backend_scans_configuration._scan_code_graph_mcp(AgentMcpConfig(enabled=True))
     yield SimpleNamespace(store=store, scan_id=scan_id, scan=scan, meta=meta, owner=owner,
                           agent=agent, app=app, put=lambda body: asyncio.run(put(body)), default=default,
                           publish=publish, backend=request.param)
@@ -171,55 +176,55 @@ def test_acknowledgement_and_reconnect_are_revision_and_agent_scoped(graph_env, 
 
 def test_live_toggle_waits_for_ack_and_repeated_request_retries(graph_env, monkeypatch):
     env = graph_env
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value=env.agent.agent_id))
+    monkeypatch.setattr(backend_scans_agent_binding, '_resolve_scan_agent_id', AsyncMock(return_value=env.agent.agent_id))
     commands = []
 
     async def send(agent_id, command):
         commands.append(command)
-        await agent_api._complete_agent_response({
+        await backend_agents_rpc._complete_agent_response({
             "request_id": command["request_id"], "scan_id": env.scan_id,
             "revision": command["revision"], "ok": True,
-        }, agent_api._code_graph_waiters)
+        }, get_runtime().agents.code_graph_waiters)
         return True
 
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     response = env.put({"enabled": True})
     assert response.json()["code_graph_mcp_sync_status"] == "synced"
     assert response.json()["code_graph_mcp_applied_revision"] == 1
     assert commands[0]["type"] == "code_graph_update"
     assert env.put({"enabled": True}).json()["code_graph_mcp_revision"] == 1
     assert len(commands) == 2
-    assert not agent_api._code_graph_waiters
+    assert not get_runtime().agents.code_graph_waiters
 
 
 @pytest.mark.parametrize("mode", ["legacy", "timeout", "rejected", "send_failure"])
 def test_delivery_failures_keep_saved_config_pending(graph_env, monkeypatch, mode):
     env = graph_env
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value=env.agent.agent_id))
-    monkeypatch.setattr(agent_api, "send_agent_command", AsyncMock(return_value=mode != "send_failure"))
+    monkeypatch.setattr(backend_scans_agent_binding, '_resolve_scan_agent_id', AsyncMock(return_value=env.agent.agent_id))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=mode != "send_failure"))
     if mode == "legacy":
         env.agent.scan_code_graph_updates = False
     elif mode == "timeout":
-        monkeypatch.setattr(agent_api, "_wait_agent_response", AsyncMock(side_effect=asyncio.TimeoutError))
+        monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', AsyncMock(side_effect=asyncio.TimeoutError))
     else:
-        monkeypatch.setattr(agent_api, "_wait_agent_response", AsyncMock(return_value={"ok": False}))
+        monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', AsyncMock(return_value={"ok": False}))
     response = env.put({"enabled": True})
     assert response.status_code == 200
     assert response.json()["code_graph_mcp_sync_status"] == "pending"
     assert response.json()["sync_message"]
     assert env.store.get_scan_meta(env.scan_id).code_graph_mcp.enabled is True
-    assert not agent_api._code_graph_waiters
+    assert not get_runtime().agents.code_graph_waiters
 
 
 def test_cached_scan_status_hydrates_latest_configuration(graph_env):
     env = graph_env
     env.store.update_scan_code_graph(env.scan_id, True, env.default)
     env.store.acknowledge_scan_code_graph(env.scan_id, 1, env.agent.agent_key)
-    scan_api._apply_scan_metadata(env.scan, env.store.get_scan_meta(env.scan_id))
+    backend_scans_projection._apply_scan_metadata(env.scan, env.store.get_scan_meta(env.scan_id))
     assert env.scan.code_graph_mcp_enabled is True
     assert env.scan.code_graph_mcp_sync_status == "synced"
     assert env.scan.code_graph_mcp_revision == 1
     stale = env.store.get_scan_meta(env.scan_id).model_copy(update={"code_graph_mcp_applied_revision": 0})
-    scan_api._apply_scan_metadata(env.scan, stale)
+    backend_scans_projection._apply_scan_metadata(env.scan, stale)
     assert env.scan.code_graph_mcp_applied_revision == 1
     assert env.scan.code_graph_mcp_sync_status == "synced"

@@ -1,11 +1,12 @@
+
+import backend.agents.configuration as backend_agents_configuration
+import backend.scans.configuration as backend_scans_configuration
 import tempfile
 import unittest
+import yaml
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import yaml
-
 from deephole_client.config import (
     AgentConfig,
     apply_network_env,
@@ -47,7 +48,7 @@ def _server_knowledge_config(headers: dict[str, str] | None = None):
 
 class AgentConfigTests(unittest.TestCase):
     def test_model_capacity_survives_legacy_inputs_and_save_reload(self) -> None:
-        from backend.api.agent import _validate_managed_config
+        pass
         from backend.config import AppConfig
         from deephole_client.platform_runtime import _runtime_sections
 
@@ -65,7 +66,7 @@ class AgentConfigTests(unittest.TestCase):
                         {"opencode_concurrency": legacy_limit, "opencode": {"models": models}}
                     )
                     remote = AgentRemoteConfig.model_validate(payload)
-                    _validate_managed_config(remote)
+                    backend_agents_configuration._validate_managed_config(remote)
                     self.assertEqual(remote.opencode_concurrency, 9)
                     self.assertNotIn("global_concurrency", remote.model_dump()["model_pool"])
                     self.assertNotIn("opencode_concurrency", remote.model_dump())
@@ -944,9 +945,9 @@ class AgentConfigTests(unittest.TestCase):
         )
 
     def test_managed_config_rejects_invalid_time_windows(self) -> None:
-        from fastapi import HTTPException
+        from backend.application import ApplicationError as HTTPException
 
-        from backend.api.agent import _validate_managed_config
+        pass
 
         invalid_windows = [
             ({"weekdays": [], "start": "09:00", "end": "18:00"}, "至少要选择一天"),
@@ -969,19 +970,19 @@ class AgentConfigTests(unittest.TestCase):
                     },
                 })
                 with self.assertRaisesRegex(HTTPException, error_text):
-                    _validate_managed_config(config)
+                    backend_agents_configuration._validate_managed_config(config)
 
     def test_scan_knowledge_base_uses_server_connection_and_selected_project(self) -> None:
-        from backend.api.scan import _knowledge_base_mcp
+        pass
         from backend.models import ScanKnowledgeBaseRequest
 
         with patch(
-            "backend.api.agent.get_config",
+            "backend.application.default_config_factory",
             return_value=_server_knowledge_config({
                 "Authorization": "Bearer test-secret-123",
             }),
         ):
-            config = _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+            config = backend_scans_configuration._knowledge_base_mcp(ScanKnowledgeBaseRequest(
                 enabled=True,
                 project_id="project-1",
                 project_name="5G-gnodeb",
@@ -998,8 +999,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config.set_project_tool, "xxx_set_project")
 
     def test_scan_knowledge_base_rejects_invalid_or_duplicate_header_names(self) -> None:
-        from fastapi import HTTPException
-        from backend.api.scan import _knowledge_base_mcp
+        from backend.application import ApplicationError as HTTPException
+        pass
         from backend.models import ScanKnowledgeBaseRequest
 
         for headers, error_text in (
@@ -1011,10 +1012,10 @@ class AgentConfigTests(unittest.TestCase):
             with self.subTest(headers=headers):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     with patch(
-                        "backend.api.agent.get_config",
+                        "backend.application.default_config_factory",
                         return_value=_server_knowledge_config(headers),
                     ):
-                        _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+                        backend_scans_configuration._knowledge_base_mcp(ScanKnowledgeBaseRequest(
                             enabled=True,
                             project_id="project-1",
                             project_name="Project One",

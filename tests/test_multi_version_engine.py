@@ -1,14 +1,11 @@
 from __future__ import annotations
-
+import backend.scans.configuration as backend_scans_configuration
 import asyncio
 import json
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import pytest
-
-from backend.api.scan import _resolve_scan_mining_engines, _validated_multi_versions
 from backend.models import MultiVersionTarget
 from task_agent import opencode_task_context
 from task_agent.task_service import get_opencode_execution_context
@@ -140,7 +137,7 @@ def test_multi_version_mode_is_normalized_to_a_custom_component_mode() -> None:
 
 
 def test_multi_version_mode_selects_only_its_combined_engine() -> None:
-    selections = _resolve_scan_mining_engines(
+    selections = backend_scans_configuration._resolve_scan_mining_engines(
         scan_overrides=None,
         scan_mode="multi_version",
     )
@@ -399,7 +396,7 @@ def test_multi_version_resume_reuses_static_results_per_version(
 
 
 def test_multi_version_input_requires_unique_two_to_five_targets() -> None:
-    values = _validated_multi_versions([
+    values = backend_scans_configuration._validated_multi_versions([
         MultiVersionTarget(version_name="v1", project_path="/repo/v1"),
         MultiVersionTarget(version_name="v2", project_path="/repo/v2"),
     ])

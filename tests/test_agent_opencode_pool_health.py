@@ -1,9 +1,10 @@
+
+from backend.application import get_runtime
+import backend.api.agent_routes.queries as backend_api_agent_routes_queries
 import asyncio
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
-
-from backend.api import agent as agent_api
 from backend.models import AgentInfo, OpenCodePoolModelStats, OpenCodePoolStatus, User
 from backend.store.sqlite import SqliteScanStore
 
@@ -179,23 +180,23 @@ def test_live_complete_snapshot_clears_omitted_model_health_overlay(
         agent_session_id="current-session",
     )
     user = User(user_id="owner", username="owner", role="user")
-    agent_api._registered_agents["agent-id"] = agent
-    agent_api._agent_opencode_pool_latest["agent-id"] = OpenCodePoolStatus(
+    get_runtime().agents.registered_agents["agent-id"] = agent
+    get_runtime().agents.agent_opencode_pool_latest["agent-id"] = OpenCodePoolStatus(
         agent_session_id="current-session",
         updated_at="2026-07-30T00:00:02+00:00",
         models=[],
     )
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent._is_agent_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.directory._is_agent_online", return_value=True),
         ):
             current = asyncio.run(
-                agent_api.get_agent_opencode_pool("agent-id", current_user=user)
+                backend_api_agent_routes_queries.get_agent_opencode_pool("agent-id", current_user=user)
             )
     finally:
-        agent_api._registered_agents.clear()
-        agent_api._agent_opencode_pool_latest.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_opencode_pool_latest.clear()
 
     model = current.models[0]
     assert model.enabled is False

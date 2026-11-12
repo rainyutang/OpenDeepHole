@@ -1,9 +1,11 @@
+
 import asyncio
 import gc
 import weakref
-
+import backend.api.agent_routes.scan_validation as backend_api_agent_routes_scan_validation
+import backend.application as application
+import backend.scans.projection as backend_scans_projection
 from backend import sse
-from backend.api import scan as api
 from backend.models import ScanProgressEstimate, ScanStatus, VulnerabilityValidation
 from backend.scan_estimate_cache import ScanEstimateCache
 
@@ -27,25 +29,25 @@ def estimate(revision=0):
 def test_cache_hit_never_enqueues_a_store_call_and_expires_after_60_seconds(monkeypatch):
     now = [0.0]
     cache = ScanEstimateCache(clock=lambda: now[0])
-    monkeypatch.setattr(api, "scan_estimate_cache", cache)
+    monkeypatch.setattr(backend_scans_projection, 'scan_estimate_cache', cache)
     calls = []
 
     async def store_call(*args):
         calls.append(args)
         return estimate()
 
-    monkeypatch.setattr(api, "run_store_call", store_call)
+    monkeypatch.setattr(application, 'default_store_runner', store_call)
 
     async def scenario():
         store, value = Store(), scan()
-        first = await api._scan_progress_estimate(store, value)
+        first = await backend_scans_projection._scan_progress_estimate(store, value)
         value.progress = 0.9
         for elapsed in (10, 20, 59.99):
             now[0] = elapsed
-            assert await api._scan_progress_estimate(store, value) is first
+            assert await backend_scans_projection._scan_progress_estimate(store, value) is first
         assert len(calls) == 1
         now[0] = 60
-        await api._scan_progress_estimate(store, value)
+        await backend_scans_projection._scan_progress_estimate(store, value)
         assert len(calls) == 2
 
     asyncio.run(scenario())
@@ -125,7 +127,7 @@ def test_large_status_relay_preserves_eta_ttl_and_terminal_invalidation(monkeypa
 
 def test_parallel_requests_share_work_and_client_cancel_does_not_cancel_it(monkeypatch):
     cache = ScanEstimateCache()
-    monkeypatch.setattr(api, "scan_estimate_cache", cache)
+    monkeypatch.setattr(backend_scans_projection, 'scan_estimate_cache', cache)
 
     async def scenario():
         store, value = Store(), scan()
@@ -138,8 +140,8 @@ def test_parallel_requests_share_work_and_client_cancel_does_not_cancel_it(monke
             await release.wait()
             return estimate()
 
-        monkeypatch.setattr(api, "run_store_call", store_call)
-        tasks = [asyncio.create_task(api._scan_progress_estimate(store, value)) for _ in range(20)]
+        monkeypatch.setattr(application, 'default_store_runner', store_call)
+        tasks = [asyncio.create_task(backend_scans_projection._scan_progress_estimate(store, value)) for _ in range(20)]
         await entered.wait()
         tasks[0].cancel()
         await asyncio.gather(tasks[0], return_exceptions=True)
@@ -428,7 +430,6 @@ def test_validation_durable_notification_keeps_only_small_lifecycle_fields():
 
 
 def test_validation_delta_api_publishes_lifecycle_without_body(monkeypatch):
-    from backend.api import agent
     from backend.models import AgentValidationDelta
 
     notices = []
@@ -436,14 +437,14 @@ def test_validation_delta_api_publishes_lifecycle_without_body(monkeypatch):
     async def write(*args, **kwargs):
         return {"ok": True}
 
-    monkeypatch.setattr(agent, "get_scan_store", Store)
-    monkeypatch.setattr(agent, "run_store_call", write)
-    monkeypatch.setattr(sse, "publish", lambda *args: notices.append(args))
+    monkeypatch.setattr(application, 'default_store_factory', Store)
+    monkeypatch.setattr(application, 'default_store_runner', write)
+    monkeypatch.setattr(application, "default_publisher", lambda *args: notices.append(args))
     body = AgentValidationDelta(
         state={"vuln_index": 5, "status": "verified", "running": False, "execution_revision": 3},
         sequence=9, changes=[{"field": "final_output", "operation": "set", "content": "large body"}],
     )
-    assert asyncio.run(agent.agent_report_validation_delta("scan", body)) == {"ok": True}
+    assert asyncio.run(backend_api_agent_routes_scan_validation.agent_report_validation_delta("scan", body)) == {"ok": True}
     assert notices == [("scan", "resource_changed", {
         "resource": "validations", "index": 5, "status": "verified", "running": False,
         "execution_revision": 3,

@@ -1,12 +1,10 @@
 """Business ETA projections stay scan-local and use bounded metadata queries."""
 
+from test_scan_estimation_store import sample_store
 from types import SimpleNamespace
 from unittest.mock import patch
-
 import pytest
-
 from backend.models import Vulnerability
-from test_scan_estimation_store import sample_store  # noqa: F401 - shared database fixture
 
 
 @pytest.fixture
@@ -104,7 +102,9 @@ def test_audit_yield_uses_successful_associations_and_allows_multiple_findings(b
     }
 
 
-def test_completed_reviews_deduplicate_effective_results_and_pending_uses_business_eligibility(business):
+def test_completed_reviews_deduplicate_effective_results_and_pending_uses_business_eligibility(
+    business,
+):
     b = business
     complete = b.finding()
     pending = b.finding()
@@ -131,7 +131,9 @@ def test_completed_reviews_deduplicate_effective_results_and_pending_uses_busine
     assert "private" not in str(result)
 
 
-def test_reused_counts_need_only_two_queries_regardless_of_issue_count_and_do_not_cross_scans(business):
+def test_reused_counts_need_only_two_queries_regardless_of_issue_count_and_do_not_cross_scans(
+    business,
+):
     b = business
     b.candidate(0)
     current = b.finding(audit_index=0)
@@ -180,7 +182,10 @@ def test_empty_scan_and_missing_scan_have_no_forecast_units(business):
 
 
 @pytest.mark.parametrize("category", ["static_candidate", "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"])
-def test_early_findings_from_remaining_audits_do_not_inflate_completed_discovery_yield(business, category):
+def test_early_findings_from_remaining_audits_do_not_inflate_completed_discovery_yield(
+    business,
+    category,
+):
     b = business
     pending = []
     for index, state in enumerate(("pending", "queued", "running", "failed")):

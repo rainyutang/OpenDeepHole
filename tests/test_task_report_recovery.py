@@ -1,14 +1,15 @@
 """History delivery must survive 404s without holding up scan results."""
 
+import backend.api.agent_routes.queries as backend_api_agent_routes_queries
+import backend.agents.directory as backend_agents_directory
+import backend.application as application
 import asyncio
 import json
 import logging
-from unittest.mock import AsyncMock, patch
-
 import httpx
 import pytest
-from fastapi import HTTPException
-
+from unittest.mock import AsyncMock, patch
+from backend.application import ApplicationError as HTTPException
 from backend.models import AgentInfo, OpenCodeTaskReport
 from deephole_client.report_outbox import OPENCODE_TASK_REPORT_PATH, ReportOutbox
 from deephole_client.reporter import Reporter
@@ -312,17 +313,17 @@ def test_task_404_staggered_schedule_survives_restart_and_drains_in_order(tmp_pa
 
 @pytest.mark.parametrize("agent_found", [False, True])
 def test_task_report_rejection_identifies_original_scope_and_task(caplog, agent_found):
-    from backend.api import agent
+    pass
 
     info = AgentInfo(agent_id="agent", name="agent", ip="127.0.0.1", last_seen="now")
     task = {"scope_id": "reported-scan", "task_id": "task", "revision": 3, "outcome": "success"}
     body = OpenCodeTaskReport(agent_session_id="original-session", **task, task=task)
 
     async def run():
-        with patch.object(agent, "resolve_agent_id_connection_async", AsyncMock(return_value=("agent", info) if agent_found else None)), \
-             patch.object(agent, "get_scan_store"), patch.object(agent, "run_store_call", AsyncMock(return_value=None)):
+        with patch.object(backend_agents_directory, 'resolve_agent_id_connection_async', AsyncMock(return_value=("agent", info) if agent_found else None)), \
+             patch.object(application, 'default_store_factory'), patch.object(application, 'default_store_runner', AsyncMock(return_value=None)):
             with pytest.raises(HTTPException) as error:
-                await agent.report_agent_opencode_task("agent", body)
+                await backend_api_agent_routes_queries.report_agent_opencode_task("agent", body)
             assert error.value.status_code == 404
             assert error.value.detail == {
                 "code": "scan_not_found" if agent_found else "agent_not_found",

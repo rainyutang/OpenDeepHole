@@ -1,3 +1,7 @@
+
+from backend.application import get_runtime
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.api.agent_routes.artifacts as backend_api_agent_routes_artifacts
 import asyncio
 import base64
 import hashlib
@@ -7,18 +11,15 @@ import os
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import yaml
-
 import deephole_client.updater as updater
 import deephole_client.main as agent_main
 import deephole_client.server as agent_server
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 from deephole_client.config import AgentConfig
 from deephole_client.updater import compute_runtime_hash
-from backend.api import agent as agent_api
 
 
 class AgentWebSocketMessageLimitTests(unittest.TestCase):
@@ -192,7 +193,7 @@ class AgentWebSocketMessageLimitTests(unittest.TestCase):
 
 class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_zip_excludes_local_config_and_launchers(self) -> None:
-        data = agent_api._build_agent_runtime_zip()
+        data = backend_agents_artifacts._build_agent_runtime_zip()
         with zipfile.ZipFile(_bytes_path(data)) as zf:
             names = set(zf.namelist())
 
@@ -286,7 +287,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertNotIn("deephole_client/validation_debug.py", names)
 
     def test_agent_download_zip_includes_launchers_config_and_bundled_ctags(self) -> None:
-        data = agent_api._build_agent_zip("http://server.example", "owner-token")
+        data = backend_agents_artifacts._build_agent_zip("http://server.example", "owner-token")
         with zipfile.ZipFile(_bytes_path(data)) as zf:
             names = set(zf.namelist())
             agent_yaml = zf.read("agent.yaml").decode("utf-8")
@@ -447,12 +448,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("%PYTHON_CMD% -m deephole_client.main %*", batch_text)
 
     def test_runtime_hash_matches_archive_contents(self) -> None:
-        data = agent_api._build_agent_runtime_zip()
+        data = backend_agents_artifacts._build_agent_runtime_zip()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with zipfile.ZipFile(_bytes_path(data)) as zf:
                 zf.extractall(root)
-            self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
+            self.assertEqual(compute_runtime_hash(root), backend_agents_artifacts._agent_runtime_hash())
 
     def test_runtime_hash_scope_includes_top_level_runtime_packages(self) -> None:
         expected_dirs = [
@@ -464,7 +465,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         ]
         self.assertEqual(updater.runtime_hash_scope()["version"], 4)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
-        self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
+        self.assertEqual(backend_agents_artifacts._agent_runtime_hash_scope(), updater.runtime_hash_scope())
 
     def test_runtime_hash_includes_task_agent_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -551,17 +552,17 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_download_serves_payload_snapshot(self) -> None:
-        agent_api._runtime_download_tokens.clear()
+        get_runtime().agents.runtime_download_tokens.clear()
         snapshot_files = [("deephole_client/main.py", b"snapshot")]
 
-        with patch("backend.api.agent._read_agent_runtime_files", return_value=snapshot_files):
-            payload = agent_api.create_agent_runtime_update_payload("http://server.example")
+        with patch("backend.agents.artifacts._read_agent_runtime_files", return_value=snapshot_files):
+            payload = backend_agents_artifacts.create_agent_runtime_update_payload("http://server.example")
 
         self.assertEqual(payload["manifest"]["runtime_hash"], payload["hash"])
         self.assertEqual(payload["manifest"]["hash_scope"], payload["hash_scope"])
         self.assertEqual(payload["manifest"]["files"][0]["path"], "deephole_client/main.py")
         request = _FakeRequest(payload["token"])
-        response = asyncio.run(agent_api.agent_runtime_download(request))
+        response = asyncio.run(backend_api_agent_routes_artifacts.agent_runtime_download(request))
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -569,12 +570,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 self.assertEqual(zf.read("deephole_client/main.py"), b"snapshot")
                 zf.extractall(root)
             self.assertEqual(compute_runtime_hash(root), payload["hash"])
-        self.assertEqual(agent_api._runtime_download_tokens, {})
+        self.assertEqual(get_runtime().agents.runtime_download_tokens, {})
 
     def test_runtime_install_accepts_manifest_verified_scope_mismatch(self) -> None:
         files = [("deephole_client/main.py", b"print('server snapshot')\n")]
-        archive = agent_api._build_agent_runtime_zip_from_files(files)
-        expected_hash = agent_api._agent_runtime_hash_for_files(files)
+        archive = backend_agents_artifacts._build_agent_runtime_zip_from_files(files)
+        expected_hash = backend_agents_artifacts._agent_runtime_hash_for_files(files)
         manifest = _runtime_manifest(files, scope={"version": 1, "dirs": ["agent", "checkers"]})
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -590,8 +591,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_legacy_updater_installs_all_business_skills_in_one_update(self) -> None:
         from deephole_client.skill_catalog import builtin_skill_sources
 
-        files = agent_api._read_agent_runtime_files()
-        archive = agent_api._build_agent_runtime_zip_from_files(files)
+        files = backend_agents_artifacts._read_agent_runtime_files()
+        archive = backend_agents_artifacts._build_agent_runtime_zip_from_files(files)
         manifest = _runtime_manifest(files)
         legacy_scope = {**updater.runtime_hash_scope(), "version": 3}
         # Old updaters skip system_skills even when it is in a verified archive.
@@ -621,8 +622,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             ("backend/api.py", b"# api\n"),
             ("requirements-agent.txt", b"requests\n"),
         ]
-        archive = agent_api._build_agent_runtime_zip_from_files(files)
-        expected_hash = agent_api._agent_runtime_hash_for_files(files)
+        archive = backend_agents_artifacts._build_agent_runtime_zip_from_files(files)
+        expected_hash = backend_agents_artifacts._agent_runtime_hash_for_files(files)
         manifest = _runtime_manifest(files)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,8 +689,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest mismatch"):
                     updater._install_update_archive(
-                        agent_api._build_agent_runtime_zip_from_files(archive_files),
-                        agent_api._agent_runtime_hash_for_files(manifest_files),
+                        backend_agents_artifacts._build_agent_runtime_zip_from_files(archive_files),
+                        backend_agents_artifacts._agent_runtime_hash_for_files(manifest_files),
                         _runtime_manifest(manifest_files),
                     )
 
@@ -705,8 +706,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest mismatch"):
                     updater._install_update_archive(
-                        agent_api._build_agent_runtime_zip_from_files(archive_files),
-                        agent_api._agent_runtime_hash_for_files(manifest_files),
+                        backend_agents_artifacts._build_agent_runtime_zip_from_files(archive_files),
+                        backend_agents_artifacts._agent_runtime_hash_for_files(manifest_files),
                         _runtime_manifest(manifest_files),
                     )
 
@@ -719,8 +720,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "manifest hash mismatch"):
                     updater._install_update_archive(
-                        agent_api._build_agent_runtime_zip_from_files(archive_files),
-                        agent_api._agent_runtime_hash_for_files(manifest_files),
+                        backend_agents_artifacts._build_agent_runtime_zip_from_files(archive_files),
+                        backend_agents_artifacts._agent_runtime_hash_for_files(manifest_files),
                         _runtime_manifest(manifest_files),
                     )
 
@@ -732,7 +733,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             with patch("deephole_client.updater.runtime_root", return_value=root):
                 with self.assertRaisesRegex(RuntimeError, "content hash mismatch"):
                     updater._install_update_archive(
-                        agent_api._build_agent_runtime_zip_from_files(files),
+                        backend_agents_artifacts._build_agent_runtime_zip_from_files(files),
                         "not-the-expected-hash",
                     )
 
@@ -1204,8 +1205,8 @@ def _skill_creator_package(files: dict[str, str]) -> dict[str, str]:
 
 
 def _runtime_manifest(files: list[tuple[str, bytes]], scope: dict | None = None) -> dict:
-    manifest = agent_api._agent_runtime_manifest_for_files(files)
-    manifest["runtime_hash"] = agent_api._agent_runtime_hash_for_files(files)
+    manifest = backend_agents_artifacts._agent_runtime_manifest_for_files(files)
+    manifest["runtime_hash"] = backend_agents_artifacts._agent_runtime_hash_for_files(files)
     if scope is not None:
         manifest["hash_scope"] = scope
     return manifest

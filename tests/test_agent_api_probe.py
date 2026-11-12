@@ -1,13 +1,18 @@
 from __future__ import annotations
-
+from backend.application import get_runtime, ApplicationError as HTTPException
+import backend.agents.rpc as backend_agents_rpc
+import backend.agents.schemas as backend_agents_schemas
+import backend.api.agent_routes.models as backend_api_agent_routes_models
+import backend.auth as backend_auth
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.application as application
 import asyncio
 import json
-from unittest.mock import AsyncMock
-
 import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
-
+from unittest.mock import AsyncMock
+from fastapi import FastAPI
 from backend.api import agent as api
 from backend.models import AgentInfo, AgentRemoteConfig, User
 from task_agent.llm_config import llm_provider_revision, redact_llm_providers
@@ -30,7 +35,7 @@ def live_agent(**updates):
 
 
 def draft():
-    return api._AgentApiTestRequest(provider_id="private", provider=redact_llm_providers(providers())["private"], model_id="org/model")
+    return backend_agents_schemas._AgentApiTestRequest(provider_id="private", provider=redact_llm_providers(providers())["private"], model_id="org/model")
 
 
 def result(**updates):
@@ -53,17 +58,16 @@ class Store:
 @pytest.fixture
 def configured(monkeypatch):
     store = Store()
-    monkeypatch.setattr(api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
 
     async def direct(store, operation, *args, **kwargs):
         return getattr(store, operation)(*args, **kwargs)
 
-    monkeypatch.setattr(api, "run_store_call", direct)
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", live_agent())))
-    monkeypatch.setattr(api, "_agent_configs", {})
+    monkeypatch.setattr(application, 'default_store_runner', direct)
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", live_agent())))
+    monkeypatch.setattr(get_runtime().agents, 'agent_configs', {})
     waiters = {}
-    monkeypatch.setattr(api, "_opencode_api_test_waiters", waiters)
-    monkeypatch.setattr(api, "_AGENT_RESPONSE_WAITERS", {**api._AGENT_RESPONSE_WAITERS, "opencode_api_test_result": waiters})
+    monkeypatch.setattr(get_runtime().agents, 'opencode_api_test_waiters', waiters)
     return store
 
 
@@ -72,18 +76,18 @@ def wire_result(monkeypatch, payload=None):
 
     async def send(agent_id, command):
         calls.append((agent_id, command))
-        await api._complete_agent_response(
+        await backend_agents_rpc._complete_agent_response(
             {"type": "opencode_api_test_result", "request_id": command["request_id"], **(payload or result())},
-            api._AGENT_RESPONSE_WAITERS["opencode_api_test_result"],
+            get_runtime().agents.agent_response_waiters["opencode_api_test_result"],
         )
         return True
 
-    monkeypatch.setattr(api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     return calls
 
 
 def invoke(body=None, user=None):
-    return asyncio.run(api.test_stable_agent_opencode_api("stable", body or draft(), current_user=user or owner()))
+    return asyncio.run(backend_api_agent_routes_models.test_stable_agent_opencode_api("stable", body or draft(), current_user=user or owner()))
 
 
 def test_draft_probe_uses_selected_agent_and_preserves_saved_secrets(configured, monkeypatch):
@@ -99,8 +103,8 @@ def test_draft_probe_uses_selected_agent_and_preserves_saved_secrets(configured,
     assert command["model_id"] == "org/model"
     assert configured.record["config_json"] == saved
     assert llm_provider_revision(json.loads(saved)["llm_providers"]) == revision
-    assert api._agent_configs == {}
-    assert api._opencode_api_test_waiters == {}
+    assert get_runtime().agents.agent_configs == {}
+    assert get_runtime().agents.opencode_api_test_waiters == {}
 
 
 def test_only_selected_model_is_normalized(configured, monkeypatch):
@@ -157,9 +161,9 @@ def test_owner_and_admin_authorization(configured, monkeypatch):
 
 @pytest.mark.parametrize("live,status", [(None, 409), (("session", live_agent(llm_api_test=False)), 501)])
 def test_offline_or_unsupported_agent_is_not_contacted(configured, monkeypatch, live, status):
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=live))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=live))
     send = AsyncMock()
-    monkeypatch.setattr(api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     with pytest.raises(HTTPException) as error:
         invoke()
     assert error.value.status_code == status
@@ -190,36 +194,41 @@ def test_untrusted_result_metadata_and_success_text_do_not_echo_secrets(configur
     (ConnectionError("key-secret provider-secret"), 502),
     (ValueError("model-secret"), 502),
 ])
-def test_timeout_and_transport_failure_are_safe_and_clean_waiters(configured, monkeypatch, failure, status):
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=True))
+def test_timeout_and_transport_failure_are_safe_and_clean_waiters(
+    configured,
+    monkeypatch,
+    failure,
+    status,
+):
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
     wait = AsyncMock(side_effect=failure)
-    monkeypatch.setattr(api, "_wait_agent_response", wait)
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', wait)
     with pytest.raises(HTTPException) as error:
         invoke()
     assert error.value.status_code == status
     assert "secret" not in str(error.value)
     assert wait.await_args.kwargs["timeout"] == 40.0
-    assert api._opencode_api_test_waiters == {}
+    assert get_runtime().agents.opencode_api_test_waiters == {}
 
 
 def test_disconnect_before_delivery_and_cancelled_request_cleanup(configured, monkeypatch):
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=False))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=False))
     with pytest.raises(HTTPException) as error:
         invoke()
     assert error.value.status_code == 502
-    assert api._opencode_api_test_waiters == {}
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=True))
-    monkeypatch.setattr(api, "_wait_agent_response", AsyncMock(side_effect=asyncio.CancelledError))
+    assert get_runtime().agents.opencode_api_test_waiters == {}
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', AsyncMock(side_effect=asyncio.CancelledError))
     with pytest.raises(asyncio.CancelledError):
         invoke()
-    assert api._opencode_api_test_waiters == {}
+    assert get_runtime().agents.opencode_api_test_waiters == {}
 
 
 def test_unknown_shared_worker_capability_uses_rpc_mailbox(configured, monkeypatch):
     configured.distributed = True
     configured.pop_agent_rpc_response = lambda request_id: result()
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("remote-session", live_agent(llm_api_test=None))))
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=True))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("remote-session", live_agent(llm_api_test=None))))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
     assert invoke().success
 
 
@@ -229,12 +238,12 @@ def test_invalid_rpc_results_fail_safely(configured, monkeypatch, payload):
     with pytest.raises(HTTPException) as error:
         invoke()
     assert error.value.status_code == 502
-    assert api._opencode_api_test_waiters == {}
+    assert get_runtime().agents.opencode_api_test_waiters == {}
 
 
 def test_missing_model_and_invalid_selected_model_do_not_dispatch(configured, monkeypatch):
     send = AsyncMock()
-    monkeypatch.setattr(api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     body = draft()
     body.model_id = "missing"
     with pytest.raises(HTTPException) as error:
@@ -256,7 +265,7 @@ def test_malformed_http_request_does_not_echo_secret_inputs(configured, monkeypa
     async def current_user():
         return owner()
 
-    app.dependency_overrides[api.get_current_user] = current_user
+    app.dependency_overrides[backend_auth.get_current_user] = current_user
     wire_result(monkeypatch)
 
     async def run():

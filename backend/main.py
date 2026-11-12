@@ -1,30 +1,46 @@
 """FastAPI application entry point."""
 
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
-
-import uuid
-
-from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, review_notes, scan, sharing, skills
+from backend.api import (
+    admin,
+    agent,
+    announcements,
+    auth,
+    checkers,
+    feedback,
+    integration,
+    review_notes,
+    scan,
+    sharing,
+    skills,
+)
+from backend.application import (
+    BackendRuntime,
+    get_config,
+    get_runtime,
+    get_scan_store,
+    run_store_call,
+    use_runtime,
+)
 from backend.auth import hash_password
-from backend.config import apply_no_proxy, get_config
+from backend.config import apply_no_proxy
 from backend.frontend import FrontendStaticFiles
 from backend.logger import get_logger
 from backend.registry import get_registry
 from backend.runtime_metrics import RequestMetricsMiddleware, monitor_event_loop_lag
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call, shutdown_store_executor
+from backend.store.async_ops import shutdown_store_executor
 
 logger = get_logger(__name__)
 _LEADER_LOCK_KEY = 5711767769877594436
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     """Application startup and shutdown."""
     config = get_config()
     apply_no_proxy()
@@ -85,8 +101,10 @@ async def lifespan(app: FastAPI):
 
     refresh_validation_catalog()
 
+    from backend.agents.runtime_updates import run_agent_runtime_update_scheduler
+
     runtime_update_task = (
-        asyncio.create_task(agent.run_agent_runtime_update_scheduler())
+        asyncio.create_task(run_agent_runtime_update_scheduler())
         if is_leader
         else None
     )
@@ -122,9 +140,21 @@ async def lifespan(app: FastAPI):
             await event_loop_monitor_task
         except asyncio.CancelledError:
             pass
+        await get_runtime().close()
         await run_store_call(store, "close")
         await shutdown_store_executor()
         logger.info("DeepHole 2.0 backend shutting down")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    runtime = getattr(app.state, "backend_runtime", None) or BackendRuntime()
+    app.state.backend_runtime = runtime
+    with use_runtime(runtime):
+        if runtime.store is None:
+            runtime.store = get_scan_store()
+        async with _application_lifespan(app):
+            yield
 
 
 app = FastAPI(

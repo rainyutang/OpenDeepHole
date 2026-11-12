@@ -1,22 +1,36 @@
 """Mutable scan labels must not change the scan's execution configuration."""
 from __future__ import annotations
-
-import asyncio
 from datetime import datetime, timezone
-import os
+from fastapi import FastAPI
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
-import uuid
-
+import asyncio
 import httpx
+import os
 import pytest
-from fastapi import FastAPI
-
-from backend.api import agent as agent_api, integration, scan as scan_api, sharing
+import uuid
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.agents.configuration as backend_agents_configuration
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.runtime_updates as backend_agents_runtime_updates
+import backend.api.scan_routes.continuation as backend_api_scan_routes_continuation
+import backend.application as application
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.projection as backend_scans_projection
+import backend.scans.validation as backend_scans_validation
+from backend.api import integration, scan as scan_api, sharing
+from backend.application import get_runtime
 from backend.auth import get_current_user
 from backend.models import (
-    AgentInfo, AgentMcpConfig, ScanItemStatus, ScanMeta,
-    ScanStatus, ScanVulnerabilityValidationConfig, User, Vulnerability,
+    AgentInfo,
+    AgentMcpConfig,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    ScanVulnerabilityValidationConfig,
+    User,
+    Vulnerability,
 )
 from backend.store.base import DuplicateScanNameError
 from backend.store.sqlite import SqliteScanStore
@@ -96,15 +110,13 @@ def metadata_store(request, tmp_path):
 def metadata_api(metadata_store, monkeypatch):
     env = metadata_store
     running, owners = {}, {}
-    for module in (scan_api, agent_api, integration, sharing):
-        monkeypatch.setattr(module, "get_scan_store", lambda: env.store)
-        monkeypatch.setattr(module, "run_store_call", _direct_store)
-    for module in (scan_api, agent_api):
-        monkeypatch.setattr(module, "_running_scans", running)
-        monkeypatch.setattr(module, "_scan_owners", owners)
+    monkeypatch.setattr(application, "default_store_factory", lambda: env.store)
+    monkeypatch.setattr(application, "default_store_runner", _direct_store)
+    monkeypatch.setattr(application.get_runtime().scans, "running_scans", running)
+    monkeypatch.setattr(application.get_runtime().scans, "scan_owners", owners)
     publish = Mock()
-    monkeypatch.setattr("backend.sse.publish", publish)
-    monkeypatch.setattr(scan_api, "publish_scan_event", publish)
+    monkeypatch.setattr("backend.application.default_publisher", publish)
+    monkeypatch.setattr(application, 'default_publisher', publish)
     owner = User(user_id=env.owner_id, username="owner", role="user")
 
     def patch_metadata(scan_id, body, *, user=owner):
@@ -209,7 +221,10 @@ def test_name_conflicts_are_case_sensitive_per_owner_and_roll_back_product(metad
 
 
 @pytest.mark.parametrize("original_product", ["Original product", ""])
-def test_legacy_null_snapshot_is_frozen_before_first_edit_and_persists(metadata_store, original_product):
+def test_legacy_null_snapshot_is_frozen_before_first_edit_and_persists(
+    metadata_store,
+    original_product,
+):
     env = metadata_store
     scan_id = env.save(product=original_product, validation=True)
     before_scan, before_meta = env.store.load_scan(scan_id)
@@ -372,8 +387,8 @@ def test_older_metadata_cannot_overwrite_a_newer_running_snapshot(metadata_store
     scan_id = env.save()
     live, old_meta = env.store.load_scan(scan_id)
     latest = env.store.update_scan_metadata(scan_id, scan_name="Latest name", product="Latest product")
-    scan_api._apply_scan_metadata(live, latest)
-    scan_api._apply_scan_metadata(live, old_meta)
+    backend_scans_projection._apply_scan_metadata(live, latest)
+    backend_scans_projection._apply_scan_metadata(live, old_meta)
     assert (live.scan_name, live.product, live.metadata_revision) == ("Latest name", "Latest product", latest.metadata_revision)
 
 
@@ -385,18 +400,18 @@ def dispatch_agent(metadata_api, monkeypatch):
         agent_session_id="new-agent-session", ip="127.0.0.1",
         last_seen=datetime.now(timezone.utc).isoformat(), protocol_version=1,
     )
-    monkeypatch.setattr(agent_api, "_registered_agents", {agent.agent_id: agent})
-    monkeypatch.setattr(agent_api, "ensure_agent_accepting_tasks_async", AsyncMock())
-    monkeypatch.setattr(agent_api, "get_scan_agent_config_async", AsyncMock(return_value=object()))
-    monkeypatch.setattr(agent_api, "agent_config_has_explicit_model", lambda _: True)
-    monkeypatch.setattr(agent_api, "agent_explicit_model_ids", lambda _: ["provider/model"])
-    monkeypatch.setattr(agent_api, "request_agent_scan_stop", AsyncMock(return_value={"still_active": False, "error": ""}))
-    monkeypatch.setattr(agent_api, "resolve_agent_id_connection_async", AsyncMock(return_value=(agent.agent_id, agent)))
-    monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(scan_api, "_resolve_scan_agent_id", AsyncMock(return_value=agent.agent_id))
-    monkeypatch.setattr(scan_api, "_checker_packages_for", lambda _: [])
+    monkeypatch.setattr(get_runtime().agents, 'registered_agents', {agent.agent_id: agent})
+    monkeypatch.setattr(backend_agents_runtime_updates, 'ensure_agent_accepting_tasks_async', AsyncMock())
+    monkeypatch.setattr(backend_agents_configuration, 'get_scan_agent_config_async', AsyncMock(return_value=object()))
+    monkeypatch.setattr(backend_agents_configuration, 'agent_config_has_explicit_model', lambda _: True)
+    monkeypatch.setattr(backend_agents_configuration, 'agent_explicit_model_ids', lambda _: ["provider/model"])
+    monkeypatch.setattr(backend_agents_gateway, 'request_agent_scan_stop', AsyncMock(return_value={"still_active": False, "error": ""}))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_id_connection_async', AsyncMock(return_value=(agent.agent_id, agent)))
+    monkeypatch.setattr(backend_agents_artifacts, 'create_agent_task_runtime_update_payload_async', AsyncMock(return_value=None))
+    monkeypatch.setattr("backend.scans.validation._resolve_scan_agent_id", AsyncMock(return_value=agent.agent_id))
+    monkeypatch.setattr(backend_scans_configuration, '_checker_packages_for', lambda _: [])
     send = AsyncMock(return_value=True)
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     return SimpleNamespace(**vars(env), agent=agent, send=send)
 
 
@@ -405,7 +420,7 @@ def test_resume_dispatch_uses_original_product_after_repeated_display_edits(disp
     scan_id = env.save(status=ScanItemStatus.CANCELLED)
     env.store.update_scan_metadata(scan_id, product="First display product")
     env.store.update_scan_metadata(scan_id, product="Second display product", scan_name="Renamed scan")
-    asyncio.run(scan_api.resume_scan(scan_id, SimpleNamespace(base_url="http://server/"), env.owner))
+    asyncio.run(backend_api_scan_routes_continuation.resume_scan(scan_id, SimpleNamespace(base_url="http://server/"), env.owner))
     command = env.send.await_args.args[1]
     assert command["product"] == "Original product"
     assert command["scan_name"] == "Renamed scan"
@@ -417,7 +432,7 @@ def test_manual_validation_dispatch_uses_original_product_and_method_snapshot(di
     env = dispatch_agent
     scan_id = env.save(validation=True)
     env.store.update_scan_metadata(scan_id, product="Renamed display product")
-    result = asyncio.run(scan_api._trigger_vulnerability_validation(scan_id, 0, "http://server/"))
+    result = asyncio.run(backend_scans_validation._trigger_vulnerability_validation(scan_id, 0, "http://server/"))
     assert result["ok"] is True
     command = env.send.await_args.args[1]
     assert command["product"] == "Original product"

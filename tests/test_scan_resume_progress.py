@@ -1,22 +1,43 @@
 """Candidate progress across completed-scan retries and worker-local caches."""
 from __future__ import annotations
-
-import asyncio
-import os
 from datetime import datetime, timezone
+from fastapi import FastAPI
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
-
+import asyncio
 import httpx
+import os
 import pytest
-from fastapi import FastAPI
-
-from backend import report_routes, sse
-from backend.api import agent as agent_api, scan as scan_api
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.agents.configuration as backend_agents_configuration
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.runtime_updates as backend_agents_runtime_updates
+import backend.agents.schemas as backend_agents_schemas
+import backend.api.agent_routes.scan_events as backend_api_agent_routes_scan_events
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
+import backend.api.scan_routes.continuation as backend_api_scan_routes_continuation
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.fp_review as backend_scans_fp_review
+import backend.scans.ingestion.candidates as backend_scans_ingestion_candidates
+import backend.scans.ingestion.state as backend_scans_ingestion_state
+from backend import application
+from backend.api import agent as agent_api
+from backend.application import get_runtime
 from backend.models import (
-    AgentInfo, Candidate, MiningEngineRunStatus, MiningEngineSelection,
-    OpenCodePoolStatus, ScanCandidate, ScanEvent, ScanItemStatus, ScanMeta, ScanStatus, User, Vulnerability,
+    AgentInfo,
+    Candidate,
+    MiningEngineRunStatus,
+    MiningEngineSelection,
+    OpenCodePoolStatus,
+    ScanCandidate,
+    ScanEvent,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    User,
+    Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
 
@@ -67,31 +88,29 @@ def progress_env(request, tmp_path, monkeypatch):
     stale = store.load_scan(sid)[0]
     stale.status = "auditing"
     cache = {}
-    for module in (agent_api, scan_api, report_routes):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
-        monkeypatch.setattr(module, "run_store_call", direct_store)
-    for module in (agent_api, scan_api):
-        monkeypatch.setattr(module, "_running_scans", cache)
-        monkeypatch.setattr(module, "_scan_owners", {})
+    monkeypatch.setattr(application, "default_store_factory", lambda: store)
+    monkeypatch.setattr(application, "default_store_runner", direct_store)
+    monkeypatch.setattr(application.get_runtime().scans, "running_scans", cache)
+    monkeypatch.setattr(application.get_runtime().scans, "scan_owners", {})
     agent = AgentInfo(agent_id="agent", name="agent", ip="127.0.0.1", user_id="user",
                       last_seen=now, agent_session_id="session", protocol_version=1)
-    monkeypatch.setattr(agent_api, "_registered_agents", {"agent": agent})
-    monkeypatch.setattr(agent_api, "ensure_agent_accepting_tasks_async", AsyncMock())
-    monkeypatch.setattr(agent_api, "get_scan_agent_config_async", AsyncMock(return_value=object()))
-    monkeypatch.setattr(agent_api, "agent_config_has_explicit_model", lambda _: True)
-    monkeypatch.setattr(agent_api, "agent_explicit_model_ids", lambda _: ["provider/model"])
-    monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(agent_api, "request_agent_scan_stop", AsyncMock(return_value={"still_active": False}))
-    monkeypatch.setattr(agent_api, "send_agent_command", AsyncMock(return_value=True))
-    monkeypatch.setattr(scan_api, "_checker_packages_for", lambda _: [])
-    monkeypatch.setattr(scan_api, "_start_fp_review", AsyncMock())
-    monkeypatch.setattr(sse, "publish", Mock())
+    monkeypatch.setattr(get_runtime().agents, 'registered_agents', {"agent": agent})
+    monkeypatch.setattr(backend_agents_runtime_updates, 'ensure_agent_accepting_tasks_async', AsyncMock())
+    monkeypatch.setattr(backend_agents_configuration, 'get_scan_agent_config_async', AsyncMock(return_value=object()))
+    monkeypatch.setattr(backend_agents_configuration, 'agent_config_has_explicit_model', lambda _: True)
+    monkeypatch.setattr(backend_agents_configuration, 'agent_explicit_model_ids', lambda _: ["provider/model"])
+    monkeypatch.setattr(backend_agents_artifacts, 'create_agent_task_runtime_update_payload_async', AsyncMock(return_value=None))
+    monkeypatch.setattr(backend_agents_gateway, 'request_agent_scan_stop', AsyncMock(return_value={"still_active": False}))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
+    monkeypatch.setattr(backend_scans_configuration, '_checker_packages_for', lambda _: [])
+    monkeypatch.setattr(backend_scans_fp_review, '_start_fp_review', AsyncMock())
+    monkeypatch.setattr(application, "default_publisher", Mock())
     app = FastAPI()
     app.include_router(agent_api.router)
     user = User(user_id="user", username="user", role="admin")
 
     async def resume():
-        return await scan_api.resume_scan(sid, SimpleNamespace(base_url="http://server/"), user)
+        return await backend_api_scan_routes_continuation.resume_scan(sid, SimpleNamespace(base_url="http://server/"), user)
 
     try:
         yield SimpleNamespace(store=store, sid=sid, stale=stale, cache=cache,
@@ -124,11 +143,11 @@ def test_completed_scan_retry_counts_results_and_ignores_pool_cache(progress_env
                 assert response.json()["processed"] == index + 1
                 # Simulate a second worker that last saw the old complete run.
                 env.cache[env.sid] = env.stale.model_copy(deep=True)
-                sse.publish.reset_mock()
-                await agent_api.agent_push_opencode_pool(env.sid, OpenCodePoolStatus(
+                application.default_publisher.reset_mock()
+                await backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.sid, OpenCodePoolStatus(
                     execution_revision=2, agent_session_id="session", global_running=1,
                 ))
-                event = sse.publish.call_args.args[2]
+                event = application.default_publisher.call_args.args[2]
                 assert "processed_candidates" not in event
                 assert "total_candidates" not in event
                 assert "progress" not in event
@@ -142,7 +161,7 @@ def test_completed_scan_retry_counts_results_and_ignores_pool_cache(progress_env
             })
             assert response.status_code == 200, response.text
         env.cache.clear()
-        overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
+        overview = await backend_api_scan_routes_queries.get_scan_overview_v2(env.sid, current_user=env.user)
         assert overview.processed_candidates == overview.total_candidates == 3
         assert overview.execution_revision == 2
         assert overview.detail_counts.candidate_audit_failed == 1
@@ -177,8 +196,8 @@ def test_completed_scan_resumes_queued_candidates_with_original_indexes(progress
             env.cache.clear()
             if cached:
                 env.cache[env.sid] = env.store.load_scan(env.sid)[0]
-            overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
-            detail = await scan_api.get_scan_status(env.sid, current_user=env.user)
+            overview = await backend_api_scan_routes_queries.get_scan_overview_v2(env.sid, current_user=env.user)
+            detail = await backend_api_scan_routes_queries.get_scan_status(env.sid, current_user=env.user)
             for snapshot in (overview, detail):
                 assert snapshot.can_continue
                 assert snapshot.continuable_task_count == 2
@@ -186,7 +205,7 @@ def test_completed_scan_resumes_queued_candidates_with_original_indexes(progress
             assert overview.detail_counts.candidate_audit_queued == 2
 
         await env.resume()
-        command = agent_api.send_agent_command.await_args.args[1]
+        command = backend_agents_gateway.send_agent_command.await_args.args[1]
         assert command["retry_mining_engine_ids"] == ["static_candidate"]
         assert [item["idx"] for item in command["retry_candidates"]] == [123, 124]
         assert command["retry_total_candidates"] == 125
@@ -209,7 +228,7 @@ def test_completed_scan_resumes_queued_candidates_with_original_indexes(progress
                 assert response.status_code == 200, response.text
                 assert response.json()["processed"] == index + 1
         env.cache.clear()
-        overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
+        overview = await backend_api_scan_routes_queries.get_scan_overview_v2(env.sid, current_user=env.user)
         assert overview.processed_candidates == overview.total_candidates == 125
         assert overview.detail_counts.candidate_audit_queued == 0
 
@@ -223,27 +242,30 @@ def test_auxiliary_events_never_republish_candidate_progress(progress_env, sourc
     async def run():
         await env.resume()
         env.cache[env.sid] = env.stale.model_copy(deep=True)
-        sse.publish.reset_mock()
+        application.default_publisher.reset_mock()
         if source == "pool":
-            await agent_api.agent_push_opencode_pool(env.sid, OpenCodePoolStatus(
+            await backend_api_agent_routes_scan_progress.agent_push_opencode_pool(env.sid, OpenCodePoolStatus(
                 execution_revision=2, agent_session_id="session",
             ))
         elif source == "log":
-            await agent_api.agent_scan_event(env.sid, ScanEvent.create("candidate_audit", "candidate finished"))
+            await backend_api_agent_routes_scan_events.agent_scan_event(env.sid, ScanEvent.create("candidate_audit", "candidate finished"))
         elif source == "index":
-            await agent_api.agent_push_index_status(env.sid, agent_api._IndexStatusBody(
+            await backend_api_agent_routes_scan_progress.agent_push_index_status(env.sid, backend_agents_schemas._IndexStatusBody(
                 status="done", parsed_files=5, total_files=5,
             ))
         else:
-            await agent_api.agent_push_static_progress(env.sid, agent_api._StaticProgressBody(done=True))
-        for call in sse.publish.call_args_list:
+            await backend_api_agent_routes_scan_progress.agent_push_static_progress(env.sid, backend_agents_schemas._StaticProgressBody(done=True))
+        for call in application.default_publisher.call_args_list:
             if call.args[1] == "scan_status":
                 assert not {"processed_candidates", "total_candidates", "progress"} & call.args[2].keys()
 
     asyncio.run(run())
 
 
-def test_distributed_cache_refresh_and_reconciliation_use_current_execution(progress_env, monkeypatch):
+def test_distributed_cache_refresh_and_reconciliation_use_current_execution(
+    progress_env,
+    monkeypatch,
+):
     env = progress_env
 
     async def run():
@@ -251,21 +273,21 @@ def test_distributed_cache_refresh_and_reconciliation_use_current_execution(prog
         env.cache[env.sid] = env.stale.model_copy(deep=True)
         # Exercise the worker-cache path even with the lightweight SQLite fixture.
         monkeypatch.setattr(env.store, "distributed", True, raising=False)
-        current = await agent_api._ensure_running_scan(env.sid)
+        current = await backend_scans_ingestion_state._ensure_running_scan(env.sid)
         assert current.execution_revision == 2
         assert current.processed_candidates == 1
         assert current.status == "pending"
         current.candidates = env.store.list_scan_candidates(env.sid)
-        refreshed = await agent_api._ensure_running_scan(env.sid)
+        refreshed = await backend_scans_ingestion_state._ensure_running_scan(env.sid)
         assert refreshed.candidates == current.candidates
         env.cache[env.sid] = env.stale.model_copy(deep=True)
-        await agent_api._reconcile_candidate_progress(env.sid)
-        event = sse.publish.call_args.args[2]
+        await backend_scans_ingestion_candidates._reconcile_candidate_progress(env.sid)
+        event = application.default_publisher.call_args.args[2]
         assert (event["processed_candidates"], event["total_candidates"]) == (1, 3)
         assert event["status"] == "pending"
         assert event["execution_revision"] == 2
         env.store.update_scan_progress(env.sid, status=ScanItemStatus.COMPLETE)
-        assert await agent_api._ensure_running_scan(env.sid) is None
+        assert await backend_scans_ingestion_state._ensure_running_scan(env.sid) is None
         assert env.sid not in env.cache
 
     asyncio.run(run())

@@ -1,16 +1,16 @@
 """Personal review notes remain current, private and durable across both stores."""
 
+from backend.application import get_runtime
+import backend.application as application
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import os
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 import uuid
-
 import httpx
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from fastapi import FastAPI
-
 from backend.api import review_notes as api, scan as scan_api
 from backend.auth import get_current_user
 from backend.models import CreateScanRequest, ScanMeta, ScanStatus, User
@@ -53,8 +53,8 @@ def notes_env(request, tmp_path):
 def notes_api(notes_env, monkeypatch):
     env = notes_env
     monkeypatch.setattr(api, "get_scan_store", lambda: env.store)
-    monkeypatch.setattr(scan_api, "get_scan_store", lambda: env.store)
-    monkeypatch.setattr(scan_api, "_scan_owners", {})
+    monkeypatch.setattr(application, 'default_store_factory', lambda: env.store)
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
     sync = AsyncMock(return_value="synced")
     monkeypatch.setattr(api, "_sync", sync)
 
@@ -227,7 +227,9 @@ def test_resaving_previous_content_pushes_after_an_interleaved_edit(notes_api, m
     assert state["entries"][0]["title"] == "original"
 
 
-def test_api_edit_propagates_pending_status_and_admin_cannot_attach_own_notes_to_other_scan(notes_api):
+def test_api_edit_propagates_pending_status_and_admin_cannot_attach_own_notes_to_other_scan(
+    notes_api,
+):
     env = notes_api
     scan_id = env.save()
     note = env.store.create_review_note(env.owner, "note", "body")

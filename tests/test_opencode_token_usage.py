@@ -1,8 +1,8 @@
+
+import backend.api.agent_routes.configuration as backend_api_agent_routes_configuration
 import asyncio
 from pathlib import Path
 from unittest.mock import patch
-
-from backend.api import agent as agent_api
 from backend.models import (
     AgentRemoteConfig,
     OpenCodePoolStatus,
@@ -161,9 +161,9 @@ def test_stable_agent_usage_endpoint_works_while_agent_is_offline(tmp_path: Path
         status=status,
     )
 
-    with patch("backend.api.agent.get_scan_store", return_value=store):
+    with patch("backend.application.default_store_factory", return_value=store):
         result = asyncio.run(
-            agent_api.get_stable_agent_opencode_usage(
+            backend_api_agent_routes_configuration.get_stable_agent_opencode_usage(
                 "stable-agent",
                 current_user=User(user_id="user-1", username="owner", role="user"),
             )

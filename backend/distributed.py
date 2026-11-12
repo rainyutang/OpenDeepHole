@@ -1,16 +1,15 @@
 """PostgreSQL-backed cross-worker command and SSE fan-out runtime."""
 
 from __future__ import annotations
-
+from backend.agents.transport import LocalAgentTransport
 import asyncio
 import json
 import os
 import socket
 import time
 import uuid
-
 from backend.logger import get_logger
-from backend.store.async_ops import run_store_call
+from backend.application import run_store_call
 
 logger = get_logger(__name__)
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -82,8 +81,8 @@ async def _initialize_runtime(store) -> int:
         return last_id
 
 
-async def _deliver_commands(store) -> None:
-    from backend.api.agent import _agent_ws, _send_agent_json
+async def _deliver_commands(store, transport=None) -> None:
+    transport = transport if transport is not None else LocalAgentTransport()
 
     commands = await run_store_call(
         store,
@@ -96,10 +95,10 @@ async def _deliver_commands(store) -> None:
         agent_id = str(command["agent_id"])
         error = ""
         try:
-            if agent_id not in _agent_ws:
+            if not transport.owns(agent_id):
                 raise RuntimeError("Agent WebSocket is no longer owned by this worker")
             payload = json.loads(str(command["payload_json"]))
-            await _send_agent_json(agent_id, payload)
+            await transport.send(agent_id, payload)
         except Exception as exc:
             error = str(exc)
             logger.warning(
@@ -140,7 +139,7 @@ async def _fan_out_stream_events(store, last_id: int) -> int:
             return last_id
 
 
-async def run_distributed_runtime(store, *, leader: bool = False) -> None:
+async def run_distributed_runtime(store, *, leader: bool = False, transport=None) -> None:
     """Run reliable command delivery and SSE catch-up for one worker."""
     last_id = await _initialize_runtime(store)
     wake = asyncio.Event()
@@ -154,7 +153,7 @@ async def run_distributed_runtime(store, *, leader: bool = False) -> None:
     try:
         while True:
             try:
-                await _deliver_commands(store)
+                await _deliver_commands(store, transport)
                 last_id = await _fan_out_stream_events(store, last_id)
                 now = time.monotonic()
                 if now - last_maintenance >= 30.0:
@@ -177,7 +176,7 @@ async def run_distributed_runtime(store, *, leader: bool = False) -> None:
                             error_message="Agent 断开连接",
                         )
                         if stale_scans:
-                            from backend.sse import publish
+                            from backend.application import publish
 
                             for scan_id in stale_scans:
                                 loaded = await run_store_call(

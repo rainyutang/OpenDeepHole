@@ -1,16 +1,5 @@
 """Resume through the real candidate engine, audit runner, pool and HTTP reports."""
 from __future__ import annotations
-
-import asyncio
-import threading
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
-import httpx
-import pytest
-
-from backend.api import agent as agent_api, scan as scan_api
-from backend.models import Candidate, MiningEngineRunStatus
 from deephole_client.config import AgentConfig
 from deephole_client.reporter import Reporter
 from deephole_client.vulnerability_mining.engines.static_candidate import engine
@@ -18,9 +7,16 @@ from deephole_client.vulnerability_mining.engines.static_candidate.candidate_aud
 from task_agent import OpenCodeResult
 from task_agent.model_pool import acquire_model_lease, model_pool_snapshot, release_model_lease
 from task_agent.task_service import bind_opencode_execution_context, get_opencode_execution_context
-
-from test_opencode_model_pool import _reset_model_pool  # noqa: F401 - shared isolated pool fixture
-from test_scan_resume_progress import progress_env, result  # noqa: F401 - shared SQLite/PostgreSQL fixture
+from test_scan_resume_progress import progress_env, result
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import asyncio
+import httpx
+import pytest
+import threading
+import backend.agents.gateway as backend_agents_gateway
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
+from backend.models import Candidate, MiningEngineRunStatus
 
 
 @pytest.mark.parametrize("unfinished_state", ["failed", "queued"])
@@ -62,7 +58,7 @@ def test_resume_executes_only_unfinished_candidates_through_real_pool(
 
     async def run():
         await env.resume()
-        payload = agent_api.send_agent_command.await_args.args[1]
+        payload = backend_agents_gateway.send_agent_command.await_args.args[1]
         assert payload["retry_mining_engine_ids"] == ["static_candidate"]
         assert [item["idx"] for item in payload["retry_candidates"]] == [123, 124]
         assert payload["retry_total_candidates"] == 125
@@ -140,7 +136,7 @@ def test_resume_executes_only_unfinished_candidates_through_real_pool(
             ))
             await reporter.finish_scan(env.sid, [], "complete", 125, 125)
             env.cache.clear()
-            overview = await scan_api.get_scan_overview_v2(env.sid, current_user=env.user)
+            overview = await backend_api_scan_routes_queries.get_scan_overview_v2(env.sid, current_user=env.user)
             assert overview.processed_candidates == overview.total_candidates == 125
             assert overview.detail_counts.candidate_audit_success == 125
             assert not overview.can_continue

@@ -1,14 +1,10 @@
 from __future__ import annotations
-
-import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
+import asyncio
 import pytest
-from fastapi import HTTPException
-
-from backend.api import agent as agent_api
-from backend.api import scan as scan_api
+import backend.agents.configuration as backend_agents_configuration
+import backend.scans.creation as backend_scans_creation
+from backend.application import ApplicationError as HTTPException
 from backend.models import (
     AgentInfo,
     AgentMcpConfig,
@@ -27,33 +23,33 @@ def successful_path_probe(monkeypatch):
     async def probe(_agent_id, _agent, targets):
         return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
                 for target in targets]
-    monkeypatch.setattr("backend.api.agent.request_agent_scan_paths", probe)
+    monkeypatch.setattr("backend.agents.gateway.request_agent_scan_paths", probe)
 
 
 def test_model_readiness_requires_enabled_explicit_model() -> None:
-    assert not agent_api.agent_config_has_explicit_model(AgentRemoteConfig())
-    assert not agent_api.agent_config_has_explicit_model(AgentRemoteConfig(
+    assert not backend_agents_configuration.agent_config_has_explicit_model(AgentRemoteConfig())
+    assert not backend_agents_configuration.agent_config_has_explicit_model(AgentRemoteConfig(
         model_pool={"models": [{
             "id": "disabled",
             "model": "provider/model",
             "enabled": False,
         }]},
     ))
-    assert not agent_api.agent_config_has_explicit_model(AgentRemoteConfig(
+    assert not backend_agents_configuration.agent_config_has_explicit_model(AgentRemoteConfig(
         model_pool={"models": [{
             "id": "blank",
             "model": "   ",
             "enabled": True,
         }]},
     ))
-    assert agent_api.agent_config_has_explicit_model(AgentRemoteConfig(
+    assert backend_agents_configuration.agent_config_has_explicit_model(AgentRemoteConfig(
         model_pool={"models": [{
             "id": "ready",
             "model": "provider/model",
             "enabled": True,
         }]},
     ))
-    assert agent_api.agent_explicit_model_ids(AgentRemoteConfig(
+    assert backend_agents_configuration.agent_explicit_model_ids(AgentRemoteConfig(
         model_pool={"models": [
             {"id": "first", "model": "p/one", "enabled": True},
             {"id": "duplicate", "model": "p/one", "enabled": True},
@@ -83,15 +79,15 @@ def test_create_scan_rejects_client_without_model_before_persisting() -> None:
     config = AsyncMock(return_value=AgentRemoteConfig())
 
     with (
-        patch("backend.api.agent.resolve_agent_connection_async", resolve),
-        patch("backend.api.agent.ensure_agent_accepting_tasks_async", readiness),
-        patch("backend.api.agent.get_scan_agent_config_async", config),
+        patch("backend.agents.directory.resolve_agent_connection_async", resolve),
+        patch("backend.agents.runtime_updates.ensure_agent_accepting_tasks_async", readiness),
+        patch("backend.agents.configuration.get_scan_agent_config_async", config),
     ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(
-                scan_api.create_agent_scan(
+                backend_scans_creation.create_agent_scan(
                     body,
-                    SimpleNamespace(base_url="http://testserver/"),
+                    'http://testserver',
                     user,
                 )
             )
@@ -137,31 +133,31 @@ def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
 
     send = AsyncMock(return_value=True)
     with (
-        patch("backend.api.scan.get_scan_store", return_value=object()),
-        patch("backend.api.scan.run_store_call", new=store_call),
+        patch("backend.application.default_store_factory", return_value=object()),
+        patch("backend.application.default_store_runner", new=store_call),
         patch(
-            "backend.api.scan._globally_enabled_checker_names",
+            "backend.scans.creation_config._globally_enabled_checker_names",
             return_value=[],
         ),
         patch(
-            "backend.api.agent.resolve_agent_connection_async",
+            "backend.agents.directory.resolve_agent_connection_async",
             new=AsyncMock(return_value=(client.agent_id, client)),
         ),
         patch(
-            "backend.api.agent.ensure_agent_accepting_tasks_async",
+            "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "backend.api.agent.get_scan_agent_config_async",
+            "backend.agents.configuration.get_scan_agent_config_async",
             new=AsyncMock(return_value=ready),
         ),
         patch(
-            "backend.api.agent.create_agent_task_runtime_update_payload_async",
+            "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
             new=AsyncMock(return_value=None),
         ),
-        patch("backend.api.agent.send_agent_command", new=send),
+        patch("backend.agents.gateway.send_agent_command", new=send),
     ):
-        asyncio.run(scan_api.create_agent_scan(
+        asyncio.run(backend_scans_creation.create_agent_scan(
             CreateScanRequest(
                 agent_key=client.agent_key,
                 scan_mode="multi_version",
@@ -187,7 +183,7 @@ def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
                     project_name="Knowledge Project",
                 ),
             ),
-            SimpleNamespace(base_url="http://testserver/"),
+            'http://testserver',
             user,
         ))
 
@@ -242,22 +238,22 @@ def test_fixed_scan_modes_reject_conflicting_overrides(
 
     with (
         patch(
-            "backend.api.agent.resolve_agent_connection_async",
+            "backend.agents.directory.resolve_agent_connection_async",
             new=AsyncMock(return_value=(client.agent_id, client)),
         ),
         patch(
-            "backend.api.agent.ensure_agent_accepting_tasks_async",
+            "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "backend.api.agent.get_scan_agent_config_async",
+            "backend.agents.configuration.get_scan_agent_config_async",
             new=AsyncMock(return_value=ready),
         ),
         pytest.raises(HTTPException) as exc_info,
     ):
-        asyncio.run(scan_api.create_agent_scan(
+        asyncio.run(backend_scans_creation.create_agent_scan(
             body,
-            SimpleNamespace(base_url="http://testserver/"),
+            'http://testserver',
             user,
         ))
 
@@ -314,39 +310,39 @@ def test_fixed_modes_snapshot_pipeline_defaults(
 
     send = AsyncMock(return_value=True)
     with (
-        patch("backend.api.scan.get_scan_store", return_value=object()),
-        patch("backend.api.scan.run_store_call", new=store_call),
+        patch("backend.application.default_store_factory", return_value=object()),
+        patch("backend.application.default_store_runner", new=store_call),
         patch(
-            "backend.api.scan._globally_enabled_checker_names",
+            "backend.scans.creation_config._globally_enabled_checker_names",
             return_value=["normal"],
         ),
         patch(
-            "backend.api.scan._validated_checker_names",
+            "backend.scans.creation_config._validated_checker_names",
             side_effect=lambda names, _user: list(names),
         ),
         patch(
-            "backend.api.scan._checker_packages_for",
+            "backend.scans.creation_config._checker_packages_for",
             return_value=[{"name": "normal"}],
         ),
         patch(
-            "backend.api.agent.resolve_agent_connection_async",
+            "backend.agents.directory.resolve_agent_connection_async",
             new=AsyncMock(return_value=(client.agent_id, client)),
         ),
         patch(
-            "backend.api.agent.ensure_agent_accepting_tasks_async",
+            "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "backend.api.agent.get_scan_agent_config_async",
+            "backend.agents.configuration.get_scan_agent_config_async",
             new=AsyncMock(return_value=ready),
         ),
         patch(
-            "backend.api.agent.create_agent_task_runtime_update_payload_async",
+            "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
             new=AsyncMock(return_value=None),
         ),
-        patch("backend.api.agent.send_agent_command", new=send),
+        patch("backend.agents.gateway.send_agent_command", new=send),
     ):
-        response = asyncio.run(scan_api.create_agent_scan(
+        response = asyncio.run(backend_scans_creation.create_agent_scan(
             CreateScanRequest(
                 agent_key=client.agent_key,
                 project_path="/repo/project",
@@ -354,7 +350,7 @@ def test_fixed_modes_snapshot_pipeline_defaults(
                 scan_mode=scan_mode,
                 threat_analysis_method=expected_method if explicit_method else None,
             ),
-            SimpleNamespace(base_url="http://testserver/"),
+            'http://testserver',
             user,
         ))
 

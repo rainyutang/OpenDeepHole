@@ -1,14 +1,12 @@
 """Independent validation telemetry survives a completed parent scan."""
 
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
 import asyncio
 import os
+import pytest
 from unittest.mock import patch
 from uuid import uuid4
-
-import pytest
-from fastapi import HTTPException
-
-from backend.api.agent import agent_push_opencode_pool
+from backend.application import ApplicationError as HTTPException
 from backend.models import OpenCodePoolStatus, ScanMeta, ScanStatus, VulnerabilityValidation
 from backend.store.sqlite import SqliteScanStore
 
@@ -62,11 +60,11 @@ async def direct_store_call(store, operation, *args, **kwargs):
 def test_validation_publisher_accepts_own_identity_and_keeps_parent_revision(validation_store):
     store, scan_id = validation_store
     with (
-        patch("backend.api.agent.get_scan_store", return_value=store),
-        patch("backend.api.agent.run_store_call", direct_store_call),
-        patch("backend.sse.publish") as publish,
+        patch("backend.application.default_store_factory", return_value=store),
+        patch("backend.application.default_store_runner", direct_store_call),
+        patch("backend.application.default_publisher") as publish,
     ):
-        assert asyncio.run(agent_push_opencode_pool(scan_id, validation_pool(scan_id))) == {"ok": True}
+        assert asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(scan_id, validation_pool(scan_id))) == {"ok": True}
     value = store.get_opencode_pool_status(scan_id)
     assert value.global_running == 1
     assert value.models[0].active_tasks[0]["task_id"] == "validation-task"
@@ -80,9 +78,9 @@ def test_validation_publisher_rejects_wrong_or_malformed_owner(validation_store,
     store, scan_id = validation_store
     value = validation_pool(scan_id)
     value.execution_owner.id = owner_id.replace("scan:", f"{scan_id}:")
-    with patch("backend.api.agent.get_scan_store", return_value=store), patch("backend.api.agent.run_store_call", direct_store_call):
+    with patch("backend.application.default_store_factory", return_value=store), patch("backend.application.default_store_runner", direct_store_call):
         with pytest.raises(HTTPException) as caught:
-            asyncio.run(agent_push_opencode_pool(scan_id, value))
+            asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(scan_id, value))
     assert caught.value.status_code == 409
 
 
@@ -93,7 +91,7 @@ def test_validation_publisher_rejects_old_revision_and_session(validation_store)
         value = validation_pool(scan_id)
         value.execution_owner.revision = revision
         value.agent_session_id = session
-        with patch("backend.api.agent.get_scan_store", return_value=store), patch("backend.api.agent.run_store_call", direct_store_call):
+        with patch("backend.application.default_store_factory", return_value=store), patch("backend.application.default_store_runner", direct_store_call):
             with pytest.raises(HTTPException) as caught:
-                asyncio.run(agent_push_opencode_pool(scan_id, value))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool(scan_id, value))
         assert caught.value.status_code == 409

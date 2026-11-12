@@ -1,9 +1,9 @@
-import tempfile
-import unittest
+
 from pathlib import Path
 from unittest.mock import patch
-
-from backend.api.scan import get_scan_overview_v2
+import tempfile
+import unittest
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
 from backend.models import (
     Candidate,
     FpReviewResult,
@@ -105,13 +105,13 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 with (
-                    patch("backend.api.scan.get_scan_store", return_value=store),
+                    patch("backend.application.default_store_factory", return_value=store),
                     patch(
-                        "backend.api.scan.run_store_call",
+                        "backend.application.default_store_runner",
                         side_effect=_direct_store_call,
                     ),
                 ):
-                    overview = await get_scan_overview_v2(
+                    overview = await backend_api_scan_routes_queries.get_scan_overview_v2(
                         scan_id,
                         User(user_id="user-1", username="ordinary", role="user"),
                     )
@@ -135,10 +135,10 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                 store._conn.execute("UPDATE scan_summary_state SET ready = 0 WHERE scan_id = ?", (scan_id,))
                 store._conn.commit()
                 with (
-                    patch("backend.api.scan.get_scan_store", return_value=store),
-                    patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                    patch("backend.application.default_store_factory", return_value=store),
+                    patch("backend.application.default_store_runner", side_effect=_direct_store_call),
                 ):
-                    legacy = await get_scan_overview_v2(
+                    legacy = await backend_api_scan_routes_queries.get_scan_overview_v2(
                         scan_id, User(user_id="user-1", username="ordinary", role="user"),
                     )
                 self.assertEqual(legacy.detail_counts.human_confirmed_issue_count, 2)

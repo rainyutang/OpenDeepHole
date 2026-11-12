@@ -1,16 +1,23 @@
 """Persisted task results, historical association, and final issue semantics."""
 
+import backend.application as application
 import asyncio
 import os
 import uuid
-
 import httpx
 import pytest
 from fastapi import FastAPI
-
 from backend.api import integration, scan
 from backend.auth import get_current_user
-from backend.models import FpReviewResult, ScanCandidate, ScanMeta, ScanStatus, ThreatAuditTask, User, Vulnerability
+from backend.models import (
+    FpReviewResult,
+    ScanCandidate,
+    ScanMeta,
+    ScanStatus,
+    ThreatAuditTask,
+    User,
+    Vulnerability,
+)
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -54,7 +61,16 @@ def finding(store, task_id="t", scan_id="s", **overrides):
     }))
 
 
-def review(store, index, verdict="tp", *, scan_id="s", created="2026-09-07T01:00:00+00:00", reason="已验证可达调用链", report=""):
+def review(
+    store,
+    index,
+    verdict="tp",
+    *,
+    scan_id="s",
+    created="2026-09-07T01:00:00+00:00",
+    reason="已验证可达调用链",
+    report="",
+):
     review_id = uuid.uuid4().hex
     store.create_fp_review_job(review_id, scan_id, 1, created)
     store.add_fp_review_result(review_id, FpReviewResult(
@@ -312,7 +328,7 @@ def test_authenticated_and_public_result_endpoints_are_bounded_and_authorized(st
     review(store, index)
     candidate_index = static_finding(store, 207, user_verdict="confirmed")
     store.replace_scan_candidates("s", [candidate(store, 207, candidate_index)])
-    monkeypatch.setattr(scan, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
     monkeypatch.setattr(integration, "get_scan_store", lambda: store)
     # Permission checks and result reads must not hydrate the entire scan.
     monkeypatch.setattr(store, "load_scan", lambda *args: pytest.fail("Unexpected full scan read"))

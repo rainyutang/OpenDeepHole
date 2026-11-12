@@ -1,17 +1,17 @@
+from fastapi.responses import Response
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 import asyncio
 import csv
 import io
 import json
 import unittest
 import zipfile
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
-
-from fastapi.responses import Response
-
+import backend.api.scan_routes.reports as backend_api_scan_routes_reports
+import backend.application as application
+import backend.scans.reports as report_service
 from backend.api import integration as integration_api
-from backend.api import scan as scan_api
 from backend.models import (
     FpReviewResult,
     ScanItemStatus,
@@ -78,20 +78,16 @@ class ReportExportTests(unittest.TestCase):
     ) -> Response:
         user = User(user_id="owner", username="owner", role="user")
         with (
-            patch.object(scan_api, "_check_scan_owner", new=AsyncMock()),
-            patch.object(
-                scan_api,
-                "get_scan_status",
+            patch.object(report_service, '_check_scan_owner', new=AsyncMock()),
+            patch.object(report_service, 'get_scan_status',
                 new=AsyncMock(return_value=scan),
             ),
-            patch.object(scan_api, "get_scan_store", return_value=object()),
-            patch.object(
-                scan_api,
-                "run_store_call",
+            patch.object(application, 'default_store_factory', return_value=object()),
+            patch.object(application, 'default_store_runner',
                 new=AsyncMock(return_value=fp_map or {}),
             ),
         ):
-            return asyncio.run(scan_api.download_report("scan-1", user))
+            return asyncio.run(backend_api_scan_routes_reports.download_report("scan-1", user))
 
     def _download_zip(
         self,
@@ -101,21 +97,17 @@ class ReportExportTests(unittest.TestCase):
         user = User(user_id="owner", username="owner", role="user")
         store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
         with (
-            patch.object(scan_api, "_check_scan_owner", new=AsyncMock()),
-            patch.object(
-                scan_api,
-                "get_scan_status",
+            patch.object(report_service, '_check_scan_owner', new=AsyncMock()),
+            patch.object(report_service, 'get_scan_status',
                 new=AsyncMock(return_value=scan),
             ),
-            patch.object(scan_api, "get_scan_store", return_value=store),
-            patch.object(
-                scan_api,
-                "run_store_call",
+            patch.object(application, 'default_store_factory', return_value=store),
+            patch.object(application, 'default_store_runner',
                 new=AsyncMock(return_value=fp_map or {}),
             ),
-            patch.object(scan_api, "_fp_review_stage_titles", return_value=[]),
+            patch.object(report_service, '_fp_review_stage_titles', return_value=[]),
         ):
-            return asyncio.run(scan_api.download_report_zip("scan-1", user))
+            return asyncio.run(backend_api_scan_routes_reports.download_report_zip("scan-1", user))
 
     def _download_single(
         self,
@@ -126,22 +118,18 @@ class ReportExportTests(unittest.TestCase):
         user = User(user_id="owner", username="owner", role="user")
         store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
         with (
-            patch.object(scan_api, "_check_scan_owner", new=AsyncMock()),
-            patch.object(
-                scan_api,
-                "get_scan_status",
+            patch.object(report_service, '_check_scan_owner', new=AsyncMock()),
+            patch.object(report_service, 'get_scan_status',
                 new=AsyncMock(return_value=scan),
             ),
-            patch.object(scan_api, "get_scan_store", return_value=store),
-            patch.object(
-                scan_api,
-                "run_store_call",
+            patch.object(application, 'default_store_factory', return_value=store),
+            patch.object(application, 'default_store_runner',
                 new=AsyncMock(return_value=fp_map or {}),
             ),
-            patch.object(scan_api, "_fp_review_stage_titles", return_value=[]),
+            patch.object(report_service, '_fp_review_stage_titles', return_value=[]),
         ):
             return asyncio.run(
-                scan_api.download_vulnerability_report(
+                backend_api_scan_routes_reports.download_vulnerability_report(
                     "scan-1",
                     index,
                     user,
@@ -475,15 +463,17 @@ class ReportExportTests(unittest.TestCase):
 
     def test_public_csv_route_forwards_fixed_export(self) -> None:
         user = User(user_id="owner", username="owner", role="user")
-        expected = Response(content="ok")
+        expected = application.DownloadArtifact(content="ok", media_type="text/csv", headers={"X-Report": "fixed"})
         download = AsyncMock(return_value=expected)
-        with patch.object(integration_api.scan_api, "download_report", new=download):
+        with patch.object(integration_api.scan_reports, "download_report", new=download):
             response = asyncio.run(integration_api.download_public_report(
                 "scan-1",
                 user,
             ))
 
-        self.assertIs(response, expected)
+        self.assertEqual(response.body, b"ok")
+        self.assertEqual(response.headers["X-Report"], "fixed")
+        self.assertEqual(response.media_type, "text/csv")
         download.assert_awaited_once_with("scan-1", user)
 
 

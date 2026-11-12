@@ -1,16 +1,25 @@
-import copy
 
+import backend.agents.configuration as backend_agents_configuration
+import copy
 import pytest
 import yaml
-from fastapi import HTTPException
+from backend.application import ApplicationError as HTTPException
 from pydantic import ValidationError
-
-from backend.api.agent import _validate_managed_config
 from backend.models import AgentRemoteConfig
-from deephole_client.config import AgentConfig, apply_remote_config, load_config, remote_config_dict, save_config
+from deephole_client.config import (
+    AgentConfig,
+    apply_remote_config,
+    load_config,
+    remote_config_dict,
+    save_config,
+)
 from task_agent.model_pool import model_options
 from task_agent.standalone import load_standalone_config
-from task_agent.task_service import OpenCodeExecutionContext, _task_idle_timeout_seconds, _task_retry_timeout_seconds
+from task_agent.task_service import (
+    OpenCodeExecutionContext,
+    _task_idle_timeout_seconds,
+    _task_retry_timeout_seconds,
+)
 
 
 def policies(config):
@@ -53,7 +62,7 @@ def test_new_defaults_and_all_four_stage_round_trip(tmp_path):
     assert reloaded.agent_name == "local"
     assert model_options(reloaded.opencode)[0].idle_timeout == 90
     backend = AgentRemoteConfig.model_validate(exported)
-    _validate_managed_config(backend)
+    backend_agents_configuration._validate_managed_config(backend)
     assert policies(backend.model_dump()) == policies(payload)
 
 
@@ -106,11 +115,11 @@ def test_invalid_idle_timeout_is_rejected(value):
     raw = AgentRemoteConfig().model_dump()
     raw["false_positive"]["idle_timeout_seconds"] = value
     with pytest.raises((HTTPException, ValidationError)):
-        _validate_managed_config(AgentRemoteConfig.model_validate(raw))
+        backend_agents_configuration._validate_managed_config(AgentRemoteConfig.model_validate(raw))
     raw = AgentRemoteConfig().model_dump()
     raw["model_pool"]["models"] = [{"id": "one", "model": "provider/one", "idle_timeout": value}]
     with pytest.raises((HTTPException, ValidationError)):
-        _validate_managed_config(AgentRemoteConfig.model_validate(raw))
+        backend_agents_configuration._validate_managed_config(AgentRemoteConfig.model_validate(raw))
 
 
 def test_legacy_validation_snapshot_uses_idle_default_without_mutation():
@@ -153,7 +162,7 @@ def test_invalid_task_timeouts_are_rejected(field, value):
     raw = AgentRemoteConfig().model_dump()
     raw["vulnerability_mining"][field] = value
     with pytest.raises((HTTPException, ValidationError)):
-        _validate_managed_config(AgentRemoteConfig.model_validate(raw))
+        backend_agents_configuration._validate_managed_config(AgentRemoteConfig.model_validate(raw))
 
 
 @pytest.mark.parametrize("total,expected", [(10800, 1800), (91, 91)])

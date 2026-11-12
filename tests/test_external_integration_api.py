@@ -1,3 +1,5 @@
+
+from backend.application import get_runtime
 import asyncio
 import tempfile
 import unittest
@@ -5,12 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
 from fastapi import HTTPException
-
-from backend.api import agent as agent_api
 from backend.api import integration as integration_api
-from backend.api import scan as scan_api
 from backend.models import (
     AgentInfo,
     AgentMcpConfig,
@@ -45,23 +43,23 @@ class ExternalIntegrationApiTests(unittest.TestCase):
         async def probe(_agent_id, _agent, targets):
             return [{key: target[key] for key in ("project_path", "code_scan_path", "code_scan_paths")}
                     for target in targets]
-        probe_patch = patch("backend.api.agent.request_agent_scan_paths", side_effect=probe)
+        probe_patch = patch("backend.agents.gateway.request_agent_scan_paths", side_effect=probe)
         probe_patch.start()
         self.addCleanup(probe_patch.stop)
-        agent_api._registered_agents.clear()
-        agent_api._agent_ws.clear()
-        agent_api._agent_ws_locks.clear()
-        agent_api._agent_configs.clear()
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_ws.clear()
+        get_runtime().agents.agent_ws_locks.clear()
+        get_runtime().agents.agent_configs.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def tearDown(self) -> None:
-        agent_api._registered_agents.clear()
-        agent_api._agent_ws.clear()
-        agent_api._agent_ws_locks.clear()
-        agent_api._agent_configs.clear()
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_ws.clear()
+        get_runtime().agents.agent_ws_locks.clear()
+        get_runtime().agents.agent_configs.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def test_invalid_integration_token_is_rejected(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
@@ -70,7 +68,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 401)
 
     def test_integration_scan_config_requires_an_explicit_model(self) -> None:
-        agent_api._registered_agents["agent-1"] = AgentInfo(
+        get_runtime().agents.registered_agents["agent-1"] = AgentInfo(
             agent_id="agent-1",
             name="integration-client",
             ip="127.0.0.1",
@@ -78,7 +76,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
         )
         send = AsyncMock(return_value=True)
 
-        with patch("backend.api.agent.send_agent_command", send):
+        with patch("backend.agents.gateway.send_agent_command", send):
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(
                     integration_api._sync_agent_config(
@@ -91,7 +89,9 @@ class ExternalIntegrationApiTests(unittest.TestCase):
         self.assertIn("客户端", ctx.exception.detail)
         send.assert_not_awaited()
 
-    def test_create_integration_scan_syncs_config_before_task_and_uses_public_checkers(self) -> None:
+    def test_create_integration_scan_syncs_config_before_task_and_uses_public_checkers(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             user = User(
@@ -100,14 +100,14 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 role="user",
                 agent_token=integration_api.INTEGRATION_TOKEN,
             )
-            agent_api._registered_agents["agent-1"] = AgentInfo(
+            get_runtime().agents.registered_agents["agent-1"] = AgentInfo(
                 agent_id="agent-1",
                 name="reverse-linux-agent",
                 ip="127.0.0.1",
                 last_seen=datetime.now(timezone.utc).isoformat(),
                 user_id="other-user",
             )
-            agent_api._agent_ws["agent-1"] = object()
+            get_runtime().agents.agent_ws["agent-1"] = object()
 
             registry = {
                 "public_check": SimpleNamespace(visibility="public"),
@@ -126,22 +126,22 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             )
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
                     "backend.api.integration.run_store_call",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
-                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
-                patch("backend.api.scan.refresh_registry", return_value=registry),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
+                patch("backend.scans.configuration.refresh_registry", return_value=registry),
                 patch("backend.api.integration.refresh_registry", return_value=registry),
-                patch("backend.api.scan.build_checker_packages", return_value=[]),
+                patch("backend.scans.configuration.build_checker_packages", return_value=[]),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", send),
+                patch("backend.agents.gateway.send_agent_command", send),
             ):
                 result = asyncio.run(
                     integration_api.create_integration_scan(
@@ -267,8 +267,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
 
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 public_scan = asyncio.run(
@@ -308,7 +308,9 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             updated = store.get_vulnerabilities("scan-1")[0]
             self.assertEqual(updated.user_verdict, "confirmed")
 
-    def test_public_scan_pending_analysis_does_not_create_feedback_and_removes_old_feedback(self) -> None:
+    def test_public_scan_pending_analysis_does_not_create_feedback_and_removes_old_feedback(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             store.create_user("owner", "owner", "hash", "user", "owner-token")
@@ -363,8 +365,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
 
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 result = asyncio.run(
@@ -424,8 +426,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
 
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 result = asyncio.run(

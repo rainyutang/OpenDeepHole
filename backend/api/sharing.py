@@ -1,25 +1,30 @@
 """Scan-scoped links with view, report download and manual triage permissions."""
 
 from __future__ import annotations
-
+import backend.scans.access as scan_access
+import backend.scans.details as scan_details
+import backend.scans.feedback as scan_feedback
+import backend.scans.fp_review as scan_fp_review
+import backend.scans.ingestion.progress as scan_ingestion_progress
+import backend.scans.queries as scan_queries
+import backend.scans.reports as scan_reports
+import backend.scans.results as scan_results
+import backend.scans.skills as scan_skills
 import asyncio
 import json
 import secrets
 from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
-from backend.api import scan as scan_api
+from backend.report_routes import ApplicationRoute
 from backend.auth import get_current_user
 from backend.models import BatchMarkRequest, BatchUnmarkRequest, MarkRequest, UnmarkRequest, User
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call
+from backend.application import get_scan_store, run_store_call
 from backend.sse import SSE_KEEPALIVE, format_sse, publish, subscribe, unsubscribe
 
 
-router = APIRouter()
+router = APIRouter(route_class=ApplicationRoute)
 SHARE_UNAVAILABLE = "分享已关闭或链接无效"
 SHARE_HEARTBEAT_SECONDS = 30
 
@@ -33,7 +38,7 @@ class ScanShareResponse(BaseModel):
 async def create_scan_share(
     scan_id: str, response: Response, current_user: User = Depends(get_current_user),
 ) -> ScanShareResponse:
-    await scan_api._check_scan_owner(scan_id, current_user)
+    await scan_access._check_scan_owner(scan_id, current_user)
     share = await run_store_call(get_scan_store(), "get_or_create_scan_share", scan_id)
     if share is None:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -43,7 +48,7 @@ async def create_scan_share(
 
 @router.delete("/api/scan/{scan_id}/share")
 async def revoke_scan_share(scan_id: str, current_user: User = Depends(get_current_user)) -> dict:
-    await scan_api._check_scan_owner(scan_id, current_user)
+    await scan_access._check_scan_owner(scan_id, current_user)
     await run_store_call(get_scan_store(), "revoke_scan_share", scan_id)
     # Each stream rechecks its own token; delayed notifications cannot revoke
     # a newer share created after this request.
@@ -66,129 +71,143 @@ async def _shared_user(scan_id: str, response: Response, token: str = Query(""))
 
 
 SharedUser = Annotated[User, Depends(_shared_user)]
-shared = APIRouter(prefix="/api/shared/scans/{scan_id}")
+shared = APIRouter(prefix="/api/shared/scans/{scan_id}", route_class=ApplicationRoute)
 
 
 @shared.get("/overview")
 async def overview(scan_id: str, user: SharedUser):
-    scan = await scan_api.get_scan_overview_v2(scan_id, user)
+    scan = await scan_queries.get_scan_overview_v2(scan_id, user)
     return scan.model_copy(update={"can_copy_scan": False})
 
 
 @shared.get("/details/{resource}/{index}")
-async def detail(scan_id: str, resource: str, index: int, user: SharedUser, include_body: bool = True):
-    return await scan_api.get_scan_detail_item(scan_id, resource, index, user, include_body=include_body)
+async def detail(
+    scan_id: str,
+    resource: str,
+    index: int,
+    user: SharedUser,
+    include_body: bool = True,
+):
+    return await scan_details.get_scan_detail_item(scan_id, resource, index, user, include_body=include_body)
 
 
 @shared.get("/tasks")
 async def tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
                 limit: int = Query(50, ge=1, le=100), task_name: str | None = None):
-    return await scan_api.get_scan_tasks_page(scan_id, cursor, limit, user, task_name=task_name)
+    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, user, task_name=task_name)
 
 
 @shared.get("/tasks/{task_id}")
 async def task(scan_id: str, task_id: str, user: SharedUser,
                revision: int | None = None, record_id: str | None = None):
-    return await scan_api.get_scan_task_detail(scan_id, task_id, revision, record_id, user)
+    return await scan_details.get_scan_task_detail(scan_id, task_id, revision, record_id, user)
 
 
 @shared.get("/candidates")
 async def candidates(scan_id: str, user: SharedUser, after: int = Query(-1, ge=-1),
                      limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_candidates_v2(scan_id, limit, after, user)
+    return await scan_details.get_scan_candidates_v2(scan_id, limit, after, user)
 
 
 @shared.get("/vulnerabilities")
 async def vulnerabilities(scan_id: str, user: SharedUser, after: int = Query(-1, ge=-1),
                           limit: int = Query(100, ge=1, le=500)):
-    return await scan_api.get_scan_vulnerabilities_v2(scan_id, limit, after, user)
+    return await scan_details.get_scan_vulnerabilities_v2(scan_id, limit, after, user)
 
 
 @shared.get("/event-history")
 async def event_history(scan_id: str, user: SharedUser, before: int | None = Query(None, ge=1),
                         limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_events_v2(scan_id, limit, before, user)
+    return await scan_details.get_scan_events_v2(scan_id, limit, before, user)
 
 
 @shared.get("/threat-audit-tasks")
 async def threat_tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
                        limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, user)
+    return await scan_details.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, user)
 
 
 @shared.get("/threat-pattern-audit-tasks")
 async def threat_pattern_tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
                        limit: int = Query(50, ge=1, le=100), engine_id: str | None = None,
                        summary: bool = True):
-    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, user, engine_id, summary)
+    return await scan_details.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, user, engine_id, summary)
 
 
 @shared.get("/threat-pattern-audit-tasks/{task_id}")
 async def threat_pattern_task(scan_id: str, task_id: str, user: SharedUser):
-    return await scan_api.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, user)
+    return await scan_details.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, user)
 
 
 @shared.get("/validations")
 async def validations(scan_id: str, user: SharedUser, after: int = Query(-1, ge=-1),
                       limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_validations_v2(scan_id, limit, after, user)
+    return await scan_details.get_scan_validations_v2(scan_id, limit, after, user)
 
 
 @shared.get("/fp-review/overview")
 async def fp_overview(scan_id: str, user: SharedUser, allow_missing: bool = False):
-    return await scan_api.get_fp_review_overview_v2(scan_id, user, allow_missing=allow_missing)
+    return await scan_fp_review.get_fp_review_overview_v2(scan_id, user, allow_missing=allow_missing)
 
 
 @shared.get("/fp-review/results")
 async def fp_results(scan_id: str, user: SharedUser, after: int = Query(-1, ge=-1),
                      limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_fp_review_results_v2(scan_id, after, limit, user)
+    return await scan_fp_review.get_fp_review_results_v2(scan_id, after, limit, user)
 
 
 @shared.get("/fp_review")
 async def fp_review(scan_id: str, user: SharedUser):
-    return await scan_api.get_fp_review(scan_id, user)
+    return await scan_fp_review.get_fp_review(scan_id, user)
 
 
 @shared.get("/git_history")
 async def git_history(scan_id: str, user: SharedUser):
-    return await scan_api.get_scan_git_history(scan_id, user)
+    return await scan_results.get_scan_git_history(scan_id, user)
 
 
 @shared.get("/candidate-audit-results")
 async def candidate_results(scan_id: str, user: SharedUser,
                             candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100)):
-    return await scan_api.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, user)
+    return await scan_details.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, user)
 
 
 @shared.get("/vulnerabilities/{idx}/audit-source")
 async def audit_source(scan_id: str, idx: int, user: SharedUser):
-    return await scan_api.get_scan_vulnerability_audit_source_v2(scan_id, idx, user)
+    return await scan_details.get_scan_vulnerability_audit_source_v2(scan_id, idx, user)
 
 
 @shared.get("/threat-audit-results")
-async def threat_results(scan_id: str, user: SharedUser, task_ids: list[str] = Query(..., min_length=1, max_length=100)):
-    return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, user)
+async def threat_results(
+    scan_id: str,
+    user: SharedUser,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+):
+    return await scan_details.get_scan_threat_audit_results_v2(scan_id, task_ids, user)
 
 
 @shared.get("/threat-pattern-audit-results")
-async def threat_pattern_results(scan_id: str, user: SharedUser, task_ids: list[str] = Query(..., min_length=1, max_length=100)):
-    return await scan_api.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, user)
+async def threat_pattern_results(
+    scan_id: str,
+    user: SharedUser,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+):
+    return await scan_details.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, user)
 
 
 @shared.get("/threat-analysis")
 async def threat_analysis(scan_id: str, user: SharedUser, allow_missing: bool = False):
-    return await scan_api.get_scan_threat_analysis(scan_id, user, allow_missing=allow_missing)
+    return await scan_results.get_scan_threat_analysis(scan_id, user, allow_missing=allow_missing)
 
 
 @shared.get("/threat-coverage")
 async def threat_coverage(scan_id: str, user: SharedUser):
-    return await scan_api.get_scan_threat_coverage(scan_id, user)
+    return await scan_results.get_scan_threat_coverage(scan_id, user)
 
 
 @shared.get("/threat-coverage/issues")
 async def threat_coverage_issues(scan_id: str, user: SharedUser):
-    return await scan_api.get_scan_threat_coverage_issues(scan_id, user)
+    return await scan_results.get_scan_threat_coverage_issues(scan_id, user)
 
 
 @shared.get("/checkers")
@@ -203,9 +222,8 @@ async def checkers(scan_id: str, user: SharedUser):
 
 @shared.get("/index-status")
 async def index_status(scan_id: str, user: SharedUser):
-    from backend.api.agent import agent_get_index_status
 
-    return await agent_get_index_status(scan_id)
+    return await scan_ingestion_progress.agent_get_index_status(scan_id)
 
 
 @shared.get("/skill/{vuln_type}")
@@ -213,57 +231,57 @@ async def skill(scan_id: str, vuln_type: str, user: SharedUser):
     meta = await run_store_call(get_scan_store(), "get_scan_meta", scan_id)
     if meta is None or vuln_type not in meta.scan_items:
         raise HTTPException(status_code=404, detail="Checker not used in this scan")
-    return await scan_api.get_scan_skill(scan_id, vuln_type, user)
+    return await scan_skills.get_scan_skill(scan_id, vuln_type, user)
 
 
 @shared.get("/fp-review/skill")
 async def fp_skill(scan_id: str, user: SharedUser):
-    return await scan_api.get_fp_review_skill(scan_id, user)
+    return await scan_skills.get_fp_review_skill(scan_id, user)
 
 
 @shared.get("/skill-reports")
 async def skill_reports(scan_id: str, user: SharedUser, checker_name: str | None = None):
-    return await scan_api.get_scan_skill_reports(scan_id, checker_name, user)
+    return await scan_skills.get_scan_skill_reports(scan_id, checker_name, user)
 
 
-def _uncached_report(response: Response) -> Response:
-    response.headers["Cache-Control"] = "no-store"
-    return response
+def _uncached_report(artifact) -> Response:
+    return Response(content=artifact.content, media_type=artifact.media_type,
+                    headers={**artifact.headers, "Cache-Control": "no-store"})
 
 
 @shared.get("/report")
 async def report(scan_id: str, user: SharedUser):
-    return _uncached_report(await scan_api.download_report(scan_id, user))
+    return _uncached_report(await scan_reports.download_report(scan_id, user))
 
 
 @shared.get("/report.zip")
 async def report_zip(scan_id: str, user: SharedUser):
-    return _uncached_report(await scan_api.download_report_zip(scan_id, user))
+    return _uncached_report(await scan_reports.download_report_zip(scan_id, user))
 
 
 @shared.get("/vulnerability/{idx}/report")
 async def vulnerability_report(scan_id: str, idx: int, user: SharedUser):
-    return _uncached_report(await scan_api.download_vulnerability_report(scan_id, idx, user))
+    return _uncached_report(await scan_reports.download_vulnerability_report(scan_id, idx, user))
 
 
 @shared.post("/mark")
 async def mark(scan_id: str, body: MarkRequest, user: SharedUser):
-    return await scan_api.mark_vulnerability(scan_id, body, user)
+    return await scan_feedback.mark_vulnerability(scan_id, body, user)
 
 
 @shared.post("/unmark")
 async def unmark(scan_id: str, body: UnmarkRequest, user: SharedUser):
-    return await scan_api.unmark_vulnerability(scan_id, body, user)
+    return await scan_feedback.unmark_vulnerability(scan_id, body, user)
 
 
 @shared.post("/batch-mark")
 async def batch_mark(scan_id: str, body: BatchMarkRequest, user: SharedUser):
-    return await scan_api.batch_mark_vulnerabilities(scan_id, body, user)
+    return await scan_feedback.batch_mark_vulnerabilities(scan_id, body, user)
 
 
 @shared.post("/batch-unmark")
 async def batch_unmark(scan_id: str, body: BatchUnmarkRequest, user: SharedUser):
-    return await scan_api.batch_unmark_vulnerabilities(scan_id, body, user)
+    return await scan_feedback.batch_unmark_vulnerabilities(scan_id, body, user)
 
 
 @shared.get("/events")

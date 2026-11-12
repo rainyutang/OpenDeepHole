@@ -1,13 +1,10 @@
 """Exercise resume ownership with independent PostgreSQL connections."""
 from __future__ import annotations
-
 from concurrent.futures import ThreadPoolExecutor
 import os
+import pytest
 import threading
 import uuid
-
-import pytest
-
 from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.store.postgres import PostgresScanStore
 

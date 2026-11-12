@@ -1,8 +1,7 @@
+from pathlib import Path
+import json
 import tempfile
 import unittest
-import json
-from pathlib import Path
-
 from backend.models import (
     Candidate,
     FpReviewResult,

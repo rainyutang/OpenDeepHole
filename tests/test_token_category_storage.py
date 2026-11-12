@@ -1,14 +1,20 @@
+
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
+import backend.application as application
 import asyncio
 import json
 import os
 import uuid
-from unittest.mock import patch
-
 import pytest
-
+from unittest.mock import patch
 from backend.models import OpenCodePoolStatus, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
-from task_agent.token_usage import TokenCounters, attribute_token_usage, merge_token_usages, token_usage_from_models
+from task_agent.token_usage import (
+    TokenCounters,
+    attribute_token_usage,
+    merge_token_usages,
+    token_usage_from_models,
+)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -58,7 +64,15 @@ def categories(storage):
     return {item.category: item.total_tokens for item in store.get_scan_opencode_token_usage(scan_id).by_category}
 
 
-def task(key, value, *, kind="vulnerability_mining", name="candidate-audit-s-0", revision=1, session=None):
+def task(
+    key,
+    value,
+    *,
+    kind="vulnerability_mining",
+    name="candidate-audit-s-0",
+    revision=1,
+    session=None,
+):
     return {"task_id": key, "revision": revision, "task_type": kind, "task_name": name,
             "outcome": "success", "token_usage": value.as_dict(), "serve_session_id": session or "ses-" + key}
 
@@ -220,26 +234,28 @@ def test_scan_deletion_removes_categories_and_recovery_projections(storage):
         assert store._conn.execute(f"SELECT COUNT(*) FROM {table} WHERE scan_id = ?", (scan_id,)).fetchone()[0] == 0
 
 
-def test_agent_api_sse_and_persisted_snapshot_include_categories_and_reject_stale_execution(storage):
-    from backend.api import agent as api
+def test_agent_api_sse_and_persisted_snapshot_include_categories_and_reject_stale_execution(
+    storage,
+):
+    pass
     store, scan_id = storage
 
     async def direct(store, operation, *args, **kwargs):
         return getattr(store, operation)(*args, **kwargs)
 
     async def run():
-        with (patch.object(api, "get_scan_store", return_value=store), patch.object(api, "run_store_call", side_effect=direct),
-              patch.object(store, "execution_matches", return_value=True), patch("backend.sse.publish") as publish):
+        with (patch.object(application, 'default_store_factory', return_value=store), patch.object(application, 'default_store_runner', side_effect=direct),
+              patch.object(store, "execution_matches", return_value=True), patch("backend.application.default_publisher") as publish):
             payload = OpenCodePoolStatus(scope_id=scan_id, agent_session_id="old", token_usage=usage("threat_analysis").as_dict())
-            assert await api.agent_push_opencode_pool(scan_id, payload) == {"ok": True}
+            assert await backend_api_agent_routes_scan_progress.agent_push_opencode_pool(scan_id, payload) == {"ok": True}
             event = publish.call_args.args[2]["opencode_pool"]
             assert event["token_usage"]["by_category"][0]["category"] == "threat_analysis"
             assert store.get_opencode_pool_status(scan_id).token_usage.by_category[0].total_tokens == 17
-        with (patch.object(api, "get_scan_store", return_value=store), patch.object(api, "run_store_call", side_effect=direct),
+        with (patch.object(application, 'default_store_factory', return_value=store), patch.object(application, 'default_store_runner', side_effect=direct),
               patch.object(store, "execution_matches", return_value=False)):
-            from fastapi import HTTPException
+            from backend.application import ApplicationError as HTTPException
             with pytest.raises(HTTPException) as error:
-                await api.agent_push_opencode_pool(scan_id, payload)
+                await backend_api_agent_routes_scan_progress.agent_push_opencode_pool(scan_id, payload)
             assert error.value.status_code == 409
 
     asyncio.run(run())

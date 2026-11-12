@@ -1,18 +1,18 @@
 """Upload API — handles source code zip file uploads."""
 
+from backend.application import get_runtime
 import json
 import shutil
 import uuid
 import zipfile
 from pathlib import Path
-
-from fastapi import APIRouter, HTTPException, UploadFile
-
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from backend.report_routes import ApplicationRoute
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import UploadResponse
 
-router = APIRouter()
+router = APIRouter(route_class=ApplicationRoute)
 logger = get_logger(__name__)
 
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks
@@ -26,13 +26,12 @@ async def get_index_status(project_id: str) -> dict:
     the in-memory agent index status store first so agent progress is
     visible through the same polling URL the frontend already uses.
     """
-    from backend.api.agent import _scan_index_statuses
-    from backend.api.scan import _running_scans
+    pass
 
     # Agent scans: find a running scan whose project_id (scan_name) matches
-    for scan_id, scan in _running_scans.items():
-        if scan.project_id == project_id and scan_id in _scan_index_statuses:
-            return _scan_index_statuses[scan_id]
+    for scan_id, scan in get_runtime().scans.running_scans.items():
+        if scan.project_id == project_id and scan_id in get_runtime().scans.scan_index_statuses:
+            return get_runtime().scans.scan_index_statuses[scan_id]
 
     # Uploaded source is storage only. Code-graph construction is exclusively
     # coordinated by deephole_client, so the backend never executes a process.

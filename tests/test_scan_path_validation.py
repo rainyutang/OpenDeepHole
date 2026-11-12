@@ -1,15 +1,20 @@
 from __future__ import annotations
-
-import asyncio
+from fastapi import FastAPI
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
-
+import asyncio
 import httpx
 import pytest
-from fastapi import FastAPI
-
-from backend.api import agent as agent_api
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.agents.configuration as backend_agents_configuration
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.runtime_updates as backend_agents_runtime_updates
+import backend.application as application
+import backend.auth as backend_auth
+import backend.scans.configuration as backend_scans_configuration
 from backend.api import scan as scan_api
+from backend.application import get_runtime
 from backend.models import AgentInfo, AgentRemoteConfig, User
 from backend.store.sqlite import SqliteScanStore
 
@@ -38,24 +43,24 @@ def scan_api_env(tmp_path, monkeypatch):
         return function(*args, **kwargs)
 
     monkeypatch.setattr(store, "save_scan", save)
-    monkeypatch.setattr(scan_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(scan_api, "run_store_call", store_call)
-    monkeypatch.setattr(scan_api, "_globally_enabled_checker_names", lambda *_: [])
-    monkeypatch.setattr(scan_api, "_running_scans", {})
-    monkeypatch.setattr(scan_api, "_scan_owners", {})
-    monkeypatch.setattr(agent_api, "resolve_agent_connection_async", AsyncMock(return_value=(agent.agent_id, agent)))
-    monkeypatch.setattr(agent_api, "ensure_agent_accepting_tasks_async", AsyncMock())
-    monkeypatch.setattr(agent_api, "get_scan_agent_config_async", AsyncMock(return_value=ready))
-    monkeypatch.setattr(agent_api, "create_agent_task_runtime_update_payload_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
-    monkeypatch.setattr(agent_api, "request_agent_scan_paths", probe)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_store_runner', store_call)
+    monkeypatch.setattr(backend_scans_configuration, '_globally_enabled_checker_names', lambda *_: [])
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=(agent.agent_id, agent)))
+    monkeypatch.setattr(backend_agents_runtime_updates, 'ensure_agent_accepting_tasks_async', AsyncMock())
+    monkeypatch.setattr(backend_agents_configuration, 'get_scan_agent_config_async', AsyncMock(return_value=ready))
+    monkeypatch.setattr(backend_agents_artifacts, 'create_agent_task_runtime_update_payload_async', AsyncMock(return_value=None))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    monkeypatch.setattr(backend_agents_gateway, 'request_agent_scan_paths', probe)
     app = FastAPI()
     app.include_router(scan_api.router)
 
     async def current_user():
         return user
 
-    app.dependency_overrides[scan_api.get_current_user] = current_user
+    app.dependency_overrides[backend_auth.get_current_user] = current_user
     yield SimpleNamespace(app=app, store=store, save=save, send=send, probe=probe, agent=agent)
     store.close()
 
@@ -77,7 +82,13 @@ def post_scan(env, **values):
     ("project_path", "项目总路径"), ("code_scan_path", "扫描模块路径"),
 ])
 @pytest.mark.parametrize("path", ["src", " ./src ", "../src", ".", "~/src", "C:src", r"\src", r"\\server"])
-def test_relative_paths_are_rejected_before_save_or_dispatch(scan_api_env, scan_mode, field, label, path):
+def test_relative_paths_are_rejected_before_save_or_dispatch(
+    scan_api_env,
+    scan_mode,
+    field,
+    label,
+    path,
+):
     response = post_scan(scan_api_env, scan_mode=scan_mode, **{field: path})
     assert response.status_code == 422
     assert response.json()["detail"] == f"{label}必须填写绝对路径，不能使用相对路径"
@@ -163,14 +174,14 @@ def test_relative_list_member_rejected_before_probe(scan_api_env):
     (422, "missing.c"), (409, "请先更新 Agent"), (502, "Agent 连接已断开"), (504, "路径检查超时"),
 ])
 def test_probe_failure_leaves_no_scan(scan_api_env, status, message):
-    from fastapi import HTTPException
+    from backend.application import ApplicationError as HTTPException
     scan_api_env.probe.side_effect = HTTPException(status_code=status, detail=message)
     response = post_scan(scan_api_env, code_scan_paths=["/repo/project/missing.c"])
     assert response.status_code == status
     assert message in response.json()["detail"]
     scan_api_env.save.assert_not_called()
     scan_api_env.send.assert_not_awaited()
-    assert not scan_api._running_scans
+    assert not get_runtime().scans.running_scans
     assert scan_api_env.store._conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 0
 
 

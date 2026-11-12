@@ -1,16 +1,15 @@
 from __future__ import annotations
-
-import asyncio
-from pathlib import Path
-from unittest.mock import AsyncMock
-
-import pytest
-from fastapi import HTTPException
-
-from backend.api import agent as agent_api
-from backend.models import AgentInfo
 from deephole_client.server import _probe_scan_paths, handle_scan_paths_probe
 from deephole_client.task_manager import TaskManager
+from pathlib import Path
+from unittest.mock import AsyncMock
+import asyncio
+import pytest
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.rpc as backend_agents_rpc
+from backend.application import ApplicationError as HTTPException, get_runtime
+from backend.models import AgentInfo
 
 
 def _agent(**values):
@@ -60,9 +59,9 @@ def test_probe_unresolvable_project_does_not_abort_other_versions(tmp_path):
 
 def test_old_agent_refused_without_dispatch(monkeypatch):
     send = AsyncMock()
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(agent_api.request_agent_scan_paths("agent-1", _agent(supported=False), [{}]))
+        asyncio.run(backend_agents_gateway.request_agent_scan_paths("agent-1", _agent(supported=False), [{}]))
     assert error.value.status_code == 409
     send.assert_not_awaited()
 
@@ -73,27 +72,27 @@ def test_old_agent_refused_without_dispatch(monkeypatch):
     ({"ok": True, "targets": [{"project_path": "/repo", "code_scan_path": "/repo", "code_scan_paths": []}]}, 502),
 ])
 def test_rpc_failures_cleanup_waiters(monkeypatch, reply, status):
-    monkeypatch.setattr(agent_api, "send_agent_command", AsyncMock(return_value=True))
-    monkeypatch.setattr(agent_api, "_wait_agent_response", AsyncMock(return_value=reply))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', AsyncMock(return_value=reply))
     with pytest.raises(HTTPException) as error:
-        asyncio.run(agent_api.request_agent_scan_paths("agent-1", _agent(), [{}]))
+        asyncio.run(backend_agents_gateway.request_agent_scan_paths("agent-1", _agent(), [{}]))
     assert error.value.status_code == status
     if status == 422:
         assert "missing-a" in error.value.detail and "missing-b" in error.value.detail
-    assert not agent_api._scan_paths_probe_waiters
+    assert not get_runtime().agents.scan_paths_probe_waiters
 
 
 @pytest.mark.parametrize("sent,status", [(False, 502), (True, 504)])
 def test_rpc_disconnect_and_timeout_fail_closed(monkeypatch, sent, status):
-    monkeypatch.setattr(agent_api, "send_agent_command", AsyncMock(return_value=sent))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=sent))
     wait = AsyncMock(side_effect=asyncio.TimeoutError)
-    monkeypatch.setattr(agent_api, "_wait_agent_response", wait)
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', wait)
     with pytest.raises(HTTPException) as error:
-        asyncio.run(agent_api.request_agent_scan_paths("agent-1", _agent(), [{}]))
+        asyncio.run(backend_agents_gateway.request_agent_scan_paths("agent-1", _agent(), [{}]))
     assert error.value.status_code == status
     if sent:
         assert wait.await_args.kwargs["timeout"] == 10.0
-    assert not agent_api._scan_paths_probe_waiters
+    assert not get_runtime().agents.scan_paths_probe_waiters
 
 
 def test_rpc_accepts_response_while_send_unwinds(monkeypatch):
@@ -102,18 +101,18 @@ def test_rpc_accepts_response_while_send_unwinds(monkeypatch):
     async def send(agent_id, command):
         assert agent_id == "agent-1"
         assert command["type"] == "scan_paths_probe"
-        await agent_api._complete_agent_response({
+        await backend_agents_rpc._complete_agent_response({
             "request_id": command["request_id"], "ok": True, "targets": [target],
-        }, agent_api._scan_paths_probe_waiters)
+        }, get_runtime().agents.scan_paths_probe_waiters)
         return True
 
-    monkeypatch.setattr(agent_api, "send_agent_command", send)
-    assert asyncio.run(agent_api.request_agent_scan_paths("agent-1", _agent(), [target])) == [target]
-    assert not agent_api._scan_paths_probe_waiters
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    assert asyncio.run(backend_agents_gateway.request_agent_scan_paths("agent-1", _agent(), [target])) == [target]
+    assert not get_runtime().agents.scan_paths_probe_waiters
 
 
 def test_shared_agent_session_retains_probe_capability():
-    agent = agent_api._agent_info_from_shared_session({
+    agent = backend_agents_directory._agent_info_from_shared_session({
         "agent_id": "agent-1", "agent_key": "key", "name": "agent", "machine_name": "machine",
         "last_seen": "now", "user_id": "user", "protocol_version": 2, "scan_paths_probe": 1,
     })
@@ -222,7 +221,7 @@ def test_postgres_scope_and_probe_capability_roundtrip():
         store.register_agent_session(agent, worker_id)
         session = peer.get_live_agent_session(agent_id=agent_id)
         assert session["scan_paths_probe"] == 1
-        assert agent_api._agent_info_from_shared_session(session).scan_paths_probe
+        assert backend_agents_directory._agent_info_from_shared_session(session).scan_paths_probe
     finally:
         store.delete_scan(scan_id)
         store._conn.execute("DELETE FROM agent_sessions WHERE agent_id = ?", (agent_id,))

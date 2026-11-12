@@ -1,21 +1,27 @@
-import asyncio
+
+from deephole_client.scan_modes import component_scan_mode, normalize_scan_mode
+from deephole_client.vulnerability_mining.engines.static_candidate import (
+    engine as static_candidate_engine,
+)
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
-
+import asyncio
 import pytest
-from fastapi import HTTPException
-
-from backend.api import agent as agent_api
-from backend.api import scan as scan_api
+import backend.api.agent_routes.scan_validation as backend_api_agent_routes_scan_validation
+import backend.api.scan_routes.metadata as backend_api_scan_routes_metadata
+import backend.application as application
+import backend.scans.configuration as backend_scans_configuration
+import backend.scans.ingestion.state as backend_scans_ingestion_state
+from backend.application import ApplicationError as HTTPException
 from backend.models import (
     AgentMcpConfig,
     AgentMcpRemoteConfig,
     AgentRemoteConfig,
-    AgentVulnerabilityValidationUpdate,
     AgentValidatorCatalog,
     AgentValidatorField,
     AgentValidatorMethod,
+    AgentVulnerabilityValidationUpdate,
     ScanItemStatus,
     ScanKnowledgeBaseRequest,
     ScanMeta,
@@ -26,10 +32,6 @@ from backend.models import (
     Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
-from deephole_client.vulnerability_mining.engines.static_candidate import (
-    engine as static_candidate_engine,
-)
-from deephole_client.scan_modes import component_scan_mode, normalize_scan_mode
 
 
 def _catalog() -> AgentValidatorCatalog:
@@ -106,7 +108,7 @@ def test_scan_validation_snapshots_global_policy_and_typed_method_values() -> No
     global_config = AgentRemoteConfig().vulnerability_validation
     global_config.concurrency = 3
     global_config.validation_max_retries = 2
-    resolved = scan_api._resolve_scan_validation(
+    resolved = backend_scans_configuration._resolve_scan_validation(
         ScanVulnerabilityValidationRequest(
             enabled=True,
             method_id="demo",
@@ -141,12 +143,12 @@ def test_agent_validation_progress_preserves_method_snapshot() -> None:
 
     async def scenario() -> None:
         with (
-            patch.object(agent_api, "get_scan_store", return_value=object()),
-            patch.object(agent_api, "run_store_call", side_effect=direct_store_call),
-            patch.object(agent_api, "_ensure_running_scan", new=AsyncMock(return_value=None)),
-            patch("backend.sse.publish"),
+            patch.object(application, 'default_store_factory', return_value=object()),
+            patch.object(application, 'default_store_runner', side_effect=direct_store_call),
+            patch.object(backend_scans_ingestion_state, '_ensure_running_scan', new=AsyncMock(return_value=None)),
+            patch("backend.application.default_publisher"),
         ):
-            await agent_api.agent_report_vulnerability_validation(
+            await backend_api_agent_routes_scan_validation.agent_report_vulnerability_validation(
                 "scan-1",
                 AgentVulnerabilityValidationUpdate(
                     vuln_index=0,
@@ -166,14 +168,14 @@ def test_agent_validation_progress_preserves_method_snapshot() -> None:
 
 def test_scan_validation_rejects_incompatible_method_and_unknown_field() -> None:
     with pytest.raises(HTTPException, match="没有适用于产品"):
-        scan_api._resolve_scan_validation(
+        backend_scans_configuration._resolve_scan_validation(
             ScanVulnerabilityValidationRequest(enabled=True, method_id="demo"),
             product="WiFi",
             catalog=_catalog(),
             policy=AgentRemoteConfig().vulnerability_validation,
         )
     with pytest.raises(HTTPException, match="未知字段"):
-        scan_api._resolve_scan_validation(
+        backend_scans_configuration._resolve_scan_validation(
             ScanVulnerabilityValidationRequest(
                 enabled=True,
                 method_id="demo",
@@ -192,17 +194,17 @@ def test_checker_exclusion_policy_enables_new_checkers_by_default(monkeypatch) -
         "new-user-checker": SimpleNamespace(visibility="public"),
         "admin-only": SimpleNamespace(visibility="admin"),
     }
-    monkeypatch.setattr(scan_api, "refresh_registry", lambda: registry)
+    monkeypatch.setattr(backend_scans_configuration, 'refresh_registry', lambda: registry)
     config = AgentRemoteConfig(
         schema_version=6,
         checker_selection={"disabled_checkers": ["disabled"]},
     )
 
-    assert scan_api._globally_enabled_checker_names(
+    assert backend_scans_configuration._globally_enabled_checker_names(
         config,
         User(user_id="user-1", username="alice", role="user"),
     ) == ["builtin", "new-user-checker"]
-    assert scan_api._globally_enabled_checker_names(
+    assert backend_scans_configuration._globally_enabled_checker_names(
         config,
         User(user_id="admin", username="admin", role="admin"),
     ) == ["builtin", "new-user-checker", "admin-only"]
@@ -216,21 +218,21 @@ def test_checker_profiles_are_resolved_independently(monkeypatch) -> None:
         "skill_only_project_audit": SimpleNamespace(visibility="admin"),
         "future_rule": SimpleNamespace(visibility="public"),
     }
-    monkeypatch.setattr(scan_api, "refresh_registry", lambda: registry)
+    monkeypatch.setattr(backend_scans_configuration, 'refresh_registry', lambda: registry)
     config = AgentRemoteConfig()
     admin = User(user_id="admin", username="admin", role="admin")
 
-    assert scan_api._globally_enabled_checker_names(
+    assert backend_scans_configuration._globally_enabled_checker_names(
         config,
         admin,
         "quick",
     ) == ["normal", "future_rule"]
-    assert scan_api._globally_enabled_checker_names(
+    assert backend_scans_configuration._globally_enabled_checker_names(
         config,
         admin,
         "standard",
     ) == ["normal", "sensitive_clear", "future_rule"]
-    assert scan_api._globally_enabled_checker_names(
+    assert backend_scans_configuration._globally_enabled_checker_names(
         config,
         admin,
         "custom",
@@ -391,7 +393,7 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
 
 
 def test_scan_code_graph_accepts_only_mode_and_remote_connection_values() -> None:
-    local = scan_api._scan_code_graph_mcp(AgentMcpConfig(
+    local = backend_scans_configuration._scan_code_graph_mcp(AgentMcpConfig(
         enabled=True,
         name="caller-controlled",
         transport="local",
@@ -409,7 +411,7 @@ def test_scan_code_graph_accepts_only_mode_and_remote_connection_values() -> Non
     assert local.local.args == ["serve", "--mcp"]
     assert "CUSTOM" not in local.local.environment
 
-    remote = scan_api._scan_code_graph_mcp(AgentMcpConfig(
+    remote = backend_scans_configuration._scan_code_graph_mcp(AgentMcpConfig(
         enabled=True,
         name="caller-controlled",
         transport="remote",
@@ -432,9 +434,7 @@ def test_scan_private_snapshots_and_memory_round_trip(
     monkeypatch,
 ) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
-    monkeypatch.setattr(
-        agent_api,
-        "get_config",
+    monkeypatch.setattr(application, 'default_config_factory',
         lambda: SimpleNamespace(knowledge_base=SimpleNamespace(
             name="product-info",
             url="http://knowledge.test/mcp",
@@ -444,12 +444,12 @@ def test_scan_private_snapshots_and_memory_round_trip(
             set_project_tool="xxx_set_project",
         )),
     )
-    knowledge = scan_api._knowledge_base_mcp(ScanKnowledgeBaseRequest(
+    knowledge = backend_scans_configuration._knowledge_base_mcp(ScanKnowledgeBaseRequest(
         enabled=True,
         project_id="project-1",
         project_name="5G-gnodeb",
     ))
-    validation = scan_api._resolve_scan_validation(
+    validation = backend_scans_configuration._resolve_scan_validation(
         ScanVulnerabilityValidationRequest(
             enabled=True,
             method_id="demo",
@@ -506,13 +506,13 @@ def test_scan_private_snapshots_and_memory_round_trip(
             },
         },
     }
-    monkeypatch.setattr(scan_api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
 
     async def direct_store_call(target, operation, *args, **kwargs):
         return getattr(target, operation)(*args, **kwargs)
 
-    monkeypatch.setattr(scan_api, "run_store_call", direct_store_call)
-    asyncio.run(scan_api._remember_scan_configuration(
+    monkeypatch.setattr(application, 'default_store_runner', direct_store_call)
+    asyncio.run(backend_scans_configuration._remember_scan_configuration(
         user_id="user-1",
         agent_key="agent-a",
         product="LTE",
@@ -545,10 +545,10 @@ def test_scan_memory_never_leaks_through_public_models() -> None:
 
 
 def test_legacy_validation_target_edit_is_read_only(monkeypatch) -> None:
-    monkeypatch.setattr(scan_api, "_check_scan_owner", AsyncMock())
+    monkeypatch.setattr("backend.scans.metadata._check_scan_owner", AsyncMock())
 
     with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(scan_api.update_scan_validation_target(
+        asyncio.run(backend_api_scan_routes_metadata.update_scan_validation_target(
             "legacy-scan",
             UpdateScanValidationTargetRequest(
                 product="LTE",

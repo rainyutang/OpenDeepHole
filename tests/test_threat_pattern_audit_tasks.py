@@ -1,20 +1,25 @@
 """Persisted attack-pattern task state, bounded reads and exact source links."""
 
+import backend.api.agent_routes.scan_artifacts as backend_api_agent_routes_scan_artifacts
 import asyncio
 import os
 import uuid
-from types import SimpleNamespace
-
 import httpx
 import pytest
+from backend.application import get_runtime
+from types import SimpleNamespace
 from fastapi import FastAPI
-
 from backend import sse
 from backend.api import agent, integration, scan, sharing
 from backend.auth import get_current_user
 from backend.models import (
-    FpReviewResult, ScanMeta, ScanStatus, ThreatAuditTask, ThreatPatternAuditTask,
-    User, Vulnerability,
+    FpReviewResult,
+    ScanMeta,
+    ScanStatus,
+    ThreatAuditTask,
+    ThreatPatternAuditTask,
+    User,
+    Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
 
@@ -35,10 +40,10 @@ def environment(request, tmp_path, monkeypatch):
     state = ScanStatus(scan_id=key, project_id="p", scan_items=[], created_at=created,
                        status="complete", progress=1, total_candidates=0, processed_candidates=0, vulnerabilities=[])
     store.save_scan(state, ScanMeta(scan_items=[], created_at=created, user_id="owner", public_access_token="access"))
-    for module in (scan, agent, integration, sharing):
+    get_runtime().store = store
+    for module in (integration, sharing):
         monkeypatch.setattr(module, "get_scan_store", lambda: store)
-    monkeypatch.setattr(scan, "_running_scans", {})
-    monkeypatch.setattr(agent, "_running_scans", {})
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
     monkeypatch.setattr(sse, "_distributed_store", None)
     yield SimpleNamespace(store=store, factory=factory, scan_id=key, created=created)
     store.delete_scan(key)
@@ -166,7 +171,7 @@ def test_agent_upload_recovers_early_finding_and_sse_notification(environment):
     env = environment
     key = env.scan_id + "-late"
     index = finding(env, key)
-    response = asyncio.run(agent.agent_upsert_threat_pattern_audit_task(env.scan_id, {
+    response = asyncio.run(backend_api_agent_routes_scan_artifacts.agent_upsert_threat_pattern_audit_task(env.scan_id, {
         "task_id": key, "status": "completed", "module_name": "认证模块", "pattern_name": "会话伪造",
     }))
     assert response["task"]["result_vuln_indexes"] == [index]
@@ -265,15 +270,15 @@ def test_iterative_api_summary_details_and_shared_access(environment, monkeypatc
 def test_iterative_sse_is_small_and_does_not_lose_saved_clues(environment, monkeypatch):
     env = environment
     events = []
-    monkeypatch.setattr(sse, "publish", lambda *args: events.append(args))
-    response = asyncio.run(agent.agent_upsert_threat_pattern_audit_task(env.scan_id, {
+    monkeypatch.setattr(get_runtime(), "publisher", lambda *args: events.append(args))
+    response = asyncio.run(backend_api_agent_routes_scan_artifacts.agent_upsert_threat_pattern_audit_task(env.scan_id, {
         "task_id": env.scan_id + "-round", "engine_id": ITERATIVE, "iteration": 1,
         "status": "completed", "has_more_findings": True, "followup_clues": "next clue " * 500,
     }))
     assert response["task"]["followup_clues"]
     assert "followup_clues" not in events[-1][2]["task"]
     assert env.store.list_threat_pattern_audit_tasks(env.scan_id)[0].followup_clues == response["task"]["followup_clues"]
-    repeated = asyncio.run(agent.agent_upsert_threat_pattern_audit_task(env.scan_id, response["task"]))
+    repeated = asyncio.run(backend_api_agent_routes_scan_artifacts.agent_upsert_threat_pattern_audit_task(env.scan_id, response["task"]))
     assert repeated == response
     assert len(events) == 1
 

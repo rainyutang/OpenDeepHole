@@ -1,3 +1,5 @@
+
+import backend.scans.configuration as backend_scans_configuration
 import asyncio
 import base64
 import hashlib
@@ -8,9 +10,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
 from backend.api.checkers import list_checkers
-from backend.api.scan import _validated_checker_names
 from backend.checker_sync import build_checker_packages
 from backend.models import User
 from backend.registry import discover_checkers, refresh_registry
@@ -72,7 +72,7 @@ class CheckerHotReloadTests(unittest.TestCase):
 
             with patch("backend.registry.CHECKERS_DIR", root):
                 with self.assertRaises(Exception) as ctx:
-                    _validated_checker_names(["admin_check"], user)
+                    backend_scans_configuration._validated_checker_names(["admin_check"], user)
 
         self.assertEqual(getattr(ctx.exception, "status_code", None), 403)
 

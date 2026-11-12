@@ -1,22 +1,22 @@
-import asyncio
-import tempfile
-import unittest
+
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-from fastapi import HTTPException
-
-from backend.api import agent as agent_api
-from backend.api import scan as scan_api
-from backend.store.sqlite import SqliteScanStore
-from backend.api.scan import (
-    _ensure_fp_review_job_for_scan,
-    _fp_review_resume_state,
-    _ordered_fp_review_candidates,
-    _retry_incomplete_candidates,
-)
+import asyncio
+import tempfile
+import unittest
+import backend.api.agent_routes.scan_results as backend_api_agent_routes_scan_results
+import backend.api.scan_routes.feedback as backend_api_scan_routes_feedback
+import backend.api.scan_routes.fp_review as backend_api_scan_routes_fp_review
+import backend.api.scan_routes.fp_review_callbacks as backend_api_scan_routes_fp_review_callbacks
+import backend.api.scan_routes.skills as backend_api_scan_routes_skills
+import backend.scans.feedback as backend_scans_feedback
+import backend.scans.fp_review as backend_scans_fp_review
+import backend.scans.fp_review_policy as backend_scans_fp_review_policy
+import backend.scans.resume_policy as backend_scans_resume_policy
+import backend.scans.validation as backend_scans_validation
+from backend.application import ApplicationError as HTTPException, get_runtime
 from backend.models import (
     AgentFpReviewFinish,
     AgentFpReviewResult,
@@ -35,6 +35,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend.scan_metrics import latest_fp_review_result_map
+from backend.store.sqlite import SqliteScanStore
 
 
 async def _direct_store_call(store, operation, *args, **kwargs):
@@ -44,26 +45,26 @@ async def _direct_store_call(store, operation, *args, **kwargs):
 
 class FpReviewOrderTests(unittest.TestCase):
     def tearDown(self) -> None:
-        agent_api._registered_agents.clear()
-        agent_api._agent_ws.clear()
-        agent_api._agent_ws_locks.clear()
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_ws.clear()
+        get_runtime().agents.agent_ws_locks.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def test_fp_review_skill_preview_reads_process_owned_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
-            scan_api._scan_owners["scan-1"] = "user-1"
+            get_runtime().scans.scan_owners["scan-1"] = "user-1"
             with (
                 patch(
-                    "backend.api.scan._selected_feedback_entries",
+                    "backend.scans.feedback_selection._selected_feedback_entries",
                     return_value=[],
                 ),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
             ):
                 result = asyncio.run(
-                    scan_api.get_fp_review_skill(
+                    backend_api_scan_routes_skills.get_fp_review_skill(
                         "scan-1",
                         current_user=User(
                             user_id="user-1",
@@ -146,7 +147,7 @@ class FpReviewOrderTests(unittest.TestCase):
             ),
         ])
 
-        ordered = _ordered_fp_review_candidates(scan, latest)
+        ordered = backend_scans_fp_review_policy._ordered_fp_review_candidates(scan, latest)
 
         self.assertEqual([item["index"] for item in ordered], [1, 3, 0])
 
@@ -187,7 +188,7 @@ class FpReviewOrderTests(unittest.TestCase):
             ],
         )
 
-        ordered = _ordered_fp_review_candidates(scan, {})
+        ordered = backend_scans_fp_review_policy._ordered_fp_review_candidates(scan, {})
 
         self.assertEqual(
             [item["index"] for item in ordered],
@@ -240,12 +241,12 @@ class FpReviewOrderTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            [item["index"] for item in _ordered_fp_review_candidates(scan, {})],
+            [item["index"] for item in backend_scans_fp_review_policy._ordered_fp_review_candidates(scan, {})],
             [2],
         )
-        self.assertEqual(_retry_incomplete_candidates(scan), [])
+        self.assertEqual(backend_scans_resume_policy._retry_incomplete_candidates(scan), [])
         self.assertEqual(
-            _fp_review_resume_state(
+            backend_scans_fp_review_policy._fp_review_resume_state(
                 scan.vulnerabilities,
                 {},
                 [("review-1", FpReviewStatus.ERROR.value)],
@@ -278,7 +279,7 @@ class FpReviewOrderTests(unittest.TestCase):
         )
 
         with self.assertRaises(HTTPException) as marked:
-            asyncio.run(scan_api._mark_single(
+            asyncio.run(backend_scans_feedback._mark_single(
                 scan.scan_id,
                 scan,
                 object(),
@@ -289,7 +290,7 @@ class FpReviewOrderTests(unittest.TestCase):
         self.assertEqual(marked.exception.status_code, 409)
 
         with self.assertRaises(HTTPException) as unmarked:
-            asyncio.run(scan_api._unmark_single(
+            asyncio.run(backend_scans_feedback._unmark_single(
                 scan.scan_id,
                 scan,
                 object(),
@@ -298,14 +299,14 @@ class FpReviewOrderTests(unittest.TestCase):
         self.assertEqual(unmarked.exception.status_code, 409)
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=object()),
+            patch("backend.application.default_store_factory", return_value=object()),
             patch(
-                "backend.api.scan.run_store_call",
+                "backend.application.default_store_runner",
                 new=AsyncMock(return_value=(scan, SimpleNamespace())),
             ),
         ):
             with self.assertRaises(HTTPException) as validation:
-                asyncio.run(scan_api._trigger_vulnerability_validation(
+                asyncio.run(backend_scans_validation._trigger_vulnerability_validation(
                     scan.scan_id,
                     0,
                     "http://testserver/",
@@ -362,7 +363,7 @@ class FpReviewOrderTests(unittest.TestCase):
             ],
         )
 
-        candidates = _retry_incomplete_candidates(scan)
+        candidates = backend_scans_resume_policy._retry_incomplete_candidates(scan)
 
         self.assertEqual([candidate.function for candidate in candidates], ["pending"])
 
@@ -442,8 +443,8 @@ class FpReviewOrderTests(unittest.TestCase):
             )
             store.update_fp_review_job("review", status="complete", processed=1)
 
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                partial = _ensure_fp_review_job_for_scan(
+            with patch("backend.application.default_store_factory", return_value=store):
+                partial = backend_scans_fp_review_policy._ensure_fp_review_job_for_scan(
                     "scan-1",
                     scan,
                     allow_cancelled=True,
@@ -467,8 +468,8 @@ class FpReviewOrderTests(unittest.TestCase):
                 ),
             )
             store.update_fp_review_job("review", status="complete", processed=2)
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                rerun = _ensure_fp_review_job_for_scan(
+            with patch("backend.application.default_store_factory", return_value=store):
+                rerun = backend_scans_fp_review_policy._ensure_fp_review_job_for_scan(
                     "scan-1",
                     scan,
                     allow_cancelled=True,
@@ -524,9 +525,9 @@ class FpReviewOrderTests(unittest.TestCase):
                 agent_id="agent-1",
                 agent_session_id="session-1",
             )
-            scan_api._running_scans["scan-1"] = scan
-            scan_api._scan_owners["scan-1"] = "owner"
-            agent_api._registered_agents["agent-1"] = AgentInfo(
+            get_runtime().scans.running_scans["scan-1"] = scan
+            get_runtime().scans.scan_owners["scan-1"] = "owner"
+            get_runtime().agents.registered_agents["agent-1"] = AgentInfo(
                 agent_id="agent-1",
                 name="agent",
                 ip="127.0.0.1",
@@ -534,21 +535,21 @@ class FpReviewOrderTests(unittest.TestCase):
                 user_id="owner",
                 agent_session_id="session-1",
             )
-            agent_api._agent_ws["agent-1"] = object()
+            get_runtime().agents.agent_ws["agent-1"] = object()
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
-                patch("backend.api.agent.send_agent_command", send),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("backend.agents.gateway.send_agent_command", send),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value={"hash": "runtime-hash"}),
                 ) as runtime_update,
             ):
                 result = asyncio.run(
-                    scan_api.trigger_fp_review(
+                    backend_api_scan_routes_fp_review.trigger_fp_review(
                         "scan-1",
                         SimpleNamespace(base_url="http://server.example/"),
                         user,
@@ -607,10 +608,10 @@ class FpReviewOrderTests(unittest.TestCase):
             store.update_fp_review_job("review", status="complete", processed=1)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.sse.publish") as publish,
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher") as publish,
             ):
-                info = _ensure_fp_review_job_for_scan(
+                info = backend_scans_fp_review_policy._ensure_fp_review_job_for_scan(
                     "scan-1",
                     scan,
                     require_unresolved=True,
@@ -654,16 +655,16 @@ class FpReviewOrderTests(unittest.TestCase):
                 agent_id="agent-1",
                 agent_session_id="session-1",
             )
-            scan_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.run_store_call", new=_direct_store_call),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
-                patch("backend.sse.publish"),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("backend.application.default_publisher"),
             ):
-                response = asyncio.run(agent_api.agent_report_vulnerability(
+                response = asyncio.run(backend_api_agent_routes_scan_results.agent_report_vulnerability(
                     "scan-1",
                     Vulnerability(
                         file="issue.c",
@@ -679,7 +680,7 @@ class FpReviewOrderTests(unittest.TestCase):
                         ),
                     ),
                 ))
-                stale_response = asyncio.run(agent_api.agent_report_vulnerability(
+                stale_response = asyncio.run(backend_api_agent_routes_scan_results.agent_report_vulnerability(
                     "scan-1",
                     Vulnerability(
                         file="stale.c",
@@ -736,7 +737,7 @@ class FpReviewOrderTests(unittest.TestCase):
                 agent_id="agent-1",
                 agent_session_id="session-1",
             )
-            scan_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             send = AsyncMock(return_value=True)
             resolved_agent = AgentInfo(
                 agent_id="agent-1",
@@ -749,31 +750,31 @@ class FpReviewOrderTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.run_store_call", new=_direct_store_call),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.fp_review._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-1"),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_id_connection_async",
+                    "backend.agents.directory.resolve_agent_id_connection_async",
                     new=AsyncMock(return_value=("agent-1", resolved_agent)),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
-                patch("backend.sse.publish"),
+                patch("backend.agents.gateway.send_agent_command", new=send),
+                patch("backend.application.default_publisher"),
             ):
                 callback_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         "scan-1",
                         Vulnerability(
                             file="issue.c",
@@ -792,7 +793,7 @@ class FpReviewOrderTests(unittest.TestCase):
                     )
                 )
                 started = asyncio.run(
-                    scan_api._start_fp_review(
+                    backend_scans_fp_review._start_fp_review(
                         "scan-1",
                         "http://server",
                         require_unresolved=True,
@@ -802,7 +803,7 @@ class FpReviewOrderTests(unittest.TestCase):
                 review_id = callback_response["fp_review"]["review_id"]
                 revision = callback_response["fp_review"]["execution_revision"]
                 for stage in ("prove_bug", "prove_fp", "final_judge"):
-                    asyncio.run(scan_api.agent_fp_review_stage_output(
+                    asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_stage_output(
                         "scan-1",
                         AgentFpReviewStageOutput(
                             review_id=review_id,
@@ -813,7 +814,7 @@ class FpReviewOrderTests(unittest.TestCase):
                             execution_revision=revision,
                         ),
                     ))
-                asyncio.run(scan_api.agent_fp_review_result(
+                asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_result(
                     "scan-1",
                     AgentFpReviewResult(
                         review_id=review_id,
@@ -829,7 +830,7 @@ class FpReviewOrderTests(unittest.TestCase):
                         execution_revision=revision,
                     ),
                 ))
-                asyncio.run(scan_api.agent_fp_review_finish(
+                asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_finish(
                     "scan-1",
                     AgentFpReviewFinish(
                         review_id=review_id,
@@ -906,28 +907,28 @@ class FpReviewOrderTests(unittest.TestCase):
             store.add_vulnerability("scan-1", scan.vulnerabilities[0])
             store.create_fp_review_job("review-1", "scan-1", 1, now)
             store.update_fp_review_job("review-1", status="running")
-            scan_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     new=_direct_store_call,
                 ),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     new=_direct_store_call,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data)
                     ),
                 ),
             ):
-                asyncio.run(scan_api.agent_fp_review_finish(
+                asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_finish(
                     "scan-1",
                     AgentFpReviewFinish(
                         review_id="review-1",
@@ -938,7 +939,7 @@ class FpReviewOrderTests(unittest.TestCase):
                 interrupted = store.get_fp_review_job("review-1")
                 self.assertEqual(interrupted.status, FpReviewStatus.ERROR)
 
-                response = asyncio.run(agent_api.agent_report_vulnerability(
+                response = asyncio.run(backend_api_agent_routes_scan_results.agent_report_vulnerability(
                     "scan-1",
                     Vulnerability(
                         file="second.c",
@@ -986,14 +987,14 @@ class FpReviewOrderTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     new=_direct_store_call,
                 ),
-                patch("backend.sse.publish") as publish,
+                patch("backend.application.default_publisher") as publish,
             ):
-                asyncio.run(scan_api.agent_fp_review_finish(
+                asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_finish(
                     "scan-1",
                     AgentFpReviewFinish(
                         review_id="review-1",
@@ -1065,12 +1066,12 @@ class FpReviewOrderTests(unittest.TestCase):
             push = AsyncMock()
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
-                patch("backend.api.scan._push_feedback_selection_update", push),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
+                patch("backend.scans.feedback._push_feedback_selection_update", push),
             ):
                 result = asyncio.run(
-                    scan_api.unmark_vulnerability("scan-1", UnmarkRequest(index=0), user)
+                    backend_api_scan_routes_feedback.unmark_vulnerability("scan-1", UnmarkRequest(index=0), user)
                 )
 
             self.assertEqual(result["removed_feedback_ids"], ["feedback-1"])
@@ -1080,7 +1081,7 @@ class FpReviewOrderTests(unittest.TestCase):
             self.assertEqual(updated_scan.feedback_ids, ["keep"])
             self.assertEqual(updated_meta.feedback_ids, ["keep"])
             self.assertIsNone(updated_scan.vulnerabilities[0].user_verdict)
-            self.assertEqual([item["index"] for item in _ordered_fp_review_candidates(updated_scan, {})], [0])
+            self.assertEqual([item["index"] for item in backend_scans_fp_review_policy._ordered_fp_review_candidates(updated_scan, {})], [0])
             push.assert_awaited_once_with("scan-1", ["keep"])
 
     def test_batch_unmark_clears_multiple_manual_verdicts(self) -> None:
@@ -1141,11 +1142,11 @@ class FpReviewOrderTests(unittest.TestCase):
                 )
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
             ):
                 result = asyncio.run(
-                    scan_api.batch_unmark_vulnerabilities(
+                    backend_api_scan_routes_feedback.batch_unmark_vulnerabilities(
                         "scan-1",
                         BatchUnmarkRequest(indices=[0, 1, 1]),
                         user,

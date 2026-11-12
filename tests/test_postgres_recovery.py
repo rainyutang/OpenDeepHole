@@ -1,18 +1,11 @@
 from __future__ import annotations
-
 import asyncio
 import sys
-from types import ModuleType, SimpleNamespace
-
 import pytest
-
 import backend.distributed as distributed
 import backend.sse as sse
-from backend.store.postgres import (
-    PostgresScanStore,
-    _Connection,
-    _TransactionLock,
-)
+from types import ModuleType, SimpleNamespace
+from backend.store.postgres import PostgresScanStore, _Connection, _TransactionLock
 
 
 class _FakeCursor:
@@ -206,7 +199,7 @@ def test_distributed_runtime_retries_without_losing_event_cursor(monkeypatch) ->
         async def initialize(_store) -> int:
             return 41
 
-        async def deliver(_store) -> None:
+        async def deliver(_store, transport=None) -> None:
             nonlocal delivery_count
             delivery_count += 1
             if delivery_count == 3:

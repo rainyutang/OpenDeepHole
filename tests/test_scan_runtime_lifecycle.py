@@ -1,15 +1,8 @@
 from __future__ import annotations
-
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
-from backend.models import (
-    OpenCodePoolStatus,
-    ScanItemStatus,
-    ScanMeta,
-    ScanStatus,
-)
+import threading
+from backend.models import OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
 from backend.scan_runtime import terminal_opencode_pool_status
 from backend.store.sqlite import SqliteScanStore
 

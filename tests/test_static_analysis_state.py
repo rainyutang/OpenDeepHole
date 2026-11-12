@@ -1,23 +1,25 @@
 """Partial static results survive auditing, resume, API reporting and reload."""
 
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
+import backend.application as application
+import backend.scans.ingestion.candidates as backend_scans_ingestion_candidates
+import backend.scans.ingestion.state as backend_scans_ingestion_state
 import asyncio
 import json
 import os
 import threading
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
-
-import pytest
-
-from backend.api import agent as agent_api
 from backend.models import MiningEngineRunStatus, MiningEngineSelection, ScanMeta, ScanStatus
 from backend.store.sqlite import SqliteScanStore
 from deephole_client.config import AgentConfig
 from deephole_client.scanner import _update_static_analysis_errors
 from deephole_client.vulnerability_mining.engines.static_candidate import engine
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.results import (
-    load_summary, store_candidates,
+    load_summary,
+    store_candidates,
 )
 from deephole_client.vulnerability_mining.sdk import MiningEngineRun
 
@@ -29,7 +31,10 @@ ERROR = {
 }
 
 
-def test_resume_replays_failure_without_rerunning_rules_or_renumbering_candidates(tmp_path, monkeypatch):
+def test_resume_replays_failure_without_rerunning_rules_or_renumbering_candidates(
+    tmp_path,
+    monkeypatch,
+):
     candidates = [
         {"file": f"{name}.c", "line": 1, "function": "f", "description": "candidate", "vuln_type": rule}
         for name, rule in [("a", "npd"), ("b", "memleak"), ("c", "npd")]
@@ -117,7 +122,11 @@ def _retry_engine_kwargs(tmp_path):
 
 
 @pytest.mark.parametrize("checkers", [[], ["memleak"]])
-def test_retry_rejects_missing_selected_checker_without_replacing_candidates(tmp_path, monkeypatch, checkers):
+def test_retry_rejects_missing_selected_checker_without_replacing_candidates(
+    tmp_path,
+    monkeypatch,
+    checkers,
+):
     kwargs = _retry_engine_kwargs(tmp_path)
     kwargs["checker_names"] = checkers
     audit = AsyncMock()
@@ -152,7 +161,11 @@ def test_retry_engine_rejects_success_without_terminal_candidate_results(tmp_pat
 
 
 @pytest.mark.parametrize("invalid_index", [123, 999])
-def test_retry_engine_rejects_duplicate_or_unknown_result_identity(tmp_path, monkeypatch, invalid_index):
+def test_retry_engine_rejects_duplicate_or_unknown_result_identity(
+    tmp_path,
+    monkeypatch,
+    invalid_index,
+):
     kwargs = _retry_engine_kwargs(tmp_path)
 
     async def audit(**options):
@@ -231,17 +244,17 @@ def test_partial_failures_survive_api_sse_and_storage_reload(persisted_scan, mon
     async def direct_store(store, method, *args, **kwargs):
         return getattr(store, method)(*args, **kwargs)
 
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "run_store_call", direct_store)
-    monkeypatch.setattr(agent_api, "_ensure_running_scan", AsyncMock(return_value=None))
-    monkeypatch.setattr(agent_api, "_reconcile_candidate_progress", AsyncMock())
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(application, 'default_store_runner', direct_store)
+    monkeypatch.setattr(backend_scans_ingestion_state, '_ensure_running_scan', AsyncMock(return_value=None))
+    monkeypatch.setattr(backend_scans_ingestion_candidates, '_reconcile_candidate_progress', AsyncMock())
     publish = Mock()
-    monkeypatch.setattr("backend.sse.publish", publish)
+    monkeypatch.setattr("backend.application.default_publisher", publish)
     run = MiningEngineRunStatus(
         engine_id="static_candidate", engine_label="Static", status="success",
         total_candidates=2, processed_candidates=2, static_analysis_errors=[ERROR],
     )
-    response = asyncio.run(agent_api.agent_report_mining_engine_run(sid, run))
+    response = asyncio.run(backend_api_agent_routes_scan_progress.agent_report_mining_engine_run(sid, run))
     expected = run.model_dump(mode="json")["static_analysis_errors"]
     assert response["run"]["static_analysis_errors"] == expected
     assert publish.call_args.args[1] == "mining_engine_run"

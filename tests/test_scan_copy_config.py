@@ -1,21 +1,26 @@
-"""Copy only saved, owner-private creation inputs into a new scan form."""
-
-import asyncio
-import os
-from types import SimpleNamespace
-import uuid
-
-import httpx
-import pytest
 from fastapi import FastAPI
-
-from backend.api import agent, integration, scan as api, sharing
+from types import SimpleNamespace
+import asyncio
+import httpx
+import os
+import pytest
+import uuid
+from backend import application
+from backend.api import integration, scan as api, sharing
+from backend.application import get_runtime
 from backend.auth import get_current_user
 from backend.models import (
-    AgentMcpConfig, CreateScanRequest, MiningEngineSelection, MultiVersionTarget,
-    ScanMeta, ScanStatus, ScanVulnerabilityValidationConfig, User,
+    AgentMcpConfig,
+    CreateScanRequest,
+    MiningEngineSelection,
+    MultiVersionTarget,
+    ScanMeta,
+    ScanStatus,
+    ScanVulnerabilityValidationConfig,
+    User,
 )
 from backend.store.sqlite import SqliteScanStore
+"""Copy only saved, owner-private creation inputs into a new scan form."""
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -66,11 +71,10 @@ def env(request, tmp_path, monkeypatch):
     async def direct_call(target, operation, *args, **kwargs):
         return (getattr(target, operation) if isinstance(operation, str) else operation)(*args, **kwargs)
 
-    for module in (api, agent, integration, sharing):
-        monkeypatch.setattr(module, "get_scan_store", lambda: store)
-        monkeypatch.setattr(module, "run_store_call", direct_call)
-    monkeypatch.setattr(api, "_running_scans", {})
-    monkeypatch.setattr(api, "_scan_owners", {})
+    monkeypatch.setattr(application, "default_store_factory", lambda: store)
+    monkeypatch.setattr(application, "default_store_runner", direct_call)
+    monkeypatch.setattr(get_runtime().scans, 'running_scans', {})
+    monkeypatch.setattr(get_runtime().scans, 'scan_owners', {})
 
     def get(path=None, *, user_id=owner_id, role="user", authenticated=True, params=None):
         app = FastAPI()
@@ -135,7 +139,7 @@ def test_copy_reads_all_saved_form_inputs_without_results_or_credentials(env):
 def test_copy_uses_latest_saved_metadata_and_note_selection(env):
     env.store.update_scan_metadata(env.scan_id, product="Renamed product", scan_name="Renamed scan")
     env.store.set_scan_review_notes(env.scan_id, env.owner_id, False, [env.note_id])
-    api._running_scans[env.scan_id] = env.status
+    get_runtime().scans.running_scans[env.scan_id] = env.status
     payload = env.get().json()
     assert payload["product"] == "Renamed product"
     assert payload["scan_name"] == ""

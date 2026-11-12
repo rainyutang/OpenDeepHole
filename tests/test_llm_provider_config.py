@@ -1,14 +1,19 @@
 from __future__ import annotations
-
+from backend.application import get_runtime, ApplicationError as HTTPException
+import backend.agents.configuration as backend_agents_configuration
+import backend.api.agent_routes.configuration as backend_api_agent_routes_configuration
+import backend.auth as backend_auth
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.rpc as backend_agents_rpc
+import backend.application as application
 import asyncio
 import copy
 import json
-from unittest.mock import AsyncMock
-
 import pytest
 import httpx
-from fastapi import FastAPI, HTTPException
-
+from unittest.mock import AsyncMock
+from fastapi import FastAPI
 from backend.api import agent as api
 from backend.models import AgentInfo, AgentRemoteConfig, User
 from task_agent.llm_config import (
@@ -123,28 +128,28 @@ class Store:
 @pytest.fixture
 def configured(monkeypatch):
     store = Store()
-    monkeypatch.setattr(api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
 
     async def direct(store, operation, *args, **kwargs):
         return getattr(store, operation)(*args, **kwargs)
 
-    monkeypatch.setattr(api, "run_store_call", direct)
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(api, "resolve_agent_id_connection_async", AsyncMock(return_value=None))
-    monkeypatch.setattr(api, "_agent_configs", {})
-    monkeypatch.setattr(api, "_registered_agents", {})
-    monkeypatch.setattr(api, "_opencode_config_status_waiters", {})
-    monkeypatch.setattr(api, "_opencode_config_apply_waiters", {})
+    monkeypatch.setattr(application, 'default_store_runner', direct)
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=None))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_id_connection_async', AsyncMock(return_value=None))
+    monkeypatch.setattr(get_runtime().agents, 'agent_configs', {})
+    monkeypatch.setattr(get_runtime().agents, 'registered_agents', {})
+    monkeypatch.setattr(get_runtime().agents, 'opencode_config_status_waiters', {})
+    monkeypatch.setattr(get_runtime().agents, 'opencode_config_apply_waiters', {})
     return store
 
 
 def test_get_routes_mask_all_credentials_and_save_restores_them(configured):
     async def run():
-        for read in (api.get_stable_agent_config, api.get_agent_config):
+        for read in (backend_api_agent_routes_configuration.get_stable_agent_config, backend_api_agent_routes_configuration.get_agent_config):
             public = await read("stable", current_user=user())
             assert "secret" not in public.model_dump_json()
             assert public.schema_version == 11
-        response = await api.update_stable_agent_config("stable", public, current_user=user())
+        response = await backend_api_agent_routes_configuration.update_stable_agent_config("stable", public, current_user=user())
         stored = json.loads(configured.record["config_json"])
         assert stored["llm_providers"] == providers()
         assert response["applied"] is False
@@ -156,7 +161,7 @@ def test_get_routes_mask_all_credentials_and_save_restores_them(configured):
 def test_legacy_config_write_preserves_providers_and_schema_upgrade(configured):
     async def run():
         body = AgentRemoteConfig.model_validate({"schema_version": 10, "base": {"executable": "opencode"}})
-        await api.update_agent_config("stable", body, current_user=user())
+        await backend_api_agent_routes_configuration.update_agent_config("stable", body, current_user=user())
         stored = json.loads(configured.record["config_json"])
         assert stored["llm_providers"] == providers()
         assert stored["schema_version"] == 11
@@ -167,46 +172,50 @@ def test_provider_removal_rejects_only_enabled_owned_references(configured):
     previous = AgentRemoteConfig(llm_providers=providers())
     body = AgentRemoteConfig(llm_providers={}, model_pool={"models": [{"id": "one", "model": "private/org/model"}]})
     with pytest.raises(HTTPException) as error:
-        api._prepare_managed_config_update(body, previous)
+        backend_agents_configuration._prepare_managed_config_update(body, previous)
     assert error.value.status_code == 422
     body.model_pool.models[0].enabled = False
-    assert api._prepare_managed_config_update(body, previous).llm_providers == {}
+    assert backend_agents_configuration._prepare_managed_config_update(body, previous).llm_providers == {}
     body.model_pool.models[0].enabled = True
     body.model_pool.models[0].model = "externally-configured/model"
-    assert api._prepare_managed_config_update(body, previous).llm_providers == {}
+    assert backend_agents_configuration._prepare_managed_config_update(body, previous).llm_providers == {}
 
 
 @pytest.mark.parametrize("operation", ["get_stable_agent_config", "get_stable_agent_opencode_config_status", "apply_stable_agent_opencode_config"])
 def test_owner_authorization_applies_to_config_and_status(configured, operation):
     other = User(user_id="other", username="other", role="user")
     with pytest.raises(HTTPException) as error:
-        asyncio.run(getattr(api, operation)("stable", current_user=other))
+        asyncio.run(getattr(backend_agents_configuration, operation)("stable", current_user=other))
     assert error.value.status_code == 403
 
 
 def test_offline_and_unsupported_status(configured, monkeypatch):
-    status = asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user()))
+    status = asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user()))
     assert status.state == "offline"
     assert status.desired_revision == llm_provider_revision(providers())
     live = agent().model_copy(update={"llm_api_config": False})
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", live)))
-    status = asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user()))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", live)))
+    status = asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user()))
     assert status.state == "unsupported"
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_rpc_returns_agent_state_not_send_success_and_redacts_errors(configured, monkeypatch, apply):
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", agent())))
+def test_rpc_returns_agent_state_not_send_success_and_redacts_errors(
+    configured,
+    monkeypatch,
+    apply,
+):
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", agent())))
     calls = []
 
     async def send(agent_id, command):
         calls.append(command)
-        waiters = api._opencode_config_apply_waiters if apply else api._opencode_config_status_waiters
+        waiters = get_runtime().agents.opencode_config_apply_waiters if apply else get_runtime().agents.opencode_config_status_waiters
         waiters[command["request_id"]].set_result({"status": {"state": "draining", "active_tasks": 2, "applied_revision": "old", "error": "key-secret Bearer provider-secret model-secret"}})
         return True
 
-    monkeypatch.setattr(api, "send_agent_command", send)
-    call = api.apply_stable_agent_opencode_config if apply else api.get_stable_agent_opencode_config_status
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    call = backend_api_agent_routes_configuration.apply_stable_agent_opencode_config if apply else backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status
     status = asyncio.run(call("stable", current_user=user()))
     assert status.state == "draining"
     assert status.active_tasks == 2
@@ -214,32 +223,32 @@ def test_rpc_returns_agent_state_not_send_success_and_redacts_errors(configured,
     assert "secret" not in status.error
     assert calls[0]["type"] == ("opencode_config_apply" if apply else "opencode_config_status")
     assert ("config" in calls[0]) is apply
-    assert not api._opencode_config_apply_waiters
-    assert not api._opencode_config_status_waiters
+    assert not get_runtime().agents.opencode_config_apply_waiters
+    assert not get_runtime().agents.opencode_config_status_waiters
 
 
 def test_stale_active_revision_is_pending(configured, monkeypatch):
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", agent())))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", agent())))
 
     async def send(agent_id, command):
-        api._opencode_config_status_waiters[command["request_id"]].set_result({"state": "active", "applied_revision": "stale", "desired_revision": llm_provider_revision(providers())})
+        get_runtime().agents.opencode_config_status_waiters[command["request_id"]].set_result({"state": "active", "applied_revision": "stale", "desired_revision": llm_provider_revision(providers())})
         return True
 
-    monkeypatch.setattr(api, "send_agent_command", send)
-    assert asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user())).state == "draining"
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    assert asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user())).state == "draining"
 
 
 def test_lost_config_delivery_reports_retryable_failure(configured, monkeypatch):
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", agent())))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", agent())))
 
     async def send(agent_id, command):
-        api._opencode_config_status_waiters[command["request_id"]].set_result({
+        get_runtime().agents.opencode_config_status_waiters[command["request_id"]].set_result({
             "state": "active", "applied_revision": "old", "desired_revision": "old",
         })
         return True
 
-    monkeypatch.setattr(api, "send_agent_command", send)
-    status = asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user()))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+    status = asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user()))
     assert status.state == "failed"
     assert status.desired_revision == llm_provider_revision(providers())
     assert status.error == "Agent 尚未应用已保存配置，请重试应用"
@@ -248,12 +257,12 @@ def test_lost_config_delivery_reports_retryable_failure(configured, monkeypatch)
 def test_distributed_status_uses_rpc_mailbox(configured, monkeypatch):
     configured.distributed = True
     configured.pop_agent_rpc_response = lambda request_id: {"status": {"state": "active", "applied_revision": llm_provider_revision(providers())}}
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", agent().model_copy(update={"llm_api_config": None}))))
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=True))
-    status = asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user()))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", agent().model_copy(update={"llm_api_config": None}))))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
+    status = asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user()))
     assert status.state == "active"
     assert status.desired_revision == status.applied_revision
-    assert not api._opencode_config_status_waiters
+    assert not get_runtime().agents.opencode_config_status_waiters
 
 
 def test_invalid_save_does_not_replace_persisted_config(configured):
@@ -261,20 +270,20 @@ def test_invalid_save_does_not_replace_persisted_config(configured):
     incoming = providers()
     incoming["private"]["options"]["timeout"] = 0
     with pytest.raises(HTTPException) as error:
-        asyncio.run(api.update_stable_agent_config("stable", AgentRemoteConfig(llm_providers=incoming), current_user=user()))
+        asyncio.run(backend_api_agent_routes_configuration.update_stable_agent_config("stable", AgentRemoteConfig(llm_providers=incoming), current_user=user()))
     assert error.value.status_code == 422
     assert configured.record["config_json"] == original
     assert "key-secret" not in str(error.value)
 
 
 def test_rpc_timeout_cleans_waiter_without_claiming_applied(configured, monkeypatch):
-    monkeypatch.setattr(api, "resolve_agent_connection_async", AsyncMock(return_value=("session", agent())))
-    monkeypatch.setattr(api, "send_agent_command", AsyncMock(return_value=True))
-    monkeypatch.setattr(api, "_wait_agent_response", AsyncMock(side_effect=asyncio.TimeoutError))
-    status = asyncio.run(api.get_stable_agent_opencode_config_status("stable", current_user=user()))
+    monkeypatch.setattr(backend_agents_directory, 'resolve_agent_connection_async', AsyncMock(return_value=("session", agent())))
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', AsyncMock(return_value=True))
+    monkeypatch.setattr(backend_agents_rpc, '_wait_agent_response', AsyncMock(side_effect=asyncio.TimeoutError))
+    status = asyncio.run(backend_api_agent_routes_configuration.get_stable_agent_opencode_config_status("stable", current_user=user()))
     assert status.state == "failed"
     assert status.applied_revision == ""
-    assert not api._opencode_config_status_waiters
+    assert not get_runtime().agents.opencode_config_status_waiters
 
 
 @pytest.mark.parametrize("path", ["/api/agent-configs/stable", "/api/agent/stable/config"])
@@ -284,7 +293,7 @@ def test_http_validation_errors_do_not_echo_malformed_secret_payloads(configured
     app.include_router(api.public_router)
     async def current_user():
         return user()
-    app.dependency_overrides[api.get_current_user] = current_user
+    app.dependency_overrides[backend_auth.get_current_user] = current_user
     original = configured.record["config_json"]
 
     async def run():

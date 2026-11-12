@@ -13,6 +13,8 @@ from pathlib import Path
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from backend.application import get_runtime
+from backend.report_routes import ApplicationRoute
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.models import (
@@ -25,10 +27,9 @@ from backend.models import (
 )
 from backend.registry import CHECKER_CATEGORY_OTHER, CHECKER_VISIBILITY_PUBLIC, refresh_registry
 
-router = APIRouter()
+router = APIRouter(route_class=ApplicationRoute)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_jobs: dict[str, SkillCreateJob] = {}
 _JOB_STATUSES = {"pending", "running", "completed", "error"}
 _ALLOWED_RESOURCE_DIRS = {"references", "scripts", "assets"}
 _MIN_TIMEOUT_SECONDS = 60
@@ -287,7 +288,7 @@ async def create_skill(
         updated_at=now,
         draft=_skill_draft(name, description, user_input),
     )
-    _jobs[job_id] = job
+    get_runtime().skill_jobs[job_id] = job
     return job
 
 
@@ -297,7 +298,7 @@ async def get_skill_create_job(
     current_user: User = Depends(get_current_user),
 ) -> SkillCreateJob:
     """Return SKILL creation progress and generated draft."""
-    job = _jobs.get(job_id)
+    job = get_runtime().skill_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="SKILL creation job not found")
     if current_user.role != "admin" and job.user_id != current_user.user_id:
@@ -312,7 +313,7 @@ async def import_skill(
     current_user: User = Depends(get_current_user),
 ) -> SkillImportResponse:
     """Import a generated SKILL draft into the public SKILL market."""
-    job = _jobs.get(job_id)
+    job = get_runtime().skill_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="SKILL creation job not found")
     if current_user.role != "admin" and job.user_id != current_user.user_id:
@@ -388,28 +389,3 @@ async def delete_skill(
     shutil.rmtree(checker_dir)
     refresh_registry()
     return {"ok": True}
-
-
-def handle_skill_create_result(payload: dict) -> None:
-    """Record a result message sent by an Agent over WebSocket."""
-    job_id = str(payload.get("request_id") or "")
-    job = _jobs.get(job_id)
-    if job is None:
-        return
-
-    status = "completed" if payload.get("ok") else "error"
-    if status not in _JOB_STATUSES:
-        status = "error"
-    job.status = status
-    job.updated_at = _now()
-    if status == "completed":
-        draft_payload = payload.get("draft") or {}
-        job.draft = SkillDraft(
-            skill_md=str(draft_payload.get("skill_md") or ""),
-            scenarios_md=str(draft_payload.get("scenarios_md") or ""),
-            summary=str(draft_payload.get("summary") or ""),
-        )
-        job.error_message = ""
-    else:
-        job.error_message = str(payload.get("message") or "SKILL 创建失败")
-    _jobs[job_id] = job

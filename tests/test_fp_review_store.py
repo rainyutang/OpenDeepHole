@@ -1,7 +1,6 @@
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
-
 from backend.models import FpReviewResult, FpReviewStatus, OutputSource
 from backend.store.sqlite import SqliteScanStore
 

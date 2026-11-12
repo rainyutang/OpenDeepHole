@@ -1,13 +1,10 @@
 from __future__ import annotations
-
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
 import asyncio
 import json
+import pytest
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
-
-from backend.api.scan import get_scan_overview_v2
 from backend.models import (
     AgentMcpConfig,
     AgentMcpLocalConfig,
@@ -253,10 +250,10 @@ def test_scan_overview_exposes_enablement_without_private_mcp_values(tmp_path: P
 
     async def scenario():
         with (
-            patch("backend.api.scan.get_scan_store", return_value=store),
-            patch("backend.api.scan.run_store_call", side_effect=direct_store_call),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.application.default_store_runner", side_effect=direct_store_call),
         ):
-            return await get_scan_overview_v2(
+            return await backend_api_scan_routes_queries.get_scan_overview_v2(
                 "scan-overview",
                 User(user_id="user-1", username="ordinary", role="user"),
             )

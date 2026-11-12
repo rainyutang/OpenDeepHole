@@ -1,11 +1,12 @@
 from __future__ import annotations
-
+from backend.application import get_runtime
+import backend.agents.artifacts as backend_agents_artifacts
+import backend.agents.runtime_updates as backend_agents_runtime_updates
+import backend.api.agent_routes.runtime_updates as backend_api_agent_routes_runtime_updates
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-from backend.api import agent as agent_api
 from backend.models import (
     AgentInfo,
     OpenCodePoolModelStats,
@@ -39,7 +40,7 @@ def _store_with_agent(tmp_path: Path) -> tuple[SqliteScanStore, User]:
 
 
 def _connect_agent() -> None:
-    agent_api._registered_agents["live-agent"] = AgentInfo(
+    get_runtime().agents.registered_agents["live-agent"] = AgentInfo(
         agent_id="live-agent",
         agent_key="stable-agent",
         name="agent",
@@ -49,7 +50,7 @@ def _connect_agent() -> None:
         user_id="user-1",
         runtime_hash="old-runtime",
     )
-    agent_api._agent_ws["live-agent"] = object()
+    get_runtime().agents.agent_ws["live-agent"] = object()
 
 
 def _save_agent_scan(
@@ -105,10 +106,10 @@ def _stale_pool_status(scan_id: str) -> OpenCodePoolStatus:
 
 
 def _cleanup_agent_globals() -> None:
-    agent_api._registered_agents.clear()
-    agent_api._agent_ws.clear()
-    agent_api._agent_ws_locks.clear()
-    agent_api._agent_opencode_pool_latest.clear()
+    get_runtime().agents.registered_agents.clear()
+    get_runtime().agents.agent_ws.clear()
+    get_runtime().agents.agent_ws_locks.clear()
+    get_runtime().agents.agent_opencode_pool_latest.clear()
 
 
 def test_manual_runtime_update_request_is_persisted(tmp_path: Path) -> None:
@@ -117,12 +118,12 @@ def test_manual_runtime_update_request_is_persisted(tmp_path: Path) -> None:
     request = SimpleNamespace(base_url="http://server.example/")
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent._agent_runtime_hash", return_value="new-runtime"),
-            patch("backend.api.agent._is_agent_online", return_value=True),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch("backend.agents.directory._is_agent_online", return_value=True),
         ):
             result = asyncio.run(
-                agent_api.request_stable_agent_runtime_update(
+                backend_api_agent_routes_runtime_updates.request_stable_agent_runtime_update(
                     "stable-agent",
                     request,
                     user,
@@ -155,11 +156,11 @@ def test_manual_runtime_update_waits_while_agent_has_active_work(
     send = AsyncMock(return_value=True)
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent._agent_has_active_work", return_value=True),
-            patch("backend.api.agent.send_agent_command", new=send),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.runtime_updates._agent_has_active_work", return_value=True),
+            patch("backend.agents.gateway.send_agent_command", new=send),
         ):
-            asyncio.run(agent_api._process_agent_runtime_updates())
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
 
         send.assert_not_awaited()
         assert (
@@ -177,7 +178,7 @@ def test_manual_runtime_update_ignores_stale_pool_after_scan_stops(
     store, _user = _store_with_agent(tmp_path)
     _connect_agent()
     _save_agent_scan(store, "stopped-scan", ScanItemStatus.CANCELLED)
-    agent_api._agent_opencode_pool_latest["live-agent"] = _stale_pool_status(
+    get_runtime().agents.agent_opencode_pool_latest["live-agent"] = _stale_pool_status(
         "stopped-scan"
     )
     store.set_agent_runtime_update_record(
@@ -191,15 +192,15 @@ def test_manual_runtime_update_ignores_stale_pool_after_scan_stops(
     payload = {"hash": "new-runtime", "token": "one-time"}
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent._agent_runtime_hash", return_value="new-runtime"),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
             patch(
-                "backend.api.agent.create_agent_runtime_update_payload",
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
                 return_value=payload,
             ),
-            patch("backend.api.agent.send_agent_command", new=send),
+            patch("backend.agents.gateway.send_agent_command", new=send),
         ):
-            asyncio.run(agent_api._process_agent_runtime_updates())
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
 
         send.assert_awaited_once_with(
             "live-agent",
@@ -230,9 +231,9 @@ def test_manual_runtime_update_still_waits_for_durable_active_scan(
         agent_key="",
     )
     try:
-        with patch("backend.api.agent.get_scan_store", return_value=store):
+        with patch("backend.application.default_store_factory", return_value=store):
             assert asyncio.run(
-                agent_api._agent_has_active_work("stable-agent", "live-agent")
+                backend_agents_runtime_updates._agent_has_active_work("stable-agent", "live-agent")
             )
     finally:
         _cleanup_agent_globals()
@@ -255,16 +256,16 @@ def test_manual_runtime_update_dispatches_only_after_idle_recheck(
     payload = {"hash": "new-runtime", "token": "one-time"}
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
-            patch("backend.api.agent._agent_has_active_work", return_value=False),
-            patch("backend.api.agent._agent_runtime_hash", return_value="new-runtime"),
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.runtime_updates._agent_has_active_work", return_value=False),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
             patch(
-                "backend.api.agent.create_agent_runtime_update_payload",
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
                 return_value=payload,
             ),
-            patch("backend.api.agent.send_agent_command", new=send),
+            patch("backend.agents.gateway.send_agent_command", new=send),
         ):
-            asyncio.run(agent_api._process_agent_runtime_updates())
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
 
         send.assert_awaited_once_with(
             "live-agent",
@@ -277,8 +278,8 @@ def test_manual_runtime_update_dispatches_only_after_idle_recheck(
         record = store.get_agent_record("stable-agent")
         assert record["runtime_update_status"] == "updating"
         assert record["runtime_update_target_hash"] == "new-runtime"
-        with patch("backend.api.agent.get_scan_store", return_value=store):
-            assert not agent_api.is_agent_accepting_tasks("stable-agent")
+        with patch("backend.application.default_store_factory", return_value=store):
+            assert not backend_agents_runtime_updates.is_agent_accepting_tasks("stable-agent")
     finally:
         _cleanup_agent_globals()
         store.close()
@@ -299,23 +300,23 @@ def test_manual_runtime_update_returns_to_pending_if_new_work_wins_race(
     send = AsyncMock(return_value=True)
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent._agent_has_active_work",
+                "backend.agents.runtime_updates._agent_has_active_work",
                 side_effect=[False, True],
             ),
-            patch("backend.api.agent._agent_runtime_hash", return_value="new-runtime"),
-            patch("backend.api.agent.send_agent_command", new=send),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch("backend.agents.gateway.send_agent_command", new=send),
         ):
-            asyncio.run(agent_api._process_agent_runtime_updates())
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
 
         send.assert_not_awaited()
         assert (
             store.get_agent_record("stable-agent")["runtime_update_status"]
             == "pending"
         )
-        with patch("backend.api.agent.get_scan_store", return_value=store):
-            assert agent_api.is_agent_accepting_tasks("stable-agent")
+        with patch("backend.application.default_store_factory", return_value=store):
+            assert backend_agents_runtime_updates.is_agent_accepting_tasks("stable-agent")
     finally:
         _cleanup_agent_globals()
         store.close()
@@ -326,7 +327,7 @@ def test_manual_runtime_update_clears_when_target_agent_reconnects(
 ) -> None:
     store, _user = _store_with_agent(tmp_path)
     _connect_agent()
-    agent_api._registered_agents["live-agent"].runtime_hash = "new-runtime"
+    get_runtime().agents.registered_agents["live-agent"].runtime_hash = "new-runtime"
     store.set_agent_runtime_update_record(
         "stable-agent",
         status="updating",
@@ -336,13 +337,13 @@ def test_manual_runtime_update_clears_when_target_agent_reconnects(
         started_at="2026-07-29T00:00:01+00:00",
     )
     try:
-        with patch("backend.api.agent.get_scan_store", return_value=store):
-            asyncio.run(agent_api._process_agent_runtime_updates())
+        with patch("backend.application.default_store_factory", return_value=store):
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
         record = store.get_agent_record("stable-agent")
         assert record["runtime_update_status"] == ""
         assert record["runtime_update_target_hash"] == ""
-        with patch("backend.api.agent.get_scan_store", return_value=store):
-            assert agent_api.is_agent_accepting_tasks("stable-agent")
+        with patch("backend.application.default_store_factory", return_value=store):
+            assert backend_agents_runtime_updates.is_agent_accepting_tasks("stable-agent")
     finally:
         _cleanup_agent_globals()
         store.close()
@@ -361,12 +362,12 @@ def test_ordinary_task_does_not_bypass_pending_idle_update(
     )
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent.create_agent_runtime_update_payload",
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
             ) as create_payload,
         ):
-            payload = agent_api.create_agent_task_runtime_update_payload(
+            payload = backend_agents_artifacts.create_agent_task_runtime_update_payload(
                 "http://server.example",
                 "stable-agent",
             )
@@ -384,13 +385,13 @@ def test_ordinary_task_keeps_automatic_runtime_sync_without_manual_request(
     expected = {"runtime_hash": "new-runtime"}
     try:
         with (
-            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.application.default_store_factory", return_value=store),
             patch(
-                "backend.api.agent.create_agent_runtime_update_payload",
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
                 return_value=expected,
             ) as create_payload,
         ):
-            payload = agent_api.create_agent_task_runtime_update_payload(
+            payload = backend_agents_artifacts.create_agent_task_runtime_update_payload(
                 "http://server.example",
                 "stable-agent",
             )

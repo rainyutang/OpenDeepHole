@@ -1,9 +1,7 @@
 """Estimation SQL work depends on the current scan, not unrelated history."""
-import json
 from datetime import datetime, timezone
-
+import json
 import pytest
-
 from backend.models import OpenCodePoolStatus, ScanMeta, ScanStatus
 from backend.scan_estimate import estimate_scan_progress_from_store
 from backend.store.sqlite import SqliteScanStore

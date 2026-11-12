@@ -1,11 +1,11 @@
+
+import backend.application as application
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
-
 import httpx
 import pytest
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
-
 from backend.api import scan, integration
 from backend.auth import get_current_user
 from backend.models import User, VulnerabilityValidation
@@ -31,7 +31,7 @@ def test_authenticated_and_public_pages_keep_history_bounded(tmp_path, monkeypat
             store._store_task_version_locked("s", value)
     store._conn.commit()
     store.upsert_vulnerability_validation("s", VulnerabilityValidation(vuln_index=42, status="verified", final_output="complete evidence"))
-    monkeypatch.setattr(scan, "get_scan_store", lambda: store)
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
     monkeypatch.setattr(integration, "get_scan_store", lambda: store)
     app = FastAPI()
     app.include_router(scan.router)

@@ -1,14 +1,36 @@
+import backend.agents.diagnostics as backend_agents_diagnostics
+import backend.agents.constants as backend_agents_constants
+import backend.agents.directory as backend_agents_directory
+import backend.agents.gateway as backend_agents_gateway
+import backend.agents.recovery as backend_agents_recovery
+import backend.agents.rpc as backend_agents_rpc
+import backend.agents.schemas as backend_agents_schemas
+import backend.api.agent_routes.connections as backend_api_agent_routes_connections
+import backend.api.agent_routes.scan_artifacts as backend_api_agent_routes_scan_artifacts
+import backend.api.agent_routes.scan_candidates as backend_api_agent_routes_scan_candidates
+import backend.api.agent_routes.scan_completion as backend_api_agent_routes_scan_completion
+import backend.api.agent_routes.scan_events as backend_api_agent_routes_scan_events
+import backend.api.agent_routes.scan_progress as backend_api_agent_routes_scan_progress
+import backend.api.agent_routes.scan_results as backend_api_agent_routes_scan_results
+import backend.api.scan_routes.continuation as backend_api_scan_routes_continuation
+import backend.api.scan_routes.fp_review_callbacks as backend_api_scan_routes_fp_review_callbacks
+import backend.api.scan_routes.queries as backend_api_scan_routes_queries
+import backend.scan_runtime as backend_scan_runtime
+import backend.scans.fp_review as backend_scans_fp_review
+import backend.scans.fp_review_policy as backend_scans_fp_review_policy
+import backend.scans.ingestion.state as backend_scans_ingestion_state
+import fastapi as fastapi
 import asyncio
 import json
 import tempfile
 import unittest
+from backend import application
+from backend.application import get_runtime
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
 from backend.api import agent as agent_api
-from backend.api import scan as scan_api
 from backend.models import (
     AgentCandidateAuditResult,
     AgentFpReviewStageOutput,
@@ -82,8 +104,8 @@ def _meta(
 
 
 async def _run_websocket_and_cancel_disconnect(websocket) -> None:
-    await agent_api.agent_websocket(websocket)
-    tasks = list(agent_api._agent_disconnect_tasks.values())
+    await backend_api_agent_routes_connections.agent_websocket(websocket)
+    tasks = list(get_runtime().agents.agent_disconnect_tasks.values())
     for task in tasks:
         task.cancel()
     if tasks:
@@ -97,24 +119,24 @@ async def _direct_store_call(store, operation, *args, **kwargs):
 
 class AgentReconnectRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
-        agent_api._running_scans.clear()
-        agent_api._scan_owners.clear()
-        agent_api._registered_agents.clear()
-        agent_api._agent_ws.clear()
-        agent_api._agent_ws_locks.clear()
-        agent_api._agent_disconnect_tasks.clear()
-        agent_api._scan_index_statuses.clear()
-        agent_api._scan_stop_waiters.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_ws.clear()
+        get_runtime().agents.agent_ws_locks.clear()
+        get_runtime().agents.agent_disconnect_tasks.clear()
+        get_runtime().scans.scan_index_statuses.clear()
+        get_runtime().agents.scan_stop_waiters.clear()
 
     def tearDown(self) -> None:
-        agent_api._running_scans.clear()
-        agent_api._scan_owners.clear()
-        agent_api._registered_agents.clear()
-        agent_api._agent_ws.clear()
-        agent_api._agent_ws_locks.clear()
-        agent_api._agent_disconnect_tasks.clear()
-        agent_api._scan_index_statuses.clear()
-        agent_api._scan_stop_waiters.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
+        get_runtime().agents.registered_agents.clear()
+        get_runtime().agents.agent_ws.clear()
+        get_runtime().agents.agent_ws_locks.clear()
+        get_runtime().agents.agent_disconnect_tasks.clear()
+        get_runtime().scans.scan_index_statuses.clear()
+        get_runtime().agents.scan_stop_waiters.clear()
 
     def test_execution_recovery_claims_are_monotonic_and_single_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,7 +152,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(scan_revision, 1)
             store.mark_agent_scans_cancelled(
                 "agent-old",
-                agent_api.AGENT_DISCONNECT_ERROR,
+                backend_scan_runtime.AGENT_DISCONNECT_ERROR,
             )
             inflight = store.list_agent_inflight_executions(
                 "stable-agent",
@@ -180,7 +202,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             ), 1)
             store.mark_fp_reviews_for_agent_error(
                 "agent-new",
-                agent_api.AGENT_DISCONNECT_ERROR,
+                backend_scan_runtime.AGENT_DISCONNECT_ERROR,
             )
             inflight = store.list_agent_inflight_executions(
                 "stable-agent",
@@ -297,14 +319,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             start_review = AsyncMock()
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.api.scan._start_fp_review", new=start_review),
+                patch("backend.scans.fp_review._start_fp_review", new=start_review),
             ):
-                asyncio.run(agent_api._recover_missing_agent_work(
+                asyncio.run(backend_agents_recovery._recover_missing_agent_work(
                     "agent-new",
                     agent,
                     {},
@@ -381,23 +403,23 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.fp_review._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-new"),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_id_connection_async",
+                    "backend.agents.directory.resolve_agent_id_connection_async",
                     new=AsyncMock(return_value=("agent-new", agent)),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
-                result = asyncio.run(scan_api._start_fp_review(
+                result = asyncio.run(backend_scans_fp_review._start_fp_review(
                     "scan-1",
                     "http://server",
                     raise_on_error=False,
@@ -437,14 +459,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             resume = AsyncMock()
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.api.scan._continue_scan", new=resume),
+                patch("backend.scans.continuation._continue_scan", new=resume),
             ):
-                asyncio.run(agent_api._recover_missing_agent_work(
+                asyncio.run(backend_agents_recovery._recover_missing_agent_work(
                     "agent-new",
                     agent,
                     {},
@@ -485,14 +507,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             resume = AsyncMock()
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.api.scan._continue_scan", new=resume),
+                patch("backend.scans.continuation._continue_scan", new=resume),
             ):
-                asyncio.run(agent_api._recover_missing_agent_work(
+                asyncio.run(backend_agents_recovery._recover_missing_agent_work(
                     "agent-new",
                     agent,
                     {"pending_terminal_reports": {"scans": ["scan-1"]}},
@@ -530,20 +552,20 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             with (
                 patch(
-                    "backend.api.agent.get_scan_store",
+                    "backend.application.default_store_factory",
                     return_value=store,
                 ),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                first = asyncio.run(agent_api.agent_list_vulnerabilities(
+                first = asyncio.run(backend_api_agent_routes_scan_artifacts.agent_list_vulnerabilities(
                     "scan-1",
                     limit=1,
                     after=-1,
                 ))
-                second = asyncio.run(agent_api.agent_list_vulnerabilities(
+                second = asyncio.run(backend_api_agent_routes_scan_artifacts.agent_list_vulnerabilities(
                     "scan-1",
                     limit=1,
                     after=first.next_cursor if first.next_cursor is not None else -1,
@@ -577,7 +599,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             async def receive_json(self):
                 if self.messages:
                     return self.messages.pop(0)
-                raise agent_api.WebSocketDisconnect()
+                raise fastapi.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
                 self.sent.append(payload)
@@ -588,8 +610,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         ws = FakeWebSocket()
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_websocket(ws))
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_connections.agent_websocket(ws))
 
         self.assertEqual(ws.sent[0]["type"], "welcome")
         self.assertIn({"type": "heartbeat_ack"}, ws.sent)
@@ -619,10 +641,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             async def receive_json(self):
                 if self.messages:
                     return self.messages.pop(0)
-                agents = list(agent_api._registered_agents.values())
+                agents = list(get_runtime().agents.registered_agents.values())
                 if agents:
                     self.captured_runtime_hash = agents[0].runtime_hash
-                raise agent_api.WebSocketDisconnect()
+                raise fastapi.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
                 self.sent.append(payload)
@@ -633,8 +655,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         ws = FakeWebSocket()
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_websocket(ws))
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_connections.agent_websocket(ws))
 
         self.assertEqual(ws.captured_runtime_hash, "old-runtime")
 
@@ -669,7 +691,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             async def receive_json(self):
                 if self.messages:
                     return self.messages.pop(0)
-                raise agent_api.WebSocketDisconnect()
+                raise fastapi.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
                 self.sent.append(payload)
@@ -681,8 +703,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
             ):
                 asyncio.run(_run_websocket_and_cancel_disconnect(ws))
             record = store.list_agent_records()[0]
@@ -715,7 +737,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             async def receive_json(self):
                 if self.messages:
                     return self.messages.pop(0)
-                raise agent_api.WebSocketDisconnect()
+                raise fastapi.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
                 self.sent.append(payload)
@@ -745,8 +767,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 }),
             )
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", side_effect=_direct_store_call),
             ):
                 asyncio.run(_run_websocket_and_cancel_disconnect(ws))
             record = store.get_agent_record("stable-client")
@@ -761,18 +783,18 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         fresh = datetime.now(timezone.utc).isoformat()
         stale = (
             datetime.now(timezone.utc)
-            - timedelta(seconds=agent_api._WEBSOCKET_AGENT_STALE_SECONDS + 1)
+            - timedelta(seconds=backend_agents_constants._WEBSOCKET_AGENT_STALE_SECONDS + 1)
         ).isoformat()
-        agent_api._agent_ws["fresh"] = object()
-        agent_api._agent_ws["stale"] = object()
+        get_runtime().agents.agent_ws["fresh"] = object()
+        get_runtime().agents.agent_ws["stale"] = object()
 
-        self.assertTrue(agent_api._is_agent_online(AgentInfo(
+        self.assertTrue(backend_agents_directory._is_agent_online(AgentInfo(
             agent_id="fresh",
             name="agent-1",
             ip="127.0.0.1",
             last_seen=fresh,
         )))
-        self.assertFalse(agent_api._is_agent_online(AgentInfo(
+        self.assertFalse(backend_agents_directory._is_agent_online(AgentInfo(
             agent_id="stale",
             name="agent-1",
             ip="127.0.0.1",
@@ -804,13 +826,13 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.update_fp_review_job("review-1", status="running")
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                agent_api._mark_agent_scans_cancelled("agent-old")
+                backend_agents_recovery._mark_agent_scans_cancelled("agent-old")
 
             scan = store.load_scan("scan-1")[0]
             self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
@@ -833,20 +855,20 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(persisted, _meta())
             stale_live = persisted.model_copy(deep=True)
             stale_live.status = ScanItemStatus.AUDITING
-            agent_api._running_scans["scan-1"] = stale_live
-            agent_api._scan_owners["scan-1"] = "user-1"
+            get_runtime().scans.running_scans["scan-1"] = stale_live
+            get_runtime().scans.scan_owners["scan-1"] = "user-1"
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                agent_api._mark_agent_scans_cancelled("agent-old")
+                backend_agents_recovery._mark_agent_scans_cancelled("agent-old")
 
-            self.assertNotIn("scan-1", agent_api._running_scans)
-            self.assertNotIn("scan-1", agent_api._scan_owners)
+            self.assertNotIn("scan-1", get_runtime().scans.running_scans)
+            self.assertNotIn("scan-1", get_runtime().scans.scan_owners)
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.error_message, "Agent 断开连接")
@@ -860,15 +882,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             user = User(user_id="user-1", username="alice", role="user")
             started_at = (
                 datetime.now(timezone.utc)
-                - timedelta(seconds=agent_api._AGENT_DISCONNECT_GRACE_SECONDS + 1)
+                - timedelta(seconds=backend_agents_constants._AGENT_DISCONNECT_GRACE_SECONDS + 1)
             )
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.agent._SERVER_STARTED_AT", started_at),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.agents.constants._SERVER_STARTED_AT", started_at),
             ):
-                scan = asyncio.run(scan_api.get_scan_status("scan-1", current_user=user))
+                scan = asyncio.run(backend_api_scan_routes_queries.get_scan_status("scan-1", current_user=user))
 
             self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
             self.assertFalse(scan.agent_online)
@@ -899,8 +921,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 user_id="user-1",
             )
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                agent_api._reattach_active_agent_scans(
+            with patch("backend.application.default_store_factory", return_value=store):
+                backend_agents_recovery._reattach_active_agent_scans(
                     "agent-new",
                     info,
                     [{"scan_id": "scan-1", "project_path": "/repo/project"}],
@@ -910,7 +932,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(meta.agent_id, "agent-new")
             self.assertEqual(scan.status, ScanItemStatus.AUDITING)
             self.assertEqual(scan.error_message, "")
-            self.assertIn("scan-1", agent_api._running_scans)
+            self.assertIn("scan-1", get_runtime().scans.running_scans)
 
     def test_active_scan_hello_does_not_revive_user_stopped_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -935,13 +957,13 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             pending_stops: list[dict] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                agent_api._reattach_active_agent_scans(
+                backend_agents_recovery._reattach_active_agent_scans(
                     "agent-new",
                     info,
                     [{"scan_id": "scan-1"}],
@@ -951,7 +973,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan, meta = store.load_scan("scan-1")
             self.assertEqual(meta.agent_id, "agent-old")
             self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
-            self.assertNotIn("scan-1", agent_api._running_scans)
+            self.assertNotIn("scan-1", get_runtime().scans.running_scans)
             self.assertEqual(
                 pending_stops,
                 [{"type": "stop", "scan_id": "scan-1"}],
@@ -963,7 +985,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         async def send(agent_id: str, command: dict) -> bool:
             self.assertEqual(agent_id, "agent-live")
             sent.append(command)
-            await agent_api._complete_agent_response(
+            await backend_agents_rpc._complete_agent_response(
                 {
                     "type": "scan_stop_result",
                     "request_id": command["request_id"],
@@ -971,28 +993,28 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "still_active": False,
                     "error": "",
                 },
-                agent_api._scan_stop_waiters,
+                get_runtime().agents.scan_stop_waiters,
             )
             return True
 
         with (
-            patch("backend.api.agent.send_agent_command", new=send),
+            patch("backend.agents.gateway.send_agent_command", new=send),
             patch(
-                "backend.api.agent.get_scan_store",
+                "backend.application.default_store_factory",
                 side_effect=AssertionError(
                     "same-worker acknowledgement must not consult the store"
                 ),
             ),
         ):
             response = asyncio.run(
-                agent_api.request_agent_scan_stop("agent-live", "scan-1")
+                backend_agents_gateway.request_agent_scan_stop("agent-live", "scan-1")
             )
 
         self.assertIsNotNone(response)
         self.assertFalse(response["still_active"])
         self.assertEqual(sent[0]["type"], "stop")
         self.assertEqual(sent[0]["scan_id"], "scan-1")
-        self.assertEqual(agent_api._scan_stop_waiters, {})
+        self.assertEqual(get_runtime().agents.scan_stop_waiters, {})
 
     def test_upgraded_agent_promotes_existing_callback_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1016,7 +1038,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     ai_verdict="confirmed",
                 ),
             )
-            agent_api._running_scans[scan.scan_id] = scan
+            get_runtime().scans.running_scans[scan.scan_id] = scan
             info = AgentInfo(
                 agent_id="agent-new",
                 agent_key="stable-agent",
@@ -1027,15 +1049,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.sse.publish") as publish,
+                patch("backend.application.default_publisher") as publish,
             ):
                 scan_ids, promoted = asyncio.run(
-                    agent_api._promote_final_callback_agent_reports(
+                    backend_agents_recovery._promote_final_callback_agent_reports(
                         "agent-new",
                         info,
                         [scan.scan_id],
@@ -1053,7 +1075,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["report_batch_id"], "")
             self.assertFalse(
-                agent_api._running_scans[scan.scan_id]
+                get_runtime().scans.running_scans[scan.scan_id]
                 .vulnerabilities[vuln_index]
                 .provisional
             )
@@ -1099,18 +1121,18 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             start_fp_review = AsyncMock(return_value={"ok": True})
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch(
-                    "backend.api.scan._start_fp_review",
+                    "backend.scans.fp_review._start_fp_review",
                     start_fp_review,
                 ),
             ):
-                asyncio.run(agent_api._resume_final_callback_downstream(
+                asyncio.run(backend_agents_recovery._resume_final_callback_downstream(
                     info,
                     [scan.scan_id],
                     {scan.scan_id: [0]},
@@ -1130,7 +1152,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     error_message="用户手动停止",
                 )
                 start_fp_review.reset_mock()
-                asyncio.run(agent_api._resume_final_callback_downstream(
+                asyncio.run(backend_agents_recovery._resume_final_callback_downstream(
                     info,
                     [scan.scan_id],
                     {scan.scan_id: [0]},
@@ -1167,7 +1189,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 if self.messages:
                     return self.messages.pop(0)
                 await recovered.wait()
-                raise agent_api.WebSocketDisconnect()
+                raise fastapi.WebSocketDisconnect()
 
             async def send_json(self, payload: dict) -> None:
                 self.sent.append(payload)
@@ -1186,23 +1208,23 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch(
-                    "backend.api.agent._promote_final_callback_agent_reports",
+                    "backend.agents.recovery._promote_final_callback_agent_reports",
                     promote,
                 ),
                 patch(
-                    "backend.api.agent._resume_final_callback_downstream",
+                    "backend.agents.recovery._resume_final_callback_downstream",
                     new=AsyncMock(side_effect=resume),
                 ) as resume_mock,
-                patch("backend.api.agent._schedule_agent_disconnect_cancel"),
+                patch("backend.agents.recovery._schedule_agent_disconnect_cancel"),
             ):
                 asyncio.run(asyncio.wait_for(
-                    agent_api.agent_websocket(websocket),
+                    backend_api_agent_routes_connections.agent_websocket(websocket),
                     timeout=1,
                 ))
 
@@ -1214,11 +1236,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.PENDING)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             event = ScanEvent.create("static_analysis", "已加载 7 个缓存候选点", candidate_index=7)
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_scan_event("scan-1", event))
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_events.agent_scan_event("scan-1", event))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.total_candidates, 7)
@@ -1231,13 +1253,13 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.PENDING)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data)
                     ),
@@ -1249,7 +1271,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "[2026-08-03 12:00:00] "
                     "[candidate_audit][session-2][task] START",
                 ):
-                    result = asyncio.run(agent_api.agent_scan_event(
+                    result = asyncio.run(backend_api_agent_routes_scan_events.agent_scan_event(
                         "scan-1",
                         ScanEvent.create("auditing", message),
                     ))
@@ -1264,16 +1286,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.object(agent_api.logger, "warning") as warning,
-                patch("backend.sse.publish") as publish,
+                patch.object(backend_agents_diagnostics.logger, "warning") as warning,
+                patch("backend.application.default_publisher") as publish,
             ):
-                with self.assertRaises(agent_api.HTTPException) as raised:
-                    asyncio.run(agent_api.agent_scan_event(
+                with self.assertRaises(application.ApplicationError) as raised:
+                    asyncio.run(backend_api_agent_routes_scan_events.agent_scan_event(
                         "missing-scan",
                         ScanEvent.create("auditing", "late event"),
                     ))
@@ -1295,16 +1317,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.object(agent_api.logger, "warning") as warning,
-                patch("backend.sse.publish") as publish,
+                patch.object(backend_agents_diagnostics.logger, "warning") as warning,
+                patch("backend.application.default_publisher") as publish,
             ):
-                with self.assertRaises(agent_api.HTTPException) as raised:
-                    asyncio.run(agent_api.agent_scan_events_v2(
+                with self.assertRaises(application.ApplicationError) as raised:
+                    asyncio.run(backend_api_agent_routes_scan_events.agent_scan_events_v2(
                         "missing-scan",
                         AgentScanEventBatch(events=[
                             ScanEvent.create("auditing", "late event"),
@@ -1338,14 +1360,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ScanEvent.create("auditing", "late event two"),
             ]
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.sse.publish") as publish,
+                patch("backend.application.default_publisher") as publish,
             ):
-                result = asyncio.run(agent_api.agent_scan_events_v2(
+                result = asyncio.run(backend_api_agent_routes_scan_events.agent_scan_events_v2(
                     "scan-1",
                     AgentScanEventBatch(events=events),
                 ))
@@ -1359,7 +1381,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 store.load_scan("scan-1")[0].status,
                 ScanItemStatus.COMPLETE,
             )
-            self.assertNotIn("scan-1", agent_api._running_scans)
+            self.assertNotIn("scan-1", get_runtime().scans.running_scans)
             publish.assert_not_called()
 
     def test_auditing_event_marks_static_analysis_done_if_done_push_was_missed(self) -> None:
@@ -1370,15 +1392,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_scanned_files = 128
             scan.static_analysis_done = False
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             published: list[tuple[str, str, dict]] = []
             event = ScanEvent.create("auditing", "[1/3] NPD a.c:1 — f", candidate_index=0)
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_scan_event("scan-1", event))
+                asyncio.run(backend_api_agent_routes_scan_events.agent_scan_event("scan-1", event))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.AUDITING)
@@ -1392,11 +1414,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.ANALYZING, total=20, processed=4)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             event = ScanEvent.create("auditing", "[10/20] NPD z.c:1 — z", candidate_index=9)
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_scan_event("scan-1", event))
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_events.agent_scan_event("scan-1", event))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.AUDITING)
@@ -1410,15 +1432,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_total_files = 128
             scan.static_scanned_files = 128
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             published: list[tuple[str, str, dict]] = []
-            body = agent_api._StaticProgressBody(scanned=0, total=0, done=True)
+            body = backend_agents_schemas._StaticProgressBody(scanned=0, total=0, done=True)
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_static_progress("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.AUDITING)
@@ -1437,7 +1459,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.ANALYZING)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             stats = {
                 "files": 7,
@@ -1448,17 +1470,17 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "global_variable_references": 9,
             }
             published: list[tuple[str, str, dict]] = []
-            body = agent_api._IndexStatusBody(status="done", stats=stats)
+            body = backend_agents_schemas._IndexStatusBody(status="done", stats=stats)
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_index_status("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.static_scanned_files, 7)
             self.assertEqual(stored.static_total_files, 7)
-            self.assertEqual(agent_api._scan_index_statuses["scan-1"]["stats"]["function_calls"], 42)
+            self.assertEqual(get_runtime().scans.scan_index_statuses["scan-1"]["stats"]["function_calls"], 42)
             index_events = [data for _scan_id, event_type, data in published if event_type == "index_status"]
             self.assertTrue(index_events)
             self.assertEqual(index_events[-1]["parsed_files"], 0)
@@ -1475,15 +1497,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_total_files = 128
             scan.static_scanned_files = 127
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             published: list[tuple[str, str, dict]] = []
-            body = agent_api._IndexStatusBody(status="done", parsed_files=0, total_files=0)
+            body = backend_agents_schemas._IndexStatusBody(status="done", parsed_files=0, total_files=0)
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_index_status("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.static_scanned_files, 127)
@@ -1497,21 +1519,21 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_total_files = 128
             scan.static_scanned_files = 64
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             published: list[tuple[str, str, dict]] = []
-            body = agent_api._IndexStatusBody(status="skipped")
+            body = backend_agents_schemas._IndexStatusBody(status="skipped")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_index_status("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.static_scanned_files, 64)
             self.assertEqual(stored.static_total_files, 128)
             self.assertEqual(
-                agent_api._scan_index_statuses["scan-1"]["status"],
+                get_runtime().scans.scan_index_statuses["scan-1"]["status"],
                 "skipped",
             )
             self.assertFalse([
@@ -1525,11 +1547,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.PENDING)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
-            body = agent_api._StaticProgressBody(scanned=3, total=128, done=False)
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+            body = backend_agents_schemas._StaticProgressBody(scanned=3, total=128, done=False)
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_static_progress("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.ANALYZING)
@@ -1545,15 +1567,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_scanned_files = 128
             scan.static_analysis_done = True
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             published: list[tuple[str, str, dict]] = []
-            body = agent_api._StaticProgressBody(scanned=127, total=128, done=False)
+            body = backend_agents_schemas._StaticProgressBody(scanned=127, total=128, done=False)
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_static_progress("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.AUDITING)
@@ -1570,9 +1592,9 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.static_analysis_done = False
             store.save_scan(scan, _meta())
 
-            body = agent_api._StaticProgressBody(scanned=0, total=0, done=True)
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+            body = backend_agents_schemas._StaticProgressBody(scanned=0, total=0, done=True)
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_static_progress("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.COMPLETE)
@@ -1583,12 +1605,12 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=4), _meta())
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_report_processed(
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_report_processed(
                     "scan-1",
                     {"file": "a.c", "line": 1, "function": "a", "vuln_type": "npd"},
                 ))
-                asyncio.run(agent_api.agent_report_processed(
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_report_processed(
                     "scan-1",
                     {"file": "b.c", "line": 2, "function": "b", "vuln_type": "npd"},
                 ))
@@ -1627,15 +1649,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(scan, meta)
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch("backend.sse.publish"),
+                patch("backend.application.default_publisher"),
             ):
                 for index in (0, 1):
-                    asyncio.run(agent_api.agent_report_candidate_audit(
+                    asyncio.run(backend_api_agent_routes_scan_candidates.agent_report_candidate_audit(
                         "scan-1",
                         AgentCandidateAuditResult(
                             candidate_idx=index,
@@ -1658,7 +1680,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 self.assertEqual(running.total_candidates, 3)
                 self.assertEqual(running.processed_candidates, 2)
 
-                asyncio.run(agent_api.agent_report_processed(
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_report_processed(
                     "scan-1",
                     {
                         "file": "same.c",
@@ -1674,7 +1696,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     2,
                 )
 
-                asyncio.run(agent_api.agent_report_candidate_audit(
+                asyncio.run(backend_api_agent_routes_scan_candidates.agent_report_candidate_audit(
                     "scan-1",
                     AgentCandidateAuditResult(
                         candidate_idx=2,
@@ -1698,7 +1720,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     3,
                 )
 
-                asyncio.run(agent_api.agent_report_mining_engine_run(
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_report_mining_engine_run(
                     "scan-1",
                     MiningEngineRunStatus(
                         engine_id="static_candidate",
@@ -1716,15 +1738,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.object(agent_api.logger, "warning") as warning,
+                patch.object(backend_agents_diagnostics.logger, "warning") as warning,
             ):
-                with self.assertRaises(agent_api.HTTPException) as raised:
-                    asyncio.run(agent_api.agent_report_threat_analysis_run(
+                with self.assertRaises(application.ApplicationError) as raised:
+                    asyncio.run(backend_api_agent_routes_scan_progress.agent_report_threat_analysis_run(
                         "missing-scan",
                         ThreatAnalysisRunStatus(status="running"),
                     ))
@@ -1762,19 +1784,19 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
-                response = asyncio.run(agent_api.agent_report_mining_engine_run(
+                response = asyncio.run(backend_api_agent_routes_scan_progress.agent_report_mining_engine_run(
                     "scan-pattern-progress",
                     MiningEngineRunStatus(
                         engine_id="threat_pattern_audit",
@@ -1828,24 +1850,24 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
             ]
             store.save_scan(scan, meta)
-            agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
+            get_runtime().scans.running_scans["scan-1"] = store.load_scan("scan-1")[0]
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan_v2(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan_v2(
                     "scan-1",
                     AgentScanFinishV2(
                         status="error",
@@ -1904,15 +1926,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.object(agent_api.logger, "warning"),
+                patch.object(backend_agents_diagnostics.logger, "warning"),
             ):
-                with self.assertRaises(agent_api.HTTPException) as raised:
-                    asyncio.run(agent_api.agent_finish_scan(
+                with self.assertRaises(application.ApplicationError) as raised:
+                    asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                         "missing-scan",
                         AgentScanFinish(
                             vulnerabilities=[],
@@ -1943,14 +1965,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(stopped, _meta())
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
                         vulnerabilities=[],
@@ -1991,18 +2013,18 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )])
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                result = asyncio.run(agent_api.agent_report_scan_candidates(
+                result = asyncio.run(backend_api_agent_routes_scan_candidates.agent_report_scan_candidates(
                     "scan-1",
                     retry_subset,
                 ))
                 v2_result = asyncio.run(
-                    agent_api.agent_report_scan_candidates_v2(
+                    backend_api_agent_routes_scan_candidates.agent_report_scan_candidates_v2(
                         "scan-1",
                         AgentScanCandidateBatch(
                             offset=0,
@@ -2057,14 +2079,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(scan, _meta())
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                overview = asyncio.run(scan_api.get_scan_overview_v2(
+                overview = asyncio.run(backend_api_scan_routes_queries.get_scan_overview_v2(
                     "scan-1",
                     current_user=User(
                         user_id="user-1",
@@ -2082,7 +2104,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.ANALYZING, total=0, processed=0)
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             published: list[tuple[str, str, dict]] = []
 
             body = AgentScanCandidates(candidates=[
@@ -2105,16 +2127,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             ])
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_publisher", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
             ):
-                response = asyncio.run(agent_api.agent_report_scan_candidates("scan-1", body))
+                response = asyncio.run(backend_api_agent_routes_scan_candidates.agent_report_scan_candidates("scan-1", body))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(response["count"], 1)
             self.assertEqual(stored.total_candidates, 1)
             self.assertEqual(stored.candidates[0].metadata["subject"], "ptr")
-            self.assertEqual(agent_api._running_scans["scan-1"].candidates[0].file, "src/a.c")
+            self.assertEqual(get_runtime().scans.running_scans["scan-1"].candidates[0].file, "src/a.c")
             self.assertTrue(any(event_type == "scan_candidates" for _sid, event_type, _data in published))
 
     def test_retry_counts_keep_static_candidates_and_threat_tasks_separate(self) -> None:
@@ -2172,14 +2194,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             user = User(user_id="user-1", username="alice", role="user")
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                status = asyncio.run(scan_api.get_scan_status("scan-1", current_user=user))
+                status = asyncio.run(backend_api_scan_routes_queries.get_scan_status("scan-1", current_user=user))
 
             self.assertEqual(status.retryable_candidates_count, 1)
             self.assertEqual(status.continuable_task_count, 2)
@@ -2222,13 +2244,13 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_push_opencode_pool("scan-1", body))
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool("scan-1", body))
 
             pool = store.load_scan("scan-1")[0].opencode_pool
             self.assertIsNotNone(pool)
@@ -2280,8 +2302,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 queued_tasks=[{"request_id": "queued", "task_type": "fp_review"}],
             )
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                asyncio.run(agent_api.agent_push_opencode_pool("scan-1", current))
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_agent_routes_scan_progress.agent_push_opencode_pool("scan-1", current))
 
             pool = store.load_scan("scan-1")[0].opencode_pool
             self.assertIsNotNone(pool)
@@ -2329,7 +2351,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             }],
         )
 
-        merged = agent_api._merge_completed_opencode_tasks(previous, stale)
+        merged = backend_scans_ingestion_state._merge_completed_opencode_tasks(previous, stale)
 
         task = merged.completed_tasks[0]
         self.assertEqual(
@@ -2340,7 +2362,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         self.assertEqual(task["failure_kind"], "timeout")
         self.assertEqual(task["failure_reason"], "slow")
 
-    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
+    @patch("backend.agents.gateway.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2369,7 +2391,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(scan, meta)
             stale_live = scan.model_copy(deep=True)
             stale_live.status = ScanItemStatus.AUDITING
-            agent_api._running_scans["scan-1"] = stale_live
+            get_runtime().scans.running_scans["scan-1"] = stale_live
             agent = AgentInfo(
                 agent_id="agent-old",
                 name="agent-1",
@@ -2383,38 +2405,38 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
             runtime_update = AsyncMock(return_value={"hash": "runtime-current"})
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch.dict(get_runtime().agents.registered_agents, {"agent-old": agent}, clear=True),
+                patch("backend.agents.gateway.send_agent_command", new=send),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=runtime_update,
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=object()),
                 ),
                 patch(
-                    "backend.api.agent.agent_config_has_explicit_model",
+                    "backend.agents.configuration.agent_config_has_explicit_model",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.agent.agent_explicit_model_ids",
+                    "backend.agents.configuration.agent_explicit_model_ids",
                     return_value=["provider/model"],
                 ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
-                asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
+                asyncio.run(backend_api_scan_routes_continuation.resume_scan("scan-1", request=request, current_user=user))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.total_candidates, 10)
             self.assertEqual(stored.processed_candidates, 4)
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
-            self.assertEqual(agent_api._running_scans["scan-1"].status, ScanItemStatus.PENDING)
+            self.assertEqual(get_runtime().scans.running_scans["scan-1"].status, ScanItemStatus.PENDING)
             runtime_update.assert_awaited_once_with(
                 "http://testserver",
                 meta.agent_key,
@@ -2428,7 +2450,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(manifest["agent_runtime_update"], {"hash": "runtime-current"})
             self.assertEqual(manifest["code_graph_mcp"], graph.model_dump(mode="json"))
 
-    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
+    @patch("backend.agents.gateway.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_retry_incomplete_scan_dispatches_retryable_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2524,32 +2546,32 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 return True
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
-                patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
+                patch.dict(get_runtime().agents.registered_agents, {"agent-old": agent}, clear=True),
+                patch("backend.agents.gateway.send_agent_command", new=AsyncMock(side_effect=fake_send)),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=object()),
                 ),
                 patch(
-                    "backend.api.agent.agent_config_has_explicit_model",
+                    "backend.agents.configuration.agent_config_has_explicit_model",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.agent.agent_explicit_model_ids",
+                    "backend.agents.configuration.agent_explicit_model_ids",
                     return_value=["provider/model"],
                 ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
-                asyncio.run(scan_api.retry_incomplete_scan("scan-1", request=request, current_user=user))
+                asyncio.run(backend_api_scan_routes_continuation.retry_incomplete_scan("scan-1", request=request, current_user=user))
 
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
@@ -2572,7 +2594,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 [1, 2, 3],
             )
 
-    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
+    @patch("backend.agents.gateway.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_dispatches_unprocessed_failed_and_threat_audit_work_together(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2740,35 +2762,35 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 return True
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
-                patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
-                patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
+                patch.dict(get_runtime().agents.registered_agents, {"agent-old": agent}, clear=True),
+                patch("backend.agents.gateway.send_agent_command", new=AsyncMock(side_effect=fake_send)),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value={
                         "hash": "remote-runtime",
                         "archive_sha256": "archive-hash",
                     }),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=object()),
                 ),
                 patch(
-                    "backend.api.agent.agent_config_has_explicit_model",
+                    "backend.agents.configuration.agent_config_has_explicit_model",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.agent.agent_explicit_model_ids",
+                    "backend.agents.configuration.agent_explicit_model_ids",
                     return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(
-                    scan_api.resume_scan(
+                    backend_api_scan_routes_continuation.resume_scan(
                         "scan-1",
                         request=SimpleNamespace(base_url="http://testserver/"),
                         current_user=user,
@@ -2806,7 +2828,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "2026-01-01T00:01:00+00:00",
             )
 
-    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
+    @patch("backend.agents.gateway.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_resume_preserves_analysis_only_empty_engine_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -2834,38 +2856,38 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 return True
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch.dict(
-                    "backend.api.agent._registered_agents",
+                    get_runtime().agents.registered_agents,
                     {"agent-old": agent},
                     clear=True,
                 ),
                 patch(
-                    "backend.api.agent.send_agent_command",
+                    "backend.agents.gateway.send_agent_command",
                     new=AsyncMock(side_effect=fake_send),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=object()),
                 ),
                 patch(
-                    "backend.api.agent.agent_config_has_explicit_model",
+                    "backend.agents.configuration.agent_config_has_explicit_model",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.agent.agent_explicit_model_ids",
+                    "backend.agents.configuration.agent_explicit_model_ids",
                     return_value=["provider/model"],
                 ),
             ):
-                asyncio.run(scan_api.resume_scan(
+                asyncio.run(backend_api_scan_routes_continuation.resume_scan(
                     "scan-analysis",
                     request=SimpleNamespace(base_url="http://testserver/"),
                     current_user=user,
@@ -2880,7 +2902,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["mining_engines"], [])
             self.assertEqual(sent["retry_mining_engine_ids"], [])
 
-    @patch("backend.api.agent.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
+    @patch("backend.agents.gateway.request_agent_scan_stop", new=AsyncMock(return_value={"still_active": False}))
     def test_failed_threat_analysis_retries_pattern_engine_without_rerunning_successful_engine(
         self,
     ) -> None:
@@ -2929,15 +2951,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             user = User(user_id="user-1", username="alice", role="user")
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
                 status = asyncio.run(
-                    scan_api.get_scan_status(
+                    backend_api_scan_routes_queries.get_scan_status(
                         "scan-threat-retry",
                         current_user=user,
                     )
@@ -2952,39 +2974,39 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 return True
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch.dict(
-                    "backend.api.agent._registered_agents",
+                    get_runtime().agents.registered_agents,
                     {"agent-old": agent},
                     clear=True,
                 ),
                 patch(
-                    "backend.api.agent.send_agent_command",
+                    "backend.agents.gateway.send_agent_command",
                     new=AsyncMock(side_effect=fake_send),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.get_scan_agent_config_async",
+                    "backend.agents.configuration.get_scan_agent_config_async",
                     new=AsyncMock(return_value=object()),
                 ),
                 patch(
-                    "backend.api.agent.agent_config_has_explicit_model",
+                    "backend.agents.configuration.agent_config_has_explicit_model",
                     return_value=True,
                 ),
                 patch(
-                    "backend.api.agent.agent_explicit_model_ids",
+                    "backend.agents.configuration.agent_explicit_model_ids",
                     return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(
-                    scan_api.resume_scan(
+                    backend_api_scan_routes_continuation.resume_scan(
                         "scan-threat-retry",
                         request=SimpleNamespace(base_url="http://testserver/"),
                         current_user=user,
@@ -3007,7 +3029,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-live-reconcile", ScanItemStatus.AUDITING, total=1)
             store.save_scan(scan, _meta())
-            agent_api._running_scans[scan.scan_id] = scan
+            get_runtime().scans.running_scans[scan.scan_id] = scan
             callback = Vulnerability(
                 file="callback.c",
                 line=10,
@@ -3029,21 +3051,21 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
                 live_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         scan.scan_id,
                         callback,
                         provisional=True,
@@ -3054,7 +3076,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 self.assertTrue(store.get_vulnerabilities(scan.scan_id)[0].provisional)
 
                 reconciled = asyncio.run(
-                    agent_api.agent_reconcile_vulnerabilities(
+                    backend_api_agent_routes_scan_results.agent_reconcile_vulnerabilities(
                         scan.scan_id,
                         AgentVulnerabilityReconcile(
                             report_batch_ids=["batch-1"],
@@ -3084,7 +3106,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             meta = _meta()
             meta.auto_fp_review = False
             store.save_scan(scan, meta)
-            agent_api._running_scans[scan.scan_id] = scan
+            get_runtime().scans.running_scans[scan.scan_id] = scan
             callback = Vulnerability(
                 file="callback.c",
                 line=10,
@@ -3110,14 +3132,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     scan.scan_id,
                     AgentScanFinish(
                         vulnerabilities=[final],
@@ -3186,17 +3208,17 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=8, processed=5), _meta())
-            agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
+            get_runtime().scans.running_scans["scan-1"] = store.load_scan("scan-1")[0]
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
                         vulnerabilities=[],
@@ -3234,17 +3256,17 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 for index in range(3)
             ]
             store.save_scan(scan, _meta())
-            agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
+            get_runtime().scans.running_scans["scan-1"] = store.load_scan("scan-1")[0]
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
                         vulnerabilities=[],
@@ -3284,7 +3306,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             store.add_vulnerability("scan-1", static_vuln)
             scan.vulnerabilities = [static_vuln]
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             threat_vuln = Vulnerability(
                 file="threat.c",
                 line=20,
@@ -3308,21 +3330,21 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     finish,
                     SimpleNamespace(base_url="http://testserver/"),
                 ))
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     finish,
                     SimpleNamespace(base_url="http://testserver/"),
@@ -3355,7 +3377,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             if hasattr(meta, "auto_fp_review"):
                 meta.auto_fp_review = False
             store.save_scan(scan, meta)
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             finding = {
                 "file": "threat.c",
                 "line": 20,
@@ -3379,16 +3401,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
-                first_response = asyncio.run(agent_api.agent_report_vulnerability(
+                first_response = asyncio.run(backend_api_agent_routes_scan_results.agent_report_vulnerability(
                     "scan-1",
                     Vulnerability(**finding),
                 ))
@@ -3407,7 +3429,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 scan.vulnerabilities[0].ticket_submitted = True
                 scan.vulnerabilities[0].ticket_id = "SEC-42"
                 replay_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         "scan-1",
                         Vulnerability(**finding),
                     ),
@@ -3430,7 +3452,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "attack_entry": "untrusted UDP datagram",
                 }
                 distinct_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         "scan-1",
                         Vulnerability(**distinct_finding),
                     ),
@@ -3452,7 +3474,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     persisted_findings[1].attack_entry,
                     "untrusted UDP datagram",
                 )
-                live_scan = agent_api._running_scans["scan-1"]
+                live_scan = get_runtime().scans.running_scans["scan-1"]
                 self.assertEqual(live_scan.status, ScanItemStatus.AUDITING)
                 self.assertEqual(len(live_scan.vulnerabilities), 2)
                 self.assertEqual(
@@ -3469,7 +3491,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     [0, 1],
                 )
 
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
                         vulnerabilities=[
@@ -3507,7 +3529,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             meta = _meta()
             meta.auto_fp_review = False
             store.save_scan(scan, meta)
-            agent_api._running_scans["scan-static-replay"] = scan
+            get_runtime().scans.running_scans["scan-static-replay"] = scan
             finding = Vulnerability(
                 file="static.c",
                 line=12,
@@ -3525,37 +3547,37 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             published: list[tuple[str, str, dict]] = []
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     new=_direct_store_call,
                 ),
                 patch(
-                    "backend.api.scan.run_store_call",
+                    "backend.application.default_store_runner",
                     new=_direct_store_call,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=lambda scan_id, event_type, data: published.append(
                         (scan_id, event_type, data),
                     ),
                 ),
             ):
                 first_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         "scan-static-replay",
                         finding,
                     ),
                 )
-                agent_api._running_scans.pop("scan-static-replay", None)
+                get_runtime().scans.running_scans.pop("scan-static-replay", None)
                 replay_response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
+                    backend_api_agent_routes_scan_results.agent_report_vulnerability(
                         "scan-static-replay",
                         replay,
                     ),
                 )
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-static-replay",
                     AgentScanFinish(
                         vulnerabilities=[replay, replay.model_copy(deep=True)],
@@ -3646,27 +3668,27 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             with (
                 patch(
-                    "backend.api.agent.get_scan_store",
+                    "backend.application.default_store_factory",
                     return_value=store,
                 ),
                 patch(
-                    "backend.api.scan.get_scan_store",
+                    "backend.application.default_store_factory",
                     return_value=store,
                 ),
                 patch(
-                    "backend.sse.publish",
+                    "backend.application.default_publisher",
                     side_effect=(
                         lambda scan_id, event_type, data:
                         published.append((scan_id, event_type, data))
                     ),
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     finish,
                     SimpleNamespace(base_url="http://testserver/"),
                 ))
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     finish,
                     SimpleNamespace(base_url="http://testserver/"),
@@ -3725,17 +3747,17 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan.opencode_pool = pool
             store.save_scan(scan, _meta())
             store.update_opencode_pool_status("scan-1", pool)
-            agent_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
 
             with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_factory", return_value=store),
                 patch(
-                    "backend.api.agent.run_store_call",
+                    "backend.application.default_store_runner",
                     side_effect=_direct_store_call,
                 ),
             ):
-                asyncio.run(agent_api.agent_finish_scan(
+                asyncio.run(backend_api_agent_routes_scan_completion.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
                         vulnerabilities=[],
@@ -3772,8 +3794,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 user_id="user-1",
             )
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                agent_api._reattach_active_fp_reviews(
+            with patch("backend.application.default_store_factory", return_value=store):
+                backend_agents_recovery._reattach_active_fp_reviews(
                     "agent-new",
                     info,
                     [{"scan_id": "scan-1", "review_id": "review-1"}],
@@ -3788,8 +3810,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             # The old connection's delayed disconnect-cancel must not kill the
             # review once the scan points at the new agent_id.
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                agent_api._mark_agent_scans_cancelled("agent-old")
+            with patch("backend.application.default_store_factory", return_value=store):
+                backend_agents_recovery._mark_agent_scans_cancelled("agent-old")
             review = store.get_fp_review_job("review-1")
             self.assertEqual(review.status, FpReviewStatus.RUNNING)
 
@@ -3809,8 +3831,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 user_id="user-1",
             )
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
-                agent_api._reattach_active_fp_reviews(
+            with patch("backend.application.default_store_factory", return_value=store):
+                backend_agents_recovery._reattach_active_fp_reviews(
                     "agent-new",
                     info,
                     [{"scan_id": "scan-1", "review_id": "review-1"}],
@@ -3830,8 +3852,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "review-1", status="error", error_message="Agent 断开连接"
             )
 
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                asyncio.run(scan_api.agent_fp_review_stage_output(
+            with patch("backend.application.default_store_factory", return_value=store):
+                asyncio.run(backend_api_scan_routes_fp_review_callbacks.agent_fp_review_stage_output(
                     "scan-1",
                     AgentFpReviewStageOutput(
                         review_id="review-1",
@@ -3858,8 +3880,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             job = store.get_fp_review_job("review-1")
 
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                merged = scan_api._merge_latest_fp_review_results(job, "scan-1")
+            with patch("backend.application.default_store_factory", return_value=store):
+                merged = backend_scans_fp_review_policy._merge_latest_fp_review_results(job, "scan-1")
 
             entries = [r for r in merged.results if r.vuln_index == 3]
             self.assertEqual(len(entries), 1)

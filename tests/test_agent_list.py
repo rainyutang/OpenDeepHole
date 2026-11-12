@@ -1,14 +1,13 @@
 from __future__ import annotations
-
+from backend.application import get_runtime
+import backend.application as application
 import asyncio
 import os
 import uuid
-from datetime import datetime, timezone
-
 import httpx
 import pytest
+from datetime import datetime, timezone
 from fastapi import FastAPI
-
 from backend.api import agent as agent_api
 from backend.auth import get_current_user
 from backend.models import AgentInfo, User
@@ -27,10 +26,10 @@ def catalog(request, tmp_path, monkeypatch):
     else:
         store = SqliteScanStore(tmp_path / "agents.db")
     prefix = uuid.uuid4().hex
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    monkeypatch.setattr(agent_api, "_registered_agents", {})
-    monkeypatch.setattr(agent_api, "_agent_ws", {})
-    monkeypatch.setattr(agent_api, "_agent_configs", {})
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(get_runtime().agents, 'registered_agents', {})
+    monkeypatch.setattr(get_runtime().agents, 'agent_ws', {})
+    monkeypatch.setattr(get_runtime().agents, 'agent_configs', {})
     try:
         yield store, prefix
     finally:
@@ -73,8 +72,8 @@ def add_agent(catalog, name, user_id, created_at) -> AgentInfo:
 
 
 def connect(agent):
-    agent_api._registered_agents[agent.agent_id] = agent
-    agent_api._agent_ws[agent.agent_id] = object()
+    get_runtime().agents.registered_agents[agent.agent_id] = agent
+    get_runtime().agents.agent_ws[agent.agent_id] = object()
 
 
 async def fetch_agents(user, path="/api/agents"):
@@ -150,9 +149,9 @@ def test_api_groups_online_agents_without_heartbeat_reordering(catalog):
         assert rows[0]["accepting_tasks"] is False
         connect(first)
         await assert_order([first, second, third, fourth], 3)
-        agent_api._agent_ws.pop(second.agent_id)
+        get_runtime().agents.agent_ws.pop(second.agent_id)
         await assert_order([first, third, second, fourth], 2)
-        agent_api._registered_agents.pop(second.agent_id)
+        get_runtime().agents.registered_agents.pop(second.agent_id)
         reconnected = second.model_copy(update={"agent_id": second.agent_id + "-reconnected"})
         connect(reconnected)
         rows = await assert_order([first, second, third, fourth], 3)
@@ -176,7 +175,7 @@ def test_owner_names_visibility_and_legacy_fallback(catalog, path):
     for name, user_id in (("legacy-z", legacy_owner.user_id), ("legacy-a", legacy_owner.user_id), ("legacy-unbound", "")):
         agent = AgentInfo(agent_id=name, name=name, ip="127.0.0.1", port=8000,
                           last_seen=datetime.now(timezone.utc).isoformat(), user_id=user_id)
-        agent_api._registered_agents[agent.agent_id] = agent
+        get_runtime().agents.registered_agents[agent.agent_id] = agent
         legacy_agents.append(agent)
     connect(foreign)
 

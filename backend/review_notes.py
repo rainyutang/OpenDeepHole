@@ -1,13 +1,11 @@
 """Deliver the current scan review notes over the existing Agent connection."""
 
 from __future__ import annotations
-
+import backend.agents.gateway as agent_gateway
+import backend.scans.agent_binding as scan_agent_binding
 import asyncio
-import uuid
-
 from backend.logger import get_logger
-from backend.store import get_scan_store
-from backend.store.async_ops import run_store_call
+from backend.application import get_scan_store, run_store_call
 
 logger = get_logger(__name__)
 
@@ -18,7 +16,12 @@ async def scan_review_notes_payload(scan_id: str, *, store=None) -> dict | None:
     return state if state["revision"] or state["enabled"] else None
 
 
-async def review_notes_for_agent(agent_key: str, reported_revisions: object, *, store=None) -> list[dict]:
+async def review_notes_for_agent(
+    agent_key: str,
+    reported_revisions: object,
+    *,
+    store=None,
+) -> list[dict]:
     """Reconcile on reconnect, including completed and FP-only scans."""
     if not agent_key:
         return []
@@ -33,28 +36,21 @@ async def review_notes_for_agent(agent_key: str, reported_revisions: object, *, 
 
 async def sync_scan_review_notes(scan_id: str) -> str:
     """Return synced only after the Agent confirms the files were written."""
-    from backend.api import agent as agent_api
-    from backend.api.scan import _resolve_scan_agent_id
-
     store = get_scan_store()
-    request_id = uuid.uuid4().hex
     try:
         meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is None:
             return "pending"
-        agent_id = await _resolve_scan_agent_id(meta)
+        agent_id = await scan_agent_binding._resolve_scan_agent_id(meta)
         if agent_id is None:
             return "pending"
         state = await run_store_call(store, "get_scan_review_notes", scan_id)
-        waiter = asyncio.get_running_loop().create_future()
-        agent_api._review_notes_waiters[request_id] = waiter
-        if not await agent_api.send_agent_command(agent_id, {
-            **state,
-            "type": "review_notes_update",
-            "request_id": request_id,
-        }):
+        response = await agent_gateway.AgentGateway().request(
+            agent_id, {**state, "type": "review_notes_update"},
+            response_type="review_notes_result", timeout=10.0,
+        )
+        if response is None:
             return "pending"
-        response = await agent_api._wait_agent_response(request_id, waiter, timeout=10.0)
         if (
             response.get("ok") is True
             and response.get("scan_id") == scan_id
@@ -70,7 +66,3 @@ async def sync_scan_review_notes(scan_id: str) -> str:
     except Exception:
         logger.exception("Review notes sync failed for scan %s", scan_id)
         return "error"
-    finally:
-        waiter = agent_api._review_notes_waiters.pop(request_id, None)
-        if waiter is not None and not waiter.done():
-            waiter.cancel()

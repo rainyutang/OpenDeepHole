@@ -1,11 +1,13 @@
-import asyncio
-import tempfile
-import unittest
+
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
-
-from backend.api import scan as scan_api
+import asyncio
+import tempfile
+import unittest
+import backend.api.scan_routes.continuation as backend_api_scan_routes_continuation
+import backend.api.scan_routes.lifecycle as backend_api_scan_routes_lifecycle
+from backend.application import get_runtime
 from backend.models import (
     AgentInfo,
     FpReviewResult,
@@ -80,12 +82,12 @@ def _live_agent() -> AgentInfo:
 
 class ScanFpReviewLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def tearDown(self) -> None:
-        scan_api._running_scans.clear()
-        scan_api._scan_owners.clear()
+        get_runtime().scans.running_scans.clear()
+        get_runtime().scans.scan_owners.clear()
 
     def test_stop_drops_stale_local_scan_without_rewriting_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,18 +97,18 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             store.save_scan(persisted, _meta())
             stale_live = persisted.model_copy(deep=True)
             stale_live.status = ScanItemStatus.AUDITING
-            scan_api._running_scans["scan-1"] = stale_live
-            scan_api._scan_owners["scan-1"] = "user-1"
+            get_runtime().scans.running_scans["scan-1"] = stale_live
+            get_runtime().scans.scan_owners["scan-1"] = "user-1"
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.lifecycle._resolve_scan_agent_id",
                     new=AsyncMock(return_value=None),
                 ),
             ):
-                response = asyncio.run(scan_api.stop_scan(
+                response = asyncio.run(backend_api_scan_routes_lifecycle.stop_scan(
                     "scan-1",
                     User(user_id="user-1", username="alice", role="user"),
                 ))
@@ -115,8 +117,8 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             self.assertFalse(response["main_scan_stopped"])
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.error_message, "Agent 断开连接")
-            self.assertNotIn("scan-1", scan_api._running_scans)
-            self.assertNotIn("scan-1", scan_api._scan_owners)
+            self.assertNotIn("scan-1", get_runtime().scans.running_scans)
+            self.assertNotIn("scan-1", get_runtime().scans.scan_owners)
 
     def test_stop_notifies_main_scan_and_all_active_fp_reviews(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,7 +150,7 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 "review-running", "scan-1", 2, "2026-08-11T00:02:00+00:00"
             )
             store.update_fp_review_job("review-running", status="running")
-            scan_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             send = AsyncMock(return_value=True)
             request_stop = AsyncMock(return_value={
                 "scan_id": "scan-1",
@@ -157,20 +159,20 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             })
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.lifecycle._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
-                    "backend.api.agent.request_agent_scan_stop",
+                    "backend.agents.gateway.request_agent_scan_stop",
                     new=request_stop,
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
                 response = asyncio.run(
-                    scan_api.stop_scan(
+                    backend_api_scan_routes_lifecycle.stop_scan(
                         "scan-1",
                         User(user_id="user-1", username="alice", role="user"),
                     )
@@ -210,22 +212,22 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scan.db")
             scan = _scan(ScanItemStatus.ANALYZING)
             store.save_scan(scan, _meta())
-            scan_api._running_scans["scan-1"] = scan
+            get_runtime().scans.running_scans["scan-1"] = scan
             request_stop = AsyncMock(return_value=None)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.lifecycle._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
-                    "backend.api.agent.request_agent_scan_stop",
+                    "backend.agents.gateway.request_agent_scan_stop",
                     new=request_stop,
                 ),
             ):
-                response = asyncio.run(scan_api.stop_scan(
+                response = asyncio.run(backend_api_scan_routes_lifecycle.stop_scan(
                     "scan-1",
                     User(user_id="user-1", username="alice", role="user"),
                 ))
@@ -262,16 +264,16 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             common_patches = (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.lifecycle._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             )
             with common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
-                asyncio.run(scan_api.stop_scan("scan-1", user))
+                asyncio.run(backend_api_scan_routes_lifecycle.stop_scan("scan-1", user))
 
             self.assertEqual(store.load_scan("scan-1")[0].status, ScanItemStatus.COMPLETE)
             self.assertEqual(
@@ -281,28 +283,28 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             send.reset_mock()
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.fp_review._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_id_connection_async",
+                    "backend.agents.directory.resolve_agent_id_connection_async",
                     new=AsyncMock(return_value=("agent-live", _live_agent())),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
                 response = asyncio.run(
-                    scan_api.resume_scan(
+                    backend_api_scan_routes_continuation.resume_scan(
                         "scan-1",
                         request=SimpleNamespace(base_url="http://testserver/"),
                         current_user=user,
@@ -345,28 +347,28 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.fp_review._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_id_connection_async",
+                    "backend.agents.directory.resolve_agent_id_connection_async",
                     new=AsyncMock(return_value=("agent-live", _live_agent())),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
                 response = asyncio.run(
-                    scan_api.resume_scan(
+                    backend_api_scan_routes_continuation.resume_scan(
                         "scan-1",
                         request=SimpleNamespace(base_url="http://testserver/"),
                         current_user=User(
@@ -396,28 +398,28 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
 
             with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.application.default_store_factory", return_value=store),
+                patch("backend.application.default_store_runner", new=_direct_store_call),
                 patch(
-                    "backend.api.scan._resolve_scan_agent_id",
+                    "backend.scans.fp_review._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
-                    "backend.api.agent.resolve_agent_id_connection_async",
+                    "backend.agents.directory.resolve_agent_id_connection_async",
                     new=AsyncMock(return_value=("agent-live", _live_agent())),
                 ),
                 patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    "backend.agents.runtime_updates.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    "backend.agents.artifacts.create_agent_task_runtime_update_payload_async",
                     new=AsyncMock(return_value=None),
                 ),
-                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.agents.gateway.send_agent_command", new=send),
             ):
                 response = asyncio.run(
-                    scan_api.resume_scan(
+                    backend_api_scan_routes_continuation.resume_scan(
                         "scan-1",
                         request=SimpleNamespace(base_url="http://testserver/"),
                         current_user=User(
