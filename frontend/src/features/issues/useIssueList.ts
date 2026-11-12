@@ -1,26 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import type { IssueListProps } from "./types";
 import { useListFocus } from "../../auditNavigation";
-import { isFpReviewNonProblem } from "../../fpReview";
 import {
   ALL_FILTER,
   FP_REVIEW_FILTER_LABELS,
   PAGE_SIZE,
   USER_FEEDBACK_FILTER_LABELS,
   VALIDATION_FILTER_LABELS,
-  auditOrder,
+  annotateIssues,
   countedOptions,
   displayedVulnerabilityTypeLabel,
   engineId,
   engineLabel,
-  fpReviewFilterState,
-  getVerdict,
-  isFinalFpProblem,
-  isProblemVuln,
-  issueSourceOrder,
+  selectVisibleIssues,
   severityLabel,
-  userFeedbackFilterState,
-  validationFilterState,
   valueOptions,
 } from "./model";
 
@@ -63,24 +56,7 @@ export function useIssueList({
   );
   // 候选分类：问题 vs 非问题
   const annotated = useMemo(
-    () =>
-      vulnerabilities.map((vuln) => {
-        const index = vuln.vuln_index;
-        const fpResult = fpResultMap.get(index) ?? null;
-        const validation = validationMap.get(index);
-        return {
-          vuln,
-          index,
-          fpResult,
-          validation,
-          validationState: validationFilterState(validation),
-          fpReviewState: fpReviewFilterState(fpResult),
-          userFeedbackState: userFeedbackFilterState(vuln),
-          problem: isProblemVuln(vuln, fpResult),
-          fpNonProblem: getVerdict(vuln) === "confirmed" && isFpReviewNonProblem(fpResult),
-          finalTp: isFinalFpProblem(fpResult),
-        };
-      }),
+    () => annotateIssues(vulnerabilities, fpResultMap, validationMap),
     [vulnerabilities, fpResultMap, validationMap, feedbackRevision],
   );
 
@@ -174,36 +150,10 @@ export function useIssueList({
     [scopedAnnotated],
   );
 
-  const visible = useMemo(() => {
-    let list = finalTpOnly
-      ? scopedAnnotated.filter((a) => a.finalTp)
-      : scopedAnnotated.filter((a) => (showAll ? true : a.problem || a.fpNonProblem));
-    const directed = scopedAnnotated.find((item) => item.index === directIndex);
-    if (directed && !list.includes(directed)) list = [...list, directed];
-    if (!finalTpOnly && severityFilter !== ALL_FILTER) {
-      list = list.filter((a) => a.vuln.severity === severityFilter);
-    }
-    if (typeFilter !== ALL_FILTER) list = list.filter((a) => a.vuln.vuln_type === typeFilter);
-    if (effectiveEngineFilter !== ALL_FILTER) {
-      list = list.filter((a) => engineId(a.vuln) === effectiveEngineFilter);
-    }
-    if (validationFilter !== ALL_FILTER) {
-      list = list.filter((a) => (finalTpOnly ? a.finalTp : a.problem) && a.validationState === validationFilter);
-    }
-    if (!finalTpOnly && fpReviewFilter !== ALL_FILTER) {
-      list = list.filter((a) => a.fpReviewState === fpReviewFilter);
-    }
-    if (finalTpOnly && userFeedbackFilter !== ALL_FILTER) {
-      list = list.filter((a) => a.userFeedbackState === userFeedbackFilter);
-    }
-    return [...list].sort((a, b) => {
-      const sourceOrder = issueSourceOrder(a.vuln) - issueSourceOrder(b.vuln);
-      if (sourceOrder !== 0) return sourceOrder;
-      const order = auditOrder(a.vuln, a.index) - auditOrder(b.vuln, b.index);
-      if (order !== 0) return order;
-      return a.index - b.index;
-    });
-  }, [scopedAnnotated, finalTpOnly, showAll, severityFilter, typeFilter, effectiveEngineFilter, validationFilter, fpReviewFilter, userFeedbackFilter, directIndex]);
+  const visible = useMemo(() => selectVisibleIssues(scopedAnnotated, {
+    finalTpOnly, showAll, severityFilter, typeFilter, effectiveEngineFilter,
+    validationFilter, fpReviewFilter, userFeedbackFilter, directIndex,
+  }), [scopedAnnotated, finalTpOnly, showAll, severityFilter, typeFilter, effectiveEngineFilter, validationFilter, fpReviewFilter, userFeedbackFilter, directIndex]);
 
   // 左侧分页：每页 PAGE_SIZE 个
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));

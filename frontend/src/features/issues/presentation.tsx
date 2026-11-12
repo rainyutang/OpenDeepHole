@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { FpReviewResult } from "../../types/fpReview";
@@ -84,7 +85,7 @@ export function FpStatusBadge({
 }
 
 export function MarkdownReport({ content }: { content: string }) {
-  return (
+  return useMemo(() => (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
@@ -119,7 +120,7 @@ export function MarkdownReport({ content }: { content: string }) {
     >
       {content}
     </ReactMarkdown>
-  );
+  ), [content]);
 }
 
 export function FilterSelect({

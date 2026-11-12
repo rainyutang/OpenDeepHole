@@ -1,6 +1,6 @@
 import type { ReportFpReviewState } from "../../api/reports";
 import type { FpReviewResult } from "../../types/fpReview";
-import type { UserFeedbackVerdict, Vulnerability, VulnerabilityValidation } from "../../types/issues";
+import type { IndexedVulnerability, UserFeedbackVerdict, Vulnerability, VulnerabilityValidation } from "../../types/issues";
 import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../../fpReview";
 import { canonicalMiningEngineLabel } from "../../miningEngines";
 
@@ -182,6 +182,94 @@ export function fpReviewFilterState(result?: FpReviewResult | null): ReportFpRev
 
 export function userFeedbackFilterState(vuln: Vulnerability): UserFeedbackFilterState {
   return vuln.user_verdict ?? "unmarked";
+}
+
+export interface AnnotatedIssue {
+  vuln: IndexedVulnerability;
+  index: number;
+  fpResult: FpReviewResult | null;
+  validation: VulnerabilityValidation | undefined;
+  validationState: string;
+  fpReviewState: ReportFpReviewState;
+  userFeedbackState: UserFeedbackFilterState;
+  problem: boolean;
+  fpNonProblem: boolean;
+  finalTp: boolean;
+}
+
+/** Resolve per-issue state in one batch while retaining the backend index and record identity. */
+export function annotateIssues(
+  vulnerabilities: readonly IndexedVulnerability[],
+  fpResultMap: ReadonlyMap<number, FpReviewResult>,
+  validationMap: ReadonlyMap<number, VulnerabilityValidation>,
+): AnnotatedIssue[] {
+  return vulnerabilities.map((vuln) => {
+    const index = vuln.vuln_index;
+    const fpResult = fpResultMap.get(index) ?? null;
+    const validation = validationMap.get(index);
+    return {
+      vuln,
+      index,
+      fpResult,
+      validation,
+      validationState: validationFilterState(validation),
+      fpReviewState: fpReviewFilterState(fpResult),
+      userFeedbackState: userFeedbackFilterState(vuln),
+      problem: isProblemVuln(vuln, fpResult),
+      fpNonProblem: getVerdict(vuln) === "confirmed" && isFpReviewNonProblem(fpResult),
+      finalTp: isFinalFpProblem(fpResult),
+    };
+  });
+}
+
+export interface IssueListFilters {
+  finalTpOnly: boolean;
+  showAll: boolean;
+  severityFilter: string;
+  typeFilter: string;
+  effectiveEngineFilter: string;
+  validationFilter: string;
+  fpReviewFilter: string;
+  userFeedbackFilter: string;
+  directIndex: number | null;
+}
+
+/** Apply list controls within the supplied scope, then order by engine, audit order, and stable index. */
+export function selectVisibleIssues(
+  scopedAnnotated: readonly AnnotatedIssue[],
+  {
+    finalTpOnly, showAll, severityFilter, typeFilter, effectiveEngineFilter,
+    validationFilter, fpReviewFilter, userFeedbackFilter, directIndex,
+  }: IssueListFilters,
+): AnnotatedIssue[] {
+  let list = finalTpOnly
+    ? scopedAnnotated.filter((a) => a.finalTp)
+    : scopedAnnotated.filter((a) => (showAll ? true : a.problem || a.fpNonProblem));
+  const directed = scopedAnnotated.find((item) => item.index === directIndex);
+  if (directed && !list.includes(directed)) list = [...list, directed];
+  if (!finalTpOnly && severityFilter !== ALL_FILTER) {
+    list = list.filter((a) => a.vuln.severity === severityFilter);
+  }
+  if (typeFilter !== ALL_FILTER) list = list.filter((a) => a.vuln.vuln_type === typeFilter);
+  if (effectiveEngineFilter !== ALL_FILTER) {
+    list = list.filter((a) => engineId(a.vuln) === effectiveEngineFilter);
+  }
+  if (validationFilter !== ALL_FILTER) {
+    list = list.filter((a) => (finalTpOnly ? a.finalTp : a.problem) && a.validationState === validationFilter);
+  }
+  if (!finalTpOnly && fpReviewFilter !== ALL_FILTER) {
+    list = list.filter((a) => a.fpReviewState === fpReviewFilter);
+  }
+  if (finalTpOnly && userFeedbackFilter !== ALL_FILTER) {
+    list = list.filter((a) => a.userFeedbackState === userFeedbackFilter);
+  }
+  return [...list].sort((a, b) => {
+    const sourceOrder = issueSourceOrder(a.vuln) - issueSourceOrder(b.vuln);
+    if (sourceOrder !== 0) return sourceOrder;
+    const order = auditOrder(a.vuln, a.index) - auditOrder(b.vuln, b.index);
+    if (order !== 0) return order;
+    return a.index - b.index;
+  });
 }
 
 export function countedOptions(values: string[], labels: Record<string, string>): FilterOption[] {
