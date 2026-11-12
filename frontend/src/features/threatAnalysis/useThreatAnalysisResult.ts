@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type { ScanStatus, ThreatAnalysis } from "../../types";
+import type { ScanStatus } from "../../types/scans";
+import type { ThreatAnalysis } from "../../types/threatAnalysis";
 import { getScanThreatAnalysis } from "./api";
-import { isThreatAnalysisResultReady } from "./ThreatAnalysisPanel";
+import { isThreatAnalysisResultReady } from "./analysisModel";
 
 interface ResultRequestState {
   scanId: string;

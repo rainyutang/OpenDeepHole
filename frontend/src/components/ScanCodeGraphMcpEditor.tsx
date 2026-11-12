@@ -1,22 +1,6 @@
-import type { AgentMcpConfig } from "../types";
+import type { AgentMcpConfig } from "../types/agents";
 
-export function defaultScanCodeGraphMcp(): AgentMcpConfig {
-  return {
-    enabled: false,
-    name: "codegraph",
-    transport: "local",
-    timeout_seconds: 300,
-    local: {
-      executable: "codegraph",
-      args: ["serve", "--mcp"],
-      environment: {
-        CODEGRAPH_MCP_TOOLS:
-          "explore,node,search,callers,callees,impact,files,status",
-      },
-    },
-    remote: { url: "", headers: {} },
-  };
-}
+export { defaultScanCodeGraphMcp } from "../features/newScan/codeGraphDefaults";
 
 export default function ScanCodeGraphMcpEditor({
   value,
@@ -35,11 +19,17 @@ export default function ScanCodeGraphMcpEditor({
           </p>
         </div>
         <button
+
           type="button"
+
           role="switch"
+
           aria-label="启用代码图谱"
+
           aria-checked={value.enabled}
+
           onClick={() => onChange({ ...value, enabled: !value.enabled })}
+
           className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${value.enabled ? "bg-blue-500" : "bg-slate-600"}`}
         >
           <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${value.enabled ? "translate-x-5" : "translate-x-0.5"}`} />
