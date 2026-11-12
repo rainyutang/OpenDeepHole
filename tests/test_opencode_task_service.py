@@ -35,6 +35,7 @@ from task_agent.serve_client import (
     OpenCodeProviderQuotaError,
     OpenCodeServeStartupError,
     OpenCodeTaskQualityError,
+    _validate_required_command_audit,
 )
 from task_agent.task_service import (
     OpenCodeExecutionContext,
@@ -1868,13 +1869,18 @@ def test_allowlisted_external_directory_retains_descendants_and_cleans_sibling(
     asyncio.run(run())
 
 
-def test_invalid_written_json_is_formatter_source_and_retained_in_work_dir(
-    tmp_path: Path,
+@pytest.mark.parametrize(("source_location", "created"), [
+    ("work", True), ("project", True), ("work", False),
+])
+def test_invalid_written_json_is_retained_during_formatting_and_removed_on_success(
+    tmp_path: Path, source_location: str, created: bool,
 ) -> None:
     async def run() -> None:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        invalid_file = work_dir / "invalid.json"
+        invalid_file = (work_dir if source_location == "work" else tmp_path) / "invalid.json"
+        if not created:
+            invalid_file.write_text("preexisting report", encoding="utf-8")
         calls = 0
         permissions: list[list[dict[str, str]] | None] = []
         prompts: list[str] = []
@@ -1897,7 +1903,7 @@ def test_invalid_written_json_is_formatter_source_and_retained_in_work_dir(
                 kwargs["on_file_write"](OpenCodeFileWrite(
                     call_id="write-invalid",
                     path=str(invalid_file),
-                    created=True,
+                    created=created,
                 ))
                 text = "written"
             else:
@@ -1940,7 +1946,10 @@ def test_invalid_written_json_is_formatter_source_and_retained_in_work_dir(
             _writable_path_permissions((work_dir.resolve(),)),
             [],
         ]
-        assert invalid_file.read_text(encoding="utf-8") == '{"answer":"wrong"}'
+        if created:
+            assert not invalid_file.exists()
+        else:
+            assert invalid_file.read_text(encoding="utf-8") == '{"answer":"wrong"}'
 
     asyncio.run(run())
 
@@ -2038,7 +2047,256 @@ def test_json_formatter_receives_only_explicit_output_requirements(
         assert formatter["mcp_tools"] == ()
         assert formatter["system_prompt"] == ""
         if source_kind == "file":
-            assert output_file.read_text(encoding="utf-8") == markdown
+            assert not output_file.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("source_location", "outcome"), [
+    ("work", "success"), ("project", "success"),
+    ("work", "failure"), ("work", "cancelled"),
+])
+def test_response_file_survives_same_session_edits_until_recovery_finishes(
+    tmp_path: Path, source_location: str, outcome: str,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = (work_dir if source_location == "work" else tmp_path) / "response.json"
+        calls: list[dict] = []
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = "ses-formatter" if index == 1 else "ses-response"
+            callback = kwargs["on_session_id"](session_id)
+            if inspect.isawaitable(callback):
+                await callback
+            if index:
+                # Both the formatter and later edits may still need the file.
+                assert output_file.is_file()
+                assert isinstance(json.loads(output_file.read_text(encoding="utf-8"))["answer"], str)
+            if index == 1:
+                assert kwargs["disable_all_tools"] is True
+                text = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"
+            else:
+                if index == 3 and outcome == "cancelled":
+                    raise asyncio.CancelledError()
+                answer = 42 if index == 3 and outcome == "success" else f"wrong type {index}"
+                output_file.write_text(json.dumps({"answer": answer}), encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id=f"write-{index}", path=str(output_file), created=index == 0,
+                ))
+                text = "response written"
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg-{index}",
+                lines=[text], text=text, model="provider/model-low",
+            )
+
+        task = _run_service_task(
+            tmp_path, run_prompt,
+            OpenCodeTaskSpec(
+                task_name="response file recovery", prompt="return json",
+                directory=tmp_path, output_schema=SCHEMA,
+                output_retry_count=2, attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+        result = await task
+        assert result.status == outcome, result.error
+        if outcome == "success":
+            assert result.structured == {"answer": 42}
+            assert not output_file.exists()
+        if outcome != "success":
+            assert output_file.is_file()
+            assert isinstance(json.loads(output_file.read_text(encoding="utf-8"))["answer"], str)
+        assert [call["session_id"] for call in calls] == [
+            None, None, "ses-response", "ses-response",
+        ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source_location", ["work", "project"])
+@pytest.mark.parametrize("accepted_source", ["text", "file"])
+def test_unrelated_formatter_source_is_retained_when_another_response_is_accepted(
+    tmp_path: Path, source_location: str, accepted_source: str,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        notes_file = (work_dir if source_location == "work" else tmp_path) / "notes.md"
+        response_file = work_dir / "response.json"
+        notes = "Implementation notes unrelated to the requested answer."
+        calls: list[dict] = []
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = "ses-formatter" if index == 1 else "ses-response"
+            callback = kwargs["on_session_id"](session_id)
+            if inspect.isawaitable(callback):
+                await callback
+            if index == 0:
+                notes_file.write_text(notes, encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="write-notes", path=str(notes_file), created=True,
+                ))
+                text = "notes written"
+            elif index == 1:
+                assert notes_file.read_text(encoding="utf-8") == notes
+                assert json.dumps(notes) in kwargs["prompt"]
+                text = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"
+            else:
+                assert notes_file.read_text(encoding="utf-8") == notes
+                text = '{"answer": 42}'
+                if accepted_source == "file":
+                    response_file.write_text(text, encoding="utf-8")
+                    kwargs["on_file_write"](OpenCodeFileWrite(
+                        call_id="write-response", path=str(response_file), created=True,
+                    ))
+                    text = "response written"
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg-{index}",
+                lines=[text], text=text, model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path, run_prompt,
+            OpenCodeTaskSpec(
+                task_name="reject unrelated formatter source", prompt="return json",
+                directory=tmp_path, output_schema=SCHEMA,
+                output_retry_count=1, attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+        assert result.status == "success", result.error
+        assert result.structured == {"answer": 42}
+        assert notes_file.read_text(encoding="utf-8") == notes
+        assert not response_file.exists()
+        assert [call["session_id"] for call in calls] == [None, None, "ses-response"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("external_change", ["rewrite", "replace"])
+def test_formatter_source_changed_outside_task_is_retained_after_success(
+    tmp_path: Path, external_change: str,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        source_file = work_dir / "response.md"
+        original = "The answer is 42."
+        updated = "A different writer owns this file now."
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            session_id = "ses-response" if calls == 1 else "ses-formatter"
+            callback = kwargs["on_session_id"](session_id)
+            if inspect.isawaitable(callback):
+                await callback
+            if calls == 1:
+                source_file.write_text(original, encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="write-response", path=str(source_file), created=True,
+                ))
+                text = "response written"
+            else:
+                assert json.dumps(original) in kwargs["prompt"]
+                assert source_file.read_text(encoding="utf-8") == original
+                # Simulate another writer; no task file-write callback occurs.
+                if external_change == "rewrite":
+                    source_file.write_text(updated, encoding="utf-8")
+                else:
+                    replacement = work_dir / "replacement.md"
+                    replacement.write_text(updated, encoding="utf-8")
+                    replacement.replace(source_file)
+                text = '{"answer": 42}'
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg-{calls}",
+                lines=[text], text=text, model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path, run_prompt,
+            OpenCodeTaskSpec(
+                task_name="preserve externally changed source", prompt="return json",
+                directory=tmp_path, output_schema=SCHEMA,
+                output_retry_count=1, attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+        assert result.status == "success", result.error
+        assert result.structured == {"answer": 42}
+        assert source_file.read_text(encoding="utf-8") == updated
+        assert calls == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("formatter", [False, True])
+def test_response_file_cleanup_failure_only_warns_after_success(
+    tmp_path: Path, monkeypatch, caplog, formatter: bool,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "response.json"
+        calls = 0
+        original_unlink = Path.unlink
+
+        def fail_response_unlink(path, *args, **kwargs):
+            if path == output_file:
+                raise PermissionError("response file is locked")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_response_unlink)
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            session_id = "ses-response" if calls == 1 else "ses-formatter"
+            callback = kwargs["on_session_id"](session_id)
+            if inspect.isawaitable(callback):
+                await callback
+            if calls == 1:
+                payload = {"answer": "wrong type" if formatter else 42}
+                output_file.write_text(json.dumps(payload), encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="write-response", path=str(output_file), created=True,
+                ))
+                text = "response written"
+            else:
+                assert output_file.is_file()
+                text = '{"answer": 42}'
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg-{calls}",
+                lines=[text], text=text, model="provider/model-low",
+            )
+
+        with caplog.at_level("WARNING", logger="task_agent.task_service"):
+            result = await _run_service_task(
+                tmp_path, run_prompt,
+                OpenCodeTaskSpec(
+                    task_name="best effort response cleanup", prompt="return json",
+                    directory=tmp_path, output_schema=SCHEMA,
+                    output_retry_count=1, attempt=0,
+                ),
+                work_dir=work_dir,
+            )
+        assert result.status == "success", result.error
+        assert result.structured == {"answer": 42}
+        assert output_file.is_file()
+        assert calls == (2 if formatter else 1)
+        assert any(
+            record.levelname == "WARNING"
+            and str(output_file) in record.getMessage()
+            and "response file is locked" in record.getMessage()
+            for record in caplog.records
+        )
 
     asyncio.run(run())
 
@@ -2906,6 +3164,88 @@ def test_required_command_failure_requeues_without_model_health_penalty(
         assert first_release["health_outcome"] is None
         identity = {("provider/model-low", False, "opencode", "opencode")}
         assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("final_answers", "expected_status"), [
+    ((7,), "success"),
+    (("invalid", 9), "success"),
+    (("invalid", "still invalid"), "failure"),
+])
+def test_post_session_validator_checks_final_file_modified_after_successful_command(
+    tmp_path: Path, final_answers: tuple, expected_status: str,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        result_file = work_dir / "result.json"
+        audit_path = tmp_path / "command-audit.jsonl"
+        command = "python validate.py --input result.json"
+        calls: list[dict] = []
+        validated_answers = []
+
+        def validate_final_file() -> str | None:
+            value = json.loads(result_file.read_text(encoding="utf-8"))
+            validated_answers.append(value["answer"])
+            if type(value["answer"]) is not int:
+                return "result.json: final answer must be an integer"
+            return None
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            callback = kwargs["on_session_id"]("ses-final-artifact")
+            if inspect.isawaitable(callback):
+                await callback
+            result_file.write_text('{"answer": 0}', encoding="utf-8")
+            # The command succeeded against the earlier value. Its audit must
+            # not bypass the host validator reading the final, rewritten file.
+            result_file.write_text(
+                json.dumps({"answer": final_answers[index]}), encoding="utf-8",
+            )
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id=f"write-{index}", path=str(result_file), created=index == 0,
+            ))
+            audit_path.write_text("\n".join(json.dumps(event) for event in (
+                {"version": 1, "kind": "command", "command": command,
+                 "success": True, "exit_code": 0},
+                {"version": 1, "kind": "file_write", "path": str(result_file)},
+            )) + "\n", encoding="utf-8")
+            details = OpenCodePromptResult(
+                session_id="ses-final-artifact", message_id=f"msg-{index}",
+                lines=["done"], text="done", model="provider/model-low",
+            )
+            try:
+                _validate_required_command_audit(audit_path, (command,))
+            except OpenCodeTaskQualityError as exc:
+                exc.prompt_result = details
+                raise
+            return details
+
+        result = await _run_service_task(
+            tmp_path, run_prompt,
+            OpenCodeTaskSpec(
+                task_name="validate rewritten artifact", prompt="produce result.json",
+                directory=tmp_path, output_schema=None,
+                allowed_bash_commands=(command,), required_bash_commands=(command,),
+                required_bash_retry_count=1,
+                post_session_validator=validate_final_file,
+                post_session_validation_retry_count=1, attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+        assert result.status == expected_status, result.error
+        assert validated_answers == list(final_answers)
+        assert [call["session_id"] for call in calls] == [
+            None, *(["ses-final-artifact"] * (len(final_answers) - 1)),
+        ]
+        assert json.loads(result_file.read_text(encoding="utf-8")) == {
+            "answer": final_answers[-1],
+        }
+        if len(calls) == 2:
+            assert "final answer must be an integer" in calls[1]["prompt"]
+            assert "校验通过后又修改了任务文件" not in calls[1]["prompt"]
 
     asyncio.run(run())
 

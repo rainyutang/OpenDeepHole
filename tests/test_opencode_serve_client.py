@@ -1277,7 +1277,7 @@ await hooks["tool.execute.after"](
         _validate_required_command_audit(audit_path, (command,))
 
 
-def test_required_command_audit_rejects_failure_and_post_validation_write(
+def test_required_command_audit_rejects_command_failure(
     tmp_path: Path,
 ) -> None:
     command = "python validate.py"
@@ -1306,26 +1306,46 @@ def test_required_command_audit_rejects_failure_and_post_validation_write(
     )
     assert exc_info.value.command_failures[0].output_truncated is True
 
-    audit_path.write_text(
-        "\n".join((
-            json.dumps({
+
+@pytest.mark.parametrize("session_id", ["parent-session", "child-session"])
+@pytest.mark.parametrize("filename", ["result.json", "notes.md"])
+@pytest.mark.parametrize("command_count", [1, 2])
+def test_required_command_audit_accepts_writes_after_success(
+    tmp_path: Path, session_id: str, filename: str, command_count: int,
+) -> None:
+    commands = tuple(f"python validate_{index}.py" for index in range(command_count))
+    events = []
+    for command in commands:
+        events.extend((
+            {
                 "version": 1,
                 "kind": "command",
                 "command": command,
+                "session_id": "parent-session",
                 "exit_code": 0,
                 "success": True,
-            }),
-            json.dumps({
+            },
+            {
                 "version": 1,
                 "kind": "file_write",
-                "path": str(tmp_path / "result.json"),
-            }),
+                "session_id": session_id,
+                "path": str(tmp_path / filename),
+            },
         ))
-        + "\n",
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
         encoding="utf-8",
     )
-    with pytest.raises(OpenCodeTaskQualityError, match="modified task files"):
-        _validate_required_command_audit(audit_path, (command,))
+    _validate_required_command_audit(audit_path, commands)
+
+    # Ignoring write order must not let one command stand in for another.
+    with pytest.raises(OpenCodeTaskQualityError) as missing:
+        _validate_required_command_audit(audit_path, (*commands, "python missing.py"))
+    assert missing.value.failure_kind == "command_not_executed"
+    assert [failure.command for failure in missing.value.command_failures] == [
+        "python missing.py",
+    ]
 
 
 def test_opencode_mcp_tool_ids_match_official_sanitization_and_legacy_formats() -> None:

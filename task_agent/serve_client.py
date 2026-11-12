@@ -1243,32 +1243,24 @@ def _validate_required_command_audit(
             )
         events.append(value)
 
-    successful_indexes: dict[str, list[int]] = {
-        command: [] for command in required_commands
-    }
-    last_write_index = -1
+    successful_commands: set[str] = set()
     failures: dict[str, dict[str, Any]] = {}
-    successes: dict[str, dict[str, Any]] = {}
-    for index, event in enumerate(events):
-        if event.get("kind") == "file_write":
-            last_write_index = index
-            continue
+    for event in events:
         if event.get("kind") != "command":
             continue
         command = str(event.get("command") or "")
-        if command not in successful_indexes:
+        if command not in required_commands:
             continue
         if event.get("success") is True and (
             event.get("exit_code") == 0
             or event.get("success_source") == "output_marker"
         ):
-            successful_indexes[command].append(index)
-            successes[command] = event
+            successful_commands.add(command)
         else:
             failures[command] = event
 
     missing = [
-        command for command, indexes in successful_indexes.items() if not indexes
+        command for command in required_commands if command not in successful_commands
     ]
     if missing:
         command_failures: list[OpenCodeCommandFailure] = []
@@ -1308,35 +1300,6 @@ def _validate_required_command_audit(
             + detail,
             failure_kind=command_failures[0].failure_kind,
             command_failures=tuple(command_failures),
-        )
-    last_required_index = min(
-        max(indexes) for indexes in successful_indexes.values()
-    )
-    if last_write_index > last_required_index:
-        command_failures = tuple(
-            OpenCodeCommandFailure(
-                failure_kind="files_modified_after_validation",
-                command=command,
-                exit_code=(
-                    int(successes[command].get("exit_code"))
-                    if isinstance(successes.get(command, {}).get("exit_code"), int)
-                    else None
-                ),
-                output_tail=str(successes.get(command, {}).get("output_tail") or ""),
-                output_bytes=max(
-                    0,
-                    int(successes.get(command, {}).get("output_bytes") or 0),
-                ),
-                output_truncated=(
-                    successes.get(command, {}).get("output_truncated") is True
-                ),
-            )
-            for command in required_commands
-        )
-        raise OpenCodeTaskQualityError(
-            "OpenCode modified task files after the required validation command",
-            failure_kind="files_modified_after_validation",
-            command_failures=command_failures,
         )
 
 

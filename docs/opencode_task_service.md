@@ -400,7 +400,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `file_write_allowlist` / `writable_paths`：调用方显式授权的额外文件或目录；两者合并后同时获得写权限和默认保留语义。相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
 - `readable_paths`：保留的兼容参数，用于显式声明调用方希望读取的文件或目录；最终全局配置已允许读取全部本地路径，该参数不获得 `edit`，也不参与保留。
 - `allowed_bash_commands`：调用方声明的可选精确命令；先拒绝 `*`，再按声明顺序逐条放行。模型可以不执行，执行失败或之后继续写文件也不参与任务完成审计。
-- `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，但命令必须在最后一次受管文件写入后完成，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。
+- `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，每条命令都必须成功执行，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。命令成功后允许继续写文件，配置的 `post_session_validator` 负责在消息结束后读取最终产物并判断合法性。
 - `bash_command_match_mode`：默认 `exact`。轻量分析显式选择 `bound_python_script`，允许 `python`、`python3`、对应 `.exe` 名称或宿主 Python 绝对路径直接调用绑定脚本；脚本绝对路径按宿主平台规范化匹配，同名其它路径不能命中。前置 Hook 将命令原地替换为当前任务的标准命令，所有产物路径和参考目录均使用宿主已绑定的值，模型遗漏或改写的参数不会参与实际执行；父子 Session 继承同一绑定，并发任务各自独立。同一脚本不能声明多个不同的标准命令，旧绑定默认精确匹配。
 - `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
 - `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令。提供了 `allowed_bash_commands` 时，纠正提示要求模型修改产物后执行这些绑定命令并通过；未提供时仅由宿主复验。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
@@ -414,7 +414,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 - 全局允许 `read`、`list`、`glob`、`grep` 与 `external_directory`，使 OpenCode 可读取运行账户有权访问的全部本地路径；这包括项目工作目录、其它版本的真实项目路径、全局 workspace、Skill 资源、隐藏文件和配置文件。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
-- 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行声明的标准命令。默认策略拒绝变形命令；脚本策略允许引号、空格、Python 名称及参数写法差异，并在原生权限检查前还原标准命令，不扩大原生 shell 白名单。受管 Hook 拒绝未绑定脚本、命令拼接、管道、重定向、变量/命令展开及 `python -c/-m`。只有必需命令会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
+- 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行声明的标准命令。默认策略拒绝变形命令；脚本策略允许引号、空格、Python 名称及参数写法差异，并在原生权限检查前还原标准命令，不扩大原生 shell 白名单。受管 Hook 拒绝未绑定脚本、命令拼接、管道、重定向、变量/命令展开及 `python -c/-m`。只有必需命令会把缺失、超时、执行失败或无法确认成功视为任务质量失败；校验后再次写文件不触发任务质量错误。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL；完整 Agent 的所有业务 Skill 来自统一安装目录，独立过程仍兼容临时路径。注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 - 自动任务统一禁止 `question`：配置使用 `"question": "deny"`，每次消息发送前还会将禁止规则合入 Session 权限及父子 Session 执行 Hook，即使工具发现失败也生效。此规则覆盖普通分析、续接、纠正、重试和格式修复，避免等待无人回答的问题；不自动选择答案，也不改变其它工具的授权策略。旧受管工作区会自动刷新配置。部署需更新并重启 Agent 及其受管 Serve；已挂起的旧调用需停止后重新运行。
 
@@ -432,7 +432,13 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 服务先解析 LLM 的最终文本；文本中的 JSON 合法时始终优先采用。若文本不匹配 Schema，服务会检查本轮成功完成的内置 `write`、`edit`、`apply_patch`/`patch` 调用，按实际写入顺序从后向前读取文件，最后一个匹配 Schema 的文件成为 `structured`。受管 OpenCode Hook 在 `tool.execute.after` 为写入结果附加标准化路径、Session、调用 ID 和是否新建等标记；消息完成后，Task Agent 还会基于发送前 assistant 基线重新读取本轮完整消息历史，恢复最终 HTTP 响应未包含的中间 assistant 文件写入。事件流、Hook 标记和 OpenCode 原生 Tool 元数据会合并去重；Hook 异常不会改变工具执行结果。这不会改变 `OpenCodeResult.text`，它仍是 LLM 最后一次文本输出。自定义 MCP 工具的未知文件副作用不在跟踪范围内。
 
-相对写入路径以 OpenCode Session 的 `project_dir` 为基准，只允许从 `project_dir`、`work_dir` 或显式白名单路径读取文件结果。`work_dir` 是隐式白名单，显式路径自身及后代同时可写并默认保留。每次消息结束后，服务会删除本轮确认新建、但位于有效白名单之外的任意位置文件；无论消息成功、失败、取消或即将进入恢复，都会先取得需要的文件快照再清理。若某个本轮新建文件被实际采用为符合 Schema 的 `structured` 来源，则解析后强制删除，即使它位于白名单中；多个合法文件中只有实际采用者使用该例外。已存在但被修改的文件始终不删除或恢复。
+相对写入路径以 OpenCode Session 的 `project_dir` 为基准，只允许从 `project_dir`、`work_dir` 或显式白名单路径读取文件结果。`work_dir` 是隐式白名单，显式路径自身及后代同时可写并默认保留。每次消息结束后，本轮确认新建且位于有效白名单之外的文件仍按普通规则清理；已作为响应来源、后续纠正还可能读取的文件延后清理。
+
+响应中转文件仅包括实际被采用为 `structured` 的文件，以及成功格式修复所使用的来源文件。服务跨同 Session 纠正保留“本逻辑任务新建”的归属，在最终结构化结果通过校验、内容已提取且无需继续纠正后回收这些文件，即使位于白名单中。恢复过程中保留可能再次读取的来源文件；恢复失败时不按成功结果回收它们。多个合法文件中未被采用者仍按普通白名单规则处理；任务开始前已存在的文件始终不删除或恢复。删除失败只记录警告，不把合法结果改判为失败。
+
+格式匹配失败或判定来源与 Schema 无关时，该候选文件不会因后来另一份输出成功而被回收；只有最终实际接受的结构化结果来源或成功格式匹配来源适用上述回收。删除前会检查读取时的文件状态签名和符号链接情况；读取后发生未被当前任务观察到的改动或替换时，跳过删除。
+
+正式产物不纳入响应中转文件清理，包括攻击树、价值资产、高风险模块、攻击模式审计的 `task-results` 和完成标记、迭代各轮结果、报告附件及续扫检查点。`output_schema=None` 的文件产物任务继续使用宿主验收并保留正式产物，普通非白名单新文件清理仍有效。清理只使用当前逻辑任务的文件记录，不扫描目录或批量删除历史文件。
 
 若文本和已写文件都没有符合 Schema 的 JSON，且 `invalid_json_retry_count > 0`，服务按以下顺序恢复：
 
@@ -478,7 +484,7 @@ OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验
 
 OpenCode 轻量分析的 `attack_tree_path` 现在指向攻击树目录：`index.json` 使用 `{"attack_trees":[{"tree_id":"T001","file":"attack-tree-001.json"}]}` 登记树，每个 `attack-tree-xxx.json` 直接保存一棵树对象。校验命令仍为 `--attack-trees <路径>`，直接传目录，无需额外清单参数或生成合并文件。校验器逐文件检查 JSON、单树 Schema 和跨产物关系，汇总缺失树、文件与树 ID、JSON 行列及字段错误，诊断按多行返回当前 Session；过多诊断会保留总数并说明未展示项数。上传的 `content` 保持现有树列表结构，并以 `files` 保存清单和树文件快照；续扫还原为目录，审计及多版本读取兼容目录和历史单文件。仅原位修改 Prompt 的输出说明及完成条件，不额外增加分批写入协议；Codex 的单文件输出保持原样。
 
-攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合 Schema，且 `file` 是扫描范围内真实文件的项目相对路径，允许 `[]` 表示未发现漏洞。独立 `validate_result.py` 同时实施 Schema 和路径检查。调用保持 `output_schema=None`，不校验聊天回复的 JSON Schema，仅按指定文件判定结果，不从最终回复补写或覆盖文件。原引擎与 `threat_pattern_iterative_audit` 都将校验命令列入 `required_bash_commands`，采用 `bound_python_script` 绑定命令，并要求成功标志 `ok`；模型必须在写入后执行该命令，宿主仍独立复验最终文件。未执行、执行失败、缺少成功标志或自检后修改结果会进入同 Session 纠正，不能通过聊天回复声称成功。
+攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合 Schema，且 `file` 是扫描范围内真实文件的项目相对路径，允许 `[]` 表示未发现漏洞。独立 `validate_result.py` 同时实施 Schema 和路径检查。调用保持 `output_schema=None`，不校验聊天回复的 JSON Schema，仅按指定文件判定结果，不从最终回复补写或覆盖文件。原引擎与 `threat_pattern_iterative_audit` 都将校验命令列入 `required_bash_commands`，采用 `bound_python_script` 绑定命令，并要求成功标志 `ok`；模型必须执行该命令，宿主仍独立复验最终文件。未执行、执行失败或缺少成功标志会进入同 Session 纠正，不能通过聊天回复声称成功。自检成功后允许修改结果，最终文件仍必须通过宿主复验；这些文件供摘要校验、迭代和续扫使用，验收成功后继续保留。
 
 文件缺失、无法读取、JSON 损坏、Schema 不匹配或漏洞位置非法时，先向原 Session 回传诊断，要求重新分析并修改同一个结果文件，纠正一次仍失败则按 `vulnerability_mining.max_retries` 创建新 Session 重试；耗尽后队列记录 `post_session_validation_failed`，引擎报告失败。模型确认越界发现与扫描范围无关后可将文件改为 `[]`，程序不自动丢弃发现。异步校验最长 30 秒且受调用剩余时间约束，超时或取消时回收校验进程。全部校验通过后才写完成标记；续扫重新检查合法性，历史路径非法的缓存撤销标记并优先在原 Session 纠正，合法缓存及单纯上报失败仍可复用。该行为适用于所有调用该引擎的扫描，包括多版本基线审计；需更新并重启 Agent，无需数据库迁移，不追溯修改历史任务队列记录。
 
