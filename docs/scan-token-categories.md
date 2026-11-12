@@ -13,6 +13,7 @@
 | `static_candidate` | 基于候选点的审计 | 候选点引擎，包含项目级审计 |
 | `fp_review` | 去误报 | 所有复核方法及其全部阶段 |
 | `threat_pattern_audit` | 威胁模式审计 | 攻击模式引擎 |
+| `threat_pattern_iterative_audit` | 威胁模式迭代审计 | 按线索继续审计的各轮任务 |
 | `multi_version` | 多版本审计 | 多版本引擎内部的威胁分析、审计和版本匹配 |
 | `vulnerability_validation` | 漏洞验证 | 模型参与的漏洞验证 |
 | `vulnerability_dedup` | 漏洞去重 | 跨引擎共享的模型去重 |

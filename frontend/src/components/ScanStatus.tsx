@@ -20,6 +20,8 @@ import { useThreatAnalysisResult } from "../features/threatAnalysis/useThreatAna
 import { CoverageViewport, ThreatCoverageView } from "../features/threatAnalysis/ThreatCoveragePanel";
 import { useCoverageIssues, useThreatCoverage } from "../features/threatAnalysis/useThreatCoverage";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
+import { createIterativeAuditDetailCache, IterativeAuditTaskDetail } from "../features/threatAudit/IterativeAuditTaskDetail";
+import { useIterativeAuditTasks } from "../features/threatAudit/useIterativeAuditTasks";
 import type { ThreatAuditTaskResult, ThreatPatternAuditTask } from "../types";
 import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
 import { useCandidateAuditResults } from "../features/auditResults/useAuditResults";
@@ -40,6 +42,8 @@ import {
   THREAT_AUDIT_ENGINE_LABEL,
   THREAT_PATTERN_AUDIT_ENGINE_ID as THREAT_PATTERN_ENGINE_ID,
   THREAT_PATTERN_AUDIT_ENGINE_LABEL,
+  THREAT_PATTERN_ITERATIVE_ENGINE_ID,
+  isPatternAuditEngine,
   canonicalMiningEngineLabel,
   miningEngineRequiresCodeIndex,
   threatPatternAuditFlowDetail,
@@ -308,6 +312,7 @@ function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[]
   if (tab === "mining") {
     if (engineId === THREAT_ENGINE_ID) return ["threat_tasks", "events"];
     if (engineId === THREAT_PATTERN_ENGINE_ID) return ["pattern_tasks", "events"];
+    if (engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID) return ["events"];
     if (engineId && engineId !== STATIC_ENGINE_ID) {
       return ["vulnerabilities", "validations", "events"];
     }
@@ -593,9 +598,11 @@ function isThreatAuditPoolTask(task: Record<string, unknown>): boolean {
     && poolTaskName(task).startsWith("threat-audit-");
 }
 
-function isThreatPatternAuditPoolTask(task: Record<string, unknown>): boolean {
-  return poolTaskType(task) === "vulnerability_mining"
-    && poolTaskName(task).startsWith("threat-pattern-audit-");
+function isThreatPatternAuditPoolTask(task: Record<string, unknown>, engineId?: string): boolean {
+  if (poolTaskType(task) !== "vulnerability_mining") return false;
+  const actualEngine = String(task.mining_engine_id || "") || (poolTaskName(task).startsWith("threat-pattern-iterative-audit-")
+    ? THREAT_PATTERN_ITERATIVE_ENGINE_ID : poolTaskName(task).startsWith("threat-pattern-audit-") ? THREAT_PATTERN_ENGINE_ID : "");
+  return isPatternAuditEngine(actualEngine) && (!engineId || actualEngine === engineId);
 }
 
 function isVulnerabilityDedupPoolTask(task: Record<string, unknown>): boolean {
@@ -776,13 +783,13 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   const pendingInitialOpenCodePoolRef = useRef<OpenCodePoolStatus | null | undefined>(
     undefined,
   );
-  const navigateToAuditTarget = useCallback((kind: AuditTarget["kind"]) => {
+  const navigateToAuditTarget = useCallback((kind: AuditTarget["kind"], engineId?: string) => {
     setSidebarOpen(false);
     if (kind === "issue") setActiveTab("issues");
     else if (kind === "static_candidate") setActiveTab("static");
     else if (kind === "fp_review") setActiveTab("fp_review");
     else {
-      changeRoute({ tab: "mining", engineId: kind === "threat_pattern_audit" ? THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID });
+      changeRoute({ tab: "mining", engineId: kind === "threat_pattern_audit" ? engineId || THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID });
     }
   }, [setActiveTab, changeRoute]);
 
@@ -822,6 +829,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
     if (navigation?.action === "POP") auditNavigation.cancel();
   }, [navigation?.locationKey, navigation?.action, auditNavigation.cancel]);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
+  const [patternTaskRevision, setPatternTaskRevision] = useState(0);
   const [coverageRevision, setCoverageRevision] = useState(0);
   const [coverageIssuesRevision, setCoverageIssuesRevision] = useState(0);
   const [coverageRequestedScan, setCoverageRequestedScan] = useState("");
@@ -1116,6 +1124,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
         else refreshingResourcesRef.current.delete(resource);
       }
       if (refreshing) {
+        if (resources.includes("threat-pattern-audit-tasks")) setPatternTaskRevision((value) => value + 1);
         for (const resource of Object.keys(DETAIL_REFRESH_RESOURCE) as DetailResource[]) {
           if (!resources.includes(DETAIL_REFRESH_RESOURCE[resource])) continue;
           detailGenerationRef.current.set(resource, (detailGenerationRef.current.get(resource) ?? 0) + 1);
@@ -1307,15 +1316,16 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
           : prev.candidates;
         const detailCounts = prev.detail_counts ? { ...prev.detail_counts } : undefined;
         if (detailCounts && existing && existing.audit_state !== data.candidate.audit_state) {
-          const oldKey = `candidate_audit_${existing.audit_state}` as keyof typeof detailCounts;
-          const newKey = `candidate_audit_${data.candidate.audit_state}` as keyof typeof detailCounts;
+          type CandidateCountKey = Extract<keyof typeof detailCounts, `candidate_audit_${string}`>;
+          const oldKey = `candidate_audit_${existing.audit_state}` as CandidateCountKey;
+          const newKey = `candidate_audit_${data.candidate.audit_state}` as CandidateCountKey;
           if (typeof detailCounts[oldKey] === "number") {
-            (detailCounts as Record<string, number>)[oldKey] = Math.max(
+            detailCounts[oldKey] = Math.max(
               0,
               Number(detailCounts[oldKey]) - 1,
             );
           }
-          (detailCounts as Record<string, number>)[newKey] = Number(detailCounts[newKey] ?? 0) + 1;
+          detailCounts[newKey] = Number(detailCounts[newKey] ?? 0) + 1;
         }
         return { ...prev, candidates, detail_counts: detailCounts };
       });
@@ -1980,7 +1990,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   const selectedEngines = effectiveMiningEngines(scan);
   const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId)
     ?? (["threat_audit", "threat_pattern_audit"].includes(auditNavigation.focus?.kind ?? "")
-      && activeEngineId === auditNavigation.focus?.kind
+      && (activeEngineId === auditNavigation.focus?.kind || (auditNavigation.focus?.kind === "threat_pattern_audit" && isPatternAuditEngine(activeEngineId)))
       ? { engine_id: activeEngineId, engine_label: canonicalMiningEngineLabel(activeEngineId), enabled: true }
       : null);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
@@ -2407,19 +2417,21 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
             onOpenStaticAnalysis={() => setActiveTab("static")}
           />
         )}
-        {activeTab === "mining" && activeEngine && [THREAT_ENGINE_ID, THREAT_PATTERN_ENGINE_ID].includes(activeEngine.engine_id) && (
+        {activeTab === "mining" && activeEngine && (activeEngine.engine_id === THREAT_ENGINE_ID || isPatternAuditEngine(activeEngine.engine_id)) && (
           <ThreatAuditPanel
             key={activeEngine.engine_id}
-            patternMode={activeEngine.engine_id === THREAT_PATTERN_ENGINE_ID}
+            patternMode={isPatternAuditEngine(activeEngine.engine_id)}
+            engineId={activeEngine.engine_id}
+            taskRevision={patternTaskRevision}
             scan={scan}
-            events={activeEngine.engine_id === THREAT_PATTERN_ENGINE_ID ? filterEvents(scan.events, ["threat_pattern_audit"]) : threatAuditEvents}
+            events={isPatternAuditEngine(activeEngine.engine_id) ? filterEvents(scan.events, [activeEngine.engine_id]) : threatAuditEvents}
             fpReview={fpReview}
             resultRevision={threatResultRevision}
-            focusRequest={auditNavigation.focus?.kind === activeEngine.engine_id ? auditNavigation.focus as ListFocusRequest<string> : undefined}
+            focusRequest={auditNavigation.focus?.kind === (isPatternAuditEngine(activeEngine.engine_id) ? "threat_pattern_audit" : activeEngine.engine_id) ? auditNavigation.focus as ListFocusRequest<string> : undefined}
             onOpenIssue={auditNavigation.openIssue}
           />
         )}
-        {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID, THREAT_PATTERN_ENGINE_ID].includes(activeEngine.engine_id) && (
+        {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && !isPatternAuditEngine(activeEngine.engine_id) && (
           <GenericEnginePanel
             engine={activeEngine}
             run={miningEngineRun(scan, activeEngine.engine_id)}
@@ -3002,7 +3014,7 @@ function buildProcessFlowModel({
         : scan.threat_analysis
           ? "等待创建审计任务"
           : "等待威胁分析完成"
-      : engine.engine_id === THREAT_PATTERN_ENGINE_ID
+      : isPatternAuditEngine(engine.engine_id)
         ? threatPatternAuditFlowDetail(run, Boolean(scan.threat_analysis))
       : run?.error_message
         || (engine.engine_id === STATIC_ENGINE_ID && staticRunning
@@ -4060,6 +4072,8 @@ function engineRunDuration(run: MiningEngineRunStatus | null): string {
 export function ThreatAuditPanel({
   scan,
   patternMode = false,
+  engineId = patternMode ? THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID,
+  taskRevision = 0,
   events,
   fpReview,
   resultRevision,
@@ -4068,6 +4082,8 @@ export function ThreatAuditPanel({
 }: {
   scan: ScanStatusType;
   patternMode?: boolean;
+  engineId?: string;
+  taskRevision?: number;
   events: ScanEvent[];
   fpReview: FpReviewJob | null;
   resultRevision: number;
@@ -4077,21 +4093,29 @@ export function ThreatAuditPanel({
   const [statusFilter, setStatusFilter] = useState("__all__");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusRequest?.key ?? null);
   const [page, setPage] = useState(1);
+  const adjacentFocus = useRef<string | null>(null);
+  const iterative = engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID;
+  const [detailCache] = useState(createIterativeAuditDetailCache);
+  const iterativePages = useIterativeAuditTasks(scan.scan_id, engineId,
+    iterative && Boolean(scan.detail_counts), scan.threat_pattern_audit_tasks ?? [], taskRevision);
   const tasks = useMemo(() => patternMode
-    ? (scan.threat_pattern_audit_tasks ?? []).map((task): ThreatAuditTask => ({
+    ? iterativePages.tasks.map((task): ThreatAuditTask => ({
         ...task, surface_name: task.module_name, method_node_id: task.pattern_id,
         method_name: task.pattern_name, code_path: task.code_paths?.[0]?.path ?? "",
       }))
-    : scan.threat_audit_tasks ?? [], [patternMode, scan.threat_pattern_audit_tasks, scan.threat_audit_tasks]);
+    : scan.threat_audit_tasks ?? [], [patternMode, iterativePages.tasks, scan.threat_audit_tasks]);
   const prefix = patternMode ? "threat_pattern_audit" : "threat_audit";
+  const engineCounts = patternMode ? scan.detail_counts?.threat_pattern_audit_by_engine?.[engineId] : undefined;
+  const aggregate = iterative || (patternMode && scan.detail_counts?.threat_pattern_audit_by_engine)
+    ? undefined : scan.detail_counts;
   const currentTasks = useMemo(() => currentThreatAuditTasks(tasks), [tasks]);
-  const supersededTaskCount = scan.detail_counts?.[`${prefix}_superseded`]
+  const supersededTaskCount = engineCounts?.superseded ?? aggregate?.[`${prefix}_superseded`]
     ?? tasks.length - currentTasks.length;
   const queueTasks = useMemo(
     () => collectScanQueueTasks(scan.opencode_pool ?? null).filter(
-      (item) => patternMode ? isThreatPatternAuditPoolTask(item.task) : isThreatAuditPoolTask(item.task),
+      (item) => patternMode ? isThreatPatternAuditPoolTask(item.task, engineId) : isThreatAuditPoolTask(item.task),
     ),
-    [scan.opencode_pool, patternMode],
+    [scan.opencode_pool, patternMode, engineId],
   );
   const runtimeByTaskId = useMemo(() => {
     const result = new Map<string, ScanQueueTask>();
@@ -4116,8 +4140,10 @@ export function ThreatAuditPanel({
   );
   const selected = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const selectedRuntime = selected ? runtimeByTaskId.get(selected.task_id) ?? null : null;
+  const resultsScan = useMemo(() => iterative
+    ? { ...scan, threat_pattern_audit_tasks: iterativePages.tasks } : scan, [iterative, scan, iterativePages.tasks]);
   const auditResults = useThreatAuditResults(
-    scan,
+    resultsScan,
     [...pagedTasks.map((task) => task.task_id), ...(selected ? [selected.task_id] : [])],
     fpReview,
     resultRevision,
@@ -4131,32 +4157,39 @@ export function ThreatAuditPanel({
     });
     return counts;
   }, [currentTasks, runtimeByTaskId]);
-  const run = miningEngineRun(scan, prefix);
+  const run = miningEngineRun(scan, engineId);
   const processStatus = patternMode ? engineFlowStatus(run) : threatAuditFlowStatus(scan, run);
-  const aggregate = scan.detail_counts;
-  const totalTaskCount = aggregate?.[`${prefix}_current`] ?? currentTasks.length;
-  const pendingTaskCount = aggregate?.[`${prefix}_pending`]
+  const totalTaskCount = engineCounts?.current ?? aggregate?.[`${prefix}_current`] ?? currentTasks.length;
+  const pendingTaskCount = engineCounts?.pending ?? aggregate?.[`${prefix}_pending`]
     ?? statusCounts.get("pending") ?? 0;
-  const queuedTaskCount = aggregate?.[`${prefix}_queued`]
+  const queuedTaskCount = engineCounts?.queued ?? aggregate?.[`${prefix}_queued`]
     ?? statusCounts.get("queued") ?? 0;
-  const runningTaskCount = aggregate?.[`${prefix}_running`]
+  const runningTaskCount = engineCounts?.running ?? aggregate?.[`${prefix}_running`]
     ?? ["running", "analyzing", "auditing"].reduce(
       (sum, status) => sum + (statusCounts.get(status) ?? 0),
       0,
     );
-  const completedTaskCount = aggregate?.[`${prefix}_completed`]
+  const completedTaskCount = engineCounts?.completed ?? aggregate?.[`${prefix}_completed`]
     ?? statusCounts.get("completed") ?? 0;
-  const failedTaskCount = aggregate?.[`${prefix}_failed`]
+  const failedTaskCount = engineCounts?.failed ?? aggregate?.[`${prefix}_failed`]
     ?? ["failed", "failure", "error", "timeout", "no_result"].reduce(
       (sum, status) => sum + (statusCounts.get(status) ?? 0),
       0,
     );
-  const cancelledTaskCount = aggregate?.[`${prefix}_cancelled`]
+  const cancelledTaskCount = engineCounts?.cancelled ?? aggregate?.[`${prefix}_cancelled`]
     ?? statusCounts.get("cancelled") ?? 0;
 
   useEffect(() => {
     setPage(1);
   }, [statusFilter]);
+
+  useEffect(() => {
+    if (!adjacentFocus.current) return;
+    const index = visibleTasks.findIndex((task) => task.task_id === adjacentFocus.current);
+    if (index < 0) return;
+    setPage(Math.floor(index / THREAT_AUDIT_PAGE_SIZE) + 1);
+    adjacentFocus.current = null;
+  }, [visibleTasks, selectedTaskId]);
 
   const listFocus = useListFocus(focusRequest, visibleTasks.map((task) => task.task_id), THREAT_AUDIT_PAGE_SIZE,
     setSelectedTaskId, setPage, () => setStatusFilter("__all__"));
@@ -4174,10 +4207,10 @@ export function ThreatAuditPanel({
 
   return (
     <TaskPanel
-      title={patternMode ? THREAT_PATTERN_AUDIT_ENGINE_LABEL : THREAT_AUDIT_ENGINE_LABEL}
+      title={canonicalMiningEngineLabel(engineId)}
       status={flowStatusLabel(processStatus)}
       tone={flowStatusTone(processStatus, "green")}
-      summary={patternMode ? "按高风险模块与攻击模式拆分任务，并逐项执行模型审计。" : "按威胁分析产生的叶子节点与攻击模式拆分任务，并逐项执行模型审计。"}
+      summary={iterative ? "按模块与攻击模式审计，有后续线索时继续，每个威胁最多 3 轮。" : patternMode ? "按高风险模块与攻击模式拆分任务，并逐项执行模型审计。" : "按威胁分析产生的叶子节点与攻击模式拆分任务，并逐项执行模型审计。"}
     >
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <MiniMetric label="任务总数" value={totalTaskCount} />
@@ -4201,6 +4234,12 @@ export function ThreatAuditPanel({
           options={threatAuditStatusOptions(tasks, runtimeByTaskId)}
           onChange={(value) => { listFocus.release(); setStatusFilter(value); }}
         />
+        {iterative && (iterativePages.cursor || iterativePages.error) && <button type="button"
+          disabled={iterativePages.loading} onClick={() => void iterativePages.loadMore()}
+          className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 disabled:opacity-40">
+          {iterativePages.error ? "重试加载审计任务" : "加载更多审计任务"}
+        </button>}
+        {iterative && iterativePages.loading && <span className="text-xs text-slate-400">正在加载审计任务…</span>}
       </div>
 
       {tasks.length === 0 ? (
@@ -4241,6 +4280,7 @@ export function ThreatAuditPanel({
                         >
                           <div className="flex items-start gap-2">
                             <div className="flex shrink-0 flex-col items-start gap-1">
+                              {iterative && <span className="shrink-0 whitespace-nowrap rounded bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">第 {task.iteration || 1} 轮</span>}
                               <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
                               <ThreatAuditFindingBadge result={auditResults.results.get(task.task_id)} />
                             </div>
@@ -4292,7 +4332,30 @@ export function ThreatAuditPanel({
           </div>
 
           <div className="min-h-[28rem] rounded-xl border border-slate-700 bg-slate-900/40">
-            {selected ? (
+            {selected && iterative ? (
+              <IterativeAuditTaskDetail
+                key={selected.task_id}
+                scanId={scan.scan_id}
+                historyAvailable={Boolean(scan.detail_counts)}
+                task={selected}
+                runtime={selectedRuntime}
+                statusLabel={threatAuditStatusLabel(effectiveThreatAuditTaskStatus(selected, selectedRuntime ?? undefined))}
+                statusBadge={<StatusPill label={threatAuditStatusLabel(effectiveThreatAuditTaskStatus(selected, selectedRuntime ?? undefined))}
+                  tone={threatAuditStatusTone(effectiveThreatAuditTaskStatus(selected, selectedRuntime ?? undefined))} />}
+                results={<ThreatAuditResults result={auditResults.results.get(selected.task_id)}
+                  status={effectiveThreatAuditTaskStatus(selected, selectedRuntime ?? undefined)}
+                  loading={auditResults.loading} error={auditResults.error} onRetry={auditResults.retry} onOpenIssue={onOpenIssue} />}
+                nextTask={tasks.find((task) => task.parent_task_id === selected.task_id)}
+                cache={detailCache}
+                onSelectTask={(id, loaded) => {
+                  listFocus.release();
+                  adjacentFocus.current = id;
+                  setStatusFilter("__all__");
+                  if (loaded) iterativePages.addTask(loaded);
+                  setSelectedTaskId(id);
+                }}
+              />
+            ) : selected ? (
               <ThreatAuditTaskDetail
                 key={selected.task_id}
                 scan={scan}
@@ -4479,23 +4542,24 @@ function ThreatAuditTaskDetail({
           </div>
         </AuditDetailSection>
       )}
-      <AuditPromptSection scan={scan} taskName={task.task_id} runtime={runtime} />
+      <AuditPromptSection scan={scan} taskName={task.task_id} runtime={runtime} taskRevision={`${task.updated_at || ""}:${task.status}`} />
     </div>
   );
 }
 
-function AuditPromptSection({ scan, taskName, runtime, pending = false }: {
+function AuditPromptSection({ scan, taskName, runtime, pending = false, taskRevision = "" }: {
   scan: ScanStatusType;
   taskName: string;
   runtime: ScanQueueTask | null;
   pending?: boolean;
+  taskRevision?: string;
 }) {
   const inlinePrompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
   const notGenerated = runtime?.status === "planned" || (!runtime && pending);
   const canLoadHistory = Boolean(scan.detail_counts) && !inlinePrompt && !notGenerated
     && !["queued", "running"].includes(runtime?.status ?? "");
   const lookupKey = JSON.stringify([scan.scan_id, taskName, runtime?.id, runtime?.task.revision,
-    runtime?.task.record_id, scan.completed_task_count, runtime?.status]);
+    runtime?.task.record_id, runtime?.status, taskRevision]);
   const runtimeRef = useRef(runtime);
   runtimeRef.current = runtime;
   const [attempt, setAttempt] = useState(0);
@@ -5460,6 +5524,7 @@ function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
     if (taskName.startsWith("candidate-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;
     if (taskName.startsWith("project-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 项目级审计`;
     if (taskName.startsWith("threat-audit-")) return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
+    if (taskName.startsWith("threat-pattern-iterative-audit-")) return `${canonicalMiningEngineLabel(THREAT_PATTERN_ITERATIVE_ENGINE_ID)} / 迭代审计`;
     if (taskName.startsWith("threat-pattern-audit-")) return `${THREAT_PATTERN_AUDIT_ENGINE_LABEL} / 攻击模式审计`;
     return "漏洞挖掘";
   }
@@ -6212,7 +6277,7 @@ function StaticCandidateDetail({ scan, item, runtime, result, resultLoading, res
         </AuditDetailSection>
       )}
       <AuditPromptSection scan={scan} taskName={staticCandidateTaskName(scan.scan_id, item.candidate)}
-        runtime={runtime} pending={item.auditStatus === "pending"} />
+        runtime={runtime} pending={item.auditStatus === "pending"} taskRevision={`${item.auditStatus}:${item.candidate.audit_updated_at || ""}`} />
       {metadata && (
         <details className="rounded border border-slate-800 bg-slate-950/40">
           <summary className="cursor-pointer px-3 py-2 text-xs text-slate-500 hover:text-slate-300">候选元数据</summary>

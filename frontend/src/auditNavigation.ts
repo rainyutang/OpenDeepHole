@@ -3,6 +3,7 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { getScanFpReviewResult, getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
 import { hasFpReviewRecord } from "./fpReview";
 import { mergeIndexedVulnerabilities } from "./scanRuntime";
+import { isPatternAuditEngine } from "./miningEngines";
 import type { FpReviewJob, FpReviewResult, IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, ThreatPatternAuditTask, Vulnerability } from "./types";
 
 export interface ListFocusRequest<K> { key: K; revision: number }
@@ -19,7 +20,7 @@ export type AuditTarget =
 export interface AuditNavigationRequest { kind: "issue" | "source" | "fp_review"; index: number }
 
 export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "threat_pattern_audit" | "static_candidate" | null {
-  if ([vuln.analysis_source, vuln.engine_id].includes("threat_pattern_audit")) return "threat_pattern_audit";
+  if ([vuln.analysis_source, vuln.engine_id].some((value) => isPatternAuditEngine(value || ""))) return "threat_pattern_audit";
   if ([vuln.analysis_source, vuln.engine_id, vuln.vuln_type].includes("threat_audit")) return "threat_audit";
   return (vuln.analysis_source || "static_candidate") === "static_candidate" ? "static_candidate" : null;
 }
@@ -114,7 +115,7 @@ export function useAuditNavigation(
   scanId: string,
   scanRef: MutableRefObject<ScanStatus | null>,
   setScan: Dispatch<SetStateAction<ScanStatus | null>>,
-  onNavigate: (kind: AuditTarget["kind"]) => void,
+  onNavigate: (kind: AuditTarget["kind"], engineId?: string) => void,
   fpReview: FpReviewJob | null = null,
   setFpReview?: Dispatch<SetStateAction<FpReviewJob | null>>,
 ) {
@@ -175,7 +176,7 @@ export function useAuditNavigation(
         : target.kind === "static_candidate"
           ? { kind: "static_candidate", key: target.candidate.idx, revision: nextRevision }
           : { kind: target.kind, key: target.task.task_id, revision: nextRevision });
-      onNavigate(target.kind);
+      onNavigate(target.kind, target.kind === "threat_pattern_audit" ? target.task.engine_id || "threat_pattern_audit" : undefined);
     } catch (failure) {
       if (!pending.signal.aborted) setError(failure instanceof Error ? failure.message : "定位失败，请重试");
     } finally {

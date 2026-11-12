@@ -356,8 +356,11 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
         originalMetadata.timeout ?? originalMetadata.timed_out ?? nestedMetadata.timeout
         ?? outputMetadata.timeout ?? output?.timeout
       )
-      const markerMatched = exitCode === null && !timedOut && hasExactLine(commandOutput, marker)
-      const success = !timedOut && (exitCode === 0 || markerMatched)
+      const markerRequired = typeof marker === "string" && marker.length > 0
+      const markerMatched = !timedOut && hasExactLine(commandOutput, marker)
+      const success = !timedOut && (markerRequired
+        ? markerMatched && (exitCode === null || exitCode === 0)
+        : exitCode === 0)
       await appendAudit(binding, {
         kind: "command",
         session_id: String(input?.sessionID || ""),
@@ -366,7 +369,8 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
         exit_code: exitCode,
         timed_out: timedOut,
         success,
-        success_source: exitCode === 0 ? "exit_code" : markerMatched ? "output_marker" : "",
+        success_source: success ? (exitCode === 0 ? "exit_code" : "output_marker") : "",
+        ...(markerRequired ? { success_marker_matched: markerMatched } : {}),
         ...outputTail(commandOutput, binding.output_tail_bytes),
       })
       return
@@ -1276,6 +1280,8 @@ def _validate_required_command_audit(
                 failure_kind = "command_not_executed"
             elif timed_out:
                 failure_kind = "command_timeout"
+            elif event.get("success_marker_matched") is False and exit_code in (None, 0):
+                failure_kind = "command_output_marker_missing"
             elif exit_code is None:
                 failure_kind = "command_exit_unknown"
             else:

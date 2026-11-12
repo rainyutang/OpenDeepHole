@@ -86,11 +86,14 @@ from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixi
 from .token_categories import TOKEN_CATEGORY_SCHEMA, ScanTokenCategoriesMixin
 from .file_inventories import FILE_INVENTORY_SCHEMA, ScanFileInventoriesMixin
 from .model_usage import MODEL_USAGE_SCHEMA, ScanModelUsageMixin
-from .pattern_audit import PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin
+from .pattern_audit import (
+    PATTERN_AUDIT_COLUMNS, PATTERN_AUDIT_ENGINE_INDEX, PATTERN_AUDIT_PARENT_INDEX,
+    PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin,
+)
 from .review_notes import REVIEW_NOTES_SCHEMA, ReviewNotesStoreMixin
 from .code_graph import ScanCodeGraphStoreMixin
 
-STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
+STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS, **PATTERN_AUDIT_COLUMNS}
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
     "execution_product": "TEXT",
@@ -1071,6 +1074,12 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                 for column, definition in columns.items():
                     if column not in existing:
                         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._conn.execute(PATTERN_AUDIT_ENGINE_INDEX)
+            self._conn.execute(PATTERN_AUDIT_PARENT_INDEX)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scan_task_versions_name "
+                "ON scan_task_versions(scan_id, json_extract(metadata_json, '$.task_name'))"
+            )
             trigger_statements = [*summary_triggers(postgres=False), *deletion_triggers(postgres=False)]
             signature = hashlib.sha256("\n".join(trigger_statements).encode()).hexdigest()
             trigger_marker = self._conn.execute("SELECT cursor_json FROM schema_migrations WHERE name = 'scan-storage-triggers-v1'").fetchone()

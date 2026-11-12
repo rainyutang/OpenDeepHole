@@ -79,6 +79,7 @@ async function mount({ source = fixture(), sourceScanId = "source-id", agentList
     else if (config.url === `/api/scan/${sourceScanId}/copy-config`) data = source;
     else if (config.url === "/api/mining-engines") data = { engines: [
       { engine_id: "static_candidate", label: "Static" }, { engine_id: "threat_pattern_audit", label: "Patterns" },
+      { engine_id: "threat_pattern_iterative_audit", label: "Iterative patterns" },
     ] };
     else if (config.url === "/api/threat-analysis-methods") data = { methods: [
       { method_id: "opencode_lightweight_threat_analysis", label: "Default threat" },
@@ -138,6 +139,29 @@ test("copy restores all custom form selections, requires a new name, and submits
   assert.equal("feedback_ids" in payload, false);
   assert.deepEqual(started, ["new-scan"]);
   assert.ok(requests.every((request) => !request.url.includes("probe")));
+});
+
+test("iterative engine remains opt-in and enables its threat analysis dependency", async () => {
+  const { root } = await mount({ sourceScanId: undefined });
+  const custom = root.root.findAllByType("label").find((item) => content(item) === "自定义模式");
+  await act(async () => custom.findByType("input").props.onChange());
+  const selection = () => root.root.findAllByType("label")
+    .find((item) => content(item).includes("DeepHole基于攻击模式的迭代漏洞挖掘引擎")).findByType("input");
+  assert.equal(selection().props.checked, false);
+  const threatToggle = () => root.root.findByProps({ "aria-label": "启用威胁分析" });
+  await act(async () => threatToggle().props.onClick());
+  assert.equal(threatToggle().props["aria-checked"], false);
+  await act(async () => selection().props.onChange({ target: { checked: true } }));
+  assert.equal(threatToggle().props["aria-checked"], true);
+  assert.equal(selection().props.checked, true);
+});
+
+test("copy retains an explicitly selected iterative engine", async () => {
+  const source = fixture({ mining_engines: [{ engine_id: "threat_pattern_iterative_audit" }] });
+  const { root, submissions } = await mount({ source });
+  await fillName(root);
+  await submit(root);
+  assert.deepEqual(submissions[0].mining_engines, source.mining_engines);
 });
 
 test("copy retains explicit false switches and the empty engine selection", async () => {

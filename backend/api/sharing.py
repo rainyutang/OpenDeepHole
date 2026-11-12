@@ -118,8 +118,14 @@ async def threat_tasks(scan_id: str, user: SharedUser, cursor: str | None = None
 
 @shared.get("/threat-pattern-audit-tasks")
 async def threat_pattern_tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
-                       limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, user)
+                       limit: int = Query(50, ge=1, le=100), engine_id: str | None = None,
+                       summary: bool = True):
+    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, user, engine_id, summary)
+
+
+@shared.get("/threat-pattern-audit-tasks/{task_id}")
+async def threat_pattern_task(scan_id: str, task_id: str, user: SharedUser):
+    return await scan_api.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, user)
 
 
 @shared.get("/validations")

@@ -227,7 +227,7 @@ class ScanSummariesMixin:
                     item["threat_incomplete"] = item.get("threat_incomplete", 0) + int(row["item_count"])
         return out
 
-    def get_scan_detail_counts(self, scan_id: str) -> dict[str, int]:
+    def get_scan_detail_counts(self, scan_id: str) -> dict:
         state = self._conn.execute("SELECT ready FROM scan_summary_state WHERE scan_id = ?", (scan_id,)).fetchone()
         if state and state["ready"]:
             rows = self._conn.execute(
@@ -270,6 +270,10 @@ class ScanSummariesMixin:
                     counts[prefix + bucket] += n
             elif resource == "fp_review_jobs" and bucket in {"pending", "running"}:
                 counts["fp_review_active"] += n
+        counts["threat_pattern_audit_by_engine"] = (
+            self.get_threat_pattern_audit_counts_by_engine(scan_id)
+            if counts["threat_pattern_audit_tasks"] else {}
+        )
         return counts
 
     def rebuild_scan_summary(self, scan_id: str) -> dict:

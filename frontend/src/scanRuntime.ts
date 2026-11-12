@@ -187,6 +187,10 @@ export function findIndexedVulnerability(
 export function normalizePatternTask(value: unknown): ThreatPatternAuditTask {
   const raw = isRecord(value) ? value : {};
   return { ...raw, task_id: text(raw.task_id), status: text(raw.status),
+    engine_id: text(raw.engine_id) || "threat_pattern_audit",
+    iteration: typeof raw.iteration === "number" && Number.isInteger(raw.iteration) ? Math.max(1, Math.min(3, raw.iteration)) : 1,
+    parent_task_id: text(raw.parent_task_id),
+    has_more_findings: typeof raw.has_more_findings === "boolean" ? raw.has_more_findings : null,
     module_name: text(raw.module_name), pattern_id: text(raw.pattern_id), pattern_name: text(raw.pattern_name) };
 }
 

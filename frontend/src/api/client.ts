@@ -1,6 +1,6 @@
 import axios from "axios";
 import type { ReviewNote, ScanReviewNotes, ScanCodeGraphState } from "../types";
-import type { ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource, ScanMetadata, ScanMetadataUpdate } from "../types";
+import type { ThreatPatternAuditTask, ThreatPatternAuditTaskPage, CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource, ScanMetadata, ScanMetadataUpdate } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
@@ -667,9 +667,11 @@ export async function getScanPatternTasksPage(
   scanId: string,
   cursor?: string | null,
   signal?: AbortSignal,
+  engineId?: string,
 ): Promise<ThreatPatternAuditTaskPage> {
   const { data } = await api.get<unknown>(scanV2Path(scanId, "/threat-pattern-audit-tasks"), {
-    params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(cursor ? { cursor } : {}) },
+    params: { ...(isPublicScan(scanId) ? publicParams() : {}), ...(cursor ? { cursor } : {}),
+      ...(engineId ? { engine_id: engineId, summary: true } : {}) },
     signal, timeout: SCAN_READ_TIMEOUT_MS,
   });
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("攻击模式审计任务分页响应无效");
@@ -678,6 +680,15 @@ export async function getScanPatternTasksPage(
     next_cursor: typeof data.next_cursor === "string" ? data.next_cursor : null,
     has_more: data.has_more === true,
   };
+}
+
+export async function getScanPatternTaskDetail(scanId: string, taskId: string, signal?: AbortSignal): Promise<ThreatPatternAuditTask> {
+  const { data } = await api.get<unknown>(scanV2Path(scanId, `/threat-pattern-audit-tasks/${encodeURIComponent(taskId)}`), {
+    params: isPublicScan(scanId) ? publicParams() : undefined,
+    signal, timeout: SCAN_READ_TIMEOUT_MS,
+  });
+  if (!isRecord(data) || data.task_id !== taskId || data.scan_id !== scanId) throw new Error("攻击模式审计详情响应无效");
+  return normalizePatternTask(data);
 }
 
 export async function getScanValidationsPage(

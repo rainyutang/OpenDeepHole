@@ -396,6 +396,10 @@ def _sqlite_schema() -> list[str]:
     portable: list[str] = []
     for statement in ddl:
         statement = _AUTOINCREMENT.sub("BIGSERIAL PRIMARY KEY", statement)
+        statement = statement.replace(
+            "json_extract(metadata_json, '$.task_name')",
+            "(CAST(metadata_json AS jsonb) ->> 'task_name')",
+        )
         statement = re.sub(
             r"^CREATE\s+TABLE\s+",
             "CREATE TABLE IF NOT EXISTS ",

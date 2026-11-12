@@ -16,6 +16,8 @@ SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 # Used only when resolving newly created quick/standard scans. Resumes keep the
 # engine selections persisted with the original scan.
 BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
+# New optional workflows must not silently join legacy callers' default scans.
+OPT_IN_MINING_ENGINE_IDS = frozenset({"threat_pattern_iterative_audit"})
 STATIC_ANALYSIS_ENGINE_IDS = frozenset({
     "static_candidate",
     "multi_version",
@@ -23,6 +25,7 @@ STATIC_ANALYSIS_ENGINE_IDS = frozenset({
 THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = frozenset({
     "threat_audit",
     "threat_pattern_audit",
+    "threat_pattern_iterative_audit",
 })
 PROFILE_SCAN_MODES = {
     SCAN_MODE_QUICK,

@@ -99,7 +99,7 @@ def _known_tasks(scan: ScanStatus, completed: list[dict]) -> list[tuple[str, dic
     return list(groups.values())
 
 
-AUDIT_CATEGORIES = ("static_candidate", "threat_audit", "threat_pattern_audit")
+AUDIT_CATEGORIES = ("static_candidate", "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit")
 
 
 def _elapsed(task: dict, state: str, now: datetime) -> float:

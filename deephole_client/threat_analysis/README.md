@@ -251,7 +251,7 @@ Session。其它方法直接以 `is_resume=False` 新建任务，业务层也不
 
 该恢复策略属于平台协调逻辑，不要求方法感知扫描整体状态，也不修改
 `methods/deephole_threat_analysis/` 内的原生实现。威胁分析失败只会阻塞消费其结果的
-`threat_audit` 和 `threat_pattern_audit`；其它漏洞挖掘引擎按各自生命周期独立运行和续扫。
+`threat_audit`、`threat_pattern_audit` 和 `threat_pattern_iterative_audit`；其它漏洞挖掘引擎按各自生命周期独立运行和续扫。
 
 ## 从现有 ThreatAnalysis 工程迁移内置方法
 

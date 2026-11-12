@@ -613,7 +613,9 @@ def test_engine_consumes_validated_file_without_overwriting_it(tmp_path: Path, r
     assert captured["post_session_validation_retry_count"] == 1
     assert captured["bash_command_match_mode"] == "bound_python_script"
     assert captured["allowed_bash_commands"][0] in captured["prompt"]
-    assert "required_bash_commands" not in captured
+    assert captured["required_bash_commands"] == captured["allowed_bash_commands"]
+    assert captured["required_bash_success_markers"] == {captured["allowed_bash_commands"][0]: "ok"}
+    assert captured["required_bash_retry_count"] == 1
     assert "认证模块" in captured["prompt"]
     assert "会话伪造" in captured["prompt"]
     assert len(reported) == 1

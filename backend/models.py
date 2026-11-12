@@ -27,12 +27,15 @@ THREAT_AUDIT_ENGINE_ID = "threat_audit"
 THREAT_AUDIT_ENGINE_LABEL = "DeepHole基于攻击威胁的漏洞挖掘引擎"
 THREAT_PATTERN_AUDIT_ENGINE_ID = "threat_pattern_audit"
 THREAT_PATTERN_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的漏洞挖掘引擎"
+THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID = "threat_pattern_iterative_audit"
+THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的迭代漏洞挖掘引擎"
 MULTI_VERSION_ENGINE_ID = "multi_version"
 MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎"
 BUILTIN_MINING_ENGINE_LABELS = {
     STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_AUDIT_ENGINE_ID: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
+    THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID: THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL,
     MULTI_VERSION_ENGINE_ID: MULTI_VERSION_ENGINE_LABEL,
 }
 
@@ -627,6 +630,11 @@ class ThreatPatternAuditTask(BaseModel):
     """One persisted high-risk-module / attack-pattern audit."""
     task_id: str
     scan_id: str = ""
+    engine_id: str = THREAT_PATTERN_AUDIT_ENGINE_ID
+    iteration: int = Field(default=1, ge=1, le=3)
+    parent_task_id: str = ""
+    has_more_findings: bool | None = None
+    followup_clues: str = ""
     status: str = "pending"
     module_name: str = ""
     pattern_id: str = ""
@@ -640,6 +648,10 @@ class ThreatPatternAuditTask(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     updated_at: str = ""
+
+
+class ThreatPatternAuditTaskDetail(ThreatPatternAuditTask):
+    next_task_id: str = ""
 
 
 class ThreatAuditFindingSummary(BaseModel):
@@ -949,6 +961,7 @@ class ScanDetailCounts(BaseModel):
     threat_pattern_audit_failed: int = 0
     threat_pattern_audit_cancelled: int = 0
     threat_pattern_audit_superseded: int = 0
+    threat_pattern_audit_by_engine: dict[str, dict[str, int]] = Field(default_factory=dict)
     validations: int = 0
     skill_reports: int = 0
 

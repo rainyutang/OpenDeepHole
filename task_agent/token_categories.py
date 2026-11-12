@@ -11,6 +11,7 @@ CATEGORY_LABELS = {
     "static_candidate": "基于候选点的审计",
     "fp_review": "去误报",
     "threat_pattern_audit": "威胁模式审计",
+    "threat_pattern_iterative_audit": "威胁模式迭代审计",
     "multi_version": "多版本审计",
     "vulnerability_validation": "漏洞验证",
     "vulnerability_dedup": "漏洞去重",
@@ -35,6 +36,7 @@ _MINING_PREFIXES = (
     ("project-audit-", "static_candidate"),
     ("threat-audit-", "threat_audit"),
     ("threat-pattern-audit-", "threat_pattern_audit"),
+    ("threat-pattern-iterative-audit-", "threat_pattern_iterative_audit"),
 )
 
 

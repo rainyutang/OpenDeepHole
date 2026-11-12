@@ -1227,6 +1227,56 @@ await assert.rejects(fs.stat(marker), { code: "ENOENT" })
     assert not marker.exists()
 
 
+@pytest.mark.parametrize(
+    ("output", "metadata", "expected_failure"),
+    [
+        ("ok\n", {"exit": 0}, ""),
+        ("ok\n", {}, ""),
+        ("", {"exit": 0}, "command_output_marker_missing"),
+        ("looks ok\n", {"exit": 0}, "command_output_marker_missing"),
+        ("OK\n", {"exit": 0}, "command_output_marker_missing"),
+        ("ok\n", {"exit": 1}, "command_exit_failure"),
+        ("ok\n", {"exit": 0, "timeout": True}, "command_timeout"),
+    ],
+)
+def test_required_success_marker_checks_actual_command_output(
+    tmp_path: Path, output: str, metadata: dict, expected_failure: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _write_serve_config_file(runtime, "{}")
+    command = "python validate.py --input result.json"
+    _, audit_path = _write_command_binding(
+        runtime, session_id="audit-session", required_commands=(command,),
+        success_markers=((command, "ok"),),
+    )
+    with pytest.raises(OpenCodeTaskQualityError) as missing:
+        _validate_required_command_audit(audit_path, (command,))
+    assert missing.value.failure_kind == "command_not_executed"
+    plugin_path = runtime / ".opendeephole-plugins" / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+    script = r'''
+import { pathToFileURL } from "node:url"
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
+await hooks["tool.execute.after"](
+  { sessionID: "audit-session", tool: "bash", args: { command: process.argv[2] } },
+  JSON.parse(process.argv[3]),
+)
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(plugin_path), command,
+         json.dumps({"output": output, "metadata": metadata})],
+        check=False, capture_output=True, text=True, timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+    if expected_failure:
+        with pytest.raises(OpenCodeTaskQualityError) as failed:
+            _validate_required_command_audit(audit_path, (command,))
+        assert failed.value.failure_kind == expected_failure
+    else:
+        _validate_required_command_audit(audit_path, (command,))
+
+
 def test_required_command_audit_rejects_failure_and_post_validation_write(
     tmp_path: Path,
 ) -> None:

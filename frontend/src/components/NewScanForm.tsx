@@ -26,6 +26,7 @@ import { ReviewNotesSelector } from "./ReviewNotes";
 import {
   canonicalMiningEngineLabel,
   miningEngineRequiresThreatAnalysis,
+  miningEngineSelectedByDefault,
 } from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
 import PageHeader from "./PageHeader";
@@ -159,7 +160,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
       if (controller.signal.aborted) return;
       setAgents(agentList);
       setMiningEngineCatalog(engineCatalog.engines);
-      setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => [engine.engine_id, { selected: true }])));
+      setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => [engine.engine_id, { selected: miningEngineSelectedByDefault(engine.engine_id) }])));
       setThreatMethods(threatCatalog.methods);
       setThreatAnalysisMethod(threatCatalog.methods.find((method) => method.method_id === "opencode_lightweight_threat_analysis")?.method_id || threatCatalog.methods[0]?.method_id || "");
       setFpMethods(fpCatalog.methods);

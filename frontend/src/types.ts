@@ -354,6 +354,11 @@ export interface ThreatAnalysis {
 }
 
 export interface ThreatAuditTask {
+  engine_id?: string;
+  iteration?: number;
+  parent_task_id?: string;
+  has_more_findings?: boolean | null;
+  followup_clues?: string;
   task_id: string;
   scan_id?: string;
   status: string;
@@ -382,6 +387,13 @@ export interface ThreatAuditTask {
 }
 
 export interface ThreatPatternAuditTask {
+  /** Derived by the detail endpoint; omitted from summary rows and persistence. */
+  next_task_id?: string;
+  engine_id?: string;
+  iteration?: number;
+  parent_task_id?: string;
+  has_more_findings?: boolean | null;
+  followup_clues?: string;
   task_id: string;
   scan_id?: string;
   status: string;
@@ -705,6 +717,10 @@ export interface ScanDetailCounts {
   threat_audit_cancelled?: number;
   threat_audit_superseded?: number;
   threat_pattern_audit_tasks?: number;
+  threat_pattern_audit_by_engine?: Record<string, {
+    tasks: number; current: number; pending: number; queued: number; running: number;
+    completed: number; failed: number; cancelled: number; superseded: number;
+  }>;
   threat_pattern_audit_current?: number;
   threat_pattern_audit_pending?: number;
   threat_pattern_audit_queued?: number;

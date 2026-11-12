@@ -102,8 +102,14 @@ async def get_public_threat_tasks(scan_id: str, token: str = Query(...), cursor:
 
 @router.get("/api/public/scans/{scan_id}/threat-pattern-audit-tasks")
 async def get_public_threat_pattern_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
-                                 limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
+                                 limit: int = Query(50, ge=1, le=100), engine_id: str | None = None,
+                                 summary: bool = True):
+    return await scan_api.get_scan_threat_pattern_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token), engine_id, summary)
+
+
+@router.get("/api/public/scans/{scan_id}/threat-pattern-audit-tasks/{task_id}")
+async def get_public_threat_pattern_task(scan_id: str, task_id: str, token: str = Query(...)):
+    return await scan_api.get_scan_threat_pattern_audit_task_v2(scan_id, task_id, await _public_user_for_scan_async(scan_id, token))
 
 
 @router.get("/api/public/scans/{scan_id}/validations")

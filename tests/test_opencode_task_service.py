@@ -3054,8 +3054,9 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
     ("exact", 0), ("exact", 1), ("exact", 2),
     ("bound_python_script", 1), ("bound_python_script", 2),
 ])
+@pytest.mark.parametrize("success_marker", ["", "ok"])
 def test_post_session_validator_returns_feedback_to_the_same_session(
-    tmp_path: Path, match_mode: str, command_count: int,
+    tmp_path: Path, match_mode: str, command_count: int, success_marker: str,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
@@ -3123,6 +3124,8 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
                     prompt="run",
                     directory=tmp_path,
                     allowed_bash_commands=commands,
+                    required_bash_commands=commands if success_marker else (),
+                    required_bash_success_markers=tuple((command, success_marker) for command in commands) if success_marker else (),
                     bash_command_match_mode=match_mode,
                     post_session_validator=validate,
                     post_session_validation_retry_count=1,
@@ -3130,6 +3133,7 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
 
         assert result.status == "success"
         assert result.session_id == "ses_post_validation"
+        assert calls[0][0] == "run"
         assert [session_id for _, session_id, _ in calls] == [
             None,
             "ses_post_validation",
@@ -3140,15 +3144,18 @@ def test_post_session_validator_returns_feedback_to_the_same_session(
         correction_prompt = calls[1][0]
         assert "missing required property 'nodes'" in correction_prompt
         assert "不要求你在 Session 内执行校验命令" not in correction_prompt
-        assert "宿主会在回复结束后再次校验。" in correction_prompt
+        assert "宿主会在回复结束后再次校验。" not in correction_prompt
         if commands:
-            instructions, diagnostic = correction_prompt.split("<validation-output>\n", 1)
-            assert "修正后必须在当前 Session 内执行以下校验命令" in instructions
-            assert "校验通过后再结束本次回复" in instructions
-            assert "\n".join(commands) in instructions
+            diagnostic, instructions = correction_prompt.split("</validation-output>", 1)
+            if success_marker:
+                assert "写入后运行以下命令自检，必须返回 `ok` 才认为任务完成" in instructions
+            else:
+                assert "写入后必须在当前 Session 内执行以下校验命令" in instructions
+                assert "校验通过后再结束本次回复" in instructions
+            assert all(command in instructions for command in commands)
             assert all(command not in diagnostic for command in commands)
         else:
-            assert "请根据错误修正指定产物后结束本次回复" in correction_prompt
+            assert "请根据以下诊断重新分析并修改同一个结果文件" in correction_prompt
             assert "以下校验命令" not in correction_prompt
         assert acquire_mock.await_count == 1
         assert release_mock.await_args.kwargs["outcome"] == "success"
@@ -3200,7 +3207,8 @@ def test_threat_pattern_audit_queue_outcome_requires_the_designated_file(
             session_id = kwargs["session_id"] or f"ses_artifact_{len(calls)}"
             if kwargs["session_id"] is None:
                 await kwargs["on_session_id"](session_id)
-            assert kwargs["required_bash_commands"] == ()
+            assert kwargs["required_bash_commands"] == kwargs["allowed_bash_commands"]
+            assert kwargs["required_bash_success_markers"] == ((kwargs["allowed_bash_commands"][0], "ok"),)
             assert kwargs["bash_command_match_mode"] == "bound_python_script"
             assert len(kwargs["allowed_bash_commands"]) == 1
             payload = writes[len(calls) - 1]
@@ -3242,7 +3250,7 @@ def test_threat_pattern_audit_queue_outcome_requires_the_designated_file(
             # Terminal result and pool release run on the service worker.
             await asyncio.gather(*(record.worker for record in service._records.values()))
 
-        assert result["status"] == expected_status
+        assert result["status"] == expected_status, result
         assert [call["session_id"] for call in calls] == expected_sessions
         report.assert_not_awaited()
         terminal_releases = [

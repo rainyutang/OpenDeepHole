@@ -181,3 +181,139 @@ def test_empty_history_is_read_only_and_delete_removes_tasks(environment):
     task(env)
     env.store.delete_scan(env.scan_id)
     assert not env.store.list_threat_pattern_audit_tasks(env.scan_id)
+
+
+ITERATIVE = "threat_pattern_iterative_audit"
+
+
+def test_iterative_rounds_keep_engine_counts_links_and_clues_separate(environment):
+    env = environment
+    original = task(env, "original", status="completed")
+    first = task(env, "round-1", engine_id=ITERATIVE, iteration=1, status="completed",
+                 has_more_findings=True, followup_clues="src/auth/refresh.c 的刷新入口\n" * 200)
+    second = task(env, "round-2", engine_id=ITERATIVE, iteration=2,
+                  parent_task_id=first.task_id, status="queued")
+    index = finding(env, first.task_id, analysis_source=ITERATIVE, engine_id=ITERATIVE)
+    result = env.store.get_threat_pattern_audit_task_results(env.scan_id, [first.task_id])[0]
+    assert [item.vuln_index for item in result.findings] == [index]
+    source = env.store.get_vulnerability_audit_source(env.scan_id, index)
+    assert source.kind == "threat_pattern_audit"
+    assert source.pattern_task.engine_id == ITERATIVE
+    counts = env.store.get_scan_detail_counts(env.scan_id)["threat_pattern_audit_by_engine"]
+    assert counts["threat_pattern_audit"]["tasks"] == 1
+    assert counts[ITERATIVE]["tasks"] == 2
+    assert counts[ITERATIVE]["completed"] == counts[ITERATIVE]["queued"] == 1
+    assert counts[ITERATIVE]["current"] == 2
+    audits = env.store.get_scan_estimation_business_stats(env.scan_id)["audits"]
+    assert audits[ITERATIVE] == {"success": 1, "done": 1, "remaining": 1, "findings": 1, "remaining_findings": 0}
+    assert audits["threat_pattern_audit"]["success"] == 1
+    assert audits["threat_pattern_audit"]["findings"] == 0
+    summaries = env.store.list_threat_pattern_audit_tasks(env.scan_id, engine_id=ITERATIVE, summary=True)
+    assert {item.task_id for item in summaries} == {first.task_id, second.task_id}
+    assert all(item.followup_clues == "" for item in summaries)
+    full = env.store.list_threat_pattern_audit_tasks(env.scan_id, task_id=first.task_id)[0]
+    assert full.followup_clues == first.followup_clues and full.has_more_findings is True
+    assert env.store.get_threat_pattern_audit_task_detail(env.scan_id, first.task_id)["next_task_id"] == second.task_id
+    unchanged = env.store.upsert_threat_pattern_audit_task(env.scan_id, full.model_copy(update={"updated_at": "later"}))
+    assert unchanged.updated_at == full.updated_at
+    # Explicit indexes must not associate a finding from a different engine.
+    task(env, "original", status="completed", result_vuln_indexes=[index])
+    assert not env.store.get_threat_pattern_audit_task_results(env.scan_id, [original.task_id])[0].findings
+    reopened = env.factory()
+    try:
+        restored = reopened.list_threat_pattern_audit_tasks(env.scan_id, task_id=second.task_id)[0]
+        assert restored.iteration == 2 and restored.parent_task_id == first.task_id
+    finally:
+        reopened.close()
+
+
+def test_iterative_api_summary_details_and_shared_access(environment, monkeypatch):
+    env = environment
+    task(env, "old")
+    value = task(env, "round", engine_id=ITERATIVE, iteration=2, parent_task_id="parent",
+                 has_more_findings=True, followup_clues="private full clue " * 200)
+    share = env.store.get_or_create_scan_share(env.scan_id)
+    monkeypatch.setattr(env.store, "load_scan", lambda *args: pytest.fail("full scan read"))
+    app = FastAPI()
+    for router in (scan.router, integration.router, sharing.router):
+        app.include_router(router)
+    async def owner():
+        return User(user_id="owner", username="owner", role="user")
+    app.dependency_overrides[get_current_user] = owner
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            for prefix, auth in ((f"/api/v2/scans/{env.scan_id}", {}),
+                                 (f"/api/public/scans/{env.scan_id}", {"token": "access"}),
+                                 (f"/api/shared/scans/{env.scan_id}", {"token": share["token"]})):
+                response = await client.get(prefix + "/threat-pattern-audit-tasks", params={**auth, "engine_id": ITERATIVE})
+                assert response.status_code == 200, response.text
+                values = response.json()["items"]
+                assert [item["task_id"] for item in values] == [value.task_id]
+                assert values[0]["iteration"] == 2 and values[0]["followup_clues"] == ""
+                response = await client.get(prefix + "/threat-pattern-audit-tasks/" + value.task_id, params=auth)
+                assert response.status_code == 200, response.text
+                assert response.json()["followup_clues"] == value.followup_clues
+                assert response.json()["parent_task_id"] == "parent"
+                assert response.json()["next_task_id"] == ""
+                assert (await client.get(prefix + "/threat-pattern-audit-tasks/missing", params=auth)).status_code == 404
+            assert (await client.get(f"/api/public/scans/{env.scan_id}/threat-pattern-audit-tasks/" + value.task_id,
+                                     params={"token": "bad"})).status_code == 403
+    asyncio.run(run())
+
+
+def test_iterative_sse_is_small_and_does_not_lose_saved_clues(environment, monkeypatch):
+    env = environment
+    events = []
+    monkeypatch.setattr(sse, "publish", lambda *args: events.append(args))
+    response = asyncio.run(agent.agent_upsert_threat_pattern_audit_task(env.scan_id, {
+        "task_id": env.scan_id + "-round", "engine_id": ITERATIVE, "iteration": 1,
+        "status": "completed", "has_more_findings": True, "followup_clues": "next clue " * 500,
+    }))
+    assert response["task"]["followup_clues"]
+    assert "followup_clues" not in events[-1][2]["task"]
+    assert env.store.list_threat_pattern_audit_tasks(env.scan_id)[0].followup_clues == response["task"]["followup_clues"]
+    repeated = asyncio.run(agent.agent_upsert_threat_pattern_audit_task(env.scan_id, response["task"]))
+    assert repeated == response
+    assert len(events) == 1
+
+
+def test_old_pattern_table_migrates_without_losing_history_and_uses_indexes(environment):
+    env = environment
+    original = task(env, "legacy", status="completed")
+    # Reconstruct the previous release's table on a real persisted database.
+    env.store._conn.execute("DROP INDEX idx_pattern_audit_engine_cursor")
+    env.store._conn.execute("DROP INDEX idx_pattern_audit_parent")
+    env.store._conn.execute("DROP INDEX idx_scan_task_versions_name")
+    for column in ("engine_id", "iteration", "parent_task_id", "has_more_findings", "followup_clues"):
+        env.store._conn.execute(f"ALTER TABLE threat_pattern_audit_tasks DROP COLUMN {column}")
+    env.store._conn.commit()
+    migrated = env.factory()
+    try:
+        restored = migrated.list_threat_pattern_audit_tasks(env.scan_id)[0]
+        assert restored.task_id == original.task_id and restored.status == "completed"
+        assert restored.engine_id == "threat_pattern_audit" and restored.iteration == 1
+        assert restored.parent_task_id == restored.followup_clues == ""
+        assert restored.has_more_findings is None
+        is_postgres = bool(getattr(migrated, "distributed", False))
+        if is_postgres:
+            migrated._conn.execute("SET enable_seqscan = off")
+        explain = "EXPLAIN " if is_postgres else "EXPLAIN QUERY PLAN "
+        plans = migrated._conn.execute(explain + (
+            "SELECT task_id FROM threat_pattern_audit_tasks WHERE scan_id = ? AND engine_id = ? "
+            "ORDER BY created_at, task_id LIMIT 50"
+        ), (env.scan_id, ITERATIVE)).fetchall()
+        assert "idx_pattern_audit_engine_cursor" in str([dict(row) for row in plans])
+        plans = migrated._conn.execute(explain + (
+            "SELECT task_id FROM threat_pattern_audit_tasks WHERE scan_id = ? AND engine_id = ? "
+            "AND parent_task_id = ? AND parent_task_id != '' LIMIT 1"
+        ), (env.scan_id, ITERATIVE, original.task_id)).fetchall()
+        assert "idx_pattern_audit_parent" in str([dict(row) for row in plans])
+        expression = "CAST(metadata_json AS jsonb) ->> 'task_name'" if is_postgres else "json_extract(metadata_json, '$.task_name')"
+        plans = migrated._conn.execute(explain + (
+            "SELECT record_id FROM scan_task_versions WHERE scan_id = ? AND (" + expression + ") = ?"
+        ), (env.scan_id, "round-2")).fetchall()
+        assert "idx_scan_task_versions_name" in str([dict(row) for row in plans])
+        migrated._conn.commit()
+    finally:
+        migrated.close()

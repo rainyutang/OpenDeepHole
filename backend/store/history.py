@@ -485,13 +485,22 @@ class ScanHistoryMixin:
             ("static_candidate", "candidate_audit", "success"),
             ("threat_audit", "threat_audit", "completed"),
             ("threat_pattern_audit", "threat_pattern_audit", "completed"),
+            ("threat_pattern_iterative_audit", "threat_pattern_audit", "completed"),
         ):
-            success = max(0, int(counts.get(f"{prefix}_{success_state}", 0)))
+            by_engine = counts.get("threat_pattern_audit_by_engine", {})
+            if prefix == "threat_pattern_audit" and (by_engine or category == "threat_pattern_iterative_audit"):
+                category_counts = by_engine.get(category, {})
+            else:
+                category_counts = {
+                    state: counts.get(f"{prefix}_{state}", 0)
+                    for state in (success_state, "failed", "cancelled", "pending", "queued", "running")
+                }
+            success = max(0, int(category_counts.get(success_state, 0)))
             audits[category] = {
                 "success": success,
-                "done": success + sum(max(0, int(counts.get(f"{prefix}_{state}", 0)))
+                "done": success + sum(max(0, int(category_counts.get(state, 0)))
                                       for state in ("failed", "cancelled")),
-                "remaining": sum(max(0, int(counts.get(f"{prefix}_{state}", 0)))
+                "remaining": sum(max(0, int(category_counts.get(state, 0)))
                                  for state in ("pending", "queued", "running")),
                 "findings": 0,
                 "remaining_findings": 0,
@@ -499,7 +508,9 @@ class ScanHistoryMixin:
         # Match audit_source_kind's precedence, including old threat rows whose
         # category was recorded only in engine_id or vuln_type.
         category_sql = (
-            "CASE WHEN v.analysis_source = 'threat_pattern_audit' OR v.engine_id = 'threat_pattern_audit' "
+            "CASE WHEN v.analysis_source = 'threat_pattern_iterative_audit' OR v.engine_id = 'threat_pattern_iterative_audit' "
+            "THEN 'threat_pattern_iterative_audit' "
+            "WHEN v.analysis_source = 'threat_pattern_audit' OR v.engine_id = 'threat_pattern_audit' "
             "THEN 'threat_pattern_audit' "
             "WHEN v.analysis_source = 'threat_audit' OR v.engine_id = 'threat_audit' OR v.vuln_type = 'threat_audit' "
             "THEN 'threat_audit' "
@@ -526,7 +537,7 @@ class ScanHistoryMixin:
             "UNION ALL SELECT v.category, v.idx, CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END AS completed "
             "FROM eligible v JOIN threat_pattern_audit_tasks t ON t.task_id = v.source_task_id "
             "WHERE t.scan_id = ? AND t.status IN ('completed', 'pending', 'queued', 'running', 'analyzing', 'auditing') "
-            "AND v.category = 'threat_pattern_audit') "
+            "AND v.category IN ('threat_pattern_audit', 'threat_pattern_iterative_audit') AND t.engine_id = v.category) "
             "SELECT category, SUM(completed) AS findings, SUM(1 - completed) AS remaining_findings "
             "FROM (SELECT category, idx, MAX(completed) AS completed FROM associated GROUP BY category, idx) unique_findings "
             "GROUP BY category",
@@ -584,8 +595,8 @@ class ScanHistoryMixin:
         postgres = bool(getattr(self, "distributed", False))
         if task_name is not None:
             name_expression = "CAST(v.metadata_json AS jsonb) ->> 'task_name'" if getattr(self, "distributed", False) else "json_extract(v.metadata_json, '$.task_name')"
-            name_filter = f" AND ({name_expression}) = ?"
-            params.append(task_name)
+            name_filter = f" AND v.scan_id = ? AND ({name_expression}) = ?"
+            params.extend((scan_id, task_name))
         cursor_filter = ""
         if before_sort_time is not None:
             cursor_filter = " WHERE (sort_time, task_id) < (?, ?)"

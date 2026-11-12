@@ -213,7 +213,11 @@ class ScanStoreBase(ABC):
         """Idempotently link one finding to an already stored threat-audit task."""
         raise NotImplementedError
 
-    def upsert_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask) -> ThreatPatternAuditTask:
+    def upsert_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask, *,
+                                        return_changed: bool = False) -> ThreatPatternAuditTask | tuple[ThreatPatternAuditTask, bool]:
+        raise NotImplementedError
+
+    def get_threat_pattern_audit_task_detail(self, scan_id: str, task_id: str) -> dict | None:
         raise NotImplementedError
 
     def list_threat_pattern_audit_tasks(self, scan_id: str, **kwargs) -> list[ThreatPatternAuditTask]:

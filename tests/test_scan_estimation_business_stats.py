@@ -29,8 +29,8 @@ def business(sample_store):
             store._conn.execute("INSERT INTO threat_audit_tasks (task_id, scan_id, status, code_path) VALUES (?, ?, ?, ?)",
                                 (task_id, scope, state, name))
         else:
-            store._conn.execute("INSERT INTO threat_pattern_audit_tasks (task_id, scan_id, status) VALUES (?, ?, ?)",
-                                (task_id, scope, state))
+            store._conn.execute("INSERT INTO threat_pattern_audit_tasks (task_id, scan_id, status, engine_id) VALUES (?, ?, ?, ?)",
+                                (task_id, scope, state, category))
         store._conn.commit()
         return task_id
 
@@ -90,11 +90,17 @@ def test_audit_yield_uses_successful_associations_and_allows_multiple_findings(b
     b.finding(analysis_source="threat_audit", source_task_id=waiting)
     pattern = b.threat("pattern", category="threat_pattern_audit")
     b.finding(analysis_source="threat_pattern_audit", source_task_id=pattern)
+    iterative = b.threat("round-1", category="threat_pattern_iterative_audit")
+    iterative_pending = b.threat("round-2", "pending", category="threat_pattern_iterative_audit")
+    b.threat("other-round", "failed", category="threat_pattern_iterative_audit")
+    b.finding(analysis_source="threat_pattern_iterative_audit", source_task_id=iterative)
+    b.finding(analysis_source="threat_pattern_iterative_audit", source_task_id=iterative_pending)
     result = b.store.get_scan_estimation_business_stats(b.scan_id)
     assert result["audits"] == {
         "static_candidate": {"success": 2, "done": 3, "remaining": 2, "findings": 3, "remaining_findings": 1},
         "threat_audit": {"success": 1, "done": 2, "remaining": 1, "findings": 2, "remaining_findings": 1},
         "threat_pattern_audit": {"success": 1, "done": 1, "remaining": 0, "findings": 1, "remaining_findings": 0},
+        "threat_pattern_iterative_audit": {"success": 1, "done": 2, "remaining": 1, "findings": 1, "remaining_findings": 1},
     }
 
 
@@ -173,7 +179,7 @@ def test_empty_scan_and_missing_scan_have_no_forecast_units(business):
         assert stats["completed_reviews"] == stats["fp_pending_indexes"] == []
 
 
-@pytest.mark.parametrize("category", ["static_candidate", "threat_audit", "threat_pattern_audit"])
+@pytest.mark.parametrize("category", ["static_candidate", "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"])
 def test_early_findings_from_remaining_audits_do_not_inflate_completed_discovery_yield(business, category):
     b = business
     pending = []

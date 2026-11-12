@@ -24,6 +24,7 @@
     "test:model-pool": "node tests/modelPoolDashboard.test.mjs",
     "test:static-audit": "node tests/staticAudit.test.mjs",
     "test:threat-audit": "node tests/threatAuditResults.test.mjs",
+    "test:iterative-audit": "node tests/iterativeAudit.test.mjs",
     "test:audit-navigation": "node tests/auditNavigation.test.mjs",
     "test:fp-review": "node tests/fpReview.test.mjs",
     "test:review-notes": "node tests/reviewNotes.test.mjs",

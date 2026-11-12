@@ -76,6 +76,7 @@ from backend.models import (
     MULTI_VERSION_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
+    ThreatPatternAuditTaskDetail,
     ThreatPatternAuditTaskPage,
     ThreatAuditTaskResult,
     ThreatAnalysisMethodCatalog,
@@ -114,6 +115,7 @@ from backend.task_order import MISSING_TASK_TIME, task_sort_time
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 from deephole_client.scan_modes import (
     BUILTIN_PROFILE_ENGINE_IDS,
+    OPT_IN_MINING_ENGINE_IDS,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
@@ -540,7 +542,7 @@ def _resolve_scan_mining_engines(
         )]
 
     if requested is None:
-        selected_ids = [item.engine_id for item in catalog.engines]
+        selected_ids = [item.engine_id for item in catalog.engines if item.engine_id not in OPT_IN_MINING_ENGINE_IDS]
     else:
         selected_ids = [item.engine_id.strip() for item in requested]
     selections = [
@@ -2738,6 +2740,8 @@ async def get_scan_threat_pattern_audit_tasks_v2(
     limit: int = Query(50, ge=1, le=100),
     cursor: str | None = Query(None),
     current_user: User = Depends(get_current_user),
+    engine_id: str | None = None,
+    summary: bool = True,
 ) -> ThreatPatternAuditTaskPage:
     await _check_scan_owner_v2(scan_id, current_user)
     after: tuple[str, str] | None = None
@@ -2753,6 +2757,8 @@ async def get_scan_threat_pattern_audit_tasks_v2(
         after_created_at=after[0] if after is not None else None,
         after_task_id=after[1] if after is not None else None,
         limit=limit + 1,
+        engine_id=engine_id,
+        summary=summary,
     )
     has_more = len(tasks) > limit
     items = tasks[:limit]
@@ -2765,6 +2771,22 @@ async def get_scan_threat_pattern_audit_tasks_v2(
         has_more=has_more,
         next_cursor=next_cursor,
     )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-pattern-audit-tasks/{task_id}",
+    response_model=ThreatPatternAuditTaskDetail,
+)
+async def get_scan_threat_pattern_audit_task_v2(
+    scan_id: str, task_id: str, current_user: User = Depends(get_current_user),
+) -> ThreatPatternAuditTaskDetail:
+    await _check_scan_owner_v2(scan_id, current_user)
+    task = await run_store_call(
+        get_scan_store(), "get_threat_pattern_audit_task_detail", scan_id, task_id,
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Audit task not found")
+    return ThreatPatternAuditTaskDetail.model_validate(task)
 
 
 @router.get(

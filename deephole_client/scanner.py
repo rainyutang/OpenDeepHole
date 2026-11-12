@@ -43,6 +43,7 @@ from .process_artifacts import collect_json_artifacts, restore_json_artifacts
 from .reporter import Reporter
 from .scan_paths import resolve_scan_scope, scope_identity_matches
 from .scan_modes import (
+    OPT_IN_MINING_ENGINE_IDS,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     STATIC_ANALYSIS_ENGINE_IDS,
@@ -313,6 +314,7 @@ def _resolve_mining_engines(
                 engine_label=manifest.label,
             )
             for manifest in manifests
+            if manifest.engine_id not in OPT_IN_MINING_ENGINE_IDS
         ]
 
     if threat_only:

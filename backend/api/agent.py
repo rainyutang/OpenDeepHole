@@ -4631,8 +4631,8 @@ async def agent_report_vulnerability(
             "vulnerability": vuln.model_dump(),
         })
     source_task_id = str(vuln.source_task_id or "").strip()
-    if source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit"}:
-        task_kind = str(vuln.analysis_source)
+    if source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"}:
+        task_kind = "threat_pattern_audit" if vuln.analysis_source == "threat_pattern_iterative_audit" else str(vuln.analysis_source)
         linked = await run_store_call(
             store,
             f"link_{task_kind}_task_vulnerability",
@@ -4650,7 +4650,7 @@ async def agent_report_vulnerability(
                         vuln_index,
                     ])
                     publish(scan_id, f"{task_kind}_task", {
-                        "task": stored_task.model_dump(mode="json"),
+                        "task": stored_task.model_dump(mode="json", exclude={"followup_clues"}),
                     })
                 break
 
@@ -5377,12 +5377,15 @@ async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> di
             task = task.model_copy(update={
                 "result_vuln_indexes": result_indexes,
             })
-    task = await run_store_call(
+    task, changed = await run_store_call(
         store,
         "upsert_threat_pattern_audit_task",
         scan_id,
         task,
+        return_changed=True,
     )
+    if not changed:
+        return {"ok": True, "task": task.model_dump()}
 
     scan = await _ensure_running_scan(scan_id)
     if scan is not None:
@@ -5392,7 +5395,7 @@ async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> di
         scan.threat_pattern_audit_tasks = tasks
 
     from backend.sse import publish
-    publish(scan_id, "threat_pattern_audit_task", {"task": task.model_dump()})
+    publish(scan_id, "threat_pattern_audit_task", {"task": task.model_dump(exclude={"followup_clues"})})
     return {"ok": True, "task": task.model_dump()}
 
 
