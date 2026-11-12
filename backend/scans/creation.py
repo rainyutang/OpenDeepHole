@@ -447,7 +447,11 @@ async def _dispatch_creation(
             selected_agent_key,
         ),
     }
-    ok = await send_agent_command(agent_id, command)
+    try:
+        ok = await send_agent_command(agent_id, command)
+    except Exception:
+        logger.exception("Failed to dispatch new scan %s via agent %s", scan_id, agent_id)
+        ok = False
     if not ok:
         await run_store_call(
             store,
@@ -458,6 +462,7 @@ async def _dispatch_creation(
         )
         scan.status = ScanItemStatus.ERROR
         get_runtime().scans.running_scans.pop(scan_id, None)
+        get_runtime().scans.scan_owners.pop(scan_id, None)
         logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, agent_id)
         raise ApplicationError(status_code=502, detail="Agent not connected")
 

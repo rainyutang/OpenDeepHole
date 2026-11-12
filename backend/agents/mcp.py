@@ -233,23 +233,23 @@ async def probe_stable_agent_mcp(
     request_id = uuid.uuid4().hex
     broker = RpcBroker()
     waiter = broker.register("mcp_probe_result", request_id)
-    sent = await send_agent_command(live[0], {
-        "type": "mcp_probe",
-        "request_id": request_id,
-        "target": target,
-        "mcp_config": mcp_config.model_dump(mode="json"),
-        "projects_tool": (
-            mcp_config.projects_tool
-            if target == "scan_knowledge_base"
-            else ""
-        ),
-    })
-    if not sent:
-        broker.release("mcp_probe_result", request_id, waiter)
-        raise HTTPException(status_code=502, detail="Agent 连接已断开")
-
     wait_seconds = min(30, max(1, mcp_config.timeout_seconds)) + 5
     try:
+        sent = await send_agent_command(live[0], {
+            "type": "mcp_probe",
+            "request_id": request_id,
+            "target": target,
+            "mcp_config": mcp_config.model_dump(mode="json"),
+            "projects_tool": (
+                mcp_config.projects_tool
+                if target == "scan_knowledge_base"
+                else ""
+            ),
+        })
+        if not sent:
+            broker.release("mcp_probe_result", request_id, waiter)
+            raise HTTPException(status_code=502, detail="Agent 连接已断开")
+
         incoming = await _wait_agent_response(
             request_id,
             waiter,

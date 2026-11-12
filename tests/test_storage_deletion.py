@@ -68,3 +68,29 @@ def test_late_task_report_is_acknowledged_using_its_scope_id(tmp_path, monkeypat
             assert response.json()["discarded"] == "scan_deleted"
     asyncio.run(run())
     store.close()
+
+
+def test_deleted_scan_stage_output_is_acknowledged_by_real_route(tmp_path):
+    import httpx
+    from fastapi import FastAPI
+    from backend.api.scan import router
+    from backend.application import BackendRuntime
+
+    store = make_store(tmp_path)
+    store.update_scan_progress("s", status=ScanItemStatus.COMPLETE)
+    store.request_scan_deletion("s")
+    app = FastAPI()
+    app.state.backend_runtime = BackendRuntime(store=store)
+    app.include_router(router)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/scan/s/fp_review/stage-output", json={
+                "review_id": "old", "vuln_index": 0, "stage": "analysis", "output": "late",
+            })
+            assert response.status_code == 200
+            assert response.json() == {"ok": True, "discarded": "scan_deleted", "scan_id": "s"}
+    try:
+        asyncio.run(run())
+    finally:
+        store.close()

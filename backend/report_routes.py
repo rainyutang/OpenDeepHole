@@ -41,7 +41,7 @@ class HistoricalReportRoute(ApplicationRoute):
         is_report = self.path.startswith("/api/agent/") or (
             "/fp_review/" in self.path
             and self.path.rsplit("/", 1)[-1] in {
-                "progress", "result", "stage_output", "finish",
+                "progress", "result", "stage_output", "stage-output", "finish",
             }
         )
 
