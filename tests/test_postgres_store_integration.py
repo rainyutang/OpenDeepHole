@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,7 +92,40 @@ def _vulnerability() -> Vulnerability:
     )
 
 
-def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> None:
+@pytest.fixture
+def empty_postgres_schema():
+    """Migration needs an empty target even when earlier tests left tombstones."""
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import conninfo_to_dict
+    from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+
+    schema = "migration_test_" + uuid.uuid4().hex
+    options = conninfo_to_dict(POSTGRES_DSN).get("options", "")
+    with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        # The migration CLI accepts URLs, while make_conninfo returns libpq
+        # key/value syntax. Preserve the URL and replace only its options.
+        uri = urlsplit(POSTGRES_DSN)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(uri.query, keep_blank_values=True)
+            if key != "options"
+        ]
+        query.append(("options", f"{options} -c search_path={schema}".strip()))
+        yield urlunsplit((
+            uri.scheme, uri.netloc, uri.path,
+            urlencode(query, quote_via=quote), uri.fragment,
+        ))
+    finally:
+        with psycopg.connect(POSTGRES_DSN, autocommit=True) as connection:
+            connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_sqlite_migration_and_distributed_store_round_trip(
+    tmp_path: Path, empty_postgres_schema: str,
+) -> None:
     from psycopg import Error as PsycopgError
 
     sqlite_path = tmp_path / "source.db"
@@ -123,15 +157,15 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
 
     migrate(
         sqlite_path,
-        POSTGRES_DSN,
+        empty_postgres_schema,
         batch_size=100,
         dry_run=False,
     )
 
-    store = PostgresScanStore(POSTGRES_DSN, pool_min_size=1, pool_max_size=4)
-    peer = PostgresScanStore(POSTGRES_DSN, pool_min_size=1, pool_max_size=2)
+    store = PostgresScanStore(empty_postgres_schema, pool_min_size=1, pool_max_size=4)
+    peer = PostgresScanStore(empty_postgres_schema, pool_min_size=1, pool_max_size=2)
     recovery_store = PostgresScanStore(
-        POSTGRES_DSN,
+        empty_postgres_schema,
         pool_min_size=1,
         pool_max_size=1,
     )
@@ -159,6 +193,16 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             "threat_audit_failed": 0,
             "threat_audit_cancelled": 0,
             "threat_audit_superseded": 0,
+            "threat_pattern_audit_tasks": 0,
+            "threat_pattern_audit_current": 0,
+            "threat_pattern_audit_pending": 0,
+            "threat_pattern_audit_queued": 0,
+            "threat_pattern_audit_running": 0,
+            "threat_pattern_audit_completed": 0,
+            "threat_pattern_audit_failed": 0,
+            "threat_pattern_audit_cancelled": 0,
+            "threat_pattern_audit_superseded": 0,
+            "threat_pattern_audit_by_engine": {},
             "validations": 1,
             "skill_reports": 0,
             "fp_review_active": 0,

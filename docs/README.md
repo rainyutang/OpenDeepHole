@@ -10,6 +10,7 @@
 | [扫描使用指南](usage.md) | 模式、MCP、停止续扫、复核、反馈、导出与用户 Skill |
 | [配置参考](configuration.md) | 服务端与 Agent 配置、模型池、OpenCode 和 Codex 运行时 |
 | [架构与数据存储](architecture.md) | 组件职责、通信、数据流和本地存储 |
+| [扫描与 Agent 后端结构](backend-scan-agent-architecture.md) | 服务分层、运行状态、创建续扫与连接恢复 |
 | [审计结果](audit_results.md) | 候选点与威胁任务的权威结果、状态与页面入口 |
 | [漏洞报告格式](vulnerability-reports.md) | 精简字段、生成提示词、源码注释与 JSON/Markdown 示例 |
 | [威胁分析覆盖率](threat-coverage.md) | 文件清单、覆盖口径与模块路径匹配 |

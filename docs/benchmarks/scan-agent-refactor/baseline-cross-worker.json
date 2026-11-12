@@ -1,0 +1,252 @@
+{
+  "source": "/tmp/odh-refactor-baseline",
+  "python": "3.10.12 (main, Jul 26 2023, 13:20:36) [Clang 16.0.3 ]",
+  "database": "postgres",
+  "workers": 2,
+  "measurements": [
+    {
+      "name": "cross_worker_rpc_sse",
+      "concurrency": 1,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 112.23022401100025,
+          "p95_ms": 116.47283199999947,
+          "throughput_per_second": 8.87744235102113,
+          "wall_seconds": 22.52901140799804,
+          "cpu_ms_per_operation": 13.303350145,
+          "event_loop_lag_p95_ms": 0.9324780013412236,
+          "store_calls": 1600,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 400,
+            "list_stream_events": 400,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 111.97924500447698,
+          "p95_ms": 118.25901900010649,
+          "throughput_per_second": 8.883346348404556,
+          "wall_seconds": 22.514038308989257,
+          "cpu_ms_per_operation": 13.066436640000001,
+          "event_loop_lag_p95_ms": 0.9140719968127086,
+          "store_calls": 1602,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "list_stream_events": 400,
+            "register_worker": 1,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.66986800183076,
+          "p95_ms": 117.67957599658985,
+          "throughput_per_second": 8.860272156323957,
+          "wall_seconds": 22.57267005700851,
+          "cpu_ms_per_operation": 13.330224645000003,
+          "event_loop_lag_p95_ms": 0.9262680006213485,
+          "store_calls": 1602,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "list_stream_events": 400,
+            "register_worker": 1,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.69250999612268,
+          "p95_ms": 118.93836200761143,
+          "throughput_per_second": 8.829268978174813,
+          "wall_seconds": 22.651931942993542,
+          "cpu_ms_per_operation": 13.683357625000001,
+          "event_loop_lag_p95_ms": 0.9651030023815109,
+          "store_calls": 1602,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "list_stream_events": 400,
+            "register_worker": 1,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.3279269959312,
+          "p95_ms": 117.26664900197648,
+          "throughput_per_second": 8.854647145094841,
+          "wall_seconds": 22.58700959199632,
+          "cpu_ms_per_operation": 13.404850275000006,
+          "event_loop_lag_p95_ms": 0.9324500034563242,
+          "store_calls": 1600,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 400,
+            "list_stream_events": 400,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 112.3279269959312,
+        "p95_ms": 117.67957599658985,
+        "throughput_per_second": 8.860272156323957,
+        "cpu_ms_per_operation": 13.330224645000003,
+        "event_loop_lag_p95_ms": 0.9324500034563242,
+        "store_calls": 1602
+      },
+      "peak_rss_kib": 87792
+    },
+    {
+      "name": "cross_worker_rpc_sse",
+      "concurrency": 8,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 114.77875900163781,
+          "p95_ms": 147.07785101199988,
+          "throughput_per_second": 69.52535189319735,
+          "wall_seconds": 2.8766485109954374,
+          "cpu_ms_per_operation": 8.460757195,
+          "event_loop_lag_p95_ms": 1.0517660022014752,
+          "store_calls": 1188,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 380,
+            "list_stream_events": 204,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 204
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 116.28659399866592,
+          "p95_ms": 147.4865969939856,
+          "throughput_per_second": 67.55678739868242,
+          "wall_seconds": 2.960472332997597,
+          "cpu_ms_per_operation": 9.063073460000002,
+          "event_loop_lag_p95_ms": 1.0716640000464395,
+          "store_calls": 1217,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 385,
+            "list_stream_events": 216,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 216
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 117.30187600187492,
+          "p95_ms": 142.06114900298417,
+          "throughput_per_second": 68.1230519086978,
+          "wall_seconds": 2.935863769991556,
+          "cpu_ms_per_operation": 9.013273154999997,
+          "event_loop_lag_p95_ms": 1.1145930085331202,
+          "store_calls": 1209,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 385,
+            "list_stream_events": 212,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 212
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 116.52668699389324,
+          "p95_ms": 148.6627340054838,
+          "throughput_per_second": 66.86529942208463,
+          "wall_seconds": 2.9910880789975636,
+          "cpu_ms_per_operation": 8.772426205000006,
+          "event_loop_lag_p95_ms": 1.0877259966218844,
+          "store_calls": 1210,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 390,
+            "list_stream_events": 210,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 210
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 114.67856900708284,
+          "p95_ms": 146.38815200305544,
+          "throughput_per_second": 69.70921215872495,
+          "wall_seconds": 2.8690612589998636,
+          "cpu_ms_per_operation": 8.423900504999988,
+          "event_loop_lag_p95_ms": 1.061795007553883,
+          "store_calls": 1196,
+          "store_operations": {
+            "get_live_agent_session": 200,
+            "pop_agent_rpc_response": 380,
+            "list_stream_events": 208,
+            "enqueue_agent_command": 200,
+            "claim_agent_commands": 208
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 116.28659399866592,
+        "p95_ms": 147.07785101199988,
+        "throughput_per_second": 68.1230519086978,
+        "cpu_ms_per_operation": 8.772426205000006,
+        "event_loop_lag_p95_ms": 1.0716640000464395,
+        "store_calls": 1209
+      },
+      "peak_rss_kib": 88304
+    }
+  ],
+  "unique_acknowledgements": 2060,
+  "remote_worker": {
+    "worker_cpu_seconds": 13.802780933,
+    "worker_peak_rss_kib": 80284
+  },
+  "peak_rss_kib": 88432,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.10.12",
+    "fastapi": "0.141.1",
+    "pydantic": "2.13.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

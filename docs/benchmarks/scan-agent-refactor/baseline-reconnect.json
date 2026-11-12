@@ -1,0 +1,426 @@
+{
+  "source": "/tmp/odh-refactor-baseline",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "database": "sqlite",
+  "active_work_per_agent": {
+    "scans": 1,
+    "fp_reviews": 1,
+    "validations": 1
+  },
+  "agents": 8,
+  "measurements": [
+    {
+      "name": "active_reconnect",
+      "concurrency": 1,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 31.4983510033926,
+          "p95_ms": 35.152189986547455,
+          "throughput_per_second": 31.32315201580328,
+          "wall_seconds": 6.385053455000161,
+          "cpu_ms_per_operation": 7.017622520000001,
+          "event_loop_lag_p95_ms": 1.0801049985457212,
+          "store_calls": 3000,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 200,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.287,
+            "p95": 4.852,
+            "p99": 5.204,
+            "max": 10.703
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.083,
+            "p95": 4.334,
+            "p99": 4.961,
+            "max": 6.1
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 10.35992699326016,
+          "p95_ms": 30.77392399427481,
+          "throughput_per_second": 80.83228183003155,
+          "wall_seconds": 2.4742589899979066,
+          "cpu_ms_per_operation": 5.04590986,
+          "event_loop_lag_p95_ms": 1.07394399412442,
+          "store_calls": 3001,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 201,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.218,
+            "p95": 1.192,
+            "p99": 1.486,
+            "max": 8.175
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.058,
+            "p95": 1.127,
+            "p99": 1.387,
+            "max": 1.821
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 10.327230003895238,
+          "p95_ms": 12.145115004386753,
+          "throughput_per_second": 94.26308972775666,
+          "wall_seconds": 2.1217212439951254,
+          "cpu_ms_per_operation": 4.875198459999998,
+          "event_loop_lag_p95_ms": 1.0661980096483603,
+          "store_calls": 3000,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 200,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.219,
+            "p95": 1.186,
+            "p99": 1.424,
+            "max": 2.324
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.058,
+            "p95": 1.115,
+            "p99": 1.334,
+            "max": 1.685
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 10.373835990321822,
+          "p95_ms": 12.49458099482581,
+          "throughput_per_second": 93.03179509396156,
+          "wall_seconds": 2.149802654006635,
+          "cpu_ms_per_operation": 4.993628024999999,
+          "event_loop_lag_p95_ms": 1.049196992535144,
+          "store_calls": 3000,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 200,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.224,
+            "p95": 1.193,
+            "p99": 1.569,
+            "max": 2.877
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.058,
+            "p95": 1.147,
+            "p99": 1.411,
+            "max": 20.923
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 10.313193997717462,
+          "p95_ms": 11.862186001962982,
+          "throughput_per_second": 94.82120999545103,
+          "wall_seconds": 2.109232734001125,
+          "cpu_ms_per_operation": 4.818828814999998,
+          "event_loop_lag_p95_ms": 1.0526020097313449,
+          "store_calls": 2999,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 199,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.22,
+            "p95": 1.191,
+            "p99": 1.579,
+            "max": 5.861
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.058,
+            "p95": 1.123,
+            "p99": 1.361,
+            "max": 1.763
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 10.35992699326016,
+        "p95_ms": 12.49458099482581,
+        "throughput_per_second": 93.03179509396156,
+        "cpu_ms_per_operation": 4.993628024999999,
+        "event_loop_lag_p95_ms": 1.0661980096483603,
+        "store_calls": 3000
+      },
+      "peak_rss_kib": 77824
+    },
+    {
+      "name": "active_reconnect",
+      "concurrency": 8,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 78.70061899302527,
+          "p95_ms": 84.18380400689784,
+          "throughput_per_second": 100.49604985897338,
+          "wall_seconds": 1.9901279729965609,
+          "cpu_ms_per_operation": 4.586156244999997,
+          "event_loop_lag_p95_ms": 1.103446998167783,
+          "store_calls": 2995,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 195,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.294,
+            "p95": 1.408,
+            "p99": 1.942,
+            "max": 25.079
+          },
+          "store_recent_queue_ms": {
+            "p50": 5.24,
+            "p95": 10.032,
+            "p99": 11.19,
+            "max": 33.069
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 78.03380300174467,
+          "p95_ms": 84.69563399557956,
+          "throughput_per_second": 99.96506011255642,
+          "wall_seconds": 2.0006990419933572,
+          "cpu_ms_per_operation": 4.5950002700000026,
+          "event_loop_lag_p95_ms": 1.1232830048538744,
+          "store_calls": 3002,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 202,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.285,
+            "p95": 1.423,
+            "p99": 2.03,
+            "max": 25.024
+          },
+          "store_recent_queue_ms": {
+            "p50": 5.295,
+            "p95": 10.122,
+            "p99": 11.706,
+            "max": 27.245
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 80.37257599062286,
+          "p95_ms": 88.60999099852052,
+          "throughput_per_second": 98.16018266564076,
+          "wall_seconds": 2.037486020999495,
+          "cpu_ms_per_operation": 4.742439455000005,
+          "event_loop_lag_p95_ms": 1.0875610070070252,
+          "store_calls": 3000,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 200,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.308,
+            "p95": 1.45,
+            "p99": 2.084,
+            "max": 27.481
+          },
+          "store_recent_queue_ms": {
+            "p50": 5.29,
+            "p95": 10.288,
+            "p99": 11.414,
+            "max": 35.722
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 78.57367700489704,
+          "p95_ms": 91.85454100952484,
+          "throughput_per_second": 99.07567664471104,
+          "wall_seconds": 2.0186589360091602,
+          "cpu_ms_per_operation": 4.655590125,
+          "event_loop_lag_p95_ms": 1.0972329956712201,
+          "store_calls": 2997,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 197,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.277,
+            "p95": 1.437,
+            "p99": 1.997,
+            "max": 4.173
+          },
+          "store_recent_queue_ms": {
+            "p50": 5.06,
+            "p95": 10.167,
+            "p99": 11.427,
+            "max": 12.038
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        },
+        {
+          "p50_ms": 80.56207999470644,
+          "p95_ms": 107.25716200249735,
+          "throughput_per_second": 94.8196255268843,
+          "wall_seconds": 2.109267980005825,
+          "cpu_ms_per_operation": 5.117454879999999,
+          "event_loop_lag_p95_ms": 1.0845219995826483,
+          "store_calls": 2999,
+          "store_operations": {
+            "update_scan_agent": 600,
+            "touch_agent_record": 199,
+            "load_scan": 200,
+            "find_agent_record": 200,
+            "upsert_agent_record": 200,
+            "list_agent_inflight_executions": 400,
+            "get_fp_review_job": 200,
+            "get_scan_meta": 400,
+            "update_scan_progress": 200,
+            "list_agent_review_notes": 200,
+            "list_vulnerability_validations": 200
+          },
+          "store_recent_execution_ms": {
+            "p50": 0.355,
+            "p95": 1.484,
+            "p99": 1.976,
+            "max": 36.596
+          },
+          "store_recent_queue_ms": {
+            "p50": 5.419,
+            "p95": 10.369,
+            "p99": 11.363,
+            "max": 44.216
+          },
+          "outcomes": {
+            "adopted+ack": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 78.70061899302527,
+        "p95_ms": 88.60999099852052,
+        "throughput_per_second": 99.07567664471104,
+        "cpu_ms_per_operation": 4.655590125,
+        "event_loop_lag_p95_ms": 1.0972329956712201,
+        "store_calls": 2999
+      },
+      "peak_rss_kib": 81280
+    }
+  ],
+  "peak_rss_kib": 81536,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "fastapi": "0.135.3",
+    "pydantic": "2.12.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

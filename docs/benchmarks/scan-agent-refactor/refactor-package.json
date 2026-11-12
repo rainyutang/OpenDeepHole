@@ -1,0 +1,76 @@
+{
+  "source": "/home/raint/workspace/OpenDeepHole",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "measurements": {
+    "runtime_manifest": {
+      "first_ms": 63.18575399927795,
+      "repeat_median_ms": 55.062031009583734,
+      "repeat_p95_ms": 56.239393990836106,
+      "cpu_median_ms": 54.88510400000002,
+      "response_bytes": 107220,
+      "timings_ms": [
+        63.18575399927795,
+        55.062031009583734,
+        52.467745001195,
+        53.85302400100045,
+        55.314461002126336,
+        56.239393990836106
+      ],
+      "hash_scope": {
+        "version": 4,
+        "dirs": [
+          "deephole_client",
+          "task_agent",
+          "codex_sdk",
+          "mcp_server",
+          "backend"
+        ],
+        "tool_dirs": [
+          "ctags-p6.2.20260517.0-x64"
+        ],
+        "root_files": [
+          "requirements-agent.txt"
+        ],
+        "skip_dirs": [
+          ".git",
+          ".mypy_cache",
+          ".pytest_cache",
+          "__pycache__",
+          "static",
+          "system_skills"
+        ],
+        "skip_suffixes": [
+          ".pyc",
+          ".pyo"
+        ]
+      },
+      "manifest_files": 673
+    },
+    "agent_zip": {
+      "first_ms": 396.8319400009932,
+      "repeat_median_ms": 391.7883329995675,
+      "repeat_p95_ms": 398.71479201246984,
+      "cpu_median_ms": 391.71330299999994,
+      "response_bytes": 4816990,
+      "timings_ms": [
+        396.8319400009932,
+        391.7883329995675,
+        388.8142100040568,
+        386.6787240112899,
+        398.71479201246984,
+        392.03988200461026
+      ],
+      "archive_entries": 677,
+      "uncompressed_bytes": 14345431
+    }
+  },
+  "peak_rss_kib": 118312,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "fastapi": "0.135.3",
+    "pydantic": "2.12.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

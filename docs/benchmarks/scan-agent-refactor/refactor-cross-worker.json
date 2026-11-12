@@ -1,0 +1,252 @@
+{
+  "source": "/home/raint/workspace/OpenDeepHole",
+  "python": "3.10.12 (main, Jul 26 2023, 13:20:36) [Clang 16.0.3 ]",
+  "database": "postgres",
+  "workers": 2,
+  "measurements": [
+    {
+      "name": "cross_worker_rpc_sse",
+      "concurrency": 1,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 112.6875409972854,
+          "p95_ms": 117.02526599401608,
+          "throughput_per_second": 8.850297870688495,
+          "wall_seconds": 22.598109455997474,
+          "cpu_ms_per_operation": 13.794809345,
+          "event_loop_lag_p95_ms": 0.910612002480775,
+          "store_calls": 1600,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 400,
+            "get_live_agent_session": 200,
+            "list_stream_events": 400,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.62969800736755,
+          "p95_ms": 117.54810198908672,
+          "throughput_per_second": 8.852579163566524,
+          "wall_seconds": 22.592285966005875,
+          "cpu_ms_per_operation": 13.697877260000002,
+          "event_loop_lag_p95_ms": 0.9309169882908462,
+          "store_calls": 1602,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "register_worker": 1,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "get_live_agent_session": 200,
+            "list_stream_events": 400,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.3094630020205,
+          "p95_ms": 117.40969901438802,
+          "throughput_per_second": 8.86803713067642,
+          "wall_seconds": 22.552905119009665,
+          "cpu_ms_per_operation": 13.275829274999994,
+          "event_loop_lag_p95_ms": 0.9296140098012983,
+          "store_calls": 1602,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "register_worker": 1,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "get_live_agent_session": 200,
+            "list_stream_events": 400,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 113.13425499247387,
+          "p95_ms": 117.04783400637098,
+          "throughput_per_second": 8.839102664347214,
+          "wall_seconds": 22.6267311959964,
+          "cpu_ms_per_operation": 13.685611070000004,
+          "event_loop_lag_p95_ms": 0.9059030027128755,
+          "store_calls": 1602,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "register_worker": 1,
+            "recover_stale_agent_commands": 1,
+            "pop_agent_rpc_response": 400,
+            "get_live_agent_session": 200,
+            "list_stream_events": 400,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 112.93744800786953,
+          "p95_ms": 118.0500589980511,
+          "throughput_per_second": 8.806378074338317,
+          "wall_seconds": 22.710812358011026,
+          "cpu_ms_per_operation": 14.401495065,
+          "event_loop_lag_p95_ms": 0.9598920051939784,
+          "store_calls": 1600,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 400,
+            "get_live_agent_session": 200,
+            "list_stream_events": 400,
+            "claim_agent_commands": 400
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 112.6875409972854,
+        "p95_ms": 117.40969901438802,
+        "throughput_per_second": 8.850297870688495,
+        "cpu_ms_per_operation": 13.697877260000002,
+        "event_loop_lag_p95_ms": 0.9296140098012983,
+        "store_calls": 1602
+      },
+      "peak_rss_kib": 87424
+    },
+    {
+      "name": "cross_worker_rpc_sse",
+      "concurrency": 8,
+      "samples_per_round": 200,
+      "warmup": 30,
+      "rounds": [
+        {
+          "p50_ms": 125.12940099986736,
+          "p95_ms": 148.95944400632288,
+          "throughput_per_second": 67.52580377044977,
+          "wall_seconds": 2.9618307199998526,
+          "cpu_ms_per_operation": 9.575502124999993,
+          "event_loop_lag_p95_ms": 1.3226960046449676,
+          "store_calls": 1112,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 364,
+            "get_live_agent_session": 200,
+            "list_stream_events": 174,
+            "claim_agent_commands": 174
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 121.92742900515441,
+          "p95_ms": 150.02088400069624,
+          "throughput_per_second": 65.83892447768022,
+          "wall_seconds": 3.037716693987022,
+          "cpu_ms_per_operation": 9.683879505000004,
+          "event_loop_lag_p95_ms": 1.1663670057896525,
+          "store_calls": 1180,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 382,
+            "get_live_agent_session": 200,
+            "list_stream_events": 199,
+            "claim_agent_commands": 199
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 122.49876599526033,
+          "p95_ms": 146.00593299837783,
+          "throughput_per_second": 69.4271759291172,
+          "wall_seconds": 2.8807163379970007,
+          "cpu_ms_per_operation": 9.385471579999987,
+          "event_loop_lag_p95_ms": 1.086986992158927,
+          "store_calls": 1142,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 368,
+            "get_live_agent_session": 200,
+            "list_stream_events": 187,
+            "claim_agent_commands": 187
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 113.88255099882372,
+          "p95_ms": 149.2233099997975,
+          "throughput_per_second": 67.41602404374355,
+          "wall_seconds": 2.966653741998016,
+          "cpu_ms_per_operation": 8.817913609999994,
+          "event_loop_lag_p95_ms": 1.091046001529321,
+          "store_calls": 1208,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 386,
+            "get_live_agent_session": 200,
+            "list_stream_events": 211,
+            "claim_agent_commands": 211
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        },
+        {
+          "p50_ms": 118.60966400126927,
+          "p95_ms": 148.55538999836426,
+          "throughput_per_second": 66.75402710545322,
+          "wall_seconds": 2.9960739250091137,
+          "cpu_ms_per_operation": 8.969900914999993,
+          "event_loop_lag_p95_ms": 1.1219009949127212,
+          "store_calls": 1201,
+          "store_operations": {
+            "enqueue_agent_command": 200,
+            "pop_agent_rpc_response": 389,
+            "get_live_agent_session": 200,
+            "list_stream_events": 206,
+            "claim_agent_commands": 206
+          },
+          "outcomes": {
+            "rpc+sse": 200
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 121.92742900515441,
+        "p95_ms": 148.95944400632288,
+        "throughput_per_second": 67.41602404374355,
+        "cpu_ms_per_operation": 9.385471579999987,
+        "event_loop_lag_p95_ms": 1.1219009949127212,
+        "store_calls": 1180
+      },
+      "peak_rss_kib": 88704
+    }
+  ],
+  "unique_acknowledgements": 2060,
+  "remote_worker": {
+    "worker_cpu_seconds": 13.960524019,
+    "worker_peak_rss_kib": 80736
+  },
+  "peak_rss_kib": 88704,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.10.12",
+    "fastapi": "0.141.1",
+    "pydantic": "2.13.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

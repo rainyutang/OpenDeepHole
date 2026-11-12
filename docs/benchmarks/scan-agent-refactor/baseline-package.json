@@ -1,0 +1,76 @@
+{
+  "source": "/tmp/odh-refactor-baseline",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "measurements": {
+    "runtime_manifest": {
+      "first_ms": 184.4036539987428,
+      "repeat_median_ms": 45.43988399382215,
+      "repeat_p95_ms": 47.56590099714231,
+      "cpu_median_ms": 45.325190999999876,
+      "response_bytes": 95358,
+      "timings_ms": [
+        184.4036539987428,
+        47.56590099714231,
+        46.44327799906023,
+        45.15495299710892,
+        44.906649985932745,
+        45.43988399382215
+      ],
+      "hash_scope": {
+        "version": 4,
+        "dirs": [
+          "deephole_client",
+          "task_agent",
+          "codex_sdk",
+          "mcp_server",
+          "backend"
+        ],
+        "tool_dirs": [
+          "ctags-p6.2.20260517.0-x64"
+        ],
+        "root_files": [
+          "requirements-agent.txt"
+        ],
+        "skip_dirs": [
+          ".git",
+          ".mypy_cache",
+          ".pytest_cache",
+          "__pycache__",
+          "static",
+          "system_skills"
+        ],
+        "skip_suffixes": [
+          ".pyc",
+          ".pyo"
+        ]
+      },
+      "manifest_files": 583
+    },
+    "agent_zip": {
+      "first_ms": 388.6556290090084,
+      "repeat_median_ms": 378.75684699974954,
+      "repeat_p95_ms": 380.11109000945,
+      "cpu_median_ms": 378.6220199999999,
+      "response_bytes": 4753033,
+      "timings_ms": [
+        388.6556290090084,
+        380.11109000945,
+        379.348457994638,
+        372.38943799457047,
+        378.75684699974954,
+        368.75840400171
+      ],
+      "archive_entries": 587,
+      "uncompressed_bytes": 14227530
+    }
+  },
+  "peak_rss_kib": 113372,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "fastapi": "0.135.3",
+    "pydantic": "2.12.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

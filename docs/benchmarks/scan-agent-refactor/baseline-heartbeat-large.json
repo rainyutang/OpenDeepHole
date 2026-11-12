@@ -1,0 +1,311 @@
+{
+  "source": "/tmp/odh-refactor-baseline",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "database": "sqlite",
+  "seed": {
+    "scans": 102,
+    "tasks": 10000,
+    "task_body_bytes": 1024
+  },
+  "measurements": [
+    {
+      "name": "heartbeat",
+      "concurrency": 1,
+      "samples_per_round": 2000,
+      "warmup": 200,
+      "rounds": [
+        {
+          "p50_ms": 0.02483099524397403,
+          "p95_ms": 0.0447530037490651,
+          "throughput_per_second": 21327.454915639144,
+          "wall_seconds": 0.093775840010494,
+          "cpu_ms_per_operation": 0.046917538000000036,
+          "event_loop_lag_p95_ms": 0.8344849967397748,
+          "store_calls": 1,
+          "store_operations": {
+            "touch_agent_record": 1
+          },
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.02426000719424337,
+          "p95_ms": 0.038309997762553394,
+          "throughput_per_second": 29977.21072338255,
+          "wall_seconds": 0.06671734800329432,
+          "cpu_ms_per_operation": 0.03335959150000001,
+          "event_loop_lag_p95_ms": 0.47319000179413695,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.024182998458854854,
+          "p95_ms": 0.03337700036354363,
+          "throughput_per_second": 30895.435300878264,
+          "wall_seconds": 0.06473448198812548,
+          "cpu_ms_per_operation": 0.032345766000000054,
+          "event_loop_lag_p95_ms": 0.5279040097957476,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.023689994122833014,
+          "p95_ms": 0.03511300019454211,
+          "throughput_per_second": 31332.585846372935,
+          "wall_seconds": 0.06383130999165587,
+          "cpu_ms_per_operation": 0.031916242500000025,
+          "event_loop_lag_p95_ms": 0.5975380091695114,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.024263004888780415,
+          "p95_ms": 0.034222000977024436,
+          "throughput_per_second": 20126.174613364765,
+          "wall_seconds": 0.09937308199005201,
+          "cpu_ms_per_operation": 0.04883739600000003,
+          "event_loop_lag_p95_ms": 0.6584840058349072,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 0.02426000719424337,
+        "p95_ms": 0.03511300019454211,
+        "throughput_per_second": 29977.21072338255,
+        "cpu_ms_per_operation": 0.03335959150000001,
+        "event_loop_lag_p95_ms": 0.5975380091695114,
+        "store_calls": 0
+      },
+      "peak_rss_kib": 83260
+    },
+    {
+      "name": "heartbeat",
+      "concurrency": 8,
+      "samples_per_round": 2000,
+      "warmup": 200,
+      "rounds": [
+        {
+          "p50_ms": 0.11561100836843252,
+          "p95_ms": 0.17824899987317622,
+          "throughput_per_second": 44017.19012469587,
+          "wall_seconds": 0.04543679399648681,
+          "cpu_ms_per_operation": 0.022718928999999943,
+          "event_loop_lag_p95_ms": 0.6981340021593495,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.11663400800898671,
+          "p95_ms": 0.14658100553788245,
+          "throughput_per_second": 42811.7691074908,
+          "wall_seconds": 0.04671612600213848,
+          "cpu_ms_per_operation": 0.023358873500000103,
+          "event_loop_lag_p95_ms": 0.7519760011928155,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.11749099940061569,
+          "p95_ms": 0.18616300076246262,
+          "throughput_per_second": 42362.86594322216,
+          "wall_seconds": 0.04721115900611039,
+          "cpu_ms_per_operation": 0.023605892999999933,
+          "event_loop_lag_p95_ms": 0.9877260064240544,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.11663000623229891,
+          "p95_ms": 0.15705199621152133,
+          "throughput_per_second": 28641.75308059368,
+          "wall_seconds": 0.06982812799105886,
+          "cpu_ms_per_operation": 0.03489375100000003,
+          "event_loop_lag_p95_ms": 22.009466997697018,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        },
+        {
+          "p50_ms": 0.12065499322488904,
+          "p95_ms": 0.17397299234289676,
+          "throughput_per_second": 42521.167620724584,
+          "wall_seconds": 0.04703539700130932,
+          "cpu_ms_per_operation": 0.02349837799999999,
+          "event_loop_lag_p95_ms": 0.5674500035820528,
+          "store_calls": 0,
+          "store_operations": {},
+          "store_recent_execution_ms": {
+            "p50": 4.993,
+            "p95": 22.107,
+            "p99": 22.107,
+            "max": 22.107
+          },
+          "store_recent_queue_ms": {
+            "p50": 0.312,
+            "p95": 11.788,
+            "p99": 11.788,
+            "max": 11.788
+          },
+          "outcomes": {
+            "ack": 2000
+          }
+        }
+      ],
+      "median": {
+        "p50_ms": 0.11663400800898671,
+        "p95_ms": 0.17397299234289676,
+        "throughput_per_second": 42521.167620724584,
+        "cpu_ms_per_operation": 0.02349837799999999,
+        "event_loop_lag_p95_ms": 0.7519760011928155,
+        "store_calls": 0
+      },
+      "peak_rss_kib": 83260
+    }
+  ],
+  "agent_commands": {
+    "welcome": 1,
+    "heartbeat_ack": 20400
+  },
+  "peak_rss_kib": 83388,
+  "environment": {
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "fastapi": "0.135.3",
+    "pydantic": "2.12.5",
+    "logical_cpus": 12
+  },
+  "auth_mode": "sync"
+}

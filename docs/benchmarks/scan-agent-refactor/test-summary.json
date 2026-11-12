@@ -1,0 +1,253 @@
+{
+  "baseline_commit": "8158fbfd0632bf847ebbe5ee789b79468c577df3",
+  "date": "2026-11-12",
+  "runs": {
+    "baseline-complete": {
+      "pytest_summary": "24 failed, 3273 passed, 201 skipped, 1 warning, 99 subtests passed in 301.20s (0:05:01)",
+      "counts": {
+        "failed": 24,
+        "passed": 3273,
+        "skipped": 201,
+        "warning": 1,
+        "subtests passed": 99
+      },
+      "junit_testcases": 3597,
+      "errors": 0,
+      "seconds": 301.117,
+      "failed_tests": [
+        "tests.test_agent_feedback.AgentFeedbackTests::test_fp_process_passes_feedback_without_platform_dependency",
+        "tests.test_agent_result_paths.AgentResultPathTests::test_agent_backend_config_uses_scan_dir_for_results",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_full_scan_coordinates_graph_static_and_audit_processes",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_partial_static_scan_continues_audit_and_keeps_failure_snapshot",
+        "tests.test_checker_test_cli::test_checker_test_cli_rejects_mismatched_vuln_type",
+        "tests.test_codex_runtime.CodexRuntimeTests::test_agent_prepares_codex_before_connecting",
+        "tests.test_command_injection_integration::test_one_model_call_and_one_report_preserve_multiple_problems",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_allows_explicit_writable_path",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_keeps_scan_owned_mcps_out_of_global_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_denied_global_external_read_permission_triggers_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_refresh_does_not_overwrite_live_runtime_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_installs_all_business_skills",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_removes_legacy_managed_skill_only",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_agent_reference_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_scan_root_relative_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_obsolete_builtin_mcp_alone_triggers_managed_config_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_permissions_are_refreshed_and_obsolete_builtin_mcp_is_removed",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_question_permission_triggers_refresh",
+        "tests.test_runner_mode_dispatch::test_process_sources_do_not_import_platform_or_sibling_processes",
+        "tests.test_runner_mode_dispatch::test_framework_processes_can_be_imported_and_show_cli_help_after_extraction",
+        "tests.test_runner_mode_dispatch::test_native_threat_analysis_can_be_imported_after_extraction",
+        "tests.test_sensitive_clear_grouped.SensitiveClearFunctionTests::test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names",
+        "tests.test_static_checker_isolation::test_empty_rules_are_successful",
+        "tests.test_vulnerability_mining_engines.MiningEnginePersistenceTests::test_migration_normalizes_builtin_engine_labels_by_id"
+      ],
+      "failure_modules": {
+        "test_agent_feedback": 1,
+        "test_agent_result_paths": 1,
+        "test_agent_scan_paths": 2,
+        "test_checker_test_cli": 1,
+        "test_codex_runtime": 1,
+        "test_command_injection_integration": 1,
+        "test_opencode_workspace": 11,
+        "test_runner_mode_dispatch": 3,
+        "test_sensitive_clear_grouped": 1,
+        "test_static_checker_isolation": 1,
+        "test_vulnerability_mining_engines": 1
+      },
+      "skip_reasons": {
+        "OPENDEEPHOLE_TEST_POSTGRES_DSN is not configured": 38,
+        "PostgreSQL test DSN not configured": 89,
+        "Requires actual Windows filesystem": 1,
+        "isolated PostgreSQL DSN not configured": 70,
+        "requires Windows cmd.exe": 1,
+        "set OPENDEEPHOLE_TEST_OPENCODE_SKILLS=1 with a local OpenCode executable": 1,
+        "shared sessions require PostgreSQL": 1
+      }
+    },
+    "refactor-complete": {
+      "pytest_summary": "25 failed, 3292 passed, 201 skipped, 1 warning, 99 subtests passed in 320.95s (0:05:20)",
+      "counts": {
+        "failed": 25,
+        "passed": 3292,
+        "skipped": 201,
+        "warning": 1,
+        "subtests passed": 99
+      },
+      "junit_testcases": 3617,
+      "errors": 0,
+      "seconds": 320.863,
+      "failed_tests": [
+        "tests.test_agent_feedback.AgentFeedbackTests::test_fp_process_passes_feedback_without_platform_dependency",
+        "tests.test_agent_result_paths.AgentResultPathTests::test_agent_backend_config_uses_scan_dir_for_results",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_full_scan_coordinates_graph_static_and_audit_processes",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_partial_static_scan_continues_audit_and_keeps_failure_snapshot",
+        "tests.test_checker_test_cli::test_checker_test_cli_rejects_mismatched_vuln_type",
+        "tests.test_codex_runtime.CodexRuntimeTests::test_agent_prepares_codex_before_connecting",
+        "tests.test_command_injection_integration::test_one_model_call_and_one_report_preserve_multiple_problems",
+        "tests.test_opencode_serve_process_exit::test_owned_serve_tree_stops_before_signal_exit[15]",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_allows_explicit_writable_path",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_keeps_scan_owned_mcps_out_of_global_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_denied_global_external_read_permission_triggers_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_refresh_does_not_overwrite_live_runtime_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_installs_all_business_skills",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_removes_legacy_managed_skill_only",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_agent_reference_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_scan_root_relative_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_obsolete_builtin_mcp_alone_triggers_managed_config_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_permissions_are_refreshed_and_obsolete_builtin_mcp_is_removed",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_question_permission_triggers_refresh",
+        "tests.test_runner_mode_dispatch::test_process_sources_do_not_import_platform_or_sibling_processes",
+        "tests.test_runner_mode_dispatch::test_framework_processes_can_be_imported_and_show_cli_help_after_extraction",
+        "tests.test_runner_mode_dispatch::test_native_threat_analysis_can_be_imported_after_extraction",
+        "tests.test_sensitive_clear_grouped.SensitiveClearFunctionTests::test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names",
+        "tests.test_static_checker_isolation::test_empty_rules_are_successful",
+        "tests.test_vulnerability_mining_engines.MiningEnginePersistenceTests::test_migration_normalizes_builtin_engine_labels_by_id"
+      ],
+      "failure_modules": {
+        "test_agent_feedback": 1,
+        "test_agent_result_paths": 1,
+        "test_agent_scan_paths": 2,
+        "test_checker_test_cli": 1,
+        "test_codex_runtime": 1,
+        "test_command_injection_integration": 1,
+        "test_opencode_serve_process_exit": 1,
+        "test_opencode_workspace": 11,
+        "test_runner_mode_dispatch": 3,
+        "test_sensitive_clear_grouped": 1,
+        "test_static_checker_isolation": 1,
+        "test_vulnerability_mining_engines": 1
+      },
+      "skip_reasons": {
+        "OPENDEEPHOLE_TEST_POSTGRES_DSN is not configured": 38,
+        "PostgreSQL test DSN not configured": 89,
+        "Requires actual Windows filesystem": 1,
+        "isolated PostgreSQL DSN not configured": 70,
+        "requires Windows cmd.exe": 1,
+        "set OPENDEEPHOLE_TEST_OPENCODE_SKILLS=1 with a local OpenCode executable": 1,
+        "shared sessions require PostgreSQL": 1
+      }
+    },
+    "refactor-final": {
+      "pytest_summary": "24 failed, 3293 passed, 201 skipped, 1 warning, 99 subtests passed in 348.58s (0:05:48)",
+      "counts": {
+        "failed": 24,
+        "passed": 3293,
+        "skipped": 201,
+        "warning": 1,
+        "subtests passed": 99
+      },
+      "junit_testcases": 3617,
+      "errors": 0,
+      "seconds": 348.496,
+      "failed_tests": [
+        "tests.test_agent_feedback.AgentFeedbackTests::test_fp_process_passes_feedback_without_platform_dependency",
+        "tests.test_agent_result_paths.AgentResultPathTests::test_agent_backend_config_uses_scan_dir_for_results",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_full_scan_coordinates_graph_static_and_audit_processes",
+        "tests.test_agent_scan_paths.AgentScanPathTests::test_partial_static_scan_continues_audit_and_keeps_failure_snapshot",
+        "tests.test_checker_test_cli::test_checker_test_cli_rejects_mismatched_vuln_type",
+        "tests.test_codex_runtime.CodexRuntimeTests::test_agent_prepares_codex_before_connecting",
+        "tests.test_command_injection_integration::test_one_model_call_and_one_report_preserve_multiple_problems",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_allows_explicit_writable_path",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_build_opencode_config_keeps_scan_owned_mcps_out_of_global_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_denied_global_external_read_permission_triggers_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_refresh_does_not_overwrite_live_runtime_config",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_installs_all_business_skills",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_global_workspace_removes_legacy_managed_skill_only",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_agent_reference_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_missing_scan_root_relative_permissions_trigger_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_obsolete_builtin_mcp_alone_triggers_managed_config_refresh",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_permissions_are_refreshed_and_obsolete_builtin_mcp_is_removed",
+        "tests.test_opencode_workspace.OpencodeWorkspaceTests::test_stale_question_permission_triggers_refresh",
+        "tests.test_runner_mode_dispatch::test_process_sources_do_not_import_platform_or_sibling_processes",
+        "tests.test_runner_mode_dispatch::test_framework_processes_can_be_imported_and_show_cli_help_after_extraction",
+        "tests.test_runner_mode_dispatch::test_native_threat_analysis_can_be_imported_after_extraction",
+        "tests.test_sensitive_clear_grouped.SensitiveClearFunctionTests::test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names",
+        "tests.test_static_checker_isolation::test_empty_rules_are_successful",
+        "tests.test_vulnerability_mining_engines.MiningEnginePersistenceTests::test_migration_normalizes_builtin_engine_labels_by_id"
+      ],
+      "failure_modules": {
+        "test_agent_feedback": 1,
+        "test_agent_result_paths": 1,
+        "test_agent_scan_paths": 2,
+        "test_checker_test_cli": 1,
+        "test_codex_runtime": 1,
+        "test_command_injection_integration": 1,
+        "test_opencode_workspace": 11,
+        "test_runner_mode_dispatch": 3,
+        "test_sensitive_clear_grouped": 1,
+        "test_static_checker_isolation": 1,
+        "test_vulnerability_mining_engines": 1
+      },
+      "skip_reasons": {
+        "OPENDEEPHOLE_TEST_POSTGRES_DSN is not configured": 38,
+        "PostgreSQL test DSN not configured": 89,
+        "Requires actual Windows filesystem": 1,
+        "isolated PostgreSQL DSN not configured": 70,
+        "requires Windows cmd.exe": 1,
+        "set OPENDEEPHOLE_TEST_OPENCODE_SKILLS=1 with a local OpenCode executable": 1,
+        "shared sessions require PostgreSQL": 1
+      }
+    },
+    "baseline-pg-fixed": {
+      "pytest_summary": "534 passed, 1 skipped in 189.10s (0:03:09)",
+      "counts": {
+        "passed": 534,
+        "skipped": 1
+      },
+      "junit_testcases": 535,
+      "errors": 0,
+      "seconds": 189.086,
+      "failed_tests": [],
+      "failure_modules": {},
+      "skip_reasons": {
+        "shared sessions require PostgreSQL": 1
+      }
+    },
+    "refactor-pg-fixed": {
+      "pytest_summary": "534 passed, 1 skipped in 189.16s (0:03:09)",
+      "counts": {
+        "passed": 534,
+        "skipped": 1
+      },
+      "junit_testcases": 535,
+      "errors": 0,
+      "seconds": 189.143,
+      "failed_tests": [],
+      "failure_modules": {},
+      "skip_reasons": {
+        "shared sessions require PostgreSQL": 1
+      }
+    }
+  },
+  "postgres_modules": [
+    "tests/test_agent_list.py",
+    "tests/test_candidate_resume_pipeline.py",
+    "tests/test_fp_review_overview.py",
+    "tests/test_fp_review_pool_lifecycle.py",
+    "tests/test_postgres_store_integration.py",
+    "tests/test_review_notes.py",
+    "tests/test_scan_code_graph_updates.py",
+    "tests/test_scan_copy_config.py",
+    "tests/test_scan_estimation_business_stats.py",
+    "tests/test_scan_estimation_store.py",
+    "tests/test_scan_metadata.py",
+    "tests/test_scan_model_usage.py",
+    "tests/test_scan_optional_results.py",
+    "tests/test_scan_paths_probe.py",
+    "tests/test_scan_resume_postgres.py",
+    "tests/test_scan_resume_progress.py",
+    "tests/test_scan_sharing.py",
+    "tests/test_static_analysis_state.py",
+    "tests/test_storage_dashboard.py",
+    "tests/test_storage_postgres.py",
+    "tests/test_task_history_order.py",
+    "tests/test_threat_audit_results.py",
+    "tests/test_threat_coverage.py",
+    "tests/test_threat_coverage_resume.py",
+    "tests/test_threat_module_paths.py",
+    "tests/test_threat_pattern_audit_tasks.py",
+    "tests/test_token_category_storage.py",
+    "tests/test_validation_pool_progress.py"
+  ],
+  "postgres_fixture_note": "Both fixed PostgreSQL runs use the same updated test-only empty-schema fixture and exact 10 existing threat-pattern count fields. Baseline production code is unchanged.",
+  "timing_note": "Test durations are correctness-run elapsed times with concurrent work, not performance benchmarks."
+}

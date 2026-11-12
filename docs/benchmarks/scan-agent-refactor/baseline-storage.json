@@ -1,0 +1,36 @@
+{
+  "version": "optimized",
+  "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+  "scans": 10000,
+  "tasks": 100000,
+  "large_scan_tasks": 10000,
+  "prompt_bytes_per_task": 1024,
+  "database_bytes_after_seed": 406151695,
+  "seed_wal_bytes": 229683032,
+  "measurements": {
+    "scan_first_page_50": {
+      "samples": 200,
+      "median_ms": 3.1,
+      "p95_ms": 4.13,
+      "client_cpu_median_ms": 1.25
+    },
+    "large_scan_overview": {
+      "samples": 200,
+      "median_ms": 0.68,
+      "p95_ms": 1.19,
+      "client_cpu_median_ms": 0.46
+    },
+    "task_first_page": {
+      "samples": 200,
+      "median_ms": 38.26,
+      "p95_ms": 44.17,
+      "client_cpu_median_ms": 1.21
+    },
+    "checker_dashboard": {
+      "samples": 200,
+      "median_ms": 71.11,
+      "p95_ms": 76.72,
+      "client_cpu_median_ms": 16.6
+    }
+  }
+}

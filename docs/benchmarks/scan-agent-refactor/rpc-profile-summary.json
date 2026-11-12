@@ -1,0 +1,666 @@
+{
+  "scope": "Diagnostic cProfile of main thread only; warmup 200, measured 2000 local RPC requests, concurrency 8, one round. Excludes import/seed/warmup. tottime is own elapsed time excluding subcalls, not pure CPU. Coroutine resumptions can count as multiple calls. These profiled latencies are not performance measurements.",
+  "runs": {
+    "baseline": {
+      "own_elapsed_total_seconds": 2.7456584209999995,
+      "total_calls": 6107377,
+      "top_own_time": [
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.isinstance>",
+          "calls": 639491,
+          "own_ms": 67.77006200000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'acquire' of '_thread.lock' objects>",
+          "calls": 13355,
+          "own_ms": 66.994848
+        },
+        {
+          "file": "site-packages/starlette/routing.py",
+          "line": 238,
+          "function": "matches",
+          "calls": 140000,
+          "own_ms": 63.69182100000001
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'match' of 're.Pattern' objects>",
+          "calls": 168000,
+          "own_ms": 50.243621000000005
+        },
+        {
+          "file": "site-packages/fastapi/dependencies/utils.py",
+          "line": 598,
+          "function": "solve_dependencies",
+          "calls": 10000,
+          "own_ms": 50.083656000000005
+        },
+        {
+          "file": "site-packages/fastapi/routing.py",
+          "line": 998,
+          "function": "matches",
+          "calls": 132000,
+          "own_ms": 48.18205900000001
+        },
+        {
+          "file": "site-packages/starlette/routing.py",
+          "line": 662,
+          "function": "app",
+          "calls": 10427,
+          "own_ms": 44.64377100000001
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 213,
+          "function": "urlparse",
+          "calls": 4000,
+          "own_ms": 42.040556
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method posix.urandom>",
+          "calls": 4000,
+          "own_ms": 36.052991999999996
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 273,
+          "function": "<genexpr>",
+          "calls": 142000,
+          "own_ms": 35.077821
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'send' of '_socket.socket' objects>",
+          "calls": 2000,
+          "own_ms": 33.40914
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of 'dict' objects>",
+          "calls": 266000,
+          "own_ms": 32.580522
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 223,
+          "function": "<genexpr>",
+          "calls": 122000,
+          "own_ms": 32.556089
+        },
+        {
+          "file": "site-packages/fastapi/routing.py",
+          "line": 382,
+          "function": "app",
+          "calls": 10000,
+          "own_ms": 31.961593000000004
+        },
+        {
+          "file": "inspect.py",
+          "line": 384,
+          "function": "_has_code_flag",
+          "calls": 36000,
+          "own_ms": 28.356385000000003
+        },
+        {
+          "file": "site-packages/starlette/_utils.py",
+          "line": 90,
+          "function": "get_route_path",
+          "calls": 140000,
+          "own_ms": 26.639392
+        },
+        {
+          "file": "inspect.py",
+          "line": 747,
+          "function": "unwrap",
+          "calls": 36000,
+          "own_ms": 26.232645
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.any>",
+          "calls": 18008,
+          "own_ms": 26.085272000000003
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'poll' of 'select.epoll' objects>",
+          "calls": 2241,
+          "own_ms": 25.750894000000002
+        },
+        {
+          "file": "inspect.py",
+          "line": 2133,
+          "function": "_signature_is_functionlike",
+          "calls": 24000,
+          "own_ms": 25.308404000000003
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.getattr>",
+          "calls": 200007,
+          "own_ms": 24.323762000000002
+        },
+        {
+          "file": "base_events.py",
+          "line": 1910,
+          "function": "_run_once",
+          "calls": 2242,
+          "own_ms": 24.296579
+        },
+        {
+          "file": "site-packages/fastapi/dependencies/utils.py",
+          "line": 784,
+          "function": "request_params_to_args",
+          "calls": 16000,
+          "own_ms": 22.751253000000002
+        },
+        {
+          "file": "site-packages/httpx/_models.py",
+          "line": 144,
+          "function": "__init__",
+          "calls": 10000,
+          "own_ms": 22.308732000000003
+        },
+        {
+          "file": "site-packages/httpx/_client.py",
+          "line": 1717,
+          "function": "_send_single_request",
+          "calls": 10000,
+          "own_ms": 22.217771
+        }
+      ],
+      "backend_own_time": [
+        {
+          "file": "backend/api/agent.py",
+          "line": 2996,
+          "function": "_request_agent_opencode_models",
+          "calls": 4000,
+          "own_ms": 15.663110000000001
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 212,
+          "function": "__call__",
+          "calls": 10427,
+          "own_ms": 14.415183
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 228,
+          "function": "send_with_metrics",
+          "calls": 4000,
+          "own_ms": 10.71756
+        },
+        {
+          "file": "backend/report_routes.py",
+          "line": 17,
+          "function": "protected",
+          "calls": 10000,
+          "own_ms": 10.451648
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 1145,
+          "function": "_send_agent_json",
+          "calls": 2000,
+          "own_ms": 5.7869720000000004
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 2280,
+          "function": "agent_websocket",
+          "calls": 427,
+          "own_ms": 5.490247
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 78,
+          "function": "request_finished",
+          "calls": 2000,
+          "own_ms": 5.227009000000001
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 3158,
+          "function": "get_agent_opencode_models",
+          "calls": 4000,
+          "own_ms": 3.812802
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 787,
+          "function": "_wait_agent_response",
+          "calls": 4000,
+          "own_ms": 3.507588
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 1126,
+          "function": "_touch_agent",
+          "calls": 2000,
+          "own_ms": 3.4429440000000002
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 379,
+          "function": "resolve_agent_id_connection_async",
+          "calls": 2000,
+          "own_ms": 2.7838900000000004
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 74,
+          "function": "request_started",
+          "calls": 2000,
+          "own_ms": 2.388884
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 768,
+          "function": "_complete_agent_response",
+          "calls": 2000,
+          "own_ms": 2.1392860000000002
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 2587,
+          "function": "send_agent_command",
+          "calls": 2000,
+          "own_ms": 1.602829
+        },
+        {
+          "file": "backend/api/agent.py",
+          "line": 1115,
+          "function": "_schedule_agent_touch_persistence",
+          "calls": 2000,
+          "own_ms": 1.022673
+        },
+        {
+          "file": "backend/store/__init__.py",
+          "line": 23,
+          "function": "get_scan_store",
+          "calls": 4000,
+          "own_ms": 0.7565080000000001
+        }
+      ]
+    },
+    "refactor": {
+      "own_elapsed_total_seconds": 2.7851460620000004,
+      "total_calls": 6217125,
+      "top_own_time": [
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.isinstance>",
+          "calls": 641438,
+          "own_ms": 68.045877
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'acquire' of '_thread.lock' objects>",
+          "calls": 13315,
+          "own_ms": 63.697508
+        },
+        {
+          "file": "site-packages/starlette/routing.py",
+          "line": 238,
+          "function": "matches",
+          "calls": 140000,
+          "own_ms": 63.407619999999994
+        },
+        {
+          "file": "site-packages/fastapi/dependencies/utils.py",
+          "line": 598,
+          "function": "solve_dependencies",
+          "calls": 10000,
+          "own_ms": 49.410887
+        },
+        {
+          "file": "site-packages/fastapi/routing.py",
+          "line": 998,
+          "function": "matches",
+          "calls": 132000,
+          "own_ms": 48.332218000000005
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'match' of 're.Pattern' objects>",
+          "calls": 168000,
+          "own_ms": 48.297904
+        },
+        {
+          "file": "site-packages/starlette/routing.py",
+          "line": 662,
+          "function": "app",
+          "calls": 10438,
+          "own_ms": 43.80267500000001
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 213,
+          "function": "urlparse",
+          "calls": 4000,
+          "own_ms": 41.347028
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method posix.urandom>",
+          "calls": 4000,
+          "own_ms": 37.591557
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 273,
+          "function": "<genexpr>",
+          "calls": 142000,
+          "own_ms": 34.293474
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'send' of '_socket.socket' objects>",
+          "calls": 2000,
+          "own_ms": 33.689655
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'get' of 'dict' objects>",
+          "calls": 266000,
+          "own_ms": 32.564392000000005
+        },
+        {
+          "file": "site-packages/httpx/_urlparse.py",
+          "line": 223,
+          "function": "<genexpr>",
+          "calls": 122000,
+          "own_ms": 32.419623
+        },
+        {
+          "file": "site-packages/fastapi/routing.py",
+          "line": 382,
+          "function": "app",
+          "calls": 10000,
+          "own_ms": 31.083388000000003
+        },
+        {
+          "file": "inspect.py",
+          "line": 384,
+          "function": "_has_code_flag",
+          "calls": 36000,
+          "own_ms": 28.310081
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.getattr>",
+          "calls": 210007,
+          "own_ms": 26.998446
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'poll' of 'select.epoll' objects>",
+          "calls": 2301,
+          "own_ms": 26.638945
+        },
+        {
+          "file": "site-packages/starlette/_utils.py",
+          "line": 90,
+          "function": "get_route_path",
+          "calls": 140000,
+          "own_ms": 26.151439000000003
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<built-in method builtins.any>",
+          "calls": 18008,
+          "own_ms": 25.942805000000003
+        },
+        {
+          "file": "inspect.py",
+          "line": 2133,
+          "function": "_signature_is_functionlike",
+          "calls": 24000,
+          "own_ms": 25.603801
+        },
+        {
+          "file": "inspect.py",
+          "line": 747,
+          "function": "unwrap",
+          "calls": 36000,
+          "own_ms": 25.440482
+        },
+        {
+          "file": "base_events.py",
+          "line": 1910,
+          "function": "_run_once",
+          "calls": 2302,
+          "own_ms": 23.751505
+        },
+        {
+          "file": "site-packages/fastapi/dependencies/utils.py",
+          "line": 784,
+          "function": "request_params_to_args",
+          "calls": 16000,
+          "own_ms": 22.389536000000003
+        },
+        {
+          "file": "site-packages/httpx/_client.py",
+          "line": 1717,
+          "function": "_send_single_request",
+          "calls": 10000,
+          "own_ms": 22.346561
+        },
+        {
+          "file": "~",
+          "line": 0,
+          "function": "<method 'release' of '_thread.lock' objects>",
+          "calls": 3725,
+          "own_ms": 21.535817
+        }
+      ],
+      "backend_own_time": [
+        {
+          "file": "backend/agents/models.py",
+          "line": 54,
+          "function": "_request_agent_opencode_models",
+          "calls": 4000,
+          "own_ms": 19.291436
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 212,
+          "function": "__call__",
+          "calls": 10438,
+          "own_ms": 14.056440000000002
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 228,
+          "function": "send_with_metrics",
+          "calls": 4000,
+          "own_ms": 10.730457000000001
+        },
+        {
+          "file": "backend/report_routes.py",
+          "line": 48,
+          "function": "protected",
+          "calls": 10000,
+          "own_ms": 10.654413000000002
+        },
+        {
+          "file": "backend/report_routes.py",
+          "line": 25,
+          "function": "adapted",
+          "calls": 10000,
+          "own_ms": 8.653625
+        },
+        {
+          "file": "backend/agents/transport.py",
+          "line": 8,
+          "function": "_send_agent_json",
+          "calls": 2000,
+          "own_ms": 6.818821
+        },
+        {
+          "file": "backend/agents/connections.py",
+          "line": 385,
+          "function": "_receive_messages",
+          "calls": 438,
+          "own_ms": 6.357191000000001
+        },
+        {
+          "file": "backend/application.py",
+          "line": 160,
+          "function": "get_runtime",
+          "calls": 22000,
+          "own_ms": 5.78545
+        },
+        {
+          "file": "backend/agents/models.py",
+          "line": 218,
+          "function": "get_agent_opencode_models",
+          "calls": 4000,
+          "own_ms": 5.546056000000001
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 78,
+          "function": "request_finished",
+          "calls": 2000,
+          "own_ms": 5.3335360000000005
+        },
+        {
+          "file": "backend/agents/directory.py",
+          "line": 140,
+          "function": "_touch_agent",
+          "calls": 2000,
+          "own_ms": 3.9597249999999997
+        },
+        {
+          "file": "backend/agents/directory.py",
+          "line": 71,
+          "function": "resolve_agent_id_connection_async",
+          "calls": 2000,
+          "own_ms": 3.8346220000000004
+        },
+        {
+          "file": "backend/agents/rpc.py",
+          "line": 24,
+          "function": "_wait_agent_response",
+          "calls": 4000,
+          "own_ms": 3.4615350000000005
+        },
+        {
+          "file": "backend/agents/rpc.py",
+          "line": 62,
+          "function": "register",
+          "calls": 2000,
+          "own_ms": 2.9527560000000004
+        },
+        {
+          "file": "backend/agents/gateway.py",
+          "line": 19,
+          "function": "send_agent_command",
+          "calls": 2000,
+          "own_ms": 2.81256
+        },
+        {
+          "file": "backend/application.py",
+          "line": 164,
+          "function": "use_runtime",
+          "calls": 4000,
+          "own_ms": 2.7144960000000005
+        },
+        {
+          "file": "backend/runtime_metrics.py",
+          "line": 74,
+          "function": "request_started",
+          "calls": 2000,
+          "own_ms": 2.2819599999999998
+        },
+        {
+          "file": "backend/agents/rpc.py",
+          "line": 70,
+          "function": "release",
+          "calls": 2000,
+          "own_ms": 2.224976
+        },
+        {
+          "file": "backend/application.py",
+          "line": 80,
+          "function": "__getitem__",
+          "calls": 6000,
+          "own_ms": 2.205763
+        },
+        {
+          "file": "backend/agents/rpc.py",
+          "line": 8,
+          "function": "_complete_agent_response",
+          "calls": 2000,
+          "own_ms": 2.0952729999999997
+        },
+        {
+          "file": "backend/api/agent_routes/models.py",
+          "line": 28,
+          "function": "get_agent_opencode_models",
+          "calls": 4000,
+          "own_ms": 2.001915
+        },
+        {
+          "file": "backend/agents/rpc.py",
+          "line": 57,
+          "function": "__init__",
+          "calls": 2000,
+          "own_ms": 1.8959000000000001
+        },
+        {
+          "file": "backend/application.py",
+          "line": 173,
+          "function": "get_scan_store",
+          "calls": 4000,
+          "own_ms": 1.443148
+        },
+        {
+          "file": "backend/agents/directory.py",
+          "line": 129,
+          "function": "_schedule_agent_touch_persistence",
+          "calls": 2000,
+          "own_ms": 1.423559
+        },
+        {
+          "file": "backend/api/agent_routes/connections.py",
+          "line": 13,
+          "function": "agent_websocket",
+          "calls": 438,
+          "own_ms": 0.209151
+        },
+        {
+          "file": "backend/agents/connections.py",
+          "line": 30,
+          "function": "agent_websocket",
+          "calls": 438,
+          "own_ms": 0.18402900000000003
+        }
+      ]
+    }
+  },
+  "auth_mode": "sync"
+}
