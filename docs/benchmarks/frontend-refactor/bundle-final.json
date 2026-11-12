@@ -1,0 +1,38 @@
+{
+  "baseline": {
+    "assets": [
+      {
+        "path": "assets/index-CMi9Dbcv.css",
+        "bytes": 113420,
+        "gzipBytes": 19076
+      },
+      {
+        "path": "assets/index-D1yZ0Rko.js",
+        "bytes": 1003202,
+        "gzipBytes": 292511
+      }
+    ],
+    "bytes": 1116622,
+    "gzipBytes": 311587,
+    "lockSha256": "d5afcbb4d6123c02c5f1125071cd3cc85192cf938a6a5e1b5fb8a4b6653e1ea8"
+  },
+  "refactor": {
+    "assets": [
+      {
+        "path": "assets/index-CMWfpXyE.css",
+        "bytes": 113447,
+        "gzipBytes": 19055
+      },
+      {
+        "path": "assets/index-Jg-yvFF3.js",
+        "bytes": 1023789,
+        "gzipBytes": 301322
+      }
+    ],
+    "bytes": 1137236,
+    "gzipBytes": 320377,
+    "lockSha256": "d5afcbb4d6123c02c5f1125071cd3cc85192cf938a6a5e1b5fb8a4b6653e1ea8"
+  },
+  "methodology": "All production JS/CSS assets; gzip level 9, mtime 0; excludes index.html. No dependencies changed.",
+  "sourceSha256": "7fd6bd7cb63155fe7c6293532a70d1ec49cac4515844df31c6e9159129f2884f"
+}

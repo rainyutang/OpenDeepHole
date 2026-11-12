@@ -1,0 +1,296 @@
+{
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "linux/x64",
+    "logicalCpus": 12,
+    "memoryGiB": 15.526565551757812,
+    "repeat": 5,
+    "limits": {
+      "buildMs": 2000,
+      "retainedMiB": 256
+    }
+  },
+  "scenarios": [
+    {
+      "name": "normal",
+      "entries": 10000,
+      "modules": 100,
+      "patterns": 10,
+      "overlap": false,
+      "samples": [
+        {
+          "buildMs": 23.941602999999986,
+          "retainedMiB": 3.7388381958007812,
+          "layoutMs": 0.35876799999999776,
+          "filterMs": 1.2142240000000015,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 19.803410999999983,
+          "retainedMiB": 3.7209548950195312,
+          "layoutMs": 0.40281900000002224,
+          "filterMs": 1.6751220000000444,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 21.594839000000036,
+          "retainedMiB": 3.7253799438476562,
+          "layoutMs": 0.27978400000000647,
+          "filterMs": 1.263734999999997,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 22.306460000000015,
+          "retainedMiB": 3.7203598022460938,
+          "layoutMs": 0.4642069999999876,
+          "filterMs": 1.1904949999999985,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 19.533098999999993,
+          "retainedMiB": 3.7173538208007812,
+          "layoutMs": 0.4665120000000229,
+          "filterMs": 1.160441999999989,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        }
+      ],
+      "max": {
+        "buildMs": 23.94,
+        "retainedMiB": 3.74,
+        "layoutMs": 0.47,
+        "filterMs": 1.68,
+        "issueUpdateMs": 0
+      }
+    },
+    {
+      "name": "large",
+      "entries": 200000,
+      "modules": 100,
+      "patterns": 10,
+      "overlap": false,
+      "samples": [
+        {
+          "buildMs": 339.64427,
+          "retainedMiB": 68.61979675292969,
+          "layoutMs": 0.4387779999999566,
+          "filterMs": 6.98895200000004,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 283.031247,
+          "retainedMiB": 69.75296783447266,
+          "layoutMs": 0.36873800000000756,
+          "filterMs": 6.926951000000031,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 285.1539450000001,
+          "retainedMiB": 68.67904663085938,
+          "layoutMs": 0.3461540000000696,
+          "filterMs": 7.515382000000045,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 269.72474700000004,
+          "retainedMiB": 69.77241516113281,
+          "layoutMs": 0.36214700000004996,
+          "filterMs": 7.398181000000022,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 261.9334789999999,
+          "retainedMiB": 68.608642578125,
+          "layoutMs": 0.3941900000000942,
+          "filterMs": 6.9360849999999346,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        }
+      ],
+      "max": {
+        "buildMs": 339.64,
+        "retainedMiB": 69.77,
+        "layoutMs": 0.44,
+        "filterMs": 7.52,
+        "issueUpdateMs": 0
+      }
+    },
+    {
+      "name": "many-patterns",
+      "entries": 200000,
+      "modules": 100,
+      "patterns": 50,
+      "overlap": false,
+      "samples": [
+        {
+          "buildMs": 264.69352999999995,
+          "retainedMiB": 71.5542984008789,
+          "layoutMs": 0.3746039999999766,
+          "filterMs": 7.404391000000032,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 246.674999,
+          "retainedMiB": 71.57913970947266,
+          "layoutMs": 0.25882400000000416,
+          "filterMs": 7.31229200000007,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 249.96144300000003,
+          "retainedMiB": 71.47845458984375,
+          "layoutMs": 0.35678599999994276,
+          "filterMs": 8.417660999999953,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 276.73489400000005,
+          "retainedMiB": 71.48212432861328,
+          "layoutMs": 0.3848750000000791,
+          "filterMs": 7.705640000000017,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        },
+        {
+          "buildMs": 275.69738,
+          "retainedMiB": 70.39679718017578,
+          "layoutMs": 0.404510000000073,
+          "filterMs": 7.509287000000086,
+          "issueUpdateMs": 0,
+          "scopes": 101
+        }
+      ],
+      "max": {
+        "buildMs": 276.73,
+        "retainedMiB": 71.58,
+        "layoutMs": 0.4,
+        "filterMs": 8.42,
+        "issueUpdateMs": 0
+      }
+    },
+    {
+      "name": "overlap",
+      "entries": 200000,
+      "modules": 10,
+      "patterns": 50,
+      "overlap": true,
+      "samples": [
+        {
+          "buildMs": 176.91714000000002,
+          "retainedMiB": 61.54725646972656,
+          "layoutMs": 54.15523200000001,
+          "filterMs": 8.094543000000044,
+          "issueUpdateMs": 0,
+          "scopes": 1
+        },
+        {
+          "buildMs": 177.880317,
+          "retainedMiB": 61.552947998046875,
+          "layoutMs": 58.53624099999996,
+          "filterMs": 9.929666999999995,
+          "issueUpdateMs": 0,
+          "scopes": 1
+        },
+        {
+          "buildMs": 181.01556399999998,
+          "retainedMiB": 60.47129821777344,
+          "layoutMs": 56.96164699999997,
+          "filterMs": 9.540977999999996,
+          "issueUpdateMs": 0,
+          "scopes": 1
+        },
+        {
+          "buildMs": 184.567246,
+          "retainedMiB": 61.553871154785156,
+          "layoutMs": 55.79935999999998,
+          "filterMs": 7.657697999999982,
+          "issueUpdateMs": 0,
+          "scopes": 1
+        },
+        {
+          "buildMs": 165.12737299999998,
+          "retainedMiB": 61.55220031738281,
+          "layoutMs": 54.032974999999965,
+          "filterMs": 7.962690000000066,
+          "issueUpdateMs": 0,
+          "scopes": 1
+        }
+      ],
+      "max": {
+        "buildMs": 184.57,
+        "retainedMiB": 61.55,
+        "layoutMs": 58.54,
+        "filterMs": 9.93,
+        "issueUpdateMs": 0
+      }
+    },
+    {
+      "name": "issues",
+      "entries": 200000,
+      "modules": 10,
+      "patterns": 50,
+      "overlap": true,
+      "issues": 10000,
+      "samples": [
+        {
+          "buildMs": 200.44741799999997,
+          "retainedMiB": 64.06011199951172,
+          "layoutMs": 55.457224,
+          "filterMs": 23.333078,
+          "issueUpdateMs": 35.24251700000002,
+          "scopes": 1
+        },
+        {
+          "buildMs": 192.54684100000003,
+          "retainedMiB": 64.0721664428711,
+          "layoutMs": 50.60529299999996,
+          "filterMs": 19.5340359999999,
+          "issueUpdateMs": 31.104806000000053,
+          "scopes": 1
+        },
+        {
+          "buildMs": 200.84335099999998,
+          "retainedMiB": 64.07382202148438,
+          "layoutMs": 49.82120199999997,
+          "filterMs": 8.788330999999971,
+          "issueUpdateMs": 27.817191000000093,
+          "scopes": 1
+        },
+        {
+          "buildMs": 208.70858499999997,
+          "retainedMiB": 64.05912780761719,
+          "layoutMs": 60.642860999999925,
+          "filterMs": 7.613845999999967,
+          "issueUpdateMs": 33.568506999999954,
+          "scopes": 1
+        },
+        {
+          "buildMs": 214.087221,
+          "retainedMiB": 63.06108093261719,
+          "layoutMs": 65.51825700000006,
+          "filterMs": 7.593044999999961,
+          "issueUpdateMs": 32.22763299999997,
+          "scopes": 1
+        }
+      ],
+      "max": {
+        "buildMs": 214.09,
+        "retainedMiB": 64.07,
+        "layoutMs": 65.52,
+        "filterMs": 23.33,
+        "issueUpdateMs": 35.24
+      }
+    }
+  ]
+}

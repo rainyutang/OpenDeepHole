@@ -35,7 +35,16 @@
     "benchmark:threat-coverage": "node scripts/benchmarkThreatCoverage.mjs",
     "test:threat-module-paths": "node tests/threatModulePaths.test.mjs",
     "test:threat-baseline-patterns": "node tests/threatBaselinePatterns.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node scripts/runTests.mjs",
+    "test:api-domains": "node tests/apiDomains.test.mjs",
+    "test:issue-state": "node tests/issueState.test.mjs",
+    "test:issue-focus": "node tests/issueFocus.test.mjs",
+    "test:architecture": "node tests/frontendArchitecture.test.mjs",
+    "test:scan-history-state": "node tests/scanHistoryState.test.mjs",
+    "benchmark:frontend-refactor": "node scripts/benchmarkFrontendRefactor.mjs",
+    "test:issue-selectors": "node tests/issueSelectors.test.mjs",
+    "test:markdown-render": "node tests/markdownRender.test.mjs"
   },
   "dependencies": {
     "axios": "^1.7.0",

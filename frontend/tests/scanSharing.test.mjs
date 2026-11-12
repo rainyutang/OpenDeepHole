@@ -110,7 +110,8 @@ for (const status of ["auditing", "complete"]) {
     const calls = installApi(status);
     const root = await mount(ScanStatus, { scanId: "s", onHome() {} });
     for (const forbidden of ["停止扫描", "续扫", "分享", "误报屏蔽规则"]) {
-      assert.ok(!buttons(root).some((node) => content(node).includes(forbidden)), forbidden);
+      // Flow navigation can describe unfinished tasks as "未完成，可续扫" without offering a resume action.
+      assert.ok(!buttons(root).some((node) => (node.props["aria-label"] ?? content(node)).trim() === forbidden), forbidden);
     }
     assert.ok(button(root, "导出报告"));
     await act(async () => button(root, "疑似问题").props.onClick());
@@ -135,6 +136,24 @@ for (const status of ["auditing", "complete"]) {
     }
   });
 }
+
+test("unfinished shared-task navigation changes the view without exposing a resume action", async () => {
+  client.setPublicScanAccess(access);
+  const calls = installApi("complete");
+  const routes = [];
+  const root = await mount(ScanStatus, { scanId: "s", onHome() {}, navigation: {
+    state: { tab: "overview", engineId: "", threatResult: "valueAssets" },
+    locationKey: "shared-overview", action: "PUSH", onNavigate: (route) => routes.push(route),
+  } });
+  const taskNavigation = buttons(root).filter((node) => content(node).includes("未完成，可续扫"));
+  assert.equal(taskNavigation.length, 2, "sidebar and process flow both show the unfinished task status");
+  await act(async () => taskNavigation.forEach((node) => node.props.onClick()));
+  assert.deepEqual(routes, Array.from({ length: 2 }, () => ({
+    tab: "mining", engineId: "static_candidate", threatResult: "valueAssets",
+  })));
+  assert.ok(calls.every((config) => config.method === "get"));
+  assert.ok(!buttons(root).some((node) => content(node).trim() === "续扫"));
+});
 
 for (const scenario of [
   { name: "scan still running", status: "auditing", autoFpReview: true, vulnerabilityCount: 53 },

@@ -4,6 +4,8 @@
 
 - `api.ts`：威胁分析结果请求，复用全局鉴权和公开扫描访问逻辑。
 - `ThreatAnalysisPanel.tsx`：独立面板组件，通过 props 接收数据、所选方法名、错误信息和受控结果页签。
+- `analysisModel.ts`：产物适配、数量、节点归并与固定基线等纯模型；保留面板和 feature 的兼容导出。
+- `AttackTrees.tsx`、`AnalysisTables.tsx`、`AnalysisSupportingViews.tsx`：攻击树、资产/高风险模块表格和辅助展示。
 - `useThreatAnalysisResult.ts`：统一首屏、SSE 通知与轮询触发的产物加载，合并在途请求并在切换扫描时取消旧请求。
 - `ThreatCoveragePanel.tsx`：单次扫描首页底部的覆盖图，接近视口时启用加载；问题文件标红，目录汇总数量，详情按稳定问题索引跳转。
 - `useThreatCoverage.ts`：扫描页持有底图与最终 TP 问题的独立缓存及失效状态；威胁分析面板通过可选 `coverageState` 复用底图路径投影，不重复展示图表。

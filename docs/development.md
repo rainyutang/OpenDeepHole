@@ -61,12 +61,15 @@ PYTHONPATH=. python3 -m pytest -q tests/test_scan_model_guard.py
 前端测试命令在 [package.json](../frontend/package.json) 中，例如：
 
 ```bash
+npm --prefix frontend test
 npm --prefix frontend run test:scan-paths
 npm --prefix frontend run test:routing
 npm --prefix frontend run test:task-queue
 npm --prefix frontend run build
 git diff --check
 ```
+
+`npm test` 顺序运行全部 `test:*` 脚本并汇总用例数；任一脚本失败或未产生测试汇总都会返回失败。领域模块边界见[前端架构](frontend-architecture.md)，固定场景基准及复现命令见[前端重构验证报告](frontend-refactor-validation.md)。
 
 路由后端回归为 `PYTHONPATH=. python3 -m pytest -q tests/test_frontend_routes.py tests/test_external_integration_api.py`。
 

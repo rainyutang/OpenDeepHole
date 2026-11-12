@@ -66,7 +66,7 @@ test("frontend runtime modules have no circular dependencies", () => {
 const compatibilityEntries = new Set([
   "api/client.ts", "types.ts", "scanRuntime.ts", "hooks/useScanSSE.ts",
   "components/ScanStatus.tsx", "components/VulnerabilityList.tsx", "components/ModelPoolDashboard.tsx",
-  "components/NewScanForm.tsx", "components/AgentConfig.tsx", "components/ScanHistory.tsx",
+  "components/NewScanForm.tsx", "components/AgentConfigPage.tsx", "components/ScanHistory.tsx",
   "features/threatAnalysis/index.ts",
 ]);
 const implementationRoots = [

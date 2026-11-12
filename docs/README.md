@@ -24,6 +24,8 @@
 | 文档 | 内容 |
 | --- | --- |
 | [开发指南](development.md) | 开发服务器、测试与贡献约定 |
+| [前端模块与状态所有权](frontend-architecture.md) | 领域边界、页面状态、兼容入口和 SSE 生命周期 |
+| [前端重构验证报告](frontend-refactor-validation.md) | 回归测试、五轮性能对比、内存及构建体积 |
 | [框架开发指南](framework_development.md) | 扫描流程、组件边界和扩展类型选择 |
 | [Checker 开发参考](checker-development.md) | 规则目录、Analyzer、测试工具、去重与过滤 |
 | [命令注入规则](command-injection-rule.md) | 匹配边界、资源限制及性能复现 |
