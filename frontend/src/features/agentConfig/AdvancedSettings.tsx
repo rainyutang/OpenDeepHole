@@ -25,25 +25,19 @@ export function PolicyEditor({ value, onChange, timeoutLabel = "Session 超时�
       min={1}
       value={value.idle_timeout_seconds}
       onChange={(e) => onChange({ ...value, idle_timeout_seconds: Number(e.target.value) })} /></Field>
-    <Field label="JSON 纠正超时（秒）"><input
+    <Field label="独立 JSON 格式修复超时（秒）"><input
       className={input}
       type="number"
       min={1}
       value={value.json_correction_timeout_seconds}
       onChange={(e) => onChange({ ...value, json_correction_timeout_seconds: Number(e.target.value) })} /></Field>
-    <Field label="产物校验重试超时（秒）"><input
-      className={input}
-      type="number"
-      min={1}
-      value={value.validation_retry_timeout_seconds}
-      onChange={(e) => onChange({ ...value, validation_retry_timeout_seconds: Number(e.target.value) })} /></Field>
     <Field label="模型调用重试次数"><input
       className={input}
       type="number"
       min={0}
       value={value.max_retries}
       onChange={(e) => onChange({ ...value, max_retries: Number(e.target.value) })} /></Field>
-    <p className="text-xs text-slate-400 md:col-span-2">每次调用独立计时，JSON 纠正和产物校验重试重新计时。新文本、推理及工具进展刷新无新内容计时。</p>
+    <p className="text-xs text-slate-400 md:col-span-2">同 Session 的 JSON 纠正、产物及命令校验重试共用本次业务任务的剩余时间；新 Session 重跑重新计时。独立 JSON 格式修复和模型排队期间暂停原业务计时。新文本、推理及工具进展刷新无新内容计时。</p>
   </div>;
 }
 

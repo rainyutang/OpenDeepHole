@@ -113,18 +113,23 @@ class OperationDeadline:
     def remaining(self) -> float:
         return max(0.0, self.expires_at - time.monotonic())
 
+    def check(self, *, phase: str) -> float:
+        """Check synchronous work and return the remaining execution budget."""
+        self.phase = phase
+        # Cancellation wins even when a response and the deadline arrive together.
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise asyncio.CancelledError()
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise OpenCodeTimeout("session", f"OpenCode call timed out during {phase} (session total timeout)")
+        return remaining
+
     async def wait(self, operation: Awaitable[T], *, phase: str) -> T:
         self.phase = phase
         task = asyncio.ensure_future(operation)
         try:
             while True:
-                # Cancellation takes priority over a response arriving at the
-                # same instant, including during preparation and validation.
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    raise asyncio.CancelledError()
-                remaining = self.remaining()
-                if remaining <= 0:
-                    raise OpenCodeTimeout("session", f"OpenCode call timed out during {phase} (session total timeout)")
+                remaining = self.check(phase=phase)
                 if task.done():
                     return task.result()
                 await asyncio.wait({task}, timeout=min(_POLL_SECONDS, remaining))

@@ -10,6 +10,7 @@ const client = await server.ssrLoadModule("/src/api/client.ts");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const { default: AgentConfigPage } = await server.ssrLoadModule("/src/components/AgentConfigPage.tsx");
 const llmConfig = await server.ssrLoadModule("/src/llmApiConfig.ts");
+const { validateAgentConfig } = await server.ssrLoadModule("/src/features/agentConfig/configModel.ts");
 const originalAdapter = client.api.defaults.adapter;
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 globalThis.window = { localStorage, addEventListener() {}, removeEventListener() {}, setTimeout, clearTimeout };
@@ -41,6 +42,17 @@ function emptyConfig() {
 function provider(models = { "org/model": {} }) {
   return { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://api.example.com/v1", apiKey_set: true, headers: { Authorization: null } }, models };
 }
+
+test("deprecated validation retry timeout does not block config validation", () => {
+  const config = emptyConfig();
+  const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
+  for (const value of [0, -1, undefined]) {
+    for (const policy of policies) policy.validation_retry_timeout_seconds = value;
+    assert.equal(validateAgentConfig(config), "");
+  }
+  config.threat_analysis.model_policy.json_correction_timeout_seconds = 0;
+  assert.match(validateAgentConfig(config), /必须为正整数秒/);
+});
 
 test("unified model joins preserve scheduling aliases, stable keys, shared renames and disabled orphans", () => {
   let config = emptyConfig();
@@ -377,9 +389,9 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
     schema_version: 10,
     base: { tool: "opencode", executable: "opencode", no_proxy: "", opencode_serve_port: null },
     model_pool: { models: [model("first", 4), model("second", 5), model("disabled", 10, false)] },
-    threat_analysis: { enabled: true, model_policy: policy },
-    vulnerability_mining: { ...policy, threat_audit_timeout_seconds: 10800, candidate_audit_timeout_seconds: 3600, vulnerability_dedup_timeout_seconds: 1800 }, false_positive: { ...policy, timeout_seconds: 3600 },
-    vulnerability_validation: { supported_vulnerability_types: ["*"], concurrency: 1, validation_max_retries: 0, model_policy: policy },
+    threat_analysis: { enabled: true, model_policy: { ...policy, validation_retry_timeout_seconds: 400 } },
+    vulnerability_mining: { ...policy, validation_retry_timeout_seconds: 401, threat_audit_timeout_seconds: 10800, candidate_audit_timeout_seconds: 3600, vulnerability_dedup_timeout_seconds: 1800 }, false_positive: { ...policy, timeout_seconds: 3600, validation_retry_timeout_seconds: 402 },
+    vulnerability_validation: { supported_vulnerability_types: ["*"], concurrency: 1, validation_max_retries: 0, model_policy: { ...policy, validation_retry_timeout_seconds: 403 } },
     checker_selection: Object.fromEntries(["quick", "standard", "custom"].map((key) => [key, { disabled_checkers: [] }])),
   };
   let saved;
@@ -447,8 +459,11 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
       if (!stageButton.props["aria-expanded"]) await act(async () => { stageButton.props.onClick(); });
       const totalLabel = label === "漏洞挖掘" ? "其他挖掘任务 Session 超时（秒）" : "Session 超时（秒）";
       assert.equal(fields(totalLabel)[0].props.value, label === "去误报" ? 3600 : 10800);
-      assert.equal(fields("JSON 纠正超时（秒）")[0].props.value, 1800);
-      assert.equal(fields("产物校验重试超时（秒）")[0].props.value, 1800);
+      assert.equal(fields("独立 JSON 格式修复超时（秒）")[0].props.value, 1800);
+      assert.equal(fields("JSON 纠正超时（秒）").length, 0);
+      assert.equal(fields("产物校验重试超时（秒）").length, 0);
+      assert.match(text(root.toJSON()), /同 Session 的 JSON 纠正、产物及命令校验重试共用本次业务任务的剩余时间/);
+      assert.match(text(root.toJSON()), /独立 JSON 格式修复和模型排队期间暂停原业务计时/);
       if (label === "漏洞挖掘") {
         for (const [field, value] of [["威胁审计", 10800], ["候选点审计", 3600], ["漏洞去重", 1800]]) {
           const input = fields(`${field} Session 超时（秒）`)[0];
@@ -459,8 +474,7 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
       assert.equal(fields("单次对话无新内容超时（秒）")[0].props.value, 1200);
       await act(async () => { fields(totalLabel)[0].props.onChange({ target: { value: String(8000 + index) } }); });
       await act(async () => { fields("单次对话无新内容超时（秒）")[0].props.onChange({ target: { value: String(200 + index) } }); });
-      await act(async () => { fields("JSON 纠正超时（秒）")[0].props.onChange({ target: { value: String(300 + index) } }); });
-      await act(async () => { fields("产物校验重试超时（秒）")[0].props.onChange({ target: { value: String(400 + index) } }); });
+      await act(async () => { fields("独立 JSON 格式修复超时（秒）")[0].props.onChange({ target: { value: String(300 + index) } }); });
       await act(async () => { button("保存配置").props.onClick(); });
       assert.equal(saved.schema_version, 11);
       assert.equal(getPolicy(saved).json_correction_timeout_seconds, 300 + index);
@@ -473,7 +487,7 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
       assert.equal(getPolicy(saved).timeout_seconds, 8000 + index);
       assert.equal(getPolicy(saved).idle_timeout_seconds, 200 + index);
     }
-    for (const label of ["单次对话无新内容超时（秒）", "JSON 纠正超时（秒）", "产物校验重试超时（秒）"]) {
+    for (const label of ["单次对话无新内容超时（秒）", "独立 JSON 格式修复超时（秒）"]) {
       saved = null;
       await act(async () => { fields(label)[0].props.onChange({ target: { value: "0" } }); });
       await act(async () => { button("保存配置").props.onClick(); });

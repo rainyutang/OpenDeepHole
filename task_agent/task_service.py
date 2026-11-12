@@ -948,6 +948,7 @@ class OpenCodeTaskService:
             attempt_failure_reason = ""
             formatter_source_text = ""
             recovery_required = False
+            business_remaining_seconds = 0.0
             fresh_retry_allowed = True
             quality_message_events_recorded = False
             timeout_seconds = 0
@@ -1116,7 +1117,6 @@ class OpenCodeTaskService:
                     or int(_cfg_value(_task_cli_config(record.execution_context), "idle_timeout", DEFAULT_IDLE_TIMEOUT_SECONDS))
                 )
                 json_timeout_seconds = _task_retry_timeout_seconds(context, "json_correction_timeout_seconds")
-                validation_timeout_seconds = _task_retry_timeout_seconds(context, "validation_retry_timeout_seconds")
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
                 try:
@@ -1149,48 +1149,27 @@ class OpenCodeTaskService:
                                 ),
                             )
 
-                        async def invoke_message(
-                            message_prompt: str,
-                            call_timeout: float,
-                        ) -> OpenCodePromptResult:
+                        call_deadline = OperationDeadline(
+                            timeout_seconds, cancel_event=combined_cancel,
+                        )
+
+                        async def invoke_message(message_prompt: str) -> OpenCodePromptResult:
                             nonlocal parsed_written_json
-                            call_deadline = OperationDeadline(
-                                call_timeout, cancel_event=combined_cancel,
-                            )
-                            prompt_deadline = OperationDeadline(
-                                0, cancel_event=combined_cancel,
-                                expires_at=call_deadline.expires_at + CLEANUP_TIMEOUT_SECONDS,
-                            )
-                            callbacks_open = True
-
-                            def guard(callback):
-                                if callback is None:
-                                    return None
-                                if inspect.iscoroutinefunction(callback):
-                                    async def invoke(*args):
-                                        if callbacks_open:
-                                            return await callback(*args)
-                                    return invoke
-                                def invoke(*args):
-                                    if callbacks_open:
-                                        return callback(*args)
-                                return invoke
-
                             message_writes.clear()
                             parsed_written_json = None
                             try:
-                                result = await prompt_deadline.wait(get_serve_manager().run_prompt(
+                                result = await _run_prompt_with_deadline(
+                                    call_deadline,
                                     **runtime.kwargs(),
                                     prompt=message_prompt,
                                     model=model,
-                                    timeout=call_timeout,
                                     idle_timeout=idle_timeout_seconds,
-                                    on_line=guard(context.on_output),
-                                    on_session_id=guard(record_session),
-                                    on_model_request_failure=guard(record_model_request_failure),
-                                    on_response_model=guard(record_model),
-                                    on_token_usage=guard(record_token_usage),
-                                    on_file_write=guard(record_file_write),
+                                    on_line=context.on_output,
+                                    on_session_id=record_session,
+                                    on_model_request_failure=record_model_request_failure,
+                                    on_response_model=record_model,
+                                    on_token_usage=record_token_usage,
+                                    on_file_write=record_file_write,
                                     cancel_event=combined_cancel,
                                     session_id=session_id or None,
                                     session_title=spec.task_name,
@@ -1217,22 +1196,11 @@ class OpenCodeTaskService:
                                     required_bash_path_prepend=(
                                         spec.required_bash_path_prepend
                                     ),
-                                ), phase="prompt_and_cleanup")
+                                )
                             except BaseException:
-                                callbacks_open = False
-                                drained = await prompt_deadline.drain(expires_at=min(
-                                    prompt_deadline.expires_at,
-                                    time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
-                                ))
-                                if not drained:
-                                    mark_restart = getattr(get_serve_manager(), "_mark_serve_restart_required", None)
-                                    if callable(mark_restart):
-                                        mark_restart("Task Service deadline expired before prompt cleanup returned")
                                 cleanup_message_writes()
                                 message_writes.clear()
                                 raise
-                            finally:
-                                callbacks_open = False
                             assert isinstance(result, OpenCodePromptResult)
                             try:
                                 feedback = ""
@@ -1271,7 +1239,7 @@ class OpenCodeTaskService:
                             message_started = time.monotonic()
                             message_started_at = _now_iso()
                             try:
-                                details = await invoke_message(spec.prompt, timeout_seconds)
+                                details = await invoke_message(spec.prompt)
                             except OpenCodeTaskQualityError as quality_error:
                                 failure_result = quality_error.prompt_result
                                 if failure_result is not None:
@@ -1335,9 +1303,7 @@ class OpenCodeTaskService:
                                         validation_success_markers=spec.required_bash_success_markers,
                                     )
                                     try:
-                                        details = await invoke_message(
-                                            correction_prompt, validation_timeout_seconds,
-                                        )
+                                        details = await invoke_message(correction_prompt)
                                     except OpenCodeTaskQualityError as retry_error:
                                         retry_result = retry_error.prompt_result
                                         if retry_result is not None:
@@ -1485,6 +1451,7 @@ class OpenCodeTaskService:
                                     formatter_source_text,
                                     spec.output_schema,
                                 )
+                                call_deadline.check(phase="structured_output_validation")
                                 attempt_event_outcome = "invalid_output"
                                 attempt_failure_kind = (
                                     invalid_output.failure_kind or "schema_mismatch"
@@ -1498,8 +1465,14 @@ class OpenCodeTaskService:
                                         "OpenCode exhausted same-session JSON corrections "
                                         "(0) without matching the target schema"
                                     )
+                                # Freeze the business budget while the separate
+                                # formatter and subsequent model queues run.
+                                business_remaining_seconds = call_deadline.check(
+                                    phase="structured_output_validation",
+                                )
                                 recovery_required = True
                                 raise _StructuredRecoveryRequired()
+                            call_deadline.check(phase="structured_output_validation")
                         finally:
                             cleanup_message_writes()
                 finally:
@@ -1797,6 +1770,7 @@ class OpenCodeTaskService:
                             lease.health_identity if lease is not None else ()
                         ),
                         timeout_seconds=json_timeout_seconds,
+                        business_remaining_seconds=business_remaining_seconds,
                         idle_timeout_seconds=idle_timeout_seconds,
                         system_prompt=system_prompt,
                         validation_debug=validation_debug,
@@ -1949,6 +1923,7 @@ class OpenCodeTaskService:
         original_source: OutputSource,
         original_model_identity: tuple[str, bool, str, str],
         timeout_seconds: int,
+        business_remaining_seconds: float,
         idle_timeout_seconds: int,
         system_prompt: str,
         validation_debug: bool,
@@ -2381,6 +2356,9 @@ class OpenCodeTaskService:
             )
             await correction_lock.acquire()
             correction_lock_acquired = True
+            correction_deadline = OperationDeadline(
+                business_remaining_seconds, cancel_event=combined_cancel,
+            )
 
             async def record_correction_session(value: str) -> None:
                 value = str(value or "").strip()
@@ -2437,11 +2415,11 @@ class OpenCodeTaskService:
                     message_writes[key] = value
 
                 try:
-                    details = await get_serve_manager().run_prompt(
+                    details = await _run_prompt_with_deadline(
+                        correction_deadline,
                         **correction_runtime.kwargs(),
                         prompt=correction_prompt,
                         model=correction_model,
-                        timeout=timeout_seconds,
                         idle_timeout=idle_timeout_seconds,
                         on_line=context.on_output,
                         on_session_id=record_correction_session,
@@ -2488,6 +2466,7 @@ class OpenCodeTaskService:
                         )
                         if parsed_written_json is not None:
                             structured = parsed_written_json.structured
+                    correction_deadline.check(phase="structured_output_validation")
                     if structured is not None:
                         correction_outcome = "success"
                         correction_failure_kind = ""
@@ -3074,6 +3053,60 @@ def _json_correction_prompt(schema: dict[str, Any]) -> str:
         "不要附加说明，也不要调用工具。\nJSON Schema：\n"
         + json.dumps(schema, ensure_ascii=False, indent=2)
     )
+
+
+async def _run_prompt_with_deadline(
+    deadline: OperationDeadline,
+    **kwargs: Any,
+) -> OpenCodePromptResult:
+    """Run a message within the remaining budget, allowing bounded cleanup."""
+    remaining = deadline.check(phase="prompt")
+    prompt_deadline = OperationDeadline(
+        0,
+        cancel_event=deadline.cancel_event,
+        expires_at=deadline.expires_at + CLEANUP_TIMEOUT_SECONDS,
+    )
+    callbacks_open = True
+
+    def guard(callback):
+        if callback is None:
+            return None
+        if inspect.iscoroutinefunction(callback):
+            async def invoke(*args):
+                if callbacks_open:
+                    return await callback(*args)
+            return invoke
+        def invoke(*args):
+            if callbacks_open:
+                return callback(*args)
+        return invoke
+
+    for name in (
+        "on_line", "on_session_id", "on_model_request_failure",
+        "on_response_model", "on_token_usage", "on_file_write",
+    ):
+        if name in kwargs:
+            kwargs[name] = guard(kwargs[name])
+    try:
+        result = await prompt_deadline.wait(
+            get_serve_manager().run_prompt(timeout=remaining, **kwargs),
+            phase="prompt_and_cleanup",
+        )
+        deadline.check(phase="response_validation")
+        return result
+    except BaseException:
+        callbacks_open = False
+        drained = await prompt_deadline.drain(expires_at=min(
+            prompt_deadline.expires_at,
+            time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+        ))
+        if not drained:
+            mark_restart = getattr(get_serve_manager(), "_mark_serve_restart_required", None)
+            if callable(mark_restart):
+                mark_restart("Task Service deadline expired before prompt cleanup returned")
+        raise
+    finally:
+        callbacks_open = False
 
 
 async def _post_session_validation_feedback(

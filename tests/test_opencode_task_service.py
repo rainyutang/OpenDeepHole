@@ -309,6 +309,21 @@ def _config(*, max_retries: int = 2) -> SimpleNamespace:
     )
 
 
+@pytest.fixture
+def task_clock(monkeypatch):
+    """Advance task deadlines without changing asyncio's scheduling clock."""
+    clock = SimpleNamespace(seconds=10000.0)
+
+    def advance(seconds):
+        clock.seconds += seconds
+
+    clock.advance = advance
+    clock.monotonic = lambda: clock.seconds
+    monkeypatch.setattr("task_agent.task_service.time", clock)
+    monkeypatch.setattr("task_agent.deadline.time", clock)
+    return clock
+
+
 def _source() -> OutputSource:
     return OutputSource(
         backend="opencode",
@@ -829,8 +844,9 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("phase", ["json_format", "json_retry"])
 def test_external_cancellation_stops_same_session_json_correction_and_retries(
-    tmp_path: Path,
+    tmp_path: Path, phase: str,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
@@ -853,6 +869,12 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
                     text="not json",
                     model="provider/model-low",
                 )
+            if calls == 2 and phase == "json_retry":
+                return OpenCodePromptResult(
+                    session_id="ses-formatter", message_id="msg-format",
+                    text="__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__",
+                    lines=["__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"],
+                )
             correction_started.set()
             while not kwargs["cancel_event"].is_set():
                 await asyncio.sleep(0.005)
@@ -866,7 +888,7 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
         with (
             patches[0],
             patches[1],
-            patches[2],
+            patches[2] as release,
             patches[3],
             patches[4],
             patches[5],
@@ -886,8 +908,9 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(caller, timeout=1)
 
-        assert calls == 2
+        assert calls == (2 if phase == "json_format" else 3)
         assert next(iter(service._records.values())).status == "cancelled"
+        assert sum(call.kwargs["record_completion"] for call in release.await_args_list) == 1
 
     asyncio.run(run())
 
@@ -1229,7 +1252,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert captured["mcp_tools"] is None
         assert captured["scan_id"] == "scan-7"
         assert captured["code_graph_mcp"] == scan_graph
-        assert captured["timeout"] == 12
+        assert captured["timeout"] == pytest.approx(12, abs=0.1)
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
         assert captured["log_stage"] == "vulnerability_mining"
@@ -1404,7 +1427,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
 
         assert result.status == "success"
         assert len(calls) == 2
-        assert [call["timeout"] for call in calls] == [77, 77]
+        assert [call["timeout"] for call in calls] == pytest.approx([77, 77], abs=0.1)
         assert [call["idle_timeout"] for call in calls] == [23, 23]
         assert [call["permissions"] for call in calls] == [
             _writable_path_permissions((
@@ -2057,7 +2080,7 @@ def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("json_timeout", [1800, 41])
-def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_timeout: int) -> None:
+def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_timeout: int, task_clock) -> None:
     from task_agent.token_usage import TokenCounters, token_usage_from_models
 
     async def run() -> None:
@@ -2075,6 +2098,17 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_time
         async def run_prompt(**kwargs):
             index = len(calls)
             calls.append(kwargs)
+            task_clock.advance([10, 20, 5, 5][index])
+            if index == 1:
+                # Reacquiring the original Session lock must not consume its
+                # saved budget, just as model-pool queueing must not.
+                async def acquire_lock():
+                    task_clock.advance(1000)
+                    return True
+
+                service._session_locks["ses_same"] = SimpleNamespace(
+                    acquire=acquire_lock, release=lambda: None,
+                )
             callback = kwargs["on_session_id"](created_sessions[index])
             if hasattr(callback, "__await__"):
                 await callback
@@ -2097,6 +2131,11 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_time
         patches = _service_patches(manager, runtime_config=config)
         with (patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5],
               patch("task_agent.task_service.record_model_token_usage", new=AsyncMock()) as record_usage):
+            async def delayed_acquire(*args, **kwargs):
+                task_clock.advance(2000)
+                return _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
+
+            acquire_mock.side_effect = delayed_acquire
             with _task_context(
                 tmp_path,
                 task_metadata={"standalone_console": True, "task_type": "fp_review"},
@@ -2117,7 +2156,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path, json_time
         assert result.status == "success"
         assert result.structured == {"answer": 9}
         assert result.session_id == "ses_same"
-        assert [call["timeout"] for call in calls] == [77, json_timeout, json_timeout, json_timeout]
+        assert [call["timeout"] for call in calls] == [77, json_timeout, 67, 62]
         assert [call["idle_timeout"] for call in calls] == [23] * 4
         assert result.token_usage["total_tokens"] == 48
         assert result.token_usage["by_category"] == [{
@@ -2957,7 +2996,7 @@ def test_required_command_failure_is_corrected_in_the_same_session_first(
 
 
 def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
-    tmp_path: Path,
+    tmp_path: Path, task_clock,
 ) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
@@ -2967,6 +3006,7 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
         async def run_prompt(**kwargs):
             calls.append((kwargs["prompt"], kwargs["session_id"]))
             timeouts.append(kwargs["timeout"])
+            task_clock.advance(10)
             if len(calls) <= 2:
                 if len(calls) == 1:
                     callback = kwargs["on_session_id"]("ses_first")
@@ -3035,7 +3075,7 @@ def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
             None,
         ]
         assert calls[2][0] == "run"
-        assert timeouts == [30, 1800, 30]
+        assert timeouts == [30, 20, 30]
         assert acquire_mock.await_count == 2
         final_updates = update_context_mock.await_args_list[-1].args[1]
         assert [
@@ -3979,8 +4019,16 @@ def test_host_validation_uses_remaining_call_budget_without_model_penalty(tmp_pa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("retry_timeout,expected", [(0.08, "success"), (0.01, "timeout")])
-def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path, retry_timeout, expected):
+@pytest.mark.parametrize("retry_timeout", [1, 1800])
+@pytest.mark.parametrize(("total", "message_costs", "validation_cost", "expected", "expected_timeouts"), [
+    (10800, [600, 2100, 900], 10, "success", [10800, 10190, 8080]),
+    (100, [60, 35], 5, "timeout", [100, 35]),
+    (100, [60], 40, "timeout", [100]),
+])
+def test_same_session_validation_corrections_share_business_budget(
+    tmp_path, task_clock, retry_timeout, total, message_costs,
+    validation_cost, expected, expected_timeouts,
+):
     async def run():
         service = OpenCodeTaskService()
         session_arguments = []
@@ -3990,29 +4038,95 @@ def test_same_session_validation_correction_gets_a_new_call_budget(tmp_path, ret
             session_arguments.append(kwargs["session_id"])
             timeouts.append(kwargs["timeout"])
             await kwargs["on_session_id"]("ses_same")
-            await asyncio.sleep(0.03)
+            task_clock.advance(message_costs[len(timeouts) - 1])
             return OpenCodePromptResult(session_id="ses_same", message_id="msg", lines=["ok"], text="ok")
 
         async def validate():
-            await asyncio.sleep(0.03)
-            return "repair artifact" if len(session_arguments) == 1 else None
+            task_clock.advance(validation_cost)
+            return "repair artifact" if len(session_arguments) < 3 else None
 
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         config = _config()
         config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
-            required_capability="high", timeout_seconds=0.09, validation_retry_timeout_seconds=retry_timeout, max_retries=0,
+            required_capability="high", timeout_seconds=total,
+            validation_retry_timeout_seconds=retry_timeout, max_retries=0,
         ))
         patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), runtime_config=config)
         with patches[0], patches[1] as acquire, patches[2] as release, patches[3], patches[4], patches[5]:
             with _task_context(tmp_path, task_metadata={"task_type": "threat_analysis"}):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="correction deadline", prompt="analyze", directory=tmp_path,
-                    post_session_validator=validate, post_session_validation_retry_count=1,
+                    post_session_validator=validate, post_session_validation_retry_count=2,
                 ))
+                await service._records[result.task_id].worker
         assert result.status == expected
-        assert session_arguments == [None, "ses_same"]
-        assert timeouts == [0.09, retry_timeout]
+        assert session_arguments == [None] + ["ses_same"] * (len(expected_timeouts) - 1)
+        assert timeouts == expected_timeouts
         assert acquire.await_count == release.await_count == 1
+        assert release.await_args.kwargs["record_completion"] is True
+        assert release.await_args.kwargs["outcome"] == expected
+        if expected == "timeout":
+            # The fake provider completes normally; only the host detects the
+            # exhausted business budget, so this is not a model-health signal.
+            assert release.await_args.kwargs["health_outcome"] is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["business_parse", "json_message", "json_parse"])
+def test_exhausted_json_business_budget_stops_requests_and_completes_once(
+    tmp_path, task_clock, phase,
+):
+    import task_agent.task_service as task_service
+
+    async def run():
+        service = OpenCodeTaskService()
+        calls = []
+        real_parse = task_service._parse_text_json_result
+
+        def parse(text, schema):
+            parsed = real_parse(text, schema)
+            if phase == "business_parse" and text == "not json":
+                task_clock.advance(40)
+            elif phase == "json_parse" and text == '{"answer":9}':
+                task_clock.advance(40)
+            return parsed
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = "ses_formatter" if index == 1 else "ses_business"
+            await kwargs["on_session_id"](session_id)
+            if index == 0:
+                task_clock.advance(60)
+                text = "not json"
+            elif index == 1:
+                task_clock.advance(20)
+                text = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"
+            else:
+                task_clock.advance(40 if phase == "json_message" else 5)
+                text = '{"answer":9}'
+            return OpenCodePromptResult(session_id=session_id, message_id=f"msg_{index}", lines=[text], text=text)
+
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt))
+        with (patches[0], patches[1], patches[2] as release, patches[3], patches[4], patches[5],
+              patch.object(task_service, "_parse_text_json_result", side_effect=parse), _task_context(tmp_path)):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="JSON deadline", prompt="analyze", directory=tmp_path,
+                timeout_seconds=100, output_schema=SCHEMA, output_retry_count=2, attempt=0,
+            ))
+            await service._records[result.task_id].worker
+
+        assert result.status == "timeout"
+        assert len(calls) == (1 if phase == "business_parse" else 3)
+        if phase != "business_parse":
+            assert calls[-1]["timeout"] == 40
+        terminal = [call.kwargs for call in release.await_args_list if call.kwargs["record_completion"]]
+        assert len(terminal) == 1
+        assert terminal[0]["outcome"] == "timeout"
+        assert terminal[0]["health_outcome"] is None
+        assert terminal[0]["context_updates"]["failure_kind"] == "timeout"
 
     asyncio.run(run())
 
@@ -4129,7 +4243,7 @@ def test_threat_analysis_policy_defaults_apply_without_caller_timeout(tmp_path: 
                 ))
 
         assert result.status == "timeout"
-        assert timeouts == [7200, 7200, 7200]
+        assert timeouts == pytest.approx([7200, 7200, 7200], abs=0.1)
         assert acquire_mock.await_count == 3
         assert all(
             call.kwargs["required_capability"] == "high"
@@ -4503,7 +4617,7 @@ def test_public_task_uses_category_session_timeout(tmp_path, task_type, subtype,
             }):
                 result = await run_opencode_task(task_name="task category budget", task_type=task_type, prompt="analyze", required_capability="high")
         assert result.status == "success"
-        assert manager.run_prompt.await_args.kwargs["timeout"] == (73 if custom else default)
+        assert manager.run_prompt.await_args.kwargs["timeout"] == pytest.approx(73 if custom else default, abs=0.1)
         assert manager.run_prompt.await_args.kwargs["idle_timeout"] == 1200
 
     asyncio.run(run())

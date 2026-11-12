@@ -11,11 +11,10 @@ serve:
   # 实际启动文件，可填写 opencode、nga 或完整路径。
   executable: opencode
   port: 4096
-  # 每次调用的总超时，以及连续无新内容超时，单位均为秒。
+  # 每次业务尝试的总超时（同 Session 修复共用），以及连续无新内容超时，单位均为秒。
   timeout: 10800
   idle_timeout: 1200
-  json_correction_timeout_seconds: 1800
-  validation_retry_timeout_seconds: 1800
+  json_correction_timeout_seconds: 1800  # 独立 JSON 格式修复；原 Session 纠正共用业务预算
   max_retries: 2
   # Serve 不继承 HTTP/HTTPS/ALL 代理变量；NO_PROXY/no_proxy 分别追加到父进程同名变量。
   # environment:

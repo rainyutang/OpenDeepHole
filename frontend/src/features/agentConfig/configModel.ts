@@ -66,7 +66,7 @@ export function validateAgentConfig(config: AgentRemoteConfig): string {
   const providerError = validateLlmProviders(config);
   if (providerError) return providerError;
   const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
-  const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds, policy.json_correction_timeout_seconds, policy.validation_retry_timeout_seconds]);
+  const timeouts = policies.flatMap((policy) => [policy.timeout_seconds, policy.idle_timeout_seconds, policy.json_correction_timeout_seconds]);
   timeouts.push(config.vulnerability_mining.threat_audit_timeout_seconds, config.vulnerability_mining.candidate_audit_timeout_seconds, config.vulnerability_mining.vulnerability_dedup_timeout_seconds);
   timeouts.push(...config.model_pool.models.flatMap((model) => [model.timeout, model.idle_timeout].filter((value): value is number => value != null)));
   if (timeouts.some((value) => !Number.isInteger(value) || value < 1)) return "Session 超时和无新内容超时必须为正整数秒";

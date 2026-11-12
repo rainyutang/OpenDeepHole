@@ -29,8 +29,7 @@ threat_analysis:
     required_capability: "high"
     timeout_seconds: 10800
     idle_timeout_seconds: 1200
-    json_correction_timeout_seconds: 1800
-    validation_retry_timeout_seconds: 1800
+    json_correction_timeout_seconds: 1800  # 独立 JSON 格式修复；原 Session 纠正共用业务预算
     max_retries: 5
 
 vulnerability_mining:
@@ -40,16 +39,14 @@ vulnerability_mining:
   vulnerability_dedup_timeout_seconds: 1800
   timeout_seconds: 10800
   idle_timeout_seconds: 1200
-  json_correction_timeout_seconds: 1800
-  validation_retry_timeout_seconds: 1800
+  json_correction_timeout_seconds: 1800  # 独立 JSON 格式修复；原 Session 纠正共用业务预算
   max_retries: 2
 
 false_positive:
   required_capability: "high"
   timeout_seconds: 3600
   idle_timeout_seconds: 1200
-  json_correction_timeout_seconds: 1800
-  validation_retry_timeout_seconds: 1800
+  json_correction_timeout_seconds: 1800  # 独立 JSON 格式修复；原 Session 纠正共用业务预算
   max_retries: 2
 
 vulnerability_validation:
@@ -61,8 +58,7 @@ vulnerability_validation:
     required_capability: "high"
     timeout_seconds: 10800
     idle_timeout_seconds: 1200
-    json_correction_timeout_seconds: 1800
-    validation_retry_timeout_seconds: 1800
+    json_correction_timeout_seconds: 1800  # 独立 JSON 格式修复；原 Session 纠正共用业务预算
     max_retries: 2
 
 checker_selection:
