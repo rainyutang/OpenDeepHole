@@ -1,5 +1,7 @@
-import { SCAN_READ_TIMEOUT_MS, api, isMissingOptionalResult, isPublicScan, publicParams, publicScanPath } from "../../api/client";
-import type { ThreatAnalysis } from "../../types";
+import { SCAN_READ_TIMEOUT_MS, api } from "../../api/transport";
+import { isPublicScan, publicParams, publicScanPath } from "../../api/accessPolicy";
+import { isMissingOptionalResult } from "../../api/errors";
+import type { ThreatAnalysis } from "../../types/threatAnalysis";
 import type { CoverageIssues, ThreatCoverage } from "./coverage";
 
 export async function getCoverageIssues(scanId: string, signal?: AbortSignal): Promise<CoverageIssues> {
