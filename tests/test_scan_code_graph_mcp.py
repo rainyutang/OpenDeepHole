@@ -2,9 +2,10 @@ from __future__ import annotations
 import backend.api.scan_routes.queries as backend_api_scan_routes_queries
 import asyncio
 import json
+import httpx
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from backend.models import (
     AgentMcpConfig,
     AgentMcpLocalConfig,
@@ -1083,6 +1084,243 @@ def test_code_graph_and_knowledge_base_use_independent_scan_leases(
         await manager._release_scan_mcp(project, graph)
         assert manager._scan_mcp_states == {}
         assert disconnected == ["product-info", "codegraph"]
+
+    asyncio.run(run())
+
+
+def _prompt_mcp_manager(monkeypatch, respond):
+    """Exercise real MCP acquisition with an in-memory Serve transport."""
+    manager = OpenCodeServeManager()
+    manager._port = 12345
+    manager.ensure_managed_mcp = AsyncMock()
+    manager._register_event_state = AsyncMock()
+    manager._event_channel_healthy = lambda _directory: True
+
+    async def acquire(*_args, **_kwargs):
+        manager._active_sessions += 1
+        return "reused"
+
+    manager._acquire_session = acquire
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        "task_agent.serve_client.httpx.AsyncClient",
+        lambda **kwargs: original_client(transport=transport, **kwargs),
+    )
+    monkeypatch.setattr("task_agent.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
+    return manager
+
+
+def _successful_prompt_response(request):
+    path = request.url.path
+    if request.method == "POST" and path == "/session":
+        return httpx.Response(200, json={"id": "ses-recovered"})
+    if request.method == "POST" and path.endswith("/message"):
+        return httpx.Response(200, json={
+            "info": {"id": "msg-recovered", "sessionID": "ses-recovered", "role": "assistant"},
+            "parts": [{"type": "text", "text": "recovered"}],
+        })
+    if path.endswith("/children") or path.endswith("/message") or path.endswith("/tool/ids"):
+        return httpx.Response(200, json=[])
+    return httpx.Response(200, json={})
+
+
+@pytest.mark.parametrize("wait_kind", ["lease", "condition_lock"])
+def test_prompt_mcp_wait_timeout_keeps_neighbor_and_can_retry_after_release(
+    monkeypatch, tmp_path: Path, wait_kind: str,
+) -> None:
+    async def run():
+        requests, sessions, failures, output = [], [], [], []
+
+        async def respond(request):
+            requests.append((request.method, request.url.path))
+            return _successful_prompt_response(request)
+
+        manager = _prompt_mcp_manager(monkeypatch, respond)
+        project = tmp_path / "project"
+        async with httpx.AsyncClient(base_url=manager.base_url) as client:
+            neighbor = await manager._acquire_scan_mcp(client, project, "neighbor", None)
+        manager._active_sessions = 1
+        requests.clear()
+        condition = manager._scan_mcp_conditions[neighbor.state_key]
+        if wait_kind == "condition_lock":
+            await condition.acquire()
+        kwargs = dict(
+            tool="opencode", executable="opencode", directory=project,
+            config_workspace=tmp_path / "runtime", prompt="diagnostic", model="provider/model",
+            scan_id="waiting-scan", on_session_id=sessions.append,
+            on_model_request_failure=failures.append, on_line=output.append,
+            return_details=True,
+        )
+        try:
+            with pytest.raises(asyncio.TimeoutError, match="during scan_mcp_wait"):
+                await asyncio.wait_for(manager.run_prompt(**kwargs, timeout=0.05), timeout=1)
+        finally:
+            if wait_kind == "condition_lock":
+                condition.release()
+        assert requests == []
+        assert sessions == []
+        assert failures == []
+        assert manager._restart_required is False
+        assert manager._active_sessions == 1
+        state = manager._scan_mcp_states[neighbor.state_key]
+        assert state["identity"] == neighbor.identity
+        assert state["references"] == 1
+        assert any("TIMEOUT phase=scan_mcp_wait" in line for line in output)
+
+        await manager._release_scan_mcp(project, neighbor)
+        await manager._release_active_session()
+        result = await asyncio.wait_for(manager.run_prompt(**kwargs, timeout=2), timeout=3)
+        assert result.session_id == "ses-recovered"
+        assert result.text == "recovered"
+        assert sessions == ["ses-recovered"]
+        assert ("POST", "/session") in requests
+        assert manager._restart_required is False
+        assert manager._active_sessions == 0
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocked_method", ["GET", "POST"])
+def test_prompt_mcp_request_timeout_requires_restart_only_after_mutation(
+    monkeypatch, tmp_path: Path, blocked_method: str,
+) -> None:
+    async def run():
+        requests, output = [], []
+        blocking = False
+
+        async def respond(request):
+            requests.append((request.method, request.url.path))
+            if blocking and request.url.path == "/mcp" and request.method == blocked_method:
+                await asyncio.Future()
+            return _successful_prompt_response(request)
+
+        manager = _prompt_mcp_manager(monkeypatch, respond)
+        other = tmp_path / "neighbor"
+        async with httpx.AsyncClient(base_url=manager.base_url) as client:
+            neighbor = await manager._acquire_scan_mcp(client, other, "neighbor", None)
+        manager._active_sessions = 1
+        requests.clear()
+        blocking = True
+        with pytest.raises(asyncio.TimeoutError, match="during scan_mcp_request"):
+            await asyncio.wait_for(manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path / "victim",
+                prompt="diagnostic", model="provider/model", timeout=0.05,
+                scan_id="victim", code_graph_mcp=_remote_mcp("http://graph.test/mcp").model_dump(mode="json"),
+                on_line=output.append,
+            ), timeout=1)
+        assert (blocked_method, "/mcp") in requests
+        assert ("POST", "/session") not in requests
+        assert manager._restart_required is (blocked_method == "POST")
+        assert manager._active_sessions == 1
+        assert list(manager._scan_mcp_states) == [neighbor.state_key]
+        assert manager._scan_mcp_states[neighbor.state_key]["references"] == 1
+        assert any("TIMEOUT phase=scan_mcp_request" in line for line in output)
+        await manager._release_scan_mcp(other, neighbor)
+        await manager._release_active_session()
+
+    asyncio.run(run())
+
+
+def test_waiting_prompt_does_not_inherit_concurrent_mcp_mutation_state(monkeypatch, tmp_path: Path) -> None:
+    async def run():
+        mutation_started = asyncio.Event()
+        requests, wait_output, mutation_output = [], [], []
+
+        async def respond(request):
+            requests.append((request.method, request.url.path))
+            if request.method == "POST" and request.url.path == "/mcp":
+                mutation_started.set()
+                await asyncio.Future()
+            return _successful_prompt_response(request)
+
+        manager = _prompt_mcp_manager(monkeypatch, respond)
+        project = tmp_path / "occupied"
+        async with httpx.AsyncClient(base_url=manager.base_url) as client:
+            neighbor = await manager._acquire_scan_mcp(client, project, "neighbor", None)
+        manager._active_sessions = 1
+        common = dict(tool="opencode", executable="opencode", prompt="diagnostic", model="provider/model")
+        mutating = asyncio.create_task(manager.run_prompt(
+            **common, directory=tmp_path / "mutating", scan_id="mutating", timeout=0.2,
+            code_graph_mcp=_remote_mcp("http://graph.test/mcp").model_dump(mode="json"),
+            on_line=mutation_output.append,
+        ))
+        try:
+            await asyncio.wait_for(mutation_started.wait(), timeout=1)
+            previous_requests = list(requests)
+            with pytest.raises(asyncio.TimeoutError, match="during scan_mcp_wait"):
+                await asyncio.wait_for(manager.run_prompt(
+                    **common, directory=project, scan_id="waiting", timeout=0.05,
+                    on_line=wait_output.append,
+                ), timeout=1)
+            assert requests == previous_requests
+            assert manager._restart_required is False
+            assert manager._active_sessions == 2
+            with pytest.raises(asyncio.TimeoutError, match="during scan_mcp_request"):
+                await asyncio.wait_for(mutating, timeout=1)
+            assert manager._restart_required is True
+            assert manager._active_sessions == 1
+            assert any("phase=scan_mcp_wait" in line for line in wait_output)
+            assert any("phase=scan_mcp_request" in line for line in mutation_output)
+            assert list(manager._scan_mcp_states) == [neighbor.state_key]
+        finally:
+            if not mutating.done():
+                mutating.cancel()
+                await asyncio.gather(mutating, return_exceptions=True)
+            await manager._release_scan_mcp(project, neighbor)
+            await manager._release_active_session()
+
+    asyncio.run(run())
+
+
+def test_knowledge_wait_timeout_does_not_inherit_completed_graph_mutation(monkeypatch, tmp_path: Path) -> None:
+    async def run():
+        requests, output = [], []
+        remote_state = {}
+
+        async def respond(request):
+            path = request.url.path
+            requests.append((request.method, path))
+            if path == "/mcp":
+                if request.method == "POST":
+                    name = json.loads(request.content)["name"]
+                    remote_state[name] = {"status": "connected"}
+                return httpx.Response(200, json=remote_state)
+            if request.method == "POST" and path.endswith("/disconnect"):
+                remote_state.pop(path.split("/")[2], None)
+                return httpx.Response(200, json=True)
+            return _successful_prompt_response(request)
+
+        manager = _prompt_mcp_manager(monkeypatch, respond)
+        project = tmp_path / "project"
+        async with httpx.AsyncClient(base_url=manager.base_url) as client:
+            neighbor = await manager._acquire_scan_mcp(
+                client, project, "neighbor", None, role="knowledge_base", source_graph=False,
+            )
+        manager._active_sessions = 1
+        requests.clear()
+        with pytest.raises(asyncio.TimeoutError, match="during scan_mcp_wait"):
+            await asyncio.wait_for(manager.run_prompt(
+                tool="opencode", executable="opencode", directory=project,
+                prompt="diagnostic", model="provider/model", timeout=0.1,
+                scan_id="victim", on_line=output.append,
+                code_graph_mcp=_remote_mcp("http://graph.test/mcp", name="graph").model_dump(mode="json"),
+                knowledge_base_mcp=_remote_mcp("http://knowledge.test/mcp", name="knowledge").model_dump(mode="json"),
+            ), timeout=1)
+        assert ("POST", "/mcp") in requests
+        assert ("POST", "/mcp/graph/disconnect") in requests
+        assert sum(method == "POST" and path == "/mcp" for method, path in requests) == 1
+        assert ("POST", "/session") not in requests
+        assert remote_state == {}
+        assert manager._restart_required is False
+        assert manager._active_sessions == 1
+        assert list(manager._scan_mcp_states) == [neighbor.state_key]
+        assert manager._scan_mcp_states[neighbor.state_key]["identity"] == neighbor.identity
+        assert manager._scan_mcp_states[neighbor.state_key]["references"] == 1
+        assert any("TIMEOUT phase=scan_mcp_wait" in line for line in output)
+        await manager._release_scan_mcp(project, neighbor)
+        await manager._release_active_session()
 
     asyncio.run(run())
 

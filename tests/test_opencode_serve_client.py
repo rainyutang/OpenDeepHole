@@ -2682,6 +2682,163 @@ def test_token_cleanup_does_not_replace_original_request_error(monkeypatch, tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("boundary", ["create_response", "binding", "callback", "token_baseline", "continued_preparation"])
+def test_session_identity_survives_preparation_deadlines(monkeypatch, tmp_path, boundary):
+    from types import SimpleNamespace
+    from task_agent import deadline as deadlines
+
+    async def run():
+        real_clock = deadlines.time.monotonic
+        offset = 0.0
+        monkeypatch.setattr(deadlines, "time", SimpleNamespace(monotonic=lambda: real_clock() + offset))
+        ids, posts, failures = [], [], []
+        update = asyncio.get_running_loop().create_future()
+
+        class Client(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                nonlocal offset
+                posts.append(path)
+                response = await super().post(path, **kwargs)
+                if path == "/session" and boundary == "create_response":
+                    # The transport has a response, but the deadline's caller
+                    # will check expiry before inspecting the completed task.
+                    offset = 2.0
+                return response
+
+        def publish(value):
+            ids.append(value)
+            if boundary in {"create_response", "callback"}:
+                return update
+            return None
+
+        def remove_binding(_path):
+            nonlocal offset
+            if boundary == "binding":
+                offset = 2.0
+
+        async def block(*args, **kwargs):
+            await asyncio.Future()
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = block if boundary == "continued_preparation" else AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client._remove_file", remove_binding)
+        if boundary == "token_baseline":
+            monkeypatch.setattr("task_agent.serve_client._session_tree_token_entries", block)
+            monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.01)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(manager.run_prompt(
+                tool="opencode", executable="opencode", directory=tmp_path,
+                config_workspace=tmp_path, prompt="test", model="provider/model", timeout=0.04,
+                session_id="session-1" if boundary in {"token_baseline", "continued_preparation"} else None,
+                on_session_id=publish, on_model_request_failure=failures.append,
+            ), timeout=1)
+        assert ids == ["session-1"]
+        assert not any(path.endswith("/message") for path in posts)
+        assert failures == []
+        assert manager._restart_required is False
+        if boundary in {"create_response", "callback"}:
+            assert update.cancelled()
+        if boundary != "continued_preparation":
+            assert "/session/session-1/abort" in posts
+
+    asyncio.run(run())
+
+
+def test_late_session_creation_cannot_publish_identity_after_timeout(monkeypatch, tmp_path):
+    async def run():
+        gate = asyncio.Event()
+        cancelled = asyncio.Event()
+        finished = asyncio.Event()
+        ids = []
+
+        class Client(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    try:
+                        await gate.wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        await gate.wait()
+                    finished.set()
+                return await super().post(path, **kwargs)
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("task_agent.serve_client.CLEANUP_TIMEOUT_SECONDS", 0.03)
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(manager.run_prompt(
+                    tool="opencode", executable="opencode", directory=tmp_path,
+                    prompt="test", model="provider/model", timeout=0.03,
+                    on_session_id=ids.append,
+                ), timeout=1)
+            assert cancelled.is_set()
+            gate.set()
+            await asyncio.wait_for(finished.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            assert ids == []
+            assert manager._active_sessions == 0
+        finally:
+            gate.set()
+
+    asyncio.run(run())
+
+
+def test_session_identity_update_that_ignores_cancel_is_reaped_within_cleanup_budget(monkeypatch, tmp_path):
+    async def run():
+        gate, started, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        ids, errors = [], []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+        async def update():
+            started.set()
+            while not gate.is_set():
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    continue
+            finished.set()
+            raise RuntimeError("late update failure")
+
+        def publish(value):
+            ids.append(value)
+            return update()
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("task_agent.serve_client.CLEANUP_TIMEOUT_SECONDS", 0.03)
+        try:
+            with pytest.raises(asyncio.TimeoutError, match="response_callback"):
+                await asyncio.wait_for(manager.run_prompt(
+                    tool="opencode", executable="opencode", directory=tmp_path,
+                    prompt="test", model="provider/model", timeout=0.03,
+                    on_session_id=publish,
+                ), timeout=0.5)
+            assert started.is_set()
+            assert ids == ["session-1"]
+            assert manager._active_sessions == 0
+            gate.set()
+            await asyncio.wait_for(finished.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            assert errors == []
+        finally:
+            gate.set()
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(run())
+
+
 def test_cancelled_prompt_does_not_cancel_shared_mcp_sync(monkeypatch, tmp_path):
     async def run():
         manager = OpenCodeServeManager()

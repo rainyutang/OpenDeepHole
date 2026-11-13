@@ -429,7 +429,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                                             />
                                           </div>
                                           <div className="mt-2 select-text break-all font-mono text-xs text-cyan-300" title={event.sessionId || undefined}>
-                                            {event.sessionId || "Session 未创建"}
+                                            {event.sessionId || "未记录 Session ID"}
                                           </div>
                                           {(eventModel || eventTime || event.durationSeconds != null) && (
                                             <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
@@ -459,8 +459,8 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                                     {sessionId
                                       ? `历史任务仅保存最终 Session：${sessionId}`
                                       : isTerminal
-                                        ? "该任务在 OpenCode Session 创建前结束，或历史记录未保存完整 Session 轨迹。"
-                                        : "OpenCode Session 尚未创建，创建后会在此显示。"}
+                                        ? "该任务未记录 Session ID，无法确认是否已创建 Session。"
+                                        : "等待 Session ID 上报。"}
                                   </div>
                                 )}
                               </div>

@@ -11,7 +11,7 @@ import logging
 import re
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -1056,13 +1056,15 @@ class OpenCodeTaskService:
                 if context.on_invocation_metadata:
                     context.on_invocation_metadata(source)
 
-                async def record_session(value: str) -> None:
+                def record_session(value: str) -> Awaitable[None]:
+                    # Identity must survive a deadline that cancels the later
+                    # model-pool update before its coroutine can start.
                     nonlocal session_id, final_session_id
                     session_id = str(value or "").strip()
                     final_session_id = session_id
                     record.last_session_id = session_id
                     if not session_id or runtime is None:
-                        return
+                        return _completed_session_callback()
                     self._session_directories[session_id] = spec.directory
                     self._session_work_directories[session_id] = _required_work_dir(context)
                     self._session_runtimes[session_id] = runtime
@@ -1073,7 +1075,7 @@ class OpenCodeTaskService:
                     source.serve_session_id = session_id
                     if not record.session_future.done():
                         record.session_future.set_result(session_id)
-                    await update_model_lease_context(lease, {
+                    return update_model_lease_context(lease, {
                         "serve_session_id": session_id,
                         "session_attempt": session_attempt,
                     })
@@ -2058,16 +2060,16 @@ class OpenCodeTaskService:
                 session_attempt=session_attempt,
             )
 
-            async def record_formatter_session(value: str) -> None:
+            def record_formatter_session(value: str) -> Awaitable[None]:
                 nonlocal formatter_session_id
                 formatter_session_id = str(value or "").strip()
                 if not formatter_session_id:
-                    return
+                    return _completed_session_callback()
                 self._session_directories[formatter_session_id] = spec.directory
                 self._session_work_directories[formatter_session_id] = work_dir
                 self._session_runtimes[formatter_session_id] = formatter_runtime
                 self._active_session_tasks[formatter_session_id] = record.task_id
-                await update_model_lease_context(formatter_lease, {
+                return update_model_lease_context(formatter_lease, {
                     "serve_session_id": session_id,
                     "json_format_session_id": formatter_session_id,
                     "session_attempt": session_attempt,
@@ -2368,16 +2370,16 @@ class OpenCodeTaskService:
                 business_remaining_seconds, cancel_event=combined_cancel,
             )
 
-            async def record_correction_session(value: str) -> None:
+            def record_correction_session(value: str) -> Awaitable[None]:
                 value = str(value or "").strip()
                 if not value:
-                    return
+                    return _completed_session_callback()
                 self._session_directories[value] = spec.directory
                 self._session_work_directories[value] = work_dir
                 self._session_runtimes[value] = correction_runtime
                 self._active_session_tasks[value] = record.task_id
                 correction_source.serve_session_id = value
-                await update_model_lease_context(correction_lease, {
+                return update_model_lease_context(correction_lease, {
                     "serve_session_id": value,
                     "session_attempt": session_attempt,
                 })
@@ -3063,6 +3065,13 @@ def _json_correction_prompt(schema: dict[str, Any]) -> str:
     )
 
 
+def _completed_session_callback() -> asyncio.Future[None]:
+    """Keep ignored Session notifications awaitable without scheduling work."""
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(None)
+    return completed
+
+
 async def _run_prompt_with_deadline(
     deadline: OperationDeadline,
     **kwargs: Any,
@@ -3076,7 +3085,7 @@ async def _run_prompt_with_deadline(
     )
     callbacks_open = True
 
-    def guard(callback):
+    def guard(callback, *, session_callback: bool = False):
         if callback is None:
             return None
         if inspect.iscoroutinefunction(callback):
@@ -3087,6 +3096,8 @@ async def _run_prompt_with_deadline(
         def invoke(*args):
             if callbacks_open:
                 return callback(*args)
+            if session_callback:
+                return _completed_session_callback()
         return invoke
 
     for name in (
@@ -3094,7 +3105,7 @@ async def _run_prompt_with_deadline(
         "on_response_model", "on_token_usage", "on_file_write",
     ):
         if name in kwargs:
-            kwargs[name] = guard(kwargs[name])
+            kwargs[name] = guard(kwargs[name], session_callback=name == "on_session_id")
     try:
         result = await prompt_deadline.wait(
             get_serve_manager().run_prompt(timeout=remaining, **kwargs),

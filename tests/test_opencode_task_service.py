@@ -22,6 +22,7 @@ from task_agent.api import (
     _normalize_required_bash_success_markers,
     _normalize_writable_paths,
 )
+from task_agent.deadline import OperationDeadline
 from task_agent.model_pool import (
     NO_AVAILABLE_MODEL_MESSAGE,
     ModelLease,
@@ -4189,9 +4190,131 @@ def test_timeout_result_is_set_even_when_lease_finalization_raises(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("update_started", [False, True])
+def test_session_identity_survives_metadata_update_timeout(tmp_path, update_started):
+    async def run():
+        service = OpenCodeTaskService()
+        source = _source()
+        captured = {}
+
+        async def run_prompt(**kwargs):
+            callback = kwargs["on_session_id"]("ses-known")
+            record = service._records[kwargs["task_id"]]
+            captured.update(
+                session_id=record.last_session_id,
+                session_published=record.session_future.done(),
+                session_lock_held=(
+                    "ses-known" in service._session_locks
+                    and service._session_locks["ses-known"].locked()
+                ),
+            )
+            await OperationDeadline(0.01 if update_started else 0).wait(
+                callback, phase="response_callback",
+            )
+
+        async def update_context(_lease, updates):
+            if "session_events" not in updates:
+                await asyncio.Future()
+
+        service._runtime_for_task = AsyncMock(return_value=(
+            _runtime(tmp_path), "provider/model-low", source,
+        ))
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt), max_retries=0)
+        with (
+            patches[0], patches[1], patches[2] as release,
+            patches[3] as update, patches[4], patches[5],
+            _task_context(tmp_path),
+        ):
+            update.side_effect = update_context
+            handle = service.submit_task(OpenCodeTaskSpec(
+                task_name="session metadata timeout", prompt="run", directory=tmp_path,
+            ))
+            result = await asyncio.wait_for(handle.result(), timeout=1)
+            assert await handle.wait_session_id() == "ses-known"
+
+        assert result.status == "timeout"
+        assert result.session_id == "ses-known"
+        assert result.output_source.serve_session_id == "ses-known"
+        assert captured == {
+            "session_id": "ses-known", "session_published": True,
+            "session_lock_held": True,
+        }
+        assert release.await_count == 1
+        assert release.await_args.kwargs["health_outcome"] is None
+        assert release.await_args.kwargs["record_completion"] is True
+        terminal = release.await_args.kwargs["context_updates"]
+        assert terminal["serve_session_id"] == "ses-known"
+        assert terminal["session_events"][0]["session_id"] == "ses-known"
+        assert terminal["session_events"][0]["outcome"] == "timeout"
+        assert "ses-known" not in service._active_session_tasks
+
+    asyncio.run(run())
+
+
+def test_formatter_identity_survives_callback_timeout_and_correction_keeps_business_id(tmp_path):
+    async def run():
+        service = OpenCodeTaskService()
+        calls = []
+        immediate_owners = []
+        immediate_runtimes = []
+        runtimes = [
+            dataclasses.replace(_runtime(tmp_path), config_content=json.dumps({"phase": index}))
+            for index in range(3)
+        ]
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            session_id = "ses-formatter" if index == 1 else "ses-business"
+            callback = kwargs["on_session_id"](session_id)
+            immediate_owners.append(service._active_session_tasks.get(session_id))
+            immediate_runtimes.append(service._session_runtimes.get(session_id))
+            if index == 1:
+                await OperationDeadline(0).wait(callback, phase="response_callback")
+            else:
+                await callback
+            text = "invalid json" if index == 0 else '{"answer": 31}'
+            return OpenCodePromptResult(
+                session_id=session_id, message_id=f"msg-{index}", lines=[text], text=text,
+            )
+
+        service._runtime_for_task = AsyncMock(side_effect=[
+            (runtime, "provider/model-low", _source()) for runtime in runtimes
+        ])
+        patches = _service_patches(SimpleNamespace(run_prompt=run_prompt))
+        with (
+            patches[0], patches[1], patches[2] as release, patches[3],
+            patches[4], patches[5], _task_context(tmp_path),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="formatter identity", prompt="run", directory=tmp_path,
+                output_schema=SCHEMA, output_retry_count=1, attempt=0,
+            ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses-business"
+        assert result.output_source.serve_session_id == "ses-business"
+        assert immediate_owners == [result.task_id] * 3
+        assert immediate_runtimes == runtimes
+        formatter = release.await_args_list[1].kwargs
+        assert formatter["health_outcome"] is None
+        assert formatter["record_completion"] is False
+        events = release.await_args.kwargs["context_updates"]["session_events"]
+        assert [(event["phase"], event["session_id"], event["outcome"]) for event in events] == [
+            ("business", "ses-business", "invalid_output"),
+            ("json_format", "ses-formatter", "timeout"),
+            ("json_retry", "ses-business", "success"),
+        ]
+        assert sum(call.kwargs["record_completion"] for call in release.await_args_list) == 1
+        assert service._active_session_tasks == {}
+
+    asyncio.run(run())
+
+
 def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(tmp_path, monkeypatch):
     async def run():
         gate = asyncio.Event()
+        late_callback_completed = asyncio.Event()
         async def prompt(**kwargs):
             while not gate.is_set():
                 try:
@@ -4199,6 +4322,7 @@ def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(t
                 except asyncio.CancelledError:
                     continue
             await kwargs["on_session_id"]("late-session")
+            late_callback_completed.set()
             return OpenCodePromptResult(session_id="late-session", message_id="late", text="late", lines=[], model="p/m")
         manager = SimpleNamespace(run_prompt=prompt)
         service = OpenCodeTaskService()
@@ -4216,6 +4340,7 @@ def test_service_deadline_bounds_uncooperative_prompt_and_ignores_late_session(t
                 assert release.await_count == 1
                 gate.set()
                 await asyncio.sleep(0.03)
+                assert late_callback_completed.is_set()
                 assert handle._record.last_session_id == ""
                 assert "late-session" not in service._active_session_tasks
         finally:

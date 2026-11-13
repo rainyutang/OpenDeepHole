@@ -280,6 +280,76 @@ test("changing scans renews cursor recovery and ignores an old scan's pending er
 });
 
 for (const access of ["authenticated", "public", "shared"]) {
+  test(`missing Session IDs stay unknown per attempt after reload (${access})`, async () => {
+    if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
+    const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;
+    const reason = "OpenCode call timed out during scan_mcp_wait (session total timeout)";
+    const event = (sequence, sessionId) => ({ sequence, phase: "business", session_id: sessionId,
+      session_attempt: sequence, outcome: "timeout", failure_kind: "timeout", failure_reason: reason });
+    const history = [
+      task("missing", "2026-11-13T04:00:00Z", { outcome: "timeout", session_events: [event(1, "")] }),
+      task("retry", "2026-11-13T04:00:00Z", { outcome: "timeout", serve_session_id: "ses_previous",
+        session_events: [event(1, "ses_previous"), event(2, "")] }),
+      task("no-trace", "2026-11-13T04:00:00Z", { outcome: "timeout" }),
+      task("legacy", "2026-11-13T04:00:00Z", { outcome: "timeout", serve_session_id: "ses_legacy" }),
+    ];
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.startsWith(prefix));
+      if (access !== "authenticated") assert.equal(config.params.token, "token");
+      if (config.url === `${prefix}/tasks`) return response(config, {
+        items: history.map(({ session_events, ...metadata }) => metadata), next_cursor: null,
+      });
+      const detail = history.find((item) => config.url === `${prefix}/tasks/${item.task_id}`);
+      assert.ok(detail);
+      return response(config, { ...detail, prompt: "原始任务" });
+    };
+    for (let reload = 0; reload < 2; reload += 1) {
+      const root = await mount(pool({ completed_task_count: history.length, total_tasks: history.length }));
+      for (const item of history) {
+        const row = rows(root).find((candidate) => text(candidate.findAllByType("td")[2]) === item.task_id);
+        assert.ok(row);
+        await act(async () => row.props.onClick());
+        const rendered = text(root.toJSON());
+        assert.doesNotMatch(rendered, /Session 未创建|Session 尚未创建|Session 创建前结束/);
+        if (item.task_id === "no-trace") {
+          assert.match(rendered, /该任务未记录 Session ID，无法确认是否已创建 Session。/);
+        } else if (item.task_id === "legacy") {
+          assert.equal((rendered.match(/ses_legacy/g) || []).length, 1);
+          assert.doesNotMatch(rendered, /未记录 Session ID/);
+        } else {
+          assert.equal((rendered.match(/未记录 Session ID/g) || []).length, 1);
+          assert.ok(rendered.includes(reason));
+          if (item.task_id === "retry") assert.equal((rendered.match(/ses_previous/g) || []).length, 1);
+        }
+      }
+      await act(async () => root.unmount());
+      roots.splice(roots.indexOf(root), 1);
+    }
+  });
+
+  test(`live tasks wait for Session ID reporting without inferring creation state (${access})`, async () => {
+    if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
+    const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;
+    const liveTasks = [{ task_id: "run", revision: 1 }, { task_id: "wait", revision: 1 }];
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.startsWith(prefix));
+      if (access !== "authenticated") assert.equal(config.params.token, "token");
+      if (config.url === `${prefix}/tasks`) return response(config, { items: [], next_cursor: null });
+      const detail = liveTasks.find((item) => config.url === `${prefix}/tasks/${item.task_id}`);
+      assert.ok(detail);
+      return response(config, { ...detail, prompt: "原始任务" });
+    };
+    const root = await mount(pool({ completed_task_count: 0, total_tasks: 3,
+      models: [{ id: "m", active_tasks: [liveTasks[0]] }], queued_tasks: [liveTasks[1]],
+      planned_tasks: [{ planned_task_id: "next" }] }));
+    for (const row of rows(root)) {
+      await act(async () => row.props.onClick());
+      const rendered = text(root.toJSON());
+      assert.match(rendered, /等待 Session ID 上报。/);
+      assert.doesNotMatch(rendered, /Session 未创建|Session 尚未创建/);
+    }
+  });
+
   test(`missing model reminder is retained in task history after reload (${access})`, async () => {
     if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
     const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;

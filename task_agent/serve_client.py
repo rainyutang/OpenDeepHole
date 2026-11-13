@@ -620,6 +620,27 @@ class OpenCodeCommandFailure:
     timed_out: bool = False
 
 
+@dataclass
+class _ScanMcpAcquisition:
+    """Track only this acquisition's I/O, independently of shared MCP waiters."""
+
+    client: httpx.AsyncClient
+    phase: str = "scan_mcp_wait"
+    mutation_started: bool = False
+    completed: bool = False
+
+    async def get(self, *args, **kwargs):
+        self.phase = "scan_mcp_request"
+        return await self.client.get(*args, **kwargs)
+
+    async def post(self, *args, **kwargs):
+        self.phase = "scan_mcp_request"
+        # Until acquisition completes, a cancelled add/connect/disconnect may
+        # have changed the remote state without handing back a releasable lease.
+        self.mutation_started = True
+        return await self.client.post(*args, **kwargs)
+
+
 class OpenCodeTaskQualityError(RuntimeError):
     """The model response violated a caller-required completion contract."""
 
@@ -6872,6 +6893,8 @@ class OpenCodeServeManager:
         message_finished = False
         response_data = None
         capture_token_usage = None
+        session_callback_task: asyncio.Future | None = None
+        mcp_acquisition: _ScanMcpAcquisition | None = None
         event_state: _ServeEventState | None = None
         event_registered = False
         event_flush_task: asyncio.Task | None = None
@@ -6908,18 +6931,37 @@ class OpenCodeServeManager:
                 await self._release_active_session()
             return mode
 
-        async def acquire_mcp(*args, **kwargs) -> _ScanMcpLease:
-            lease = await self._acquire_scan_mcp(*args, **kwargs)
-            if callbacks_open:
-                owned_mcp_leases.append(lease)
-            else:
-                late_cleanup = OperationDeadline(CLEANUP_TIMEOUT_SECONDS)
-                await late_cleanup.wait(
-                    self._release_scan_mcp(directory, lease), phase="late_mcp_release",
-                )
-            return lease
+        def acquire_mcp(mcp_client, *args, **kwargs):
+            nonlocal mcp_acquisition
+            tracked = _ScanMcpAcquisition(mcp_client)
+            mcp_acquisition = tracked
+
+            async def acquire() -> _ScanMcpLease:
+                lease = await self._acquire_scan_mcp(tracked, *args, **kwargs)
+                tracked.completed = True
+                if callbacks_open:
+                    owned_mcp_leases.append(lease)
+                else:
+                    late_cleanup = OperationDeadline(CLEANUP_TIMEOUT_SECONDS)
+                    await late_cleanup.wait(
+                        self._release_scan_mcp(directory, lease), phase="late_mcp_release",
+                    )
+                return lease
+
+            return acquire()
+
+        def publish_session_id() -> None:
+            nonlocal session_callback_task
+            if callbacks_open and on_session_id:
+                result = on_session_id(active_session_id)
+                if hasattr(result, "__await__"):
+                    # Own the update even if the creation result loses a race
+                    # with the deadline. Local identity callbacks run inline.
+                    session_callback_task = asyncio.ensure_future(result)
 
         try:
+            if active_session_id:
+                publish_session_id()
             try:
                 serve_mode = await deadline.wait(acquire_serve(), phase="serve_preparation")
             except Exception as exc:
@@ -7068,17 +7110,20 @@ class OpenCodeServeManager:
                 }
                 if permissions is not None:
                     create_payload["permission"] = permissions
-                created = await deadline.wait(client.post(
-                    "/session",
-                    params=params,
-                    headers=headers,
-                    json=create_payload,
-                ), phase="session_create")
-                self._raise_for_session_control_status(
-                    created,
-                    "POST /session",
-                )
-                active_session_id = _session_id(created.json())
+                async def create_session() -> None:
+                    nonlocal active_session_id
+                    created = await client.post(
+                        "/session", params=params, headers=headers, json=create_payload,
+                    )
+                    if not callbacks_open:
+                        return
+                    self._raise_for_session_control_status(created, "POST /session")
+                    active_session_id = _session_id(created.json())
+                    publish_session_id()
+
+                await deadline.wait(create_session(), phase="session_create")
+            if session_callback_task is not None:
+                await deadline.wait(session_callback_task, phase="response_callback")
             binding_workspace = self._startup_cwd or config_workspace or _serve_bootstrap_cwd(tool)
             if binding_workspace is not None:
                 try:
@@ -7106,10 +7151,6 @@ class OpenCodeServeManager:
                         model,
                     ), phase="token_baseline")
                 )
-            if on_session_id:
-                result = on_session_id(active_session_id)
-                if hasattr(result, "__await__"):
-                    await deadline.wait(result, phase="response_callback")
             if on_line:
                 config_note = f" config={config_workspace}" if config_workspace else ""
                 correlation_note = (
@@ -7646,11 +7687,27 @@ class OpenCodeServeManager:
             return details if return_details else lines
         except asyncio.TimeoutError as exc:
             session_outcome = "timeout"
-            session_error = str(exc) or f"OpenCode call timed out during {deadline.phase}"
-            emit("task", f"TIMEOUT phase={deadline.phase} kind={getattr(exc, 'kind', 'session')} task={task_id} "
+            timeout_phase = deadline.phase
+            if timeout_phase == "scan_mcp" and mcp_acquisition is not None:
+                timeout_phase = mcp_acquisition.phase
+                session_error = f"OpenCode call timed out during {timeout_phase} (session total timeout)"
+            else:
+                session_error = str(exc) or f"OpenCode call timed out during {timeout_phase}"
+            emit("task", f"TIMEOUT phase={timeout_phase} kind={getattr(exc, 'kind', 'session')} task={task_id} "
                  f"attempt={task_attempt} elapsed={time.monotonic() - deadline.started_at:.3f}s")
-            if deadline.phase in {"session_create", "session_permissions", "scan_mcp"}:
+            session_control_uncertain = timeout_phase == "session_permissions" or (
+                timeout_phase == "session_create" and not active_session_id
+            )
+            mcp_control_uncertain = (
+                deadline.phase == "scan_mcp"
+                and mcp_acquisition is not None
+                and mcp_acquisition.mutation_started
+                and not mcp_acquisition.completed
+            )
+            if session_control_uncertain or mcp_control_uncertain:
                 self._mark_serve_restart_required("Session preparation timed out")
+            if timeout_phase != deadline.phase:
+                raise OpenCodeTimeout(getattr(exc, "kind", "session"), session_error) from exc
             raise
         except asyncio.CancelledError:
             session_outcome = "cancelled"
@@ -7691,6 +7748,9 @@ class OpenCodeServeManager:
                     return False, None
 
             try:
+                if session_callback_task is not None:
+                    session_callback_task.cancel()
+                    await cleanup(self._cancel_request_task(session_callback_task), "session_callback")
                 if request is not None and not request.done():
                     request.cancel()
                     retire_task(request)
