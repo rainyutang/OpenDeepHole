@@ -109,9 +109,27 @@ class OperationDeadline:
         self.cancel_event = cancel_event
         self.phase = "preparing"
         self.pending: set[asyncio.Future] = set()
+        self._paused_at: float | None = None
+        self._pause_depth = 0
 
     def remaining(self) -> float:
-        return max(0.0, self.expires_at - time.monotonic())
+        now = self._paused_at if self._paused_at is not None else time.monotonic()
+        return max(0.0, self.expires_at - now)
+
+    @contextlib.contextmanager
+    def paused(self):
+        """Preserve the remaining business budget while shared resources queue."""
+        if self._pause_depth == 0:
+            self._paused_at = time.monotonic()
+        self._pause_depth += 1
+        try:
+            yield
+        finally:
+            self._pause_depth -= 1
+            if self._pause_depth == 0:
+                assert self._paused_at is not None
+                self.expires_at += max(0.0, time.monotonic() - self._paused_at)
+                self._paused_at = None
 
     def check(self, *, phase: str) -> float:
         """Check synchronous work and return the remaining execution budget."""

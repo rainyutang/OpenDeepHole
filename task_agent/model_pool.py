@@ -7,7 +7,7 @@ import copy
 import inspect
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
@@ -119,6 +119,8 @@ class ModelLease:
     health_identity: tuple[str, bool, str, str] = ()
     health_generation: str = ""
     quota_half_open_probe: bool = False
+    quota_wait_budget: ModelQuotaWaitBudget | None = None
+    lease_id: str = ""
 
 
 @dataclass
@@ -179,6 +181,25 @@ class _PendingLeaseRequest:
     quota_wait_logged: bool = False
     admission_allowed: Callable[[], bool] | None = None
     on_admitted: Callable[[], None] | None = None
+    resume_lease: ModelLease | None = None
+    resume_ready: bool = False
+
+
+@dataclass
+class SuspendedModelLease:
+    """An existing execution interval queued without holding model capacity."""
+
+    lease: ModelLease
+    request: _PendingLeaseRequest
+    active_task: dict[str, Any]
+    suspended_at: float
+    finished_at: float | None = None
+    state: str = "suspended"
+
+    @property
+    def wait_seconds(self) -> float:
+        end = time.monotonic() if self.finished_at is None else self.finished_at
+        return max(0.0, end - self.suspended_at)
 
 
 @dataclass
@@ -758,6 +779,11 @@ def _current_request_cli_config(request: _PendingLeaseRequest) -> Any:
 def _request_options_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[list[ModelOption], list[ModelOption], bool]:
+    if request.resume_lease is not None:
+        # A resumed message keeps its original target. In particular, do not
+        # publish its old config over a newly configured model with the same ID.
+        options = [request.resume_lease.option]
+        return options, options, True
     active_cli_config = _current_request_cli_config(request)
     pool_enabled = _configured_model_pool_enabled(active_cli_config)
     all_options = model_options(active_cli_config)
@@ -798,6 +824,24 @@ def _eligible_options_for_request_locked(
 def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
+    if request.resume_lease is not None:
+        lease = request.resume_lease
+        option = lease.option
+        options = [option]
+        if not request.resume_ready:
+            return None, options
+        if request.admission_allowed is not None and not request.admission_allowed():
+            return None, options
+        state = _lease_health_state_locked(lease)
+        now = time.monotonic()
+        if state is not None and state.quota_open_until is not None and (
+            now < state.quota_open_until or state.quota_half_open_probe_in_flight
+        ):
+            return None, options
+        capacity = _options_by_id.get(option.id, option).max_concurrency
+        if _running_by_model.get(option.id, 0) >= capacity:
+            return None, options
+        return option, options
     eligible, all_options = _eligible_options_for_request_locked(request)
     if request.admission_allowed is not None and not request.admission_allowed():
         return None, all_options
@@ -829,6 +873,11 @@ def _choose_available_for_request_locked(
 def _request_blocked_by_quota_circuits_locked(
     request: _PendingLeaseRequest,
 ) -> bool:
+    if request.resume_lease is not None:
+        state = _lease_health_state_locked(request.resume_lease)
+        return bool(state is not None and state.quota_open_until is not None and (
+            time.monotonic() < state.quota_open_until or state.quota_half_open_probe_in_flight
+        ))
     eligible, _ = _eligible_options_for_request_locked(request)
     if not eligible:
         return False
@@ -837,6 +886,13 @@ def _request_blocked_by_quota_circuits_locked(
         _quota_circuit_available_locked(option, now=now)
         for option in eligible
     )
+
+
+def _lease_health_state_locked(lease: ModelLease) -> _ModelHealthState | None:
+    return next((
+        state for state in _model_health_by_id.values()
+        if state.identity == lease.health_identity and state.generation == lease.health_generation
+    ), None)
 
 
 def _context_queue_group(context: dict[str, Any] | None) -> str:
@@ -1145,6 +1201,7 @@ def _grant_lease_locked(
     started_at = time.monotonic()
     started_at_iso = _now_iso()
     task_id = request.request_id
+    lease_id = uuid4().hex
     global_item = _global_stats_by_model[option.id]
     global_item.running += 1
     global_item.total += 1
@@ -1156,6 +1213,7 @@ def _grant_lease_locked(
         "scope_id": request.stats_scope_id,
         "started_at": started_at_iso,
         "lease_started_at": started_at,
+        "lease_id": lease_id,
         "context": dict(request.task_context or {}),
     }
     if request.stats_scope_id:
@@ -1191,6 +1249,8 @@ def _grant_lease_locked(
         health_identity=health_state.identity,
         health_generation=health_state.generation,
         quota_half_open_probe=quota_half_open_probe,
+        quota_wait_budget=request.quota_wait_budget,
+        lease_id=lease_id,
     )
 
 
@@ -1463,6 +1523,112 @@ async def acquire_model_lease(
                     _notify_pool_changed_locked()
 
 
+def _lease_matches_active(lease: ModelLease, task: dict[str, Any] | None) -> bool:
+    return bool(
+        task is not None
+        and task.get("lease_started_at") == lease.started_at
+        and (not lease.lease_id or task.get("lease_id") == lease.lease_id)
+    )
+
+
+def _finish_model_lease_locked(
+    lease: ModelLease,
+    active_task: dict[str, Any],
+    *,
+    outcome: str | None = None,
+    health_outcome: str | None = None,
+    quota_retry_after_seconds: float | None = None,
+    duration_seconds: float | None = None,
+    record_completion: bool = True,
+    context_updates: dict[str, Any] | None = None,
+    release_capacity: bool = True,
+) -> None:
+    global _global_running
+    finished_at = _now_iso()
+    if context_updates:
+        _merge_lease_context_locked(active_task, context_updates)
+    if release_capacity:
+        _global_running = max(0, _global_running - 1)
+        current = _running_by_model.get(lease.option.id, 0)
+        if current <= 1:
+            _running_by_model.pop(lease.option.id, None)
+        else:
+            _running_by_model[lease.option.id] = current - 1
+    global_item = _global_stats_by_model.get(lease.option.id)
+    if global_item is None:
+        global_item = ModelRuntimeStats(
+            id=lease.option.id,
+            model=lease.option.model,
+            capability=lease.option.capability,
+            weight=lease.option.weight,
+            max_concurrency=lease.option.max_concurrency,
+        )
+        _global_stats_by_model[lease.option.id] = global_item
+    if release_capacity:
+        global_item.running = max(0, global_item.running - 1)
+    normalized_outcome = outcome if outcome in {"success", "failure", "timeout", "cancelled"} else ""
+    if normalized_outcome:
+        setattr(global_item, normalized_outcome, getattr(global_item, normalized_outcome) + 1)
+        global_item.last_status = normalized_outcome
+    if duration_seconds is not None and duration_seconds >= 0:
+        global_item.total_duration_seconds += duration_seconds
+    global_item.last_finished_at = finished_at
+    normalized_health_outcome = (
+        health_outcome
+        if health_outcome in {"success", "failure", "timeout", "quota"}
+        else ""
+    )
+    if normalized_health_outcome:
+        _apply_model_health_outcome_locked(
+            lease,
+            normalized_health_outcome,
+            quota_retry_after_seconds=quota_retry_after_seconds,
+        )
+    elif lease.quota_half_open_probe:
+        state = _model_health_by_id.get(lease.option.id)
+        if (
+            state is not None
+            and state.identity == lease.health_identity
+            and state.generation == lease.health_generation
+        ):
+            state.quota_half_open_probe_in_flight = False
+    if record_completion and active_task is not None and lease.stats_scope_id:
+        context = dict(active_task.get("context") or {})
+        prompt = context.get("prompt")
+        if isinstance(prompt, str) and "prompt_length" not in context:
+            context["prompt_length"] = len(prompt)
+        elif not isinstance(prompt, str):
+            context.pop("prompt", None)
+        completed = {
+            **context,
+            "task_id": lease.task_id,
+            "scope_id": lease.stats_scope_id,
+            "model_id": lease.option.id,
+            "model": lease.option.model,
+            "started_at": active_task.get("started_at", lease.started_at_iso),
+            "finished_at": finished_at,
+            "duration_seconds": duration_seconds,
+            "outcome": normalized_outcome or "unknown",
+        }
+        _record_completed_task_locked(lease.stats_scope_id, completed)
+    if release_capacity:
+        _active_tasks.pop(lease.task_id, None)
+    if lease.stats_scope_id:
+        item = _stats_by_scope[lease.stats_scope_id][lease.option.id]
+        if release_capacity:
+            item.running = max(0, item.running - 1)
+        if normalized_outcome:
+            setattr(item, normalized_outcome, getattr(item, normalized_outcome) + 1)
+            item.last_status = normalized_outcome
+        if duration_seconds is not None and duration_seconds >= 0:
+            item.total_duration_seconds += duration_seconds
+        item.last_finished_at = finished_at
+        _scope_updated_at[lease.stats_scope_id] = item.last_finished_at
+    global _global_updated_at
+    _global_updated_at = finished_at
+    _notify_pool_changed_locked()
+
+
 async def release_model_lease(
     lease: ModelLease | None,
     *,
@@ -1475,95 +1641,205 @@ async def release_model_lease(
 ) -> None:
     if lease is None:
         return
-    global _global_running
     async with _condition:
-        finished_at = _now_iso()
         active_task = _active_tasks.get(lease.task_id)
-        if active_task is None or active_task.get("lease_started_at") != lease.started_at:
+        if not _lease_matches_active(lease, active_task):
             return
-        if context_updates:
-            _merge_lease_context_locked(active_task, context_updates)
-        _global_running = max(0, _global_running - 1)
-        current = _running_by_model.get(lease.option.id, 0)
-        if current <= 1:
-            _running_by_model.pop(lease.option.id, None)
-        else:
-            _running_by_model[lease.option.id] = current - 1
-        global_item = _global_stats_by_model.get(lease.option.id)
-        if global_item is None:
-            global_item = ModelRuntimeStats(
-                id=lease.option.id,
-                model=lease.option.model,
-                capability=lease.option.capability,
-                weight=lease.option.weight,
-                max_concurrency=lease.option.max_concurrency,
-            )
-            _global_stats_by_model[lease.option.id] = global_item
-        global_item.running = max(0, global_item.running - 1)
-        normalized_outcome = outcome if outcome in {"success", "failure", "timeout", "cancelled"} else ""
-        if normalized_outcome:
-            setattr(global_item, normalized_outcome, getattr(global_item, normalized_outcome) + 1)
-            global_item.last_status = normalized_outcome
-        if duration_seconds is not None and duration_seconds >= 0:
-            global_item.total_duration_seconds += duration_seconds
-        global_item.last_finished_at = finished_at
-        normalized_health_outcome = (
-            health_outcome
-            if health_outcome in {"success", "failure", "timeout", "quota"}
-            else ""
+        _finish_model_lease_locked(
+            lease, active_task, outcome=outcome, health_outcome=health_outcome,
+            quota_retry_after_seconds=quota_retry_after_seconds,
+            duration_seconds=duration_seconds, record_completion=record_completion,
+            context_updates=context_updates,
         )
-        if normalized_health_outcome:
-            _apply_model_health_outcome_locked(
-                lease,
-                normalized_health_outcome,
-                quota_retry_after_seconds=quota_retry_after_seconds,
-            )
-        elif lease.quota_half_open_probe:
-            state = _model_health_by_id.get(lease.option.id)
-            if (
-                state is not None
-                and state.identity == lease.health_identity
-                and state.generation == lease.health_generation
-            ):
-                state.quota_half_open_probe_in_flight = False
-        if record_completion and active_task is not None and lease.stats_scope_id:
-            context = dict(active_task.get("context") or {})
-            prompt = context.get("prompt")
-            if isinstance(prompt, str) and "prompt_length" not in context:
-                context["prompt_length"] = len(prompt)
-            elif not isinstance(prompt, str):
-                context.pop("prompt", None)
-            completed = {
-                **context,
-                "task_id": lease.task_id,
-                "scope_id": lease.stats_scope_id,
-                "model_id": lease.option.id,
-                "model": lease.option.model,
-                "started_at": active_task.get("started_at", lease.started_at_iso),
-                "finished_at": finished_at,
-                "duration_seconds": duration_seconds,
-                "outcome": normalized_outcome or "unknown",
-            }
-            _record_completed_task_locked(lease.stats_scope_id, completed)
-        _active_tasks.pop(lease.task_id, None)
-        if lease.stats_scope_id:
-            stats = _ensure_scope_models_locked(lease.stats_scope_id, [lease.option])
-            item = stats[lease.option.id]
-            item.running = max(0, item.running - 1)
-            if normalized_outcome:
-                setattr(item, normalized_outcome, getattr(item, normalized_outcome) + 1)
-                item.last_status = normalized_outcome
-            if duration_seconds is not None and duration_seconds >= 0:
-                item.total_duration_seconds += duration_seconds
-            item.last_finished_at = finished_at
-            _scope_updated_at[lease.stats_scope_id] = item.last_finished_at
-        global _global_updated_at
-        _global_updated_at = finished_at
-        _notify_pool_changed_locked()
     logger.info(
         "OpenCode model lease released task=%s model=%s outcome=%s terminal=%s",
-        lease.task_id, lease.option.id, normalized_outcome or "unknown", record_completion,
+        lease.task_id, lease.option.id, outcome or "unknown", record_completion,
     )
+
+
+async def suspend_model_lease(
+    lease: ModelLease,
+    *,
+    context_updates: dict[str, Any] | None = None,
+) -> SuspendedModelLease:
+    """Queue an admitted message while shared infrastructure recovers.
+
+    This is not a completed attempt: release capacity without touching total,
+    outcomes, duration or model health. Only resume_model_lease can admit it.
+    """
+    global _global_running, _pending_sequence
+    async with _condition:
+        active = _active_tasks.get(lease.task_id)
+        if not _lease_matches_active(lease, active):
+            raise RuntimeError("Cannot suspend an inactive model lease")
+        if context_updates:
+            _merge_lease_context_locked(active, context_updates)
+        saved = copy.deepcopy(active)
+        context = dict(saved["context"])
+        context.pop("planned_task_id", None)
+        context["waiting_reason"] = "serve_recovery"
+        _pending_sequence += 1
+        now = time.monotonic()
+        request = _PendingLeaseRequest(
+            request_id=lease.task_id,
+            sequence=_pending_sequence,
+            priority=normalize_priority(context.get("priority", 50)),
+            revision=max(1, int(context.get("revision", 1))),
+            cli_config={},
+            required_capability=normalize_requirement(context.get("required_capability")),
+            prefer_high=False,
+            cancel_event=None,
+            stats_scope_id=lease.stats_scope_id,
+            task_context=context,
+            queued_at=now,
+            queued_at_iso=_now_iso(),
+            record_completion_on_failure=False,
+            resume_lease=lease,
+        )
+        _global_running = max(0, _global_running - 1)
+        running = _running_by_model.get(lease.option.id, 0) - 1
+        if running > 0:
+            _running_by_model[lease.option.id] = running
+        else:
+            _running_by_model.pop(lease.option.id, None)
+        _global_stats_by_model[lease.option.id].running = max(
+            0, _global_stats_by_model[lease.option.id].running - 1,
+        )
+        if lease.stats_scope_id:
+            item = _stats_by_scope[lease.stats_scope_id][lease.option.id]
+            item.running = max(0, item.running - 1)
+        if lease.quota_half_open_probe:
+            state = _lease_health_state_locked(lease)
+            if state is not None:
+                state.quota_half_open_probe_in_flight = False
+        _active_tasks.pop(lease.task_id)
+        _pending_requests.append(request)
+        _touch_queue_locked(lease.stats_scope_id)
+        _notify_pool_changed_locked()
+        return SuspendedModelLease(lease, request, saved, now)
+
+
+async def resume_model_lease(
+    suspended: SuspendedModelLease,
+    *,
+    cancel_event: Any = None,
+    admission_allowed: Callable[[], bool] | None = None,
+    on_queued: Callable[[], Any] | None = None,
+) -> ModelLease | None:
+    """Reacquire the original model through the existing priority queue.
+
+    On cancellation/failure, the caller still owns the suspended handle and
+    must discard it to publish the final task outcome exactly once.
+    """
+    global _global_running
+    request = suspended.request
+    async with _condition:
+        if suspended.state != "suspended":
+            raise RuntimeError("Model lease is not suspended")
+        suspended.state = "resuming"
+        if request not in _pending_requests:
+            _pending_requests.append(request)
+        request.resume_ready = True
+        request.cancel_event = cancel_event
+        request.admission_allowed = admission_allowed
+        request.quota_wait_budget = (
+            suspended.lease.quota_wait_budget
+            or request.quota_wait_budget
+            or ModelQuotaWaitBudget()
+        )
+        _notify_pool_changed_locked()
+    try:
+        if on_queued is not None:
+            notified = on_queued()
+            if inspect.isawaitable(notified):
+                await notified
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+            async with _condition:
+                if suspended.state != "resuming":
+                    raise RuntimeError("Suspended model lease was discarded while resuming")
+                admitted = admission_allowed is None or admission_allowed()
+                budget = request.quota_wait_budget
+                now = time.monotonic()
+                if admitted and _request_blocked_by_quota_circuits_locked(request):
+                    budget.start(now)
+                    if budget.remaining(now) <= 0:
+                        raise ModelQuotaCircuitOpenError()
+                else:
+                    budget.pause(now)
+                selected = _next_runnable_pending_locked()
+                if selected is not None and selected[0] is request:
+                    _remove_pending_request_locked(request)
+                    suspended.finished_at = now
+                    suspended.state = "resumed"
+                    previous = suspended.lease
+                    option = previous.option
+                    state = _lease_health_state_locked(previous)
+                    half_open = bool(state is not None and state.quota_open_until is not None)
+                    if half_open:
+                        state.quota_half_open_probe_in_flight = True
+                    _global_running += 1
+                    _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
+                    restored = replace(
+                        previous,
+                        running=_running_by_model[option.id],
+                        global_running=_global_running,
+                        started_at=previous.started_at + suspended.wait_seconds,
+                        quota_half_open_probe=half_open,
+                        quota_wait_budget=request.quota_wait_budget,
+                        lease_id=uuid4().hex,
+                    )
+                    active = copy.deepcopy(suspended.active_task)
+                    active["lease_started_at"] = restored.started_at
+                    active["lease_id"] = restored.lease_id
+                    for key in ("waiting_reason", "wait_reason"):
+                        active["context"].pop(key, None)
+                    _active_tasks[restored.task_id] = active
+                    item = _global_stats_by_model[option.id]
+                    item.running += 1
+                    item.last_status = "running"
+                    if restored.stats_scope_id:
+                        item = _stats_by_scope[restored.stats_scope_id][option.id]
+                        item.running += 1
+                        item.last_status = "running"
+                    _touch_queue_locked(restored.stats_scope_id)
+                    _notify_pool_changed_locked()
+                    return restored
+                changed = _register_change_waiter_locked()
+            await _wait_for_pool_change(changed, 0.2)
+    finally:
+        if suspended.state == "resuming":
+            async with _condition:
+                request.resume_ready = False
+                request.cancel_event = None
+                suspended.state = "suspended"
+                request.quota_wait_budget.pause(time.monotonic())
+                _notify_pool_changed_locked()
+
+
+async def discard_suspended_model_lease(
+    suspended: SuspendedModelLease,
+    **release_kwargs: Any,
+) -> None:
+    """Finish an interrupted suspended attempt without reacquiring capacity."""
+    async with _condition:
+        if suspended.state in {"resumed", "discarded"}:
+            return
+        suspended.state = "discarded"
+        suspended.finished_at = time.monotonic()
+        _remove_pending_request_locked(suspended.request)
+        release_kwargs.setdefault(
+            "duration_seconds", max(0.0, suspended.suspended_at - suspended.lease.started_at),
+        )
+        for key in ("waiting_reason", "wait_reason"):
+            suspended.active_task["context"].pop(key, None)
+        _finish_model_lease_locked(
+            replace(suspended.lease, quota_half_open_probe=False), suspended.active_task,
+            release_capacity=False, **release_kwargs,
+        )
+        _touch_queue_locked(suspended.lease.stats_scope_id)
+        _notify_pool_changed_locked()
 
 
 async def clear_completed_tasks(scope_id: str) -> None:
@@ -1588,7 +1864,7 @@ async def record_model_token_usage(
     global _global_token_usage, _global_updated_at
     async with _condition:
         active = _active_tasks.get(lease.task_id)
-        if active is None or active.get("lease_started_at") != lease.started_at:
+        if not _lease_matches_active(lease, active):
             return
         _global_token_usage = merge_token_usages((_global_token_usage, usage))
         if lease.stats_scope_id:
@@ -1610,7 +1886,7 @@ async def update_model_lease_context(lease: ModelLease | None, updates: dict[str
         return
     async with _condition:
         task = _active_tasks.get(lease.task_id)
-        if task is None or task.get("lease_started_at") != lease.started_at:
+        if not _lease_matches_active(lease, task):
             return
         if not _merge_lease_context_locked(task, updates):
             return
@@ -1712,31 +1988,41 @@ def _pending_request_matches_scope(request: _PendingLeaseRequest, scope_id: str)
 
 
 def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
-    cli_config = _current_request_cli_config(request)
-    all_options = model_options(cli_config)
-    active_options = (
-        _active_options(all_options)
-        if _configured_model_pool_enabled(cli_config)
-        else all_options
-    )
-    eligible = _eligible_options(
-        active_options,
-        required_capability=request.required_capability,
-    )
-    if not all_options:
-        blocked_reason = NO_AVAILABLE_MODEL_MESSAGE
-    elif not eligible:
-        blocked_reason = (
-            f"没有满足 {request.required_capability} 能力要求且当前可用的模型；"
-            "等待模型配置或时间窗口变化。"
-        )
-    elif not any(_quota_circuit_available_locked(option) for option in eligible):
-        blocked_reason = (
-            "所有满足能力要求的模型都处于 Provider 配额冷却或半开探测中；"
-            "等待模型恢复。"
-        )
+    if request.resume_lease is not None:
+        if not request.resume_ready or (
+            request.admission_allowed is not None and not request.admission_allowed()
+        ):
+            blocked_reason = "等待共享 OpenCode Serve 恢复。"
+        elif _request_blocked_by_quota_circuits_locked(request):
+            blocked_reason = "原模型处于 Provider 配额冷却或半开探测中；等待模型恢复。"
+        else:
+            blocked_reason = "等待原模型执行额度。"
     else:
-        blocked_reason = ""
+        cli_config = _current_request_cli_config(request)
+        all_options = model_options(cli_config)
+        active_options = (
+            _active_options(all_options)
+            if _configured_model_pool_enabled(cli_config)
+            else all_options
+        )
+        eligible = _eligible_options(
+            active_options,
+            required_capability=request.required_capability,
+        )
+        if not all_options:
+            blocked_reason = NO_AVAILABLE_MODEL_MESSAGE
+        elif not eligible:
+            blocked_reason = (
+                f"没有满足 {request.required_capability} 能力要求且当前可用的模型；"
+                "等待模型配置或时间窗口变化。"
+            )
+        elif not any(_quota_circuit_available_locked(option) for option in eligible):
+            blocked_reason = (
+                "所有满足能力要求的模型都处于 Provider 配额冷却或半开探测中；"
+                "等待模型恢复。"
+            )
+        else:
+            blocked_reason = ""
     return {
         "request_id": request.request_id,
         "task_id": request.request_id,

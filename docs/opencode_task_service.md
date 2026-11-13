@@ -242,7 +242,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.tool` | 默认且只能为 `opencode` | 固定的 OpenCode Serve 实现标识，不用于选择磁盘上的文件。 |
 | `serve.executable` | 默认 `opencode` | 实际启动 Serve 的可执行文件名或完整路径；可使用 `opencode`、`nga` 或其它兼容程序。配置哪个就启动哪个，不做名称回退。 |
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
-| `serve.timeout` | 默认 `10800`，最小 `1` | 每次业务尝试总超时（3 小时），同 Session 修复共用剩余时间；模型排队及独立格式修复期间暂停。 |
+| `serve.timeout` | 默认 `10800`，最小 `1` | 每次业务尝试总超时（3 小时），同 Session 修复共用剩余时间；模型排队、共享 Serve 准备及独立格式修复期间暂停。 |
 | `serve.idle_timeout` | 默认 `1200`，最小 `1` | 消息发送后连续无新内容的超时（20 分钟），单位为秒；工具参数生成的 `pending` 阶段暂停此检测，仍受总时限约束。 |
 | `serve.json_correction_timeout_seconds` | 默认 `1800`，最小 `1` | 独立 JSON 格式修复 Session 的总超时，不控制原 Session 纠正。 |
 | `serve.validation_retry_timeout_seconds` | 默认 `1800`，最小 `1` | 已弃用，仅兼容读取和保存；运行时忽略，校验重试使用业务剩余时间。 |
@@ -466,11 +466,15 @@ JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invali
 
 创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
 
+共享 Serve 尚未就绪时，当前消息进入可取消的准备队列，暂时释放模型执行额度并冻结业务剩余预算。该规则同样适用于原 Session 的校验重试和 JSON 纠正：恢复后仍发送原修复提示，保留 Session、模型、配置快照及校验次数；等待不增加任务总数、完成记录或模型失败计数。重新获得模型额度后会再次原子检查 Serve 就绪状态，避免恢复与消息提交之间的竞态。配置更新正在等待旧任务结束时，旧任务保留准入资格，先用已应用配置完成修复。
+
+所有等待者共享一次 Serve 准备，取消某个等待者不会中断其他等待者或既有 Session。排空等待不消耗业务超时；实际进程启动、健康检查及清理使用独立的有限时限。只有健康检查通过的进程才可复用，启动取消或失败后先撤销就绪状态并有界清理。真正启动失败使用 `serve_startup` 分类，不消耗模型重试次数或降低模型健康度。日志记录等待阶段、恢复原因、活动 Session 数和等待时间，便于区分资源排队与启动失败。
+
 阶段策略包含业务总超时、独立格式修复时限 `json_correction_timeout_seconds` 和 `idle_timeout_seconds`（默认 1200 秒）；`validation_retry_timeout_seconds` 仅保留兼容。威胁分析/威胁审计默认 10800 秒，候选点审计/去误报默认 3600 秒，漏洞去重及独立格式修复默认 1800 秒。漏洞挖掘用独立的 `threat_audit_timeout_seconds`、`candidate_audit_timeout_seconds`、`vulnerability_dedup_timeout_seconds`；业务入口通过执行上下文 `timeout_task_kind` 明确选择，不依赖任务名称或 Token 归属。其它挖掘及漏洞验证业务任务保持默认 10800 秒。完整配置见[配置说明](configuration.md#模型池与阶段策略)。独立运行使用 `serve.timeout`、`serve.idle_timeout` 和 `serve.json_correction_timeout_seconds`。
 
-`timeout_seconds` 按本次业务尝试计时：取得模型 Lease 后，首次业务调用从 Serve 准备开始使用单调时钟截止时间，覆盖共享 Serve 等待、MCP 准备、Session 创建、消息等待、响应恢复、宿主校验和同 Session 的所有修复。产物、必需命令及 JSON 纠正均只使用业务剩余时间；3 小时任务已用 2 小时 50 分钟时，后续同 Session 修复共剩 10 分钟。进入独立 JSON 格式修复前保存业务剩余时间，独立修复及模型 Lease、Session 锁排队期间暂停；回原 Session 后恢复计时，多轮纠正不重置。独立格式修复只使用自己的 JSON 时限。业务预算耗尽后不再发送同 Session 请求，新 Session 业务重试重新获得完整业务时限。无新内容计时仅覆盖消息等待；新文本、推理、工具调用/输出变化/结果刷新计时，心跳、busy/retry、重复快照和历史回复不刷新。关闭日志输出仍生效，已关联子 Session 的进展计入父调用。任一超时触发既有取消和重试，日志 `TIMEOUT kind=session|idle` 及错误原因区分两种超时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
+`timeout_seconds` 按本次业务尝试计时：取得模型 Lease 后，首次业务调用使用单调时钟截止时间，覆盖 MCP 准备、Session 创建、消息等待、响应恢复、宿主校验和同 Session 的所有修复；共享 Serve 准备及恢复排队期间暂停计时，实际启停另有限时保护。产物、必需命令及 JSON 纠正均只使用业务剩余时间；3 小时任务已用 2 小时 50 分钟时，后续同 Session 修复共剩 10 分钟。进入独立 JSON 格式修复前保存业务剩余时间，独立修复及模型 Lease、Session 锁排队期间暂停；回原 Session 后恢复计时，多轮纠正不重置。独立格式修复只使用自己的 JSON 时限。业务预算耗尽后不再发送同 Session 请求，新 Session 业务重试重新获得完整业务时限。无新内容计时仅覆盖消息等待；新文本、推理、工具调用/输出变化/结果刷新计时，心跳、busy/retry、重复快照和历史回复不刷新。关闭日志输出仍生效，已关联子 Session 的进展计入父调用。任一超时触发既有取消和重试，日志 `TIMEOUT kind=session|idle` 及错误原因区分两种超时。Serve 自身的启动故障仍使用 `serve_startup` 分类；准备或校验超时不降低模型健康度，消息超时继续沿用换模和健康惩罚。
 
-超时会输出 `TIMEOUT phase=... task=... attempt=... elapsed=...`。扫描 MCP 获取超时区分 `scan_mcp_wait`（等待锁或其它扫描释放使用权）和 `scan_mcp_request`（远端请求阶段），并将阶段写入任务失败原因。纯等待或只读请求超时不将共享 Serve 标记为需要重启；已发出 MCP 变更且获取尚未完成时，仍按远端状态不确定处理。资源等待继续消耗现有业务预算，不改变重试次数或扫描隔离。
+超时会输出 `TIMEOUT phase=... task=... attempt=... elapsed=...`。扫描 MCP 获取超时区分 `scan_mcp_wait`（等待锁或其它扫描释放使用权）和 `scan_mcp_request`（远端请求阶段），并将阶段写入任务失败原因。纯等待或只读请求超时不将共享 Serve 标记为需要重启；已发出 MCP 变更且获取尚未完成时，仍按远端状态不确定处理。MCP 资源等待继续消耗现有业务预算，不改变重试次数或扫描隔离。
 
 创建操作收到并解析 Session ID 后，先同步保留任务身份，再等待模型池状态更新及其它准备操作；续写也在准备前记录已有 ID。该规则覆盖业务、独立 formatter 和同 Session 修复，formatter ID 仅写入自身轨迹，不替换业务最终 Session ID。异步状态更新有界回收，关闭后的迟到回调不更新任务。任务队列缺少 ID 时显示“未记录 Session ID”，不据此断言创建失败；历史缺失 ID 不自动回填，接口字段和数据库结构保持兼容。
 

@@ -562,6 +562,13 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
                     "run_prompt",
                     new=run_prompt,
                 ),
+                # Runtime propagation is under test; lifecycle is mocked with
+                # the prompt transport and the synthetic model lease.
+                patch.object(
+                    serve_client.OpenCodeServeManager,
+                    "prepare_prompt",
+                    new=AsyncMock(return_value=None),
+                ),
             ):
                 first = await opencode.run_opencode_task(
                     task_name="standalone first",
@@ -699,6 +706,11 @@ def test_standalone_public_task_prints_realtime_progress(
                     serve_client.OpenCodeServeManager,
                     "run_prompt",
                     new=run_prompt,
+                ),
+                patch.object(
+                    serve_client.OpenCodeServeManager,
+                    "prepare_prompt",
+                    new=AsyncMock(return_value=None),
                 ),
                 patch("builtins.print") as console,
             ):

@@ -156,6 +156,11 @@ def test_first_public_task_creates_both_lazy_singletons(tmp_path: Path) -> None:
                 ),
                 patch.object(
                     serve_client.OpenCodeServeManager,
+                    "prepare_prompt",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch.object(
+                    serve_client.OpenCodeServeManager,
                     "run_prompt",
                     new=AsyncMock(return_value=OpenCodePromptResult(
                         session_id="ses-1",

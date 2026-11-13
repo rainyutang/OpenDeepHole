@@ -37,14 +37,18 @@ from .llm_json import (
 )
 from .model_pool import (
     ModelLease,
+    SuspendedModelLease,
     ModelQuotaCircuitOpenError,
     ModelQuotaWaitBudget,
     NoAvailableModelError,
     acquire_model_lease,
+    discard_suspended_model_lease,
     normalize_priority,
     normalize_requirement,
     record_model_token_usage,
     release_model_lease,
+    resume_model_lease,
+    suspend_model_lease,
     update_model_lease_context,
 )
 from .output_format import format_task_output, task_output_stage
@@ -55,6 +59,7 @@ from .serve_client import (
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
     OpenCodeServeStartupError,
+    OpenCodeServePreparation,
     OpenCodeTaskQualityError,
     get_serve_manager,
 )
@@ -454,6 +459,16 @@ class _TaskRecord:
     requeue_requested: bool = False
     last_session_id: str = ""
     logical_duration_seconds: float = 0.0
+    serve_wait_seconds: float = 0.0
+    suspended_lease: SuspendedModelLease | None = None
+
+
+def _execution_time(record: _TaskRecord) -> float:
+    return time.monotonic() - record.serve_wait_seconds
+
+
+def _execution_elapsed(record: _TaskRecord, started_at: float) -> float:
+    return max(0.0, _execution_time(record) - started_at) if started_at else 0.0
 
 
 class OpenCodeTaskHandle:
@@ -887,13 +902,94 @@ class OpenCodeTaskService:
         Retries and JSON recovery acquire fresh leases for the same task. Start
         each interval at admission so time spent waiting for capacity is excluded.
         """
+        suspended = record.suspended_lease
         if lease is not None:
-            record.logical_duration_seconds += _elapsed(lease.started_at)
+            record.logical_duration_seconds += max(
+                0.0, _elapsed(lease.started_at) - (suspended.wait_seconds if suspended else 0.0),
+            )
             kwargs["context_updates"] = {
                 **(kwargs.get("context_updates") or {}),
                 "logical_duration_seconds": record.logical_duration_seconds,
             }
-        await release_model_lease(lease, **kwargs)
+        if suspended is not None:
+            record.suspended_lease = None
+            await discard_suspended_model_lease(suspended, **kwargs)
+        else:
+            await release_model_lease(lease, **kwargs)
+
+    async def _run_prepared_prompt(
+        self,
+        record: _TaskRecord,
+        deadline: OperationDeadline,
+        runtime: _SessionRuntime,
+        get_lease: Callable[[], ModelLease],
+        set_lease: Callable[[ModelLease], None],
+        **kwargs: Any,
+    ) -> OpenCodePromptResult:
+        """Queue Serve recovery without surrendering this message or its Session."""
+        manager = get_serve_manager()
+        prepare = getattr(manager, "prepare_prompt", None)
+        permit = None
+        try:
+            if prepare is not None:
+                deadline.check(phase="prompt")
+                prepared = await prepare(**runtime.kwargs())
+                if isinstance(prepared, OpenCodeServePreparation):
+                    waiting_started = time.monotonic()
+                    waiting_status = "failure"
+                    session_id = kwargs.get("session_id") or record.last_session_id
+                    self._emit_task_progress(
+                        record, f"SERVE WAIT_START remaining={deadline.remaining():.3f}s",
+                        session_id=session_id,
+                    )
+                    try:
+                        with deadline.paused():
+                            while isinstance(prepared, OpenCodeServePreparation):
+                                suspended = await suspend_model_lease(get_lease())
+                                record.suspended_lease = suspended
+                                await self._notify_lease_state(record, "queued")
+                                await prepared.wait(
+                                    cancel_event=deadline.cancel_event,
+                                    on_line=lambda line: self._emit_task_progress(
+                                        record, line, session_id=session_id,
+                                    ),
+                                )
+                                resumed = await resume_model_lease(
+                                    suspended,
+                                    cancel_event=deadline.cancel_event,
+                                    admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
+                                )
+                                if resumed is None:
+                                    raise asyncio.CancelledError()
+                                set_lease(resumed)
+                                record.suspended_lease = None
+                                # Recovery can be requested after the capacity grant.
+                                # Atomically reserve Serve before resuming the clock.
+                                prepared = await prepare(**runtime.kwargs())
+                            permit = prepared
+                            await self._notify_lease_state(record, "running")
+                            waiting_status = "ready"
+                    except asyncio.CancelledError:
+                        waiting_status = "cancelled"
+                        raise
+                    finally:
+                        waited = max(0.0, time.monotonic() - waiting_started)
+                        record.serve_wait_seconds += waited
+                        self._emit_task_progress(
+                            record,
+                            f"SERVE WAIT_END status={waiting_status} elapsed={waited:.3f}s "
+                            f"remaining={deadline.remaining():.3f}s",
+                            session_id=session_id,
+                        )
+                permit = prepared
+            return await _run_prompt_with_deadline(
+                deadline, **runtime.kwargs(),
+                **({"serve_permit": permit} if permit is not None else {}),
+                **kwargs,
+            )
+        finally:
+            if permit is not None:
+                await permit.release_if_unclaimed()
 
     async def _execute_record(self, record: _TaskRecord) -> None:
         spec = record.spec
@@ -1046,7 +1142,10 @@ class OpenCodeTaskService:
                     f"model={lease.option.model or '<cli-default>'} "
                     f"capability={lease.option.capability}",
                 )
-                attempt_started = lease.started_at or time.monotonic()
+                attempt_started = (
+                    lease.started_at - record.serve_wait_seconds
+                    if lease.started_at else _execution_time(record)
+                )
                 runtime, model, source = await self._runtime_for_task(
                     record,
                     lease,
@@ -1155,12 +1254,19 @@ class OpenCodeTaskService:
                             timeout_seconds, cancel_event=combined_cancel,
                         )
 
+                        def replace_lease(value: ModelLease) -> None:
+                            nonlocal lease
+                            lease = value
+
                         async def invoke_message(message_prompt: str) -> OpenCodePromptResult:
                             message_writes.clear()
                             try:
-                                result = await _run_prompt_with_deadline(
+                                result = await self._run_prepared_prompt(
+                                    record,
                                     call_deadline,
-                                    **runtime.kwargs(),
+                                    runtime,
+                                    lambda: lease,
+                                    replace_lease,
                                     prompt=message_prompt,
                                     model=model,
                                     idle_timeout=idle_timeout_seconds,
@@ -1236,7 +1342,7 @@ class OpenCodeTaskService:
                             return result
 
                         try:
-                            message_started = time.monotonic()
+                            message_started = _execution_time(record)
                             message_started_at = _now_iso()
                             try:
                                 details = await invoke_message(spec.prompt)
@@ -1276,7 +1382,7 @@ class OpenCodeTaskService:
                                     started_at=message_started_at,
                                     duration_seconds=max(
                                         0.0,
-                                        time.monotonic() - message_started,
+                                        _execution_time(record) - message_started,
                                     ),
                                 )
                                 current_error = quality_error
@@ -1293,7 +1399,7 @@ class OpenCodeTaskService:
                                         session_id=session_id,
                                         category="session",
                                     )
-                                    retry_started = time.monotonic()
+                                    retry_started = _execution_time(record)
                                     retry_started_at = _now_iso()
                                     correction_prompt = _quality_correction_prompt(
                                         current_error,
@@ -1333,7 +1439,7 @@ class OpenCodeTaskService:
                                             started_at=retry_started_at,
                                             duration_seconds=max(
                                                 0.0,
-                                                time.monotonic() - retry_started,
+                                                _execution_time(record) - retry_started,
                                             ),
                                         )
                                         current_error = retry_error
@@ -1355,7 +1461,7 @@ class OpenCodeTaskService:
                                             started_at=retry_started_at,
                                             duration_seconds=max(
                                                 0.0,
-                                                time.monotonic() - retry_started,
+                                                _execution_time(record) - retry_started,
                                             ),
                                         )
                                         raise
@@ -1375,6 +1481,8 @@ class OpenCodeTaskService:
                                             failure_kind=(
                                                 "timeout"
                                                 if isinstance(retry_error, asyncio.TimeoutError)
+                                                else "serve_startup"
+                                                if isinstance(retry_error, OpenCodeServeStartupError)
                                                 else "model_not_found"
                                                 if isinstance(retry_error, OpenCodeModelNotFoundError)
                                                 else "execution_error"
@@ -1388,7 +1496,7 @@ class OpenCodeTaskService:
                                             started_at=retry_started_at,
                                             duration_seconds=max(
                                                 0.0,
-                                                time.monotonic() - retry_started,
+                                                _execution_time(record) - retry_started,
                                             ),
                                         )
                                         raise
@@ -1411,7 +1519,7 @@ class OpenCodeTaskService:
                                             started_at=retry_started_at,
                                             duration_seconds=max(
                                                 0.0,
-                                                time.monotonic() - retry_started,
+                                                _execution_time(record) - retry_started,
                                             ),
                                         )
                                         break
@@ -1490,7 +1598,7 @@ class OpenCodeTaskService:
                 last_model = source.model or details.model or model
                 last_source = source
                 active_duration = (
-                    max(0.0, time.monotonic() - attempt_started)
+                    max(0.0, _execution_time(record) - attempt_started)
                     if attempt_started
                     else 0.0
                 )
@@ -1565,7 +1673,7 @@ class OpenCodeTaskService:
                     model=source.model or model or last_model,
                     source=source,
                     error="OpenCode task cancelled",
-                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
+                    duration_seconds=accumulated_duration + _execution_elapsed(record, attempt_started),
                     token_usage=(
                         task_token_usage.as_dict() if task_token_usage is not None else None
                     ),
@@ -1590,7 +1698,7 @@ class OpenCodeTaskService:
                     model=source.model or model or last_model,
                     source=source,
                     error=str(exc),
-                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
+                    duration_seconds=accumulated_duration + _execution_elapsed(record, attempt_started),
                     token_usage=(
                         task_token_usage.as_dict() if task_token_usage is not None else None
                     ),
@@ -1693,7 +1801,7 @@ class OpenCodeTaskService:
                     and self._active_session_tasks.get(session_id) == record.task_id
                 ):
                     self._active_session_tasks.pop(session_id, None)
-                attempt_duration = _elapsed(attempt_started)
+                attempt_duration = _execution_elapsed(record, attempt_started)
                 accumulated_duration += attempt_duration
                 if lease is not None and not quality_message_events_recorded:
                     _append_session_event(
@@ -1757,7 +1865,7 @@ class OpenCodeTaskService:
                     logger.exception("OpenCode lease finalization failed task=%s outcome=%s", record.task_id, attempt_outcome)
 
             if recovery_required:
-                recovery_started_at = time.monotonic()
+                recovery_started_at = _execution_time(record)
                 try:
                     recovery = await self._recover_structured_output(
                         record,
@@ -1798,7 +1906,7 @@ class OpenCodeTaskService:
                         error="OpenCode task cancelled",
                         duration_seconds=(
                             accumulated_duration
-                            + max(0.0, time.monotonic() - recovery_started_at)
+                            + max(0.0, _execution_time(record) - recovery_started_at)
                         ),
                         token_usage=(
                             task_token_usage.as_dict()
@@ -1841,6 +1949,8 @@ class OpenCodeTaskService:
                     return
                 retry_reason = recovery.error
                 attempt_outcome = recovery.status
+                if recovery.failure_kind == "serve_startup":
+                    fresh_retry_allowed = False
                 attempt_failure_kind = recovery.failure_kind or (
                     "timeout" if recovery.status == "timeout" else "execution_error"
                 )
@@ -1941,7 +2051,7 @@ class OpenCodeTaskService:
         session_events: list[dict[str, Any]],
     ) -> _StructuredRecoveryOutcome:
         """Run one low-capability formatter Session, then original-Session retries."""
-        started_at = time.monotonic()
+        started_at = _execution_time(record)
         spec = record.spec
         context = record.execution_context
         cli_config_source = lambda: _task_cli_config(record.execution_context)
@@ -2000,7 +2110,7 @@ class OpenCodeTaskService:
         formatter_model = ""
         formatter_model_failure = ""
         formatter_quota_retry_after_seconds: float | None = None
-        formatter_started_at = time.monotonic()
+        formatter_started_at = _execution_time(record)
         formatter_event_recorded = False
 
         def record_formatter_event(
@@ -2032,7 +2142,7 @@ class OpenCodeTaskService:
                 started_at=(
                     formatter_lease.started_at_iso if formatter_lease is not None else ""
                 ),
-                duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+                duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
             )
         try:
             formatter_lease = await acquire_model_lease(
@@ -2085,11 +2195,19 @@ class OpenCodeTaskService:
                 assert formatter_lease is not None
                 await record_usage(formatter_lease, value)
 
-            details = await get_serve_manager().run_prompt(
-                **formatter_runtime.kwargs(),
+            def replace_formatter_lease(value: ModelLease) -> None:
+                nonlocal formatter_lease
+                formatter_lease = value
+
+            formatter_deadline = OperationDeadline(timeout_seconds, cancel_event=combined_cancel)
+            details = await self._run_prepared_prompt(
+                record,
+                formatter_deadline,
+                formatter_runtime,
+                lambda: formatter_lease,
+                replace_formatter_lease,
                 prompt=formatter_prompt,
                 model=formatter_model,
-                timeout=timeout_seconds,
                 idle_timeout=idle_timeout_seconds,
                 on_line=context.on_output,
                 on_session_id=record_formatter_session,
@@ -2136,7 +2254,7 @@ class OpenCodeTaskService:
                     record, formatter_lease,
                     outcome="success",
                     health_outcome="success",
-                    duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+                    duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
                     record_completion=True,
                     context_updates={
                         "serve_session_id": session_id,
@@ -2169,7 +2287,7 @@ class OpenCodeTaskService:
                     source=original_source,
                     response_file=formatter_snapshot,
                     token_usage=accumulated_usage,
-                    duration_seconds=max(0.0, time.monotonic() - started_at),
+                    duration_seconds=max(0.0, _execution_time(record) - started_at),
                 )
             record_formatter_event(
                 "invalid_output",
@@ -2191,7 +2309,7 @@ class OpenCodeTaskService:
                 record, formatter_lease,
                 outcome="failure",
                 health_outcome=None,
-                duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+                duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
                 record_completion=False,
                 context_updates={"session_events": copy.deepcopy(session_events)},
             )
@@ -2207,7 +2325,7 @@ class OpenCodeTaskService:
                     record, formatter_lease,
                     outcome="cancelled",
                     health_outcome=None,
-                    duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+                    duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
                     record_completion=True,
                     context_updates={
                         **_session_trace_updates(
@@ -2225,7 +2343,9 @@ class OpenCodeTaskService:
                 formatter_quota_retry_after_seconds = exc.retry_after_seconds
             if formatter_lease is not None:
                 formatter_failure_kind = (
-                    "model_not_found"
+                    "serve_startup"
+                    if isinstance(exc, OpenCodeServeStartupError)
+                    else "model_not_found"
                     if isinstance(exc, OpenCodeModelNotFoundError)
                     else "timeout"
                     if isinstance(exc, asyncio.TimeoutError)
@@ -2246,9 +2366,21 @@ class OpenCodeTaskService:
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
                     health_outcome=formatter_model_failure or None,
                     quota_retry_after_seconds=formatter_quota_retry_after_seconds,
-                    duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
-                    record_completion=False,
-                    context_updates={"session_events": copy.deepcopy(session_events)},
+                    duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
+                    record_completion=isinstance(exc, OpenCodeServeStartupError),
+                    context_updates=_session_trace_updates(
+                        session_events,
+                        failure_kind=(formatter_failure_kind if isinstance(exc, OpenCodeServeStartupError) else ""),
+                        failure_reason=(formatter_failure_reason if isinstance(exc, OpenCodeServeStartupError) else ""),
+                    ),
+                )
+            if isinstance(exc, OpenCodeServeStartupError):
+                return _StructuredRecoveryOutcome(
+                    success=False, session_id=session_id, message_id=message_id,
+                    text=text, model=original_model, source=original_source,
+                    token_usage=accumulated_usage, error=str(exc),
+                    failure_kind="serve_startup",
+                    duration_seconds=max(0.0, _execution_time(record) - started_at),
                 )
             self._emit_task_progress(
                 record,
@@ -2266,7 +2398,7 @@ class OpenCodeTaskService:
                 self._active_session_tasks.pop(formatter_session_id, None)
 
         correction_lease: ModelLease | None = None
-        correction_started_at = time.monotonic()
+        correction_started_at = _execution_time(record)
         correction_model_failure = ""
         correction_quota_retry_after_seconds: float | None = None
         correction_source = original_source
@@ -2317,7 +2449,7 @@ class OpenCodeTaskService:
                 retry_total=spec.output_retry_count,
                 started_at=correction_retry_started_at_iso,
                 duration_seconds=(
-                    max(0.0, time.monotonic() - correction_retry_started_at)
+                    max(0.0, _execution_time(record) - correction_retry_started_at)
                     if correction_retry_started_at
                     else None
                 ),
@@ -2370,6 +2502,10 @@ class OpenCodeTaskService:
                 business_remaining_seconds, cancel_event=combined_cancel,
             )
 
+            def replace_correction_lease(value: ModelLease) -> None:
+                nonlocal correction_lease
+                correction_lease = value
+
             def record_correction_session(value: str) -> Awaitable[None]:
                 value = str(value or "").strip()
                 if not value:
@@ -2399,7 +2535,7 @@ class OpenCodeTaskService:
                 await record_usage(correction_lease, value)
 
             for output_attempt in range(1, spec.output_retry_count + 1):
-                correction_retry_started_at = time.monotonic()
+                correction_retry_started_at = _execution_time(record)
                 correction_retry_started_at_iso = _now_iso()
                 correction_retry_ordinal = output_attempt
                 correction_retry_recorded = False
@@ -2426,9 +2562,12 @@ class OpenCodeTaskService:
                     response_files.record(value)
 
                 try:
-                    details = await _run_prompt_with_deadline(
+                    details = await self._run_prepared_prompt(
+                        record,
                         correction_deadline,
-                        **correction_runtime.kwargs(),
+                        correction_runtime,
+                        lambda: correction_lease,
+                        replace_correction_lease,
                         prompt=correction_prompt,
                         model=correction_model,
                         idle_timeout=idle_timeout_seconds,
@@ -2491,7 +2630,7 @@ class OpenCodeTaskService:
                             health_outcome="success",
                             duration_seconds=max(
                                 0.0,
-                                time.monotonic() - correction_started_at,
+                                _execution_time(record) - correction_started_at,
                             ),
                             record_completion=True,
                             context_updates={
@@ -2523,7 +2662,7 @@ class OpenCodeTaskService:
                             token_usage=accumulated_usage,
                             duration_seconds=max(
                                 0.0,
-                                time.monotonic() - started_at,
+                                _execution_time(record) - started_at,
                             ),
                         )
                     correction_failure_kind = (
@@ -2565,7 +2704,7 @@ class OpenCodeTaskService:
                     record, correction_lease,
                     outcome="cancelled",
                     health_outcome=None,
-                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
+                    duration_seconds=max(0.0, _execution_time(record) - correction_started_at),
                     record_completion=True,
                     context_updates={
                         **_session_trace_updates(
@@ -2579,6 +2718,8 @@ class OpenCodeTaskService:
                 correction_lease = None
             raise
         except Exception as exc:
+            if isinstance(exc, OpenCodeServeStartupError):
+                has_fresh_retry = False
             if isinstance(exc, OpenCodeProviderQuotaError):
                 correction_model_failure = "quota"
                 correction_quota_retry_after_seconds = exc.retry_after_seconds
@@ -2587,7 +2728,9 @@ class OpenCodeTaskService:
             )
             correction_error = str(exc) or type(exc).__name__
             correction_failure_kind = (
-                "model_not_found"
+                "serve_startup"
+                if isinstance(exc, OpenCodeServeStartupError)
+                else "model_not_found"
                 if isinstance(exc, OpenCodeModelNotFoundError)
                 else "timeout"
                 if isinstance(exc, asyncio.TimeoutError)
@@ -2627,7 +2770,7 @@ class OpenCodeTaskService:
                     outcome=correction_outcome,
                     health_outcome=correction_model_failure or None,
                     quota_retry_after_seconds=correction_quota_retry_after_seconds,
-                    duration_seconds=max(0.0, time.monotonic() - correction_started_at),
+                    duration_seconds=max(0.0, _execution_time(record) - correction_started_at),
                     record_completion=not has_fresh_retry,
                     context_updates={
                         **_session_trace_updates(
@@ -2663,7 +2806,7 @@ class OpenCodeTaskService:
             token_usage=accumulated_usage,
             error=correction_error or "OpenCode structured-output recovery failed",
             failure_kind=correction_failure_kind or "schema_mismatch",
-            duration_seconds=max(0.0, time.monotonic() - started_at),
+            duration_seconds=max(0.0, _execution_time(record) - started_at),
             avoid_model_identities=frozenset(avoid_identities),
         )
 

@@ -70,6 +70,14 @@ _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
 _SERVE_AUTO_PORT_MAX_ATTEMPTS = 3
+# Preserve every existing automatic-port attempt. This budget starts only
+# after the old sessions drain; queueing never consumes a startup attempt.
+_SERVE_PREPARATION_START_TIMEOUT_SECONDS = (
+    _SERVE_VERSION_PROBE_TIMEOUT_SECONDS
+    + _SERVE_AUTO_PORT_MAX_ATTEMPTS
+    * (_SERVE_START_TIMEOUT_SECONDS + _SERVE_STOP_TIMEOUT_SECONDS + CLEANUP_TIMEOUT_SECONDS)
+    + CLEANUP_TIMEOUT_SECONDS
+)
 _SCAN_MCP_INITIAL_CONNECT_ATTEMPTS = 2
 _SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS = 0.5
 _SCAN_MCP_RECOVERY_COOLDOWN_SECONDS = 1.0
@@ -5434,6 +5442,69 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+class OpenCodeServePermit:
+    """One ready-process reservation, released exactly once by its owner."""
+
+    def __init__(self, manager: OpenCodeServeManager, generation: int, mode: str) -> None:
+        self._manager = manager
+        self.generation = generation
+        self.mode = mode
+        self._released = False
+        self._claimed = False
+
+    def claim(self, manager: OpenCodeServeManager) -> None:
+        if self._released or self._claimed or self._manager is not manager:
+            raise OpenCodeServeStartupError("OpenCode Serve permit is no longer available")
+        if self.generation != manager._process_generation:
+            raise OpenCodeServeStartupError("OpenCode Serve permit belongs to an old process")
+        self._claimed = True
+
+    async def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        # The condition protects only bookkeeping and cannot await remote I/O.
+        task = asyncio.create_task(self._manager._release_active_session())
+        retire_task(task)
+        await asyncio.shield(task)
+
+    async def release_if_unclaimed(self) -> None:
+        """Caller fallback before run_prompt has accepted ownership."""
+        if not self._claimed:
+            await self.release()
+
+
+class OpenCodeServePreparation:
+    """A shared preparation result; cancelling a waiter never cancels recovery."""
+
+    def __init__(self, manager: OpenCodeServeManager, task: asyncio.Task) -> None:
+        self._manager = manager
+        self._task = task
+        self._started_at = time.monotonic()
+        self._reason = manager._restart_reason or "Serve preparation"
+
+    async def wait(self, *, cancel_event=None, on_line=None) -> None:
+        next_report = 0.0
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError()
+            if self._task.done():
+                self._task.result()
+                return
+            now = time.monotonic()
+            if on_line is not None and now >= next_report:
+                on_line(
+                    "SERVE WAIT reason=serve_recovery "
+                    f"phase={self._manager._preparation_phase} "
+                    f"active_sessions={self._manager._active_sessions} "
+                    f"elapsed={now - self._started_at:.1f}s "
+                    f"trigger={_one_line_preview(self._reason)}"
+                )
+                next_report = now + _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS
+            # asyncio.wait does not cancel its input when this waiter leaves.
+            await asyncio.wait({self._task}, timeout=0.1)
+
+
 class OpenCodeServeManager:
     """Manage a single Agent-wide opencode/nga serve process."""
 
@@ -5465,6 +5536,7 @@ class OpenCodeServeManager:
         self._dirty = False
         self._serve_config_generation = 0
         self._restart_required = False
+        self._restart_reason = ""
         self._serve_failure_generation = 0
         self._model_cache: dict[
             tuple[OpenCodeServeKey, str],
@@ -5481,6 +5553,10 @@ class OpenCodeServeManager:
         self._applied_provider_key: OpenCodeServeKey | None = None
         self._managed_mcp_specs: dict[str, dict[str, Any]] = {}
         self._process_generation = 0
+        self._ready_generation: int | None = 0
+        self._preparation: OpenCodeServePreparation | None = None
+        self._preparation_phase = "idle"
+        self._shutting_down = False
         self._event_generation = 0
         self._managed_mcp_directories: dict[str, Path] = {}
         self._managed_mcp_status: dict[str, dict[str, dict[str, Any]]] = {}
@@ -5501,6 +5577,99 @@ class OpenCodeServeManager:
         if self._port is None:
             raise RuntimeError("OpenCode serve is not running")
         return f"http://127.0.0.1:{self._port}"
+
+    async def prepare_prompt(
+        self, *, tool: str, executable: str, directory: Path | None = None,
+        config_workspace: Path | None = None, config_content: str | None = None,
+        env_overrides: dict[str, str] | None = None, serve_port_auto: bool = False,
+        **_unused: Any,
+    ) -> OpenCodeServePermit | OpenCodeServePreparation:
+        """Reserve ready Serve capacity or return shared, non-business preparation.
+
+        This method never waits for lifecycle work. The final ready check and
+        counter increment do not yield, so a restart cannot slip between them.
+        """
+        if self._shutting_down:
+            raise OpenCodeServeStartupError("OpenCode Serve manager is shutting down")
+        normalized_env = _normalized_env_overrides(env_overrides)
+        key = OpenCodeServeKey(
+            tool=tool, executable=executable, env_hash=_env_hash(normalized_env),
+            config_hash=_config_hash(config_content), config_content=config_content or "",
+            env_overrides=normalized_env, serve_port_auto=bool(serve_port_auto),
+        )
+        key = self._current_provider_key(key)
+        if (
+            not self._lock.locked()
+            and self._proc is not None and self._proc.poll() is None
+            and self._ready_generation == self._process_generation
+            and not self._restart_required
+            and self._same_process_key(self._key, key)
+            and (self._key == key or self._active_sessions > 0)
+            and (not self._dirty or self._active_sessions > 0)
+        ):
+            # Task-local permission hashes are applied to the Session itself.
+            # Explicit config invalidation still requests an idle reload.
+            self._active_sessions += 1
+            return OpenCodeServePermit(self, self._process_generation, "reused")
+        existing = self._preparation
+        if existing is not None and not existing._task.done():
+            return existing
+        task = asyncio.create_task(self._prepare_prompt_process(key, config_workspace))
+        retire_task(task)
+        self._preparation = OpenCodeServePreparation(self, task)
+        return self._preparation
+
+    async def _prepare_prompt_process(
+        self, key: OpenCodeServeKey, config_workspace: Path | None,
+    ) -> None:
+        try:
+            self._preparation_phase = "lifecycle_lock"
+            async with self._lock:
+                if self._shutting_down:
+                    raise asyncio.CancelledError()
+                key = self._current_provider_key(key)
+                if (
+                    self._proc is not None and self._proc.poll() is None
+                    and self._ready_generation == self._process_generation
+                    and not self._restart_required
+                    and self._same_process_key(self._key, key)
+                    and (self._key == key or self._active_sessions > 0)
+                    and (not self._dirty or self._active_sessions > 0)
+                ):
+                    return
+                # Recovery belongs to the already applied process. A queued
+                # caller must not apply a pending Provider edit ahead of its
+                # config-reload coordinator.
+                if self._restart_required:
+                    key = self._key or self._applied_provider_key or key
+                    config_workspace = self._startup_cwd or config_workspace
+                self._preparation_phase = "draining"
+                await self._wait_until_idle_locked()
+                self._preparation_phase = "starting"
+                try:
+                    await asyncio.wait_for(
+                        self._ensure_started_locked(key, startup_cwd=config_workspace),
+                        timeout=_SERVE_PREPARATION_START_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    self._ready_generation = None
+                    self._mark_serve_restart_required("Independent Serve startup deadline expired")
+                    raise OpenCodeServeStartupError(
+                        "OpenCode Serve startup timed out after "
+                        f"{_SERVE_PREPARATION_START_TIMEOUT_SECONDS:g}s",
+                        retry_kind="health",
+                    ) from exc
+        except asyncio.CancelledError:
+            raise
+        except OpenCodeServeStartupError:
+            raise
+        except Exception as exc:
+            raise OpenCodeServeStartupError(
+                f"OpenCode Serve preparation failed: {exc}",
+                retry_kind=_serve_startup_retry_kind(exc),
+            ) from exc
+        finally:
+            self._preparation_phase = "idle"
 
     def mark_dirty(self) -> None:
         # Keep active sessions stable, but make the next idle acquisition reload
@@ -5609,6 +5778,7 @@ class OpenCodeServeManager:
                 self._dirty = False
             if failure_generation == self._serve_failure_generation:
                 self._restart_required = False
+                self._restart_reason = ""
             self._model_cache[(key, str(directory.resolve()))] = tuple(models)
             return OpenCodeModelListResult(models=models)
 
@@ -5621,6 +5791,8 @@ class OpenCodeServeManager:
     def _mark_serve_restart_required(self, reason: str) -> None:
         """Invalidate cached state after a transport or health failure."""
         self._restart_required = True
+        self._restart_reason = reason
+        self._ready_generation = None
         self._serve_failure_generation += 1
         self._invalidate_model_cache()
         logger.warning(
@@ -6796,6 +6968,7 @@ class OpenCodeServeManager:
         bash_command_match_mode: str = "exact",
         required_bash_success_markers: tuple[tuple[str, str], ...] = (),
         required_bash_path_prepend: tuple[str, ...] = (),
+        serve_permit: OpenCodeServePermit | None = None,
     ) -> list[str] | OpenCodePromptResult:
         deadline = OperationDeadline(timeout, cancel_event=cancel_event)
         activity = ResponseActivity(idle_timeout)
@@ -6924,6 +7097,10 @@ class OpenCodeServeManager:
 
         async def acquire_serve() -> str:
             nonlocal serve_acquired
+            if serve_permit is not None:
+                serve_permit.claim(self)
+                serve_acquired = True
+                return serve_permit.mode
             mode = await self._acquire_session(key, startup_cwd=config_workspace)
             if callbacks_open:
                 serve_acquired = True
@@ -7805,7 +7982,10 @@ class OpenCodeServeManager:
                     # This condition protects only local counters; its holders
                     # never await network I/O. Release exactly once, even when
                     # remote cleanup exhausted its budget.
-                    await self._release_active_session()
+                    if serve_permit is not None:
+                        await serve_permit.release()
+                    else:
+                        await self._release_active_session()
                 if session_started:
                     error_note = f" error={_one_line_preview(session_error)}" if session_error else ""
                     correlation_note = f" task={task_id} attempt={task_attempt}" if task_id else ""
@@ -8600,11 +8780,24 @@ class OpenCodeServeManager:
         }
 
     async def shutdown(self) -> None:
-        async with self._lock:
-            await self._stop_locked()
-        self._dirty = False
-        self._restart_required = False
-        self._invalidate_model_cache()
+        self._shutting_down = True
+        self._ready_generation = None
+        preparation = self._preparation
+        if preparation is not None:
+            if not await cancel_tasks_bounded(
+                [preparation._task],
+                expires_at=time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
+            ):
+                logger.warning("OpenCode shared preparation did not stop during shutdown")
+        async def stop() -> None:
+            async with self._lock:
+                await self._stop_locked()
+        try:
+            await OperationDeadline(CLEANUP_TIMEOUT_SECONDS).wait(stop(), phase="serve_shutdown")
+        finally:
+            self._dirty = False
+            self._restart_required = self._proc is not None
+            self._invalidate_model_cache()
 
     async def update_skill_catalog(
         self,
@@ -8976,6 +9169,7 @@ class OpenCodeServeManager:
         _unregister_owned_serve_process(launcher_pid)
         adopted = _AdoptedServeProcess(listener_pid)
         self._proc = adopted
+        self._ready_generation = self._process_generation
         self._listener_pids = set(candidates)
         _register_owned_serve_process(adopted, self._marker_path)
         _write_marker(
@@ -9023,6 +9217,7 @@ class OpenCodeServeManager:
         if (
             self._proc is not None
             and self._key == key
+            and self._ready_generation == self._process_generation
             and not self._dirty
             and not self._restart_required
         ):
@@ -9030,6 +9225,7 @@ class OpenCodeServeManager:
         if (
             self._proc is not None
             and self._same_process_key(self._key, key)
+            and self._ready_generation == self._process_generation
             and self._active_sessions > 0
             and not self._restart_required
         ):
@@ -9056,10 +9252,12 @@ class OpenCodeServeManager:
             restart_reason = "Serve startup preparation"
         await self._stop_locked(reason=restart_reason, requested_key=key)
         await self._start_locked(key, startup_cwd=startup_cwd)
+        self._ready_generation = self._process_generation
         if self._serve_config_generation == reload_generation:
             self._dirty = False
         if self._serve_failure_generation == failure_generation:
             self._restart_required = False
+            self._restart_reason = ""
         return "restarted" if had_process else "started"
 
     @staticmethod
@@ -9359,6 +9557,7 @@ class OpenCodeServeManager:
             version_argv=_executable_argv(executable, "--version"),
         )
         try:
+            self._ready_generation = None
             with startup_log_path.open("ab") as startup_log:
                 self._proc = subprocess.Popen(
                     cmd,
@@ -9381,16 +9580,25 @@ class OpenCodeServeManager:
         _write_marker(self._marker_path, proc=self._proc, key=key, port=port)
         try:
             await self._wait_health_locked(startup_log_path)
-        except Exception as startup_error:
+        except BaseException as startup_error:
+            self._ready_generation = None
+            self._restart_required = True
             try:
-                await self._stop_locked(reason="startup health failure cleanup")
+                await OperationDeadline(CLEANUP_TIMEOUT_SECONDS).wait(
+                    self._stop_locked(reason="startup health failure cleanup"),
+                    phase="startup_cleanup",
+                )
             except Exception as cleanup_error:
+                if isinstance(startup_error, asyncio.CancelledError):
+                    logger.warning("OpenCode cancelled startup cleanup incomplete: %s", cleanup_error)
+                    raise startup_error
                 raise RuntimeError(
                     f"{startup_error}\n\n"
                     "OpenCode Serve cleanup after startup failure also failed: "
                     f"{cleanup_error}"
                 ) from startup_error
             raise
+        self._ready_generation = self._process_generation
         _remove_file(startup_log_path)
         config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
         logger.info(
@@ -9741,6 +9949,7 @@ class OpenCodeServeManager:
         reason: str = "serve shutdown",
         requested_key: OpenCodeServeKey | None = None,
     ) -> None:
+        self._ready_generation = None
         cleanup_expires = time.monotonic() + CLEANUP_TIMEOUT_SECONDS
         await self._reset_managed_mcp_process_state(expires_at=cleanup_expires)
         await self._stop_event_hub(expires_at=cleanup_expires)

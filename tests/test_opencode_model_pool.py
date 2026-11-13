@@ -431,6 +431,7 @@ def test_real_service_partial_tokens_release_capacity_for_following_tasks(tmp_pa
         monkeypatch.setattr(serve, "_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.03)
         monkeypatch.setattr(serve, "_SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
         manager._acquire_session = acquire
+        manager.prepare_prompt = AsyncMock(return_value=None)
         cfg = SimpleNamespace(opencode=SimpleNamespace(timeout=1, max_retries=0, models=[{
             "id": "one", "model": "p/m", "capability": "high", "max_concurrency": 1,
         }]))

@@ -4407,6 +4407,9 @@ def test_real_message_timeout_releases_lease_and_publishes_retry_history(tmp_pat
         monkeypatch.setattr(serve, "_SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.02)
         monkeypatch.setattr(serve, "_SERVE_EVENT_DRAIN_TIMEOUT_SECONDS", 0.001)
         manager._acquire_session = acquire
+        # This test exercises real message timeout/cleanup against MockTransport;
+        # Serve lifecycle itself is supplied by the acquisition stub above.
+        manager.prepare_prompt = AsyncMock(return_value=None)
         config = _config()
         config.threat_analysis = SimpleNamespace(model_policy=SimpleNamespace(
             required_capability="high", timeout_seconds=0.5 if timeout_kind == "idle" else 0.1,
