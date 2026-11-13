@@ -4,7 +4,8 @@ import { isInvalidTaskCursorError } from "../../../api/errors";
 import { compareTaskHistory, shouldMergeTaskHistory } from "../../../taskOrder";
 import type { OpenCodePoolStatus } from "../../../types/modelPool";
 import { thCls } from "../../modelPool/ModelPoolDashboard";
-import { formatDateTime, formatDuration, formatTokenCount } from "../../modelPool/presentation";
+import { formatDateTime, formatDuration, formatTokenCount, SCAN_QUEUE_TASK_KINDS, scanQueueTaskKind } from "../../modelPool/presentation";
+import type { ScanQueueTaskKind } from "../../modelPool/presentation";
 import { StatusPill } from "../components/taskUi";
 import { SCAN_QUEUE_PAGE_SIZE, taskTokenUsage } from "../model/scan";
 import {
@@ -26,6 +27,28 @@ import {
 import type { ScanQueueTask } from "../model/types";
 
 export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null; }) {
+  return <ScanTaskQueueFilter key={scanId} scanId={scanId} pool={pool} />;
+}
+
+function ScanTaskQueueFilter({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null; }) {
+  const [taskKind, setTaskKind] = useState<ScanQueueTaskKind | "">("");
+  const filterInteracted = useRef(false);
+  // A new scan starts with all types. A new type gets its own history, cursors
+  // and expanded detail state; an old request cannot populate the new list.
+  return <ScanTaskQueueContent key={taskKind} scanId={scanId} pool={pool} taskKind={taskKind}
+    focusFilter={filterInteracted.current} onTaskKindChange={(kind) => {
+      filterInteracted.current = true;
+      setTaskKind(kind);
+    }} />;
+}
+
+function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindChange }: {
+  scanId: string;
+  pool: OpenCodePoolStatus | null;
+  taskKind: ScanQueueTaskKind | "";
+  focusFilter: boolean;
+  onTaskKindChange: (kind: ScanQueueTaskKind | "") => void;
+}) {
   const [page, setPage] = useState(1);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [history, setHistory] = useState<Record<string, unknown>[]>([]);
@@ -36,6 +59,8 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   detailsRef.current = details;
   const [detailRetry, setDetailRetry] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const nextCursorRef = useRef<string | null>(null);
+  const lastCompletedCount = useRef(pool?.completed_task_count ?? 0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
   const [detailLoading, setDetailLoading] = useState<string | null>(null);
@@ -43,33 +68,12 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
   const loadedMore = useRef(false);
   const cursorResetUsed = useRef(false);
   const historyPageFailed = useRef(false);
-  const historyCount = useRef(0);
-  const nextCursorRef = useRef<string | null>(null);
   const historyGeneration = useRef(0);
-  const activeScanId = useRef(scanId);
-  const scanChanged = activeScanId.current !== scanId;
-  activeScanId.current = scanId;
-  useEffect(() => {
-    setPage(1);
-    setHistory([]);
-    historyRef.current = [];
-    setHistoryGaps([]);
-    setDetails({});
-    detailsRef.current = {};
-    setDetailLoading(null);
-    setDetailError(null);
-    setDetailRetry(0);
-    setExpandedTaskId(null);
-    setNextCursor(null);
-    setHistoryLoading(false);
-    setHistoryError(false);
-    loadedMore.current = false;
-    cursorResetUsed.current = false;
-    historyPageFailed.current = false;
-    historyCount.current = 0;
-    nextCursorRef.current = null;
+  const historyController = useRef<AbortController | null>(null);
+  useEffect(() => () => {
     historyGeneration.current += 1;
-  }, [scanId]);
+    historyController.current?.abort();
+  }, []);
   const cacheKey = (item: ScanQueueTask) => JSON.stringify([
     scanId, item.status, item.id, item.task.revision || 1,
     item.task.record_id || [
@@ -85,7 +89,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
       const previousTask = merged.get(String(task.task_id));
       if (shouldMergeTaskHistory(previousTask, task)) merged.set(String(task.task_id), task);
     });
-    historyCount.current = merged.size;
     historyRef.current = [...merged.values()];
     setHistory(historyRef.current);
   };
@@ -93,7 +96,8 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     let cancelled = false;
     const generation = historyGeneration.current;
     if (document.hidden) return;
-    getScanTasksPage(scanId).then((result) => {
+    const controller = new AbortController();
+    getScanTasksPage(scanId, undefined, undefined, controller.signal, taskKind).then((result) => {
       if (cancelled || generation !== historyGeneration.current) return;
       const newestKnown = historyRef.current.reduce<Record<string, unknown> | null>(
         (newest, task) => !newest || compareTaskHistory(task, newest) < 0 ? task : newest, null);
@@ -105,18 +109,21 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         setHistoryGaps((previous) => [gap, ...previous]);
       }
       mergeHistory(result.items);
-      if (!historyPageFailed.current && (
-        !loadedMore.current
-        || (nextCursorRef.current == null && (pool?.completed_task_count ?? 0) > historyCount.current)
-      )) {
+      // A newly reported task may have an old finish time, beyond the first
+      // page. Reopen exhausted history once when the scan count actually grows;
+      // never compare that global count with the number loaded for this type.
+      const completedCount = pool?.completed_task_count ?? 0;
+      if (!historyPageFailed.current && (!loadedMore.current
+        || (nextCursorRef.current == null && completedCount > lastCompletedCount.current))) {
         nextCursorRef.current = result.next_cursor;
         setNextCursor(result.next_cursor);
+        lastCompletedCount.current = completedCount;
       }
       // A successful first-page refresh does not repair a failed older page.
       setHistoryError(historyPageFailed.current);
     }).catch(() => { if (!cancelled && generation === historyGeneration.current) setHistoryError(true); });
-    return () => { cancelled = true; };
-  }, [scanId, pool]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [scanId, pool, taskKind]);
   const loadHistory = async () => {
     if (historyLoading) return;
     setHistoryLoading(true);
@@ -124,12 +131,14 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     const gap = historyGaps[0];
     const requestedCursor = gap?.cursor ?? nextCursor;
     let generation = historyGeneration.current;
-    const isCurrent = () => activeScanId.current === scanId && generation === historyGeneration.current;
+    const controller = new AbortController();
+    historyController.current = controller;
+    const isCurrent = () => !controller.signal.aborted && generation === historyGeneration.current;
     try {
       let result;
       let reset = false;
       try {
-        result = await getScanTasksPage(scanId, requestedCursor);
+        result = await getScanTasksPage(scanId, requestedCursor, undefined, controller.signal, taskKind);
       } catch (error) {
         if (!isCurrent()) return;
         if (!requestedCursor || !isInvalidTaskCursorError(error) || cursorResetUsed.current) throw error;
@@ -139,7 +148,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         cursorResetUsed.current = true;
         generation = ++historyGeneration.current;
         loadedMore.current = false;
-        historyCount.current = 0;
         nextCursorRef.current = null;
         setNextCursor(null);
         setHistory([]);
@@ -147,7 +155,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
         setHistoryGaps([]);
         setPage(1);
         setExpandedTaskId(null);
-        result = await getScanTasksPage(scanId);
+        result = await getScanTasksPage(scanId, undefined, undefined, controller.signal, taskKind);
       }
       if (!isCurrent()) return;
       mergeHistory(result.items);
@@ -172,7 +180,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
       }
     } finally { if (isCurrent()) setHistoryLoading(false); }
   };
-  const tasks = useMemo(() => {
+  const allTasks = useMemo(() => {
     const merged = new Map((pool?.completed_tasks ?? []).map((task) => [String(task.task_id), task]));
     history.forEach((task) => {
       const previous = merged.get(String(task.task_id));
@@ -183,9 +191,14 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
       completed_task_count: 0, models: [], queued_tasks: [], planned_tasks: [], updated_at: "", ...pool,
       completed_tasks: [...merged.values()]
     };
-    return collectScanQueueTasks(combined);
+    // Keep planned work in the shared pool for scheduling and audit panels,
+    // but do not collect or sort potentially thousands of planned queue rows.
+    return collectScanQueueTasks({ ...combined, planned_tasks: [] });
   }, [scanId, pool, history]);
-  const expandedTask = scanChanged ? undefined : tasks.find((task) => scanQueueTaskKey(task) === expandedTaskId);
+  const tasks = useMemo(() => taskKind
+    ? allTasks.filter((task) => scanQueueTaskKind(task.task) === taskKind)
+    : allTasks, [allTasks, taskKind]);
+  const expandedTask = tasks.find((task) => scanQueueTaskKey(task) === expandedTaskId);
   const expandedDetailKey = expandedTask ? cacheKey(expandedTask) : null;
   const hasInlinePrompt = Boolean(expandedTask && scanQueueTaskPrompt(expandedTask.task));
   const expandedTaskRef = useRef(expandedTask);
@@ -195,7 +208,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     setDetailError(null);
     const selected = expandedTaskRef.current;
     const key = expandedDetailKey;
-    if (!selected || !key || selected.status === "planned" || detailsRef.current[key]) return;
+    if (!selected || !key || detailsRef.current[key]) return;
     if (["queued", "running"].includes(selected.status) && hasInlinePrompt) return;
     const controller = new AbortController();
     setDetailLoading(key);
@@ -217,10 +230,9 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
     });
     setDetailRetry((current) => current + 1);
   };
-  const runningCount = tasks.filter((task) => task.status === "running").length;
-  const queuedCount = tasks.filter((task) => task.status === "queued").length;
-  const plannedCount = tasks.filter((task) => task.status === "planned").length;
-  const completedCount = Math.max(pool?.completed_task_count ?? 0, tasks.filter((task) => !["planned", "queued", "running"].includes(task.status)).length);
+  const runningCount = allTasks.filter((task) => task.status === "running").length;
+  const queuedCount = allTasks.filter((task) => task.status === "queued").length;
+  const completedCount = Math.max(pool?.completed_task_count ?? 0, allTasks.filter((task) => !["queued", "running"].includes(task.status)).length);
   const unsuccessfulCount = tasks.filter((task) => ["failure", "timeout", "cancelled", "unknown"].includes(task.status)).length;
   const totalPages = Math.max(1, Math.ceil(tasks.length / SCAN_QUEUE_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -249,12 +261,24 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <StatusPill label={`计划中 ${plannedCount}`} tone="slate" />
+          <span className="text-xs text-slate-500">扫描整体</span>
           <StatusPill label={`排队中 ${queuedCount}`} tone="amber" />
           <StatusPill label={`运行中 ${runningCount}`} tone="cyan" />
           <StatusPill label={`已执行 ${completedCount}`} tone="green" />
-          {unsuccessfulCount > 0 && <StatusPill label={`已加载未成功 ${unsuccessfulCount}`} tone="red" />}
         </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          任务类型
+          <select aria-label="任务类型" value={taskKind} autoFocus={focusFilter}
+            onChange={(event) => onTaskKindChange(event.target.value as ScanQueueTaskKind | "")}
+            className="rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-slate-200 focus:border-cyan-500 focus:outline-none">
+            <option value="">全部类型</option>
+            {Object.entries(SCAN_QUEUE_TASK_KINDS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        {unsuccessfulCount > 0 && <StatusPill label={`当前筛选已加载未成功 ${unsuccessfulCount}`} tone="red" />}
       </div>
 
       {historyError && <p className="my-2 text-xs text-amber-300">历史任务加载失败，请重试。</p>}
@@ -264,7 +288,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
       </button>}
       {tasks.length === 0 ? (
         <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-6 text-center text-sm text-slate-500">
-          当前扫描还没有 OpenCode 任务记录
+          {taskKind ? "当前类型暂无任务记录" : "当前扫描还没有 OpenCode 任务记录"}
         </div>
       ) : (
         <div className="mt-4 overflow-hidden rounded-lg border border-slate-800">
@@ -297,7 +321,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                     : "";
                   const sessionId = scanQueueTaskSessionId(detail);
                   const tokenUsage = taskTokenUsage(detail);
-                  const isTerminal = !["planned", "queued", "running"].includes(task.status);
+                  const isTerminal = !["queued", "running"].includes(task.status);
                   const terminalFailureReason = scanQueueTaskFailureReason(
                     task.status,
                     failureKind,
@@ -477,10 +501,6 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                                   <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-800 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-300">
                                     {prompt}
                                   </pre>
-                                ) : task.status === "planned" ? (
-                                  <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                    完整 prompt 尚未生成，进入排队或运行后显示。
-                                  </div>
                                 ) : detailLoading === detailKey ? (
                                   <p className="text-xs text-slate-400">正在读取完整 Prompt…</p>
                                 ) : detailError === detailKey ? (
@@ -519,7 +539,7 @@ export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: Ope
                 上一页
               </button>
               <span className="text-xs text-slate-500">
-                第 {safePage}/{totalPages} 页 · 共 {tasks.length} 条
+                第 {safePage}/{totalPages} 页 · 已加载 {tasks.length} 条
               </span>
               <button
                 type="button"

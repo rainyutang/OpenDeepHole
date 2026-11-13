@@ -6,9 +6,9 @@ import { normalizeScanEvent } from "../scanRuntime/scanSnapshots";
 import { isPublicScan, publicParams, scanV2Path } from "./accessPolicy";
 import { SCAN_READ_TIMEOUT_MS, api } from "./transport";
 
-export async function getScanTasksPage(scanId: string, cursor?: string | null, taskName?: string, signal?: AbortSignal) {
+export async function getScanTasksPage(scanId: string, cursor?: string | null, taskName?: string, signal?: AbortSignal, taskKind?: string) {
   const { data } = await api.get<{ items: Record<string, unknown>[]; next_cursor: string | null }>(
-    scanV2Path(scanId, "/tasks"), { params: { ...(isPublicScan(scanId) ? publicParams() : {}), cursor, limit: 50, task_name: taskName }, signal, timeout: SCAN_READ_TIMEOUT_MS },
+    scanV2Path(scanId, "/tasks"), { params: { ...(isPublicScan(scanId) ? publicParams() : {}), cursor, limit: 50, task_name: taskName, task_kind: taskKind || undefined }, signal, timeout: SCAN_READ_TIMEOUT_MS },
   );
   return data;
 }

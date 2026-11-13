@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.report_routes import ApplicationRoute
+from backend.task_kinds import TaskKind
 from backend.auth import get_current_user
 from backend.models import BatchMarkRequest, BatchUnmarkRequest, MarkRequest, UnmarkRequest, User
 from backend.application import get_scan_store, run_store_call
@@ -93,8 +94,8 @@ async def detail(
 
 @shared.get("/tasks")
 async def tasks(scan_id: str, user: SharedUser, cursor: str | None = None,
-                limit: int = Query(50, ge=1, le=100), task_name: str | None = None):
-    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, user, task_name=task_name)
+                limit: int = Query(50, ge=1, le=100), task_name: str | None = None, task_kind: TaskKind | None = None):
+    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, user, task_name=task_name, task_kind=task_kind)
 
 
 @shared.get("/tasks/{task_id}")

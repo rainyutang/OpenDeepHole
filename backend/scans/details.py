@@ -18,12 +18,13 @@ from backend.models import (
 from backend.pagination import decode_cursor, encode_cursor
 from backend.scans.access import _check_scan_owner, _check_scan_owner_v2
 from backend.task_order import MISSING_TASK_TIME, task_sort_time
+from backend.task_kinds import TaskKind
 
 
 async def get_scan_tasks_page(scan_id: str, cursor: str | None = None,
                               limit: int = 50,
                               current_user: User = None,
-                              task_name: str | None = None) -> dict:
+                              task_name: str | None = None, task_kind: TaskKind | None = None) -> dict:
     await _check_scan_owner(scan_id, current_user)
     before_sort_time, before_task_id = None, ""
     try:
@@ -35,7 +36,7 @@ async def get_scan_tasks_page(scan_id: str, cursor: str | None = None,
         raise ApplicationError(status_code=400, detail="Invalid cursor") from exc
     rows = await run_store_call(get_scan_store(), "list_task_page", scan_id,
                                 limit=limit + 1, before_sort_time=before_sort_time,
-                                before_task_id=before_task_id, task_name=task_name)
+                                before_task_id=before_task_id, task_name=task_name, task_kind=task_kind)
     more = len(rows) > limit
     items = rows[:limit]
     return {"items": items, "next_cursor": encode_cursor(items[-1]["sort_time"], items[-1]["task_id"]) if more else None}

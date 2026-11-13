@@ -18,6 +18,7 @@ from backend.models import (
 )
 from backend.report_routes import HistoricalReportRoute
 from backend.scans import details as service
+from backend.task_kinds import TaskKind
 
 router = APIRouter(route_class=HistoricalReportRoute)
 
@@ -26,13 +27,14 @@ router = APIRouter(route_class=HistoricalReportRoute)
 async def get_scan_tasks_page(scan_id: str, cursor: str | None = None,
                               limit: int = Query(default=50, ge=1, le=100),
                               current_user: User = Depends(get_current_user),
-                              task_name: str | None = None) -> dict:
+                              task_name: str | None = None, task_kind: TaskKind | None = None) -> dict:
     return await service.get_scan_tasks_page(
         scan_id=scan_id,
         cursor=cursor,
         limit=limit,
         current_user=current_user,
         task_name=task_name,
+        task_kind=task_kind,
     )
 
 

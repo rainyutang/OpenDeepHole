@@ -26,6 +26,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from backend.api import checkers as checkers_api, feedback as feedback_api
 from backend.report_routes import ApplicationRoute
+from backend.task_kinds import TaskKind
 from backend.auth import hash_password
 from backend.models import (
     CandidateAuditTaskResult,
@@ -93,8 +94,8 @@ async def get_public_overview(scan_id: str, token: str = Query(...)):
 
 @router.get("/api/public/scans/{scan_id}/tasks")
 async def get_public_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
-                           limit: int = Query(50, ge=1, le=100), task_name: str | None = None):
-    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token), task_name=task_name)
+                           limit: int = Query(50, ge=1, le=100), task_name: str | None = None, task_kind: TaskKind | None = None):
+    return await scan_details.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token), task_name=task_name, task_kind=task_kind)
 
 
 @router.get("/api/public/scans/{scan_id}/tasks/{task_id}")

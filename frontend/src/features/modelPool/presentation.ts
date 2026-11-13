@@ -30,27 +30,55 @@ export function poolTaskName(task: Record<string, unknown>): string {
   return "";
 }
 
-export function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
+export const SCAN_QUEUE_TASK_KINDS = {
+  candidate_audit: "候选点审计",
+  project_audit: "项目级审计",
+  sensitive_clear: "敏感信息清理审计",
+  report_audit: "报告审计",
+  threat_analysis: "威胁分析",
+  threat_audit: "威胁审计",
+  threat_pattern_audit: "攻击模式审计",
+  threat_pattern_iterative_audit: "迭代审计",
+  fp_review: "去误报复核",
+  vulnerability_validation: "漏洞验证",
+  vulnerability_dedup: "漏洞去重",
+  vulnerability_mining: "其他漏洞挖掘",
+  other: "其他任务",
+} as const;
+
+export type ScanQueueTaskKind = keyof typeof SCAN_QUEUE_TASK_KINDS;
+
+// Keep these business kinds aligned with backend/task_kinds.py. Raw mining
+// tasks share a type; their stable name prefixes identify the actual work.
+export function scanQueueTaskKind(task: Record<string, unknown>): ScanQueueTaskKind {
   const type = poolTaskType(task);
   const taskName = poolTaskName(task);
   if (type === "vulnerability_mining") {
-    if (taskName.startsWith("vulnerability-dedup-")) return "漏洞去重";
-    if (taskName.startsWith("candidate-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;
-    if (taskName.startsWith("project-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 项目级审计`;
-    if (taskName.startsWith("threat-audit-")) return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
-    if (taskName.startsWith("threat-pattern-iterative-audit-")) return `${canonicalMiningEngineLabel(THREAT_PATTERN_ITERATIVE_ENGINE_ID)} / 迭代审计`;
-    if (taskName.startsWith("threat-pattern-audit-")) return `${THREAT_PATTERN_AUDIT_ENGINE_LABEL} / 攻击模式审计`;
-    return "漏洞挖掘";
+    if (taskName.startsWith("vulnerability-dedup-")) return "vulnerability_dedup";
+    if (taskName.startsWith("candidate-audit-")) return "candidate_audit";
+    if (taskName.startsWith("project-audit-")) return "project_audit";
+    if (taskName.startsWith("threat-audit-")) return "threat_audit";
+    if (taskName.startsWith("threat-pattern-iterative-audit-")) return "threat_pattern_iterative_audit";
+    if (taskName.startsWith("threat-pattern-audit-")) return "threat_pattern_audit";
+    return "vulnerability_mining";
   }
-  if (type === "audit") return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;
-  if (type === "project_audit") return `${STATIC_CANDIDATE_ENGINE_LABEL} / 项目级审计`;
-  if (type === "sensitive_clear") return `${STATIC_CANDIDATE_ENGINE_LABEL} / 敏感信息清理审计`;
-  if (type === "report_audit") return `${STATIC_CANDIDATE_ENGINE_LABEL} / 报告审计`;
-  if (type === "fp_review") return "去误报复核";
-  if (type === "threat_analysis") return "威胁分析";
-  if (type === "threat_audit") return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
-  if (type === "validation" || type === "vulnerability_validation") return "漏洞验证";
-  return type || "漏洞挖掘";
+  if (!type) return "vulnerability_mining";
+  if (type === "audit") return "candidate_audit";
+  if (type === "validation") return "vulnerability_validation";
+  return Object.prototype.hasOwnProperty.call(SCAN_QUEUE_TASK_KINDS, type) ? type as ScanQueueTaskKind : "other";
+}
+
+export function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
+  const kind = scanQueueTaskKind(task);
+  if (["candidate_audit", "project_audit", "sensitive_clear", "report_audit"].includes(kind)) {
+    return `${STATIC_CANDIDATE_ENGINE_LABEL} / ${SCAN_QUEUE_TASK_KINDS[kind]}`;
+  }
+  if (kind === "threat_audit") return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
+  if (kind === "threat_pattern_audit") return `${THREAT_PATTERN_AUDIT_ENGINE_LABEL} / 攻击模式审计`;
+  if (kind === "threat_pattern_iterative_audit") return `${canonicalMiningEngineLabel(THREAT_PATTERN_ITERATIVE_ENGINE_ID)} / 迭代审计`;
+  if (kind === "vulnerability_mining") return "漏洞挖掘";
+  if (kind === "other") return poolTaskType(task) || "其他任务";
+  return SCAN_QUEUE_TASK_KINDS[kind];
 }
 
 export function formatDuration(seconds: number): string {

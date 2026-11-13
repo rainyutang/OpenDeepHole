@@ -193,3 +193,101 @@ def test_task_name_filter_matches_exact_history_without_report_bodies(tmp_path, 
         assert store.list_task_page("s", task_name="candidate-audit-other-0") == []
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({}, "vulnerability_mining"),
+    ({"task_name": "candidate-audit-only-name"}, "vulnerability_mining"),
+    ({"task_type": " AUDIT "}, "candidate_audit"),
+    ({"task_type": "candidate_audit"}, "candidate_audit"),
+    ({"task_type": "project_audit"}, "project_audit"),
+    ({"task_type": "sensitive_clear"}, "sensitive_clear"),
+    ({"task_type": "report_audit"}, "report_audit"),
+    ({"task_type": "threat_analysis"}, "threat_analysis"),
+    ({"task_type": "threat_audit"}, "threat_audit"),
+    ({"task_type": "threat_pattern_audit"}, "threat_pattern_audit"),
+    ({"task_type": "threat_pattern_iterative_audit"}, "threat_pattern_iterative_audit"),
+    ({"task_type": "fp_review"}, "fp_review"),
+    ({"task_type": "validation"}, "vulnerability_validation"),
+    ({"task_type": "vulnerability_validation"}, "vulnerability_validation"),
+    ({"task_type": "vulnerability_dedup"}, "vulnerability_dedup"),
+    ({"task_type": "vulnerability_mining", "task_name": "candidate-audit-s-0"}, "candidate_audit"),
+    ({"task_type": "vulnerability_mining", "task_name": "project-audit-s-0"}, "project_audit"),
+    ({"task_type": "vulnerability_mining", "task_name": "threat-audit-s-0"}, "threat_audit"),
+    ({"task_type": "vulnerability_mining", "task_name": "threat-pattern-audit-s-0"}, "threat_pattern_audit"),
+    ({"task_type": "vulnerability_mining", "task_name": "threat-pattern-iterative-audit-s-0"}, "threat_pattern_iterative_audit"),
+    ({"task_type": "vulnerability_mining", "task_name": "vulnerability-dedup-s-0"}, "vulnerability_dedup"),
+    ({"task_type": "vulnerability_mining", "task_name": "other"}, "vulnerability_mining"),
+    ({"task_type": "unrecognized"}, "other"),
+    ({"task_type": "  ", "context": {"task_type": "audit"}}, "candidate_audit"),
+    ({"context": {"task_type": "VULNERABILITY_MINING", "task_name": " CANDIDATE-AUDIT-S-0 "}}, "candidate_audit"),
+    ({"task_type": "fp_review", "context": {"task_type": "audit"}}, "fp_review"),
+])
+def test_task_kind_legacy_sql_matches_classification(tmp_path, fields, expected):
+    from backend.task_kinds import TASK_KINDS, task_kind
+    store = make_store(tmp_path)
+    value = {**task(), **fields}
+    try:
+        assert task_kind(value) == expected
+        store._store_task_version_locked("s", value)
+        # Simulate pre-projection immutable history, with context only in body.
+        metadata = {key: item for key, item in value.items() if key not in {"prompt", "session_events", "context"}}
+        store._conn.execute("UPDATE scan_task_versions SET metadata_json = ?", (json.dumps(metadata),))
+        for kind in TASK_KINDS:
+            rows = store.list_task_page("s", task_kind=kind)
+            assert len(rows) == int(kind == expected)
+            if rows:
+                assert task_kind(rows[0]) == expected
+                assert not {"context", "prompt", "session_events"} & rows[0].keys()
+    finally:
+        store.close()
+
+
+def test_projected_task_pages_do_not_parse_report_bodies_or_read_other_scans(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        for value in [task(1), {**task(2), "task_type": "audit"}]:
+            store._store_task_version_locked("s", value)
+        # A malformed body would make json_extract fail if the lazy fallback ran.
+        store._conn.execute("UPDATE scan_task_versions SET task_json = 'not JSON'")
+        statements = []
+        store._conn.set_trace_callback(statements.append)
+        assert [row["task_id"] for row in store.list_task_page("s", task_kind="candidate_audit")] == [task(2)["task_id"]]
+        assert [row["task_id"] for row in store.list_task_page("s", task_kind="vulnerability_mining")] == [task(1)["task_id"]]
+        assert len(store.list_task_page("s", task_name="")) == 2
+        assert store.list_task_page("s", task_name="  ") == []
+        store._conn.set_trace_callback(None)
+        query = next(statement for statement in statements if "FROM scan_task_current c" in statement)
+        plan = [row["detail"] for row in store._conn.execute("EXPLAIN QUERY PLAN " + query)]
+        assert any("SEARCH c USING INDEX" in step and "scan_id=?" in step for step in plan), plan
+        assert any("SEARCH v USING INDEX" in step and "record_id=?" in step for step in plan), plan
+        assert "COUNT(" not in query
+        assert "LIMIT 50" in query
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("direct_name", [None, "", "  "])
+def test_old_context_task_name_and_kind_filters_agree(tmp_path, legacy, direct_name):
+    store = make_store(tmp_path)
+    name = " Candidate-Audit-Exact "
+    value = {**task(), "task_type": "vulnerability_mining", "context": {"task_name": name}}
+    if direct_name is not None:
+        value["task_name"] = direct_name
+    try:
+        if legacy:
+            store._conn.execute("UPDATE scans SET history_version = 0, opencode_pool = ?",
+                                (json.dumps({"completed_tasks": [value]}),))
+        else:
+            store._store_task_version_locked("s", value)
+            metadata = {k: v for k, v in value.items() if k not in {"prompt", "context", "session_events"}}
+            store._conn.execute("UPDATE scan_task_versions SET metadata_json = ?", (json.dumps(metadata),))
+        rows = store.list_task_page("s", task_kind="candidate_audit", task_name=name)
+        assert len(rows) == 1
+        assert rows[0]["task_name"] == name
+        assert store.list_task_page("s", task_kind="candidate_audit", task_name=name.strip()) == []
+        assert store.list_task_page("s", task_kind="candidate_audit", task_name="") == []
+        assert store.list_task_page("s", task_kind="candidate_audit", task_name="  ") == []
+    finally:
+        store.close()

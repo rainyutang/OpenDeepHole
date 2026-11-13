@@ -41,12 +41,296 @@ function button(root, label) {
   assert.ok(result, `Missing button: ${label}`);
   return result;
 }
+function typeFilter(root) { return root.root.findByProps({ "aria-label": "任务类型" }); }
+async function selectType(root, value) {
+  await act(async () => typeFilter(root).props.onChange({ target: { value } }));
+}
+function hasHistoryButton(root) {
+  return root.root.findAllByType("button").some((item) => /加载更多历史任务|重试加载历史任务/.test(text(item)));
+}
 async function mount(value = pool()) {
   let root;
   await act(async () => { root = create(createElement(ScanTaskQueuePanel, { scanId: "s", pool: value })); });
   roots.push(root);
   return root;
 }
+
+test("planned-only work is hidden until it enters the queue, while shared runtime collection retains it", async () => {
+  const { collectScanQueueTasks } = await server.ssrLoadModule("/src/features/scanDetail/model/taskQueue.ts");
+  client.api.defaults.adapter = async (config) => response(config, { items: [], next_cursor: null });
+  const candidate = { task_type: "vulnerability_mining", task_name: "candidate-audit-s-1", planned_task_id: "candidate" };
+  const review = { task_type: "fp_review", planned_task_id: "review" };
+  const value = pool({ total_tasks: 2, completed_task_count: 0, planned_tasks: [candidate, review] });
+  assert.equal(collectScanQueueTasks(value).filter((item) => item.status === "planned").length, 2);
+  const root = await mount(value);
+  assert.equal(rows(root).length, 0);
+  assert.doesNotMatch(text(root.toJSON()), /计划中/);
+  await selectType(root, "candidate_audit");
+  assert.equal(rows(root).length, 0);
+  const queued = { ...candidate, task_id: "candidate", queued_at: "2026-11-13T01:00:00Z" };
+  const next = { ...value, global_queued: 1, queued_tasks: [queued], planned_tasks: [review] };
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: next })));
+  assert.equal(rows(root).length, 1);
+  assert.equal(text(rows(root)[0].findAllByType("td")[0]), "排队中");
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: {
+    ...next, global_queued: 0, global_running: 1, queued_tasks: [],
+    models: [{ id: "candidate-model", active_tasks: [{ ...queued, started_at: "2026-11-13T01:01:00Z" }] }],
+  } })));
+  assert.deepEqual(ids(root), ["candidate-model"]);
+  assert.equal(text(rows(root)[0].findAllByType("td")[0]), "运行中");
+});
+
+test("task filters classify new and legacy types, context fallbacks, and unknown task labels consistently", async () => {
+  client.api.defaults.adapter = async (config) => response(config, { items: [], next_cursor: null });
+  const samples = [
+    ["candidate-new", "candidate_audit", { task_type: "vulnerability_mining", task_name: "candidate-audit-s-0" }],
+    ["candidate-old", "candidate_audit", { task_type: "audit" }],
+    ["candidate-direct", "candidate_audit", { task_type: "candidate_audit" }],
+    ["candidate-nested", "candidate_audit", { task_type: " ", task_name: "", context: { task_type: " VULNERABILITY_MINING ", task_name: " CANDIDATE-AUDIT-S-1 " } }],
+    ["project-new", "project_audit", { task_type: "vulnerability_mining", task_name: "project-audit-s-0" }],
+    ["project-old", "project_audit", { task_type: "project_audit" }],
+    ["project-name-priority", "project_audit", { task_type: " VULNERABILITY_MINING ", task_name: " PROJECT-AUDIT-S-2 ", context: { task_name: "candidate-audit-s-2" } }],
+    ["sensitive", "sensitive_clear", { task_type: "sensitive_clear" }],
+    ["report", "report_audit", { task_type: "report_audit" }],
+    ["analysis", "threat_analysis", { task_type: "threat_analysis" }],
+    ["threat", "threat_audit", { task_type: "vulnerability_mining", task_name: "threat-audit-s-0" }],
+    ["pattern", "threat_pattern_audit", { task_type: "vulnerability_mining", task_name: "threat-pattern-audit-s-0" }],
+    ["iterative", "threat_pattern_iterative_audit", { task_type: "vulnerability_mining", task_name: "threat-pattern-iterative-audit-s-0" }],
+    ["review", "fp_review", { task_type: "fp_review", context: { task_type: "audit" } }],
+    ["validation-old", "vulnerability_validation", { task_type: "validation" }],
+    ["validation-new", "vulnerability_validation", { task_type: "vulnerability_validation" }],
+    ["dedup", "vulnerability_dedup", { task_type: "vulnerability_mining", task_name: "vulnerability-dedup-s-0" }],
+    ["generic", "vulnerability_mining", { task_type: "vulnerability_mining", task_name: "custom-work" }],
+    ["legacy-empty", "vulnerability_mining", {}],
+    ["legacy-name-only", "vulnerability_mining", { task_name: "threat-audit-s-1" }],
+    ["unknown", "other", { task_type: "custom-task-kind" }],
+  ];
+  const values = samples.map(([id, , fields]) => task(id, "2026-11-13T01:00:00Z", fields));
+  const root = await mount(pool({ completed_tasks: values, completed_task_count: values.length }));
+  assert.equal(typeFilter(root).props.value, "");
+  const expectedKinds = [...new Set(samples.map(([, kind]) => kind))];
+  assert.deepEqual(new Set(typeFilter(root).findAllByType("option").map((option) => option.props.value)), new Set(["", ...expectedKinds]));
+  for (const kind of expectedKinds) {
+    await selectType(root, kind);
+    assert.deepEqual([...ids(root)].sort(), samples.filter(([, expected]) => expected === kind).map(([id]) => id).sort());
+  }
+  assert.match(text(rows(root)[0]), /custom-task-kind/);
+});
+
+test("direct business types retain their filter keys independently of task names", async () => {
+  const { scanQueueTaskKind, scanQueueTaskTypeLabel } = await server.ssrLoadModule("/src/features/modelPool/presentation.ts");
+  const directKinds = ["candidate_audit", "project_audit", "sensitive_clear", "report_audit", "threat_analysis",
+    "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit", "fp_review", "vulnerability_validation", "vulnerability_dedup"];
+  for (const kind of directKinds) {
+    const value = { task_type: ` ${kind.toUpperCase()} `, task_name: "candidate-audit-unrelated-name", context: { task_type: "validation" } };
+    assert.equal(scanQueueTaskKind(value), kind);
+    assert.notEqual(scanQueueTaskTypeLabel(value), kind);
+  }
+  assert.equal(scanQueueTaskKind({ task_type: " AUDIT " }), "candidate_audit");
+  assert.equal(scanQueueTaskKind({ task_type: " VALIDATION " }), "vulnerability_validation");
+  assert.equal(scanQueueTaskKind({ task_type: "custom-type" }), "other");
+  assert.equal(scanQueueTaskTypeLabel({ task_type: "custom-type" }), "custom-type");
+  assert.equal(scanQueueTaskKind({}), "vulnerability_mining");
+});
+
+for (const access of ["authenticated", "public", "shared"]) {
+  test(`type filtering reaches older history before pagination and keeps global counts (${access})`, async () => {
+    if (access !== "authenticated") client.setPublicScanAccess({ scanId: "s", token: "token", kind: access === "shared" ? "shared" : "integration" });
+    const prefix = access === "authenticated" ? "/api/v2/scans/s" : `/api/${access}/scans/s`;
+    const values = Array.from({ length: 126 }, (_, index) => task(`history-${index}`,
+      new Date(Date.UTC(2026, 10, 13, 0, 0, 126 - index)).toISOString(), index < 65
+        ? { task_type: "fp_review" }
+        : { task_type: "vulnerability_mining", task_name: `candidate-audit-s-${index}` }));
+    const calls = [];
+    client.api.defaults.adapter = async (config) => {
+      assert.ok(config.url.startsWith(prefix));
+      if (access !== "authenticated") assert.equal(config.params.token, "token");
+      if (config.url !== `${prefix}/tasks`) {
+        const item = values.find((candidate) => config.url.endsWith(`/${candidate.task_id}`));
+        assert.ok(item);
+        return response(config, { ...item, prompt: "筛选任务完整 Prompt" });
+      }
+      calls.push({ kind: config.params.task_kind || "", cursor: config.params.cursor });
+      assert.equal(config.params.limit, 50);
+      const filtered = config.params.task_kind === "candidate_audit" ? values.slice(65)
+        : config.params.task_kind === "fp_review" ? values.slice(0, 65)
+        : config.params.task_kind ? [] : values;
+      const offset = Number(config.params.cursor || 0);
+      return response(config, { items: filtered.slice(offset, offset + 50), next_cursor: offset + 50 < filtered.length ? String(offset + 50) : null });
+    };
+    const value = pool({ completed_task_count: values.length, global_running: 2, global_queued: 2,
+      models: [
+        { id: "candidate-running", active_tasks: [{ task_id: "run-candidate", task_type: "audit" }] },
+        { id: "review-running", active_tasks: [{ task_id: "run-review", task_type: "fp_review" }] },
+      ],
+      queued_tasks: [{ task_id: "wait-candidate", task_type: "audit" }, { task_id: "wait-review", task_type: "fp_review" }],
+      completed_tasks: [task("snapshot-analysis", "2026-11-13T03:00:00Z", { task_type: "threat_analysis" })],
+      planned_tasks: [{ planned_task_id: "planned-candidate", task_type: "audit" }],
+    });
+    const root = await mount(value);
+    assert.ok(!ids(root).includes("history-65"));
+    await act(async () => button(root, "下一页").props.onClick());
+    await selectType(root, "candidate_audit");
+    assert.match(text(root.toJSON()), /第 1\//);
+    assert.deepEqual(ids(root).slice(0, 3), ["candidate-running", "-", "history-65"]);
+    assert.doesNotMatch(text(root.toJSON()), /计划中/);
+    assert.match(text(root.toJSON()), /运行中 2/);
+    assert.match(text(root.toJSON()), /排队中 2/);
+    assert.match(text(root.toJSON()), /已执行 126/);
+    await act(async () => rows(root)[2].props.onClick());
+    assert.match(text(root.toJSON()), /筛选任务完整 Prompt/);
+    await act(async () => button(root, "加载更多历史任务").props.onClick());
+    assert.equal(hasHistoryButton(root), false);
+    const loaded = ids(root);
+    for (let page = 1; page < Math.ceil(63 / 12); page += 1) {
+      await act(async () => button(root, "下一页").props.onClick());
+      loaded.push(...ids(root));
+    }
+    assert.deepEqual(loaded, ["candidate-running", "-", ...values.slice(65).map((item) => item.task_id)]);
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...value, updated_at: "heartbeat" } })));
+    assert.equal(hasHistoryButton(root), false, "an unrelated global count must not reopen exhausted filtered history");
+    assert.deepEqual(calls.filter((call) => call.cursor), [{ kind: "candidate_audit", cursor: "50" }]);
+    await selectType(root, "fp_review");
+    assert.match(text(root.toJSON()), /第 1\//);
+    assert.deepEqual(ids(root).slice(0, 3), ["review-running", "-", "history-0"]);
+    assert.doesNotMatch(text(root.toJSON()), /筛选任务完整 Prompt/);
+    await selectType(root, "vulnerability_validation");
+    assert.equal(rows(root).length, 0);
+    assert.match(text(root.toJSON()), /当前.*类型.*(?:暂无|没有)|没有.*匹配|暂无.*匹配/);
+    assert.equal(hasHistoryButton(root), false);
+    await selectType(root, "");
+    assert.equal(calls.at(-1).kind, "");
+    assert.ok(ids(root).includes("snapshot-analysis"));
+  });
+}
+
+for (const kind of ["", "candidate_audit"]) {
+  test(`late historical completions reopen exhausted pages once per count increase (${kind || "all"})`, async () => {
+    const values = Array.from({ length: 60 }, (_, index) => task(`original-${index}`,
+      new Date(Date.UTC(2026, 10, 13, 0, 0, 60 - index)).toISOString(), { task_type: "audit" }));
+    const firstPageIds = values.slice(0, 50).map((item) => item.task_id);
+    const calls = [];
+    client.api.defaults.adapter = async (config) => {
+      const ordered = [...values].sort(compareTaskHistory);
+      const offset = Number(config.params.cursor || 0);
+      const items = ordered.slice(offset, offset + 50);
+      calls.push({ kind: config.params.task_kind || "", cursor: config.params.cursor, ids: items.map((item) => item.task_id) });
+      return response(config, { items, next_cursor: offset + 50 < ordered.length ? String(offset + 50) : null });
+    };
+    // Filtered history can stay much smaller than the scan-wide total.
+    let completedCount = kind ? 160 : 60;
+    const root = await mount(pool({ completed_task_count: completedCount }));
+    if (kind) await selectType(root, kind);
+    await act(async () => button(root, "加载更多历史任务").props.onClick());
+    assert.equal(hasHistoryButton(root), false);
+    for (let arrival = 1; arrival <= 2; arrival += 1) {
+      values.push(task(`late-${arrival}`, `2026-11-13T00:00:${String(11 - arrival).padStart(2, "0")}.500Z`, { task_type: "audit" }));
+      completedCount += 1;
+      await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({
+        completed_task_count: completedCount, updated_at: `arrival-${arrival}`,
+      }) })));
+      assert.deepEqual(calls.at(-1).ids, firstPageIds, "late completions do not alter the newest history page");
+      assert.equal(calls.at(-1).kind, kind);
+      assert.equal(hasHistoryButton(root), true, "a new scan completion can be an older report outside the first page");
+      assert.equal(calls.filter((call) => call.cursor).length, arrival, "refresh must not fetch all older history automatically");
+      await act(async () => button(root, "加载更多历史任务").props.onClick());
+      assert.equal(hasHistoryButton(root), false);
+      while (!button(root, "上一页").props.disabled) await act(async () => button(root, "上一页").props.onClick());
+      const loaded = [...ids(root)];
+      while (!button(root, "下一页").props.disabled) {
+        await act(async () => button(root, "下一页").props.onClick());
+        loaded.push(...ids(root));
+      }
+      assert.deepEqual(loaded, [...values].sort(compareTaskHistory).map((item) => item.task_id));
+      for (let heartbeat = 0; heartbeat < 2; heartbeat += 1) {
+        await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({
+          completed_task_count: completedCount, updated_at: `heartbeat-${arrival}-${heartbeat}`,
+        }) })));
+        assert.equal(hasHistoryButton(root), false, "the same completion count must not repeatedly reopen exhausted history");
+      }
+    }
+    assert.deepEqual(calls.filter((call) => call.cursor).map(({ kind: selected, cursor }) => ({ kind: selected, cursor })), [
+      { kind, cursor: "50" }, { kind, cursor: "50" }, { kind, cursor: "50" },
+    ]);
+  });
+}
+
+for (const outcome of ["success", "error"]) {
+  test(`changing task types ignores an old filter's pending page ${outcome}`, async () => {
+    let finishOld;
+    client.api.defaults.adapter = async (config) => {
+      if (config.params.cursor === "candidate-older") {
+        return new Promise((resolve, reject) => { finishOld = () => outcome === "success"
+          ? resolve(response(config, { items: [task("old-candidate", "2026-11-12T00:00:00Z", { task_type: "audit" })], next_cursor: "stale" }))
+          : reject(new Error("old filter failed")); });
+      }
+      const kind = config.params.task_kind || "";
+      return response(config, { items: kind ? [task(kind, "2026-11-13T00:00:00Z", { task_type: kind === "candidate_audit" ? "audit" : kind })] : [],
+        next_cursor: kind === "candidate_audit" ? "candidate-older" : null });
+    };
+    const root = await mount();
+    await selectType(root, "candidate_audit");
+    await act(async () => button(root, "加载更多历史任务").props.onClick());
+    assert.equal(button(root, "加载中").props.disabled, true);
+    await selectType(root, "fp_review");
+    assert.deepEqual(ids(root), ["fp_review"]);
+    await act(async () => finishOld());
+    assert.deepEqual(ids(root), ["fp_review"]);
+    assert.doesNotMatch(text(root.toJSON()), /历史任务加载失败|加载中/);
+    assert.equal(hasHistoryButton(root), false);
+  });
+}
+
+test("changing scans restores all task types and discards an old filter's pending first page", async () => {
+  let finishOld;
+  const calls = [];
+  client.api.defaults.adapter = async (config) => {
+    calls.push({ url: config.url, kind: config.params.task_kind || "" });
+    if (config.url.includes("/s/") && config.params.task_kind === "candidate_audit") {
+      return new Promise((resolve) => { finishOld = () => resolve(response(config, {
+        items: [task("old-scan", "2026-11-13T00:00:00Z", { task_type: "audit" })], next_cursor: "old-cursor",
+      })); });
+    }
+    return response(config, { items: [task(config.url.includes("/other/") ? "other-scan" : "s", "2026-11-13T00:00:00Z")], next_cursor: null });
+  };
+  const root = await mount();
+  await selectType(root, "candidate_audit");
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "other", pool: pool({ scope_id: "other" }) })));
+  assert.equal(typeFilter(root).props.value, "");
+  assert.deepEqual(ids(root), ["other-scan"]);
+  await act(async () => finishOld());
+  assert.deepEqual(ids(root), ["other-scan"]);
+  assert.equal(hasHistoryButton(root), false);
+  assert.ok(calls.filter((call) => call.url.includes("/other/")).every((call) => call.kind === ""));
+});
+
+test("a failed filtered history page retries the same filter and cursor after a refresh", async () => {
+  const calls = [];
+  let failed = false;
+  client.api.defaults.adapter = async (config) => {
+    const kind = config.params.task_kind || "";
+    calls.push({ kind, cursor: config.params.cursor });
+    if (config.params.cursor === "older") {
+      assert.equal(kind, "candidate_audit");
+      if (!failed) { failed = true; throw new Error("temporary failure"); }
+      return response(config, { items: [task("older", "2026-11-12T00:00:00Z", { task_type: "audit" })], next_cursor: null });
+    }
+    return response(config, { items: kind ? [task("current", "2026-11-13T00:00:00Z", { task_type: "audit" })] : [],
+      next_cursor: kind ? "older" : null });
+  };
+  const root = await mount();
+  await selectType(root, "candidate_audit");
+  await act(async () => button(root, "加载更多历史任务").props.onClick());
+  assert.match(text(root.toJSON()), /历史任务加载失败/);
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "heartbeat" }) })));
+  assert.match(text(root.toJSON()), /历史任务加载失败/);
+  await act(async () => button(root, "重试加载历史任务").props.onClick());
+  assert.deepEqual(ids(root), ["current", "older"]);
+  assert.deepEqual(calls.filter((call) => call.cursor), [
+    { kind: "candidate_audit", cursor: "older" }, { kind: "candidate_audit", cursor: "older" },
+  ]);
+  assert.equal(hasHistoryButton(root), false);
+});
 
 test("history uses real UTC time, microseconds and stable ID ties, with invalid times last", () => {
   const values = [
@@ -63,7 +347,7 @@ test("history uses real UTC time, microseconds and stable ID ties, with invalid 
 });
 
 for (const publicAccess of [false, true]) {
-  test(`review-only queue shows planned, waiting and running work (${publicAccess ? "public" : "authenticated"})`, async () => {
+  test(`review-only queue hides planned work and keeps waiting and running work (${publicAccess ? "public" : "authenticated"})`, async () => {
     if (publicAccess) client.setPublicScanAccess({ scanId: "s", token: "public-token" });
     client.api.defaults.adapter = async (config) => response(config, { items: [], next_cursor: null });
     const owner = { task_type: "fp_review", execution_kind: "fp_review", execution_id: "review", execution_revision: 2 };
@@ -72,8 +356,9 @@ for (const publicAccess of [false, true]) {
       queued_tasks: [{ ...owner, request_id: "wait" }],
       planned_tasks: [{ ...owner, planned_task_id: "next" }] });
     const root = await mount(value);
-    assert.deepEqual(rows(root).map((row) => text(row.findAllByType("td")[0])), ["运行中", "排队中", "计划中"]);
-    assert.equal((text(root.toJSON()).match(/去误报/g) || []).length, 3);
+    assert.deepEqual(rows(root).map((row) => text(row.findAllByType("td")[0])), ["运行中", "排队中"]);
+    assert.equal(rows(root).filter((row) => text(row).includes("去误报")).length, 2);
+    assert.doesNotMatch(text(root.toJSON()), /计划中/);
     const next = { ...value, global_queued: 0, planned_tasks: [], queued_tasks: [],
       models: [{ id: "m", model: "p/m", active_tasks: [{ ...owner, task_id: "next-run" }] }], updated_at: "next" };
     await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: next })));
@@ -103,17 +388,17 @@ for (const publicAccess of [false, true]) {
       queued_tasks: [{ request_id: "queued", queued_at: "2026-09-07T00:00:01Z" }],
       planned_tasks: [{ planned_task_id: "planned", planned_at: "2026-09-07T00:00:02Z" }] });
     const root = await mount(value);
-    assert.deepEqual(rows(root).slice(0, 3).map((row) => text(row.findAllByType("td")[0])), ["运行中", "排队中", "计划中"]);
-    assert.deepEqual(ids(root).slice(3), values.slice(0, 9).map((item) => item.task_id));
+    assert.deepEqual(rows(root).slice(0, 2).map((row) => text(row.findAllByType("td")[0])), ["运行中", "排队中"]);
+    assert.deepEqual(ids(root).slice(2), values.slice(0, 10).map((item) => item.task_id));
     assert.equal(rows(root).length, 12);
     assert.match(text(root.toJSON()), /已加载 50 条/);
-    await act(async () => rows(root)[3].props.onClick());
+    await act(async () => rows(root)[2].props.onClick());
     assert.match(text(root.toJSON()), /完整任务 Prompt/);
     await act(async () => button(root, "加载更多历史任务").props.onClick());
     assert.match(text(root.toJSON()), /已加载 100 条/);
     refreshed = true;
     await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...value, updated_at: "new" } })));
-    assert.equal(ids(root)[3], "latest");
+    assert.equal(ids(root)[2], "latest");
     assert.match(text(root.toJSON()), /已加载 101 条/);
     assert.match(text(root.toJSON()), /完整任务 Prompt/);
     await act(async () => button(root, "加载更多历史任务").props.onClick());
@@ -123,7 +408,7 @@ for (const publicAccess of [false, true]) {
       await act(async () => button(root, "下一页").props.onClick());
       loadedIds.push(...ids(root));
     }
-    assert.deepEqual(loadedIds.slice(3), ["latest", ...values.map((item) => item.task_id)]);
+    assert.deepEqual(loadedIds.slice(2), ["latest", ...values.map((item) => item.task_id)]);
     assert.equal(calls.filter((call) => call.url.includes("/tasks/task-")).length, 1);
   });
 }
@@ -223,7 +508,7 @@ test("repeated cursor errors retain history and the retry boundary through refre
   await act(async () => button(root, "加载更多历史任务").props.onClick());
   assert.equal(firstPageCalls, 2);
   assert.match(text(root.toJSON()), /历史任务加载失败/);
-  assert.match(text(root.toJSON()), /共 50 条/);
+  assert.match(text(root.toJSON()), /已加载 50 条/);
 
   await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "refresh" }) })));
   assert.match(text(root.toJSON()), /历史任务加载失败/);
@@ -240,11 +525,11 @@ test("repeated cursor errors retain history and the retry boundary through refre
   await act(async () => button(root, "加载更多历史任务").props.onClick());
   assert.equal(firstPageCalls, 3);
   assert.match(text(root.toJSON()), /历史任务加载失败/);
-  assert.match(text(root.toJSON()), /共 100 条/);
+  assert.match(text(root.toJSON()), /已加载 100 条/);
   rejectPages = false;
   await act(async () => button(root, "重试加载历史任务").props.onClick());
   assert.equal(cursors.at(-1), "100");
-  assert.match(text(root.toJSON()), /共 105 条/);
+  assert.match(text(root.toJSON()), /已加载 105 条/);
   assert.doesNotMatch(text(root.toJSON()), /加载更多历史任务|重试加载历史任务|历史任务加载失败/);
   const loadedIds = ids(root);
   for (let page = 1; page < Math.ceil(values.length / 12); page += 1) {
@@ -423,8 +708,8 @@ for (const access of ["authenticated", "public", "shared"]) {
     assert.doesNotMatch(text(root.toJSON()), /尚未生成|运行任务完整 Prompt/);
     await act(async () => pending.get(`${prefix}/tasks/queued`)(queued));
     assert.match(text(root.toJSON()), /排队任务完整 Prompt/);
-    await act(async () => rows(root)[2].props.onClick());
-    assert.match(text(root.toJSON()), /尚未生成，进入排队或运行后显示/);
+    assert.equal(rows(root).length, 2);
+    assert.doesNotMatch(text(root.toJSON()), /计划中|尚未生成，进入排队或运行后显示/);
     assert.equal(calls.length, 2);
     await act(async () => rows(root)[0].props.onClick());
     assert.match(text(root.toJSON()), /运行任务完整 Prompt/);

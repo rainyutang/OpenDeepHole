@@ -93,3 +93,80 @@ def test_cursor_retains_boundary_when_its_task_gets_a_new_revision(history_store
     refreshed = store.list_task_page(scan_id)
     assert refreshed[0]["task_id"] == "2"
     assert refreshed[0]["revision"] == 2
+
+
+def test_task_kind_filters_before_pagination_and_intersects_exact_task_name(history_store):
+    store, scan_id, save = history_store
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    values = []
+    for index in range(173):
+        candidate = index < 107
+        value = {
+            "task_id": f"task-{index:03}", "revision": 1,
+            "finished_at": (now + timedelta(seconds=index)).isoformat(),
+            "task_type": "audit" if candidate else "fp_review",
+            "task_name": "candidate-audit-target" if index in {0, 53, 106} else f"candidate-audit-{index}",
+            "prompt": "private task body" * 100,
+        }
+        if candidate and index % 3 == 1:
+            value["task_type"] = " Vulnerability_Mining "
+        elif candidate and index % 3 == 2:
+            value.pop("task_type")
+            value["context"] = {"task_type": "audit", "private": "do not expose"}
+        values.append(value)
+    save(list(reversed(values)))
+
+    # All candidate audits are older than the first unfiltered history page.
+    assert all(item["task_type"] == "fp_review" for item in store.list_task_page(scan_id))
+    first = store.list_task_page(scan_id, task_kind="candidate_audit")
+    assert len(first) == 50
+    assert [item["task_id"] for item in first] == [f"task-{i:03}" for i in range(106, 56, -1)]
+    matching = all_pages(store, scan_id, task_kind="candidate_audit")
+    assert [item["task_id"] for item in matching] == [f"task-{i:03}" for i in reversed(range(107))]
+    assert all("prompt" not in item and "context" not in item for item in matching)
+    assert [item["task_id"] for item in all_pages(
+        store, scan_id, task_kind="candidate_audit", task_name="candidate-audit-target",
+    )] == ["task-106", "task-053", "task-000"]
+    assert store.list_task_page(scan_id, task_kind="fp_review", task_name="candidate-audit-target") == []
+    assert store.list_task_page(scan_id, task_kind="threat_analysis") == []
+
+
+def test_unprojected_context_history_kind_filters_match_returned_metadata(history_store):
+    from backend.task_kinds import task_kind
+    store, scan_id, save = history_store
+    fields = [
+        {"task_type": "audit"},
+        {"context": {"task_type": " VULNERABILITY_MINING ", "task_name": " THREAT-PATTERN-AUDIT-X "}},
+        {"task_type": "vulnerability_mining", "context": {"task_name": "threat-pattern-iterative-audit-x"}},
+        {"task_type": "vulnerability_mining", "task_name": "vulnerability-dedup-x"},
+        {"task_type": "vulnerability_mining", "task_name": "unspecified"},
+        {"task_type": "custom_unknown"},
+        {},
+        {"task_type": "audit", "task_name": "", "context": {"task_name": "candidate-context-empty"}},
+        {"task_type": "audit", "task_name": "  ", "context": {"task_name": "candidate-context-blank"}},
+    ]
+    values = [{"task_id": f"old-{index}", "finished_at": "2026-11-13T00:00:00Z", **value}
+              for index, value in enumerate(fields)]
+    save(values)
+    # Old immutable versions lack the newly projected kind and context fields.
+    for value in values:
+        metadata = {key: item for key, item in value.items() if key != "context"}
+        store._conn.execute("UPDATE scan_task_versions SET metadata_json = ? WHERE scan_id = ? AND task_id = ?",
+                            (json.dumps(metadata), scan_id, value["task_id"]))
+    store._conn.commit()
+    for kind in {task_kind(value) for value in values}:
+        rows = store.list_task_page(scan_id, task_kind=kind)
+        assert [row["task_id"] for row in rows] == [value["task_id"] for value in reversed(values) if task_kind(value) == kind]
+        assert all(task_kind(row) == kind for row in rows)
+        assert all("context" not in row for row in rows)
+
+    assert [row["task_id"] for row in store.list_task_page(
+        scan_id, task_kind="candidate_audit", task_name="",
+    )] == ["old-0"]
+    assert store.list_task_page(scan_id, task_kind="candidate_audit", task_name="  ") == []
+    assert [row["task_id"] for row in store.list_task_page(
+        scan_id, task_kind="candidate_audit", task_name="candidate-context-empty",
+    )] == ["old-7"]
+    assert [row["task_id"] for row in store.list_task_page(
+        scan_id, task_kind="candidate_audit", task_name="candidate-context-blank",
+    )] == ["old-8"]
