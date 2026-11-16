@@ -64,6 +64,7 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     from backend.application import publish
     publish(scan_id, "fp_review_progress", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "execution_revision": body.execution_revision,
         "method": job.method,
         "active_indices": body.active_indices,
         "processed": body.processed, "total": job.total,
@@ -132,6 +133,7 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     from backend.application import publish
     publish(scan_id, "fp_review_result", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "execution_revision": body.execution_revision,
         "method": job.method,
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
         "vulnerability_report": result.vulnerability_report,
@@ -198,6 +200,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     from backend.application import publish
     publish(scan_id, "fp_review_stage_output", {
         "review_id": body.review_id,
+        "execution_revision": body.execution_revision,
         "method": job.method,
         "vuln_index": body.vuln_index,
         "stage": body.stage,
@@ -208,7 +211,9 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     return {"ok": True}
 
 
-async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
+async def agent_fp_review_finish(
+    scan_id: str, body: AgentFpReviewFinish, server_url: str = "",
+) -> dict:
     """Agent signals the single-item FP review queue is complete."""
     store = get_scan_store()
     job = await run_store_call(store, "get_fp_review_job_state", body.review_id)
@@ -240,19 +245,26 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
             "FP review %s reported an unexpected cancellation; treating it as retryable error",
             body.review_id,
         )
-    await run_store_call(
+    changed = await run_store_call(
         store,
         "update_fp_review_job",
         body.review_id,
         status=status,
         clear_current_vuln_index=True,
         error_message=error_message,
+        expected_revision=body.execution_revision,
+        expected_agent_session_id=body.agent_session_id,
     )
+    if not changed:
+        return {"ok": True, "changed": False}
     from backend.application import publish
     publish(scan_id, "fp_review_finish", {
         "review_id": body.review_id, "status": status,
+        "execution_revision": body.execution_revision,
         "method": job.method,
         "error_message": error_message or None,
     })
     logger.info("FP review %s finished with status %s", body.review_id, status)
+    from backend.scans.auto_resume import notify_auto_resume
+    await notify_auto_resume(scan_id, server_url)
     return {"ok": True}

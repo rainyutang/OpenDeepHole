@@ -111,6 +111,7 @@ async def get_scan_copy_config(
         code_scan_path=meta.code_scan_path,
         code_scan_paths=list(meta.code_scan_paths or [meta.code_scan_path or meta.project_path]),
         scan_mode=mode,
+        auto_resume_enabled=meta.auto_resume_enabled,
         product=meta.product,
         knowledge_base=ScanKnowledgeBaseRequest(
             enabled=meta.knowledge_base_enabled,

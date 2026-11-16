@@ -1,6 +1,6 @@
 """HTTP bindings for scan fp review callbacks."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from backend.models import (
     AgentFpReviewFinish,
     AgentFpReviewProgress,
@@ -32,6 +32,11 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
 
 
 @router.post("/api/scan/{scan_id}/fp_review/finish")
-async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
+async def agent_fp_review_finish(
+    scan_id: str, body: AgentFpReviewFinish, request: Request = None,
+) -> dict:
     'Agent signals the single-item FP review queue is complete.'
-    return await service.agent_fp_review_finish(scan_id=scan_id, body=body)
+    return await service.agent_fp_review_finish(
+        scan_id=scan_id, body=body,
+        server_url=str(request.base_url).rstrip('/') if request is not None else "",
+    )

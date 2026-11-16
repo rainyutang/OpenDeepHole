@@ -1,6 +1,8 @@
 """Completion services for Agent-backed scans."""
 
 from __future__ import annotations
+import asyncio
+import time
 from backend.models import (
     AgentScanExecutionFailure,
     AgentScanFinish,
@@ -103,7 +105,9 @@ async def _merge_finish_stage_runs(
         })
 
 
-async def agent_scan_execution_failed(scan_id: str, body: AgentScanExecutionFailure) -> dict:
+async def agent_scan_execution_failed(
+    scan_id: str, body: AgentScanExecutionFailure, server_url: str = "",
+) -> dict:
     from backend.application import publish
 
     store = get_scan_store()
@@ -123,11 +127,59 @@ async def agent_scan_execution_failed(scan_id: str, body: AgentScanExecutionFail
             "status": "error", "error_message": body.error_message,
             "opencode_pool": {"execution_revision": body.execution_revision, "agent_session_id": body.agent_session_id},
         })
+        from backend.scans.auto_resume import notify_auto_resume
+        await notify_auto_resume(scan_id, server_url)
     return {"ok": True, "changed": changed}
 
 
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish, server_url: str) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
+    from backend.agents.diagnostics import _scan_not_found
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        _scan_not_found(scan_id, endpoint="finish", store=store)
+    token = await run_store_call(
+        store, "acquire_scan_finish", scan_id,
+        agent_session_id=body.agent_session_id, execution_revision=body.execution_revision,
+    )
+    if token is None:
+        raise HTTPException(status_code=409, detail="stale or already finishing scan execution")
+
+    owner = asyncio.current_task()
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(30)
+            if not await run_store_call(store, "renew_scan_finish", scan_id, token):
+                if owner is not None:
+                    owner.cancel("scan finish lease expired")
+                return
+
+    heartbeat = asyncio.create_task(renew())
+    try:
+        finished = await _persist_scan_finish(scan_id, body)
+        if finished is not None:
+            scan, final_status, confirmed = finished
+            # Keep the first review handoff inside the lease: a periodic
+            # continuation sweep must not reserve a competing review-only
+            # round before this initial job has been created.
+            await _start_completion_review(
+                scan_id, scan=scan, final_status=final_status,
+                confirmed=confirmed, server_url=server_url,
+            )
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+        await run_store_call(store, "release_scan_finish", scan_id, token)
+    if finished is None:
+        return {"ok": True, "changed": False}
+    from backend.scans.auto_resume import notify_auto_resume
+    await notify_auto_resume(scan_id, server_url)
+    return {"ok": True}
+
+
+async def _persist_scan_finish(scan_id: str, body: AgentScanFinish):
+    """Persist a complete report while resume is fenced by the finish lease."""
     from backend.scans.ingestion.candidates import _normalize_candidate_progress
     from backend.agents.diagnostics import _scan_not_found
     from backend.scans.ingestion.candidates import _static_candidate_run_status
@@ -206,7 +258,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, server_url: str
         await _reconcile_finished_vulnerabilities(scan_id, body, store=store, meta=meta)
     )
 
-    await run_store_call(
+    changed = await run_store_call(
         store,
         "update_scan_progress",
         scan_id,
@@ -216,7 +268,11 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, server_url: str
         processed_candidates=final_processed,
         error_message=final_error_message,
         clear_current_candidate=True,
+        expected_revision=body.execution_revision,
+        expected_agent_session_id=body.agent_session_id,
     )
+    if not changed:
+        return None
 
     scan = get_runtime().scans.running_scans.get(scan_id)
     final_pool = await _persist_finished_pool(
@@ -264,11 +320,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, server_url: str
         scan_id, final_status.value, confirmed, final_total,
     )
 
-    await _start_completion_review(
-        scan_id, scan=scan, final_status=final_status, confirmed=confirmed, server_url=server_url,
-    )
-
-    return {"ok": True}
+    return scan, final_status, confirmed
 
 
 async def agent_finish_scan_v2(scan_id: str, body: AgentScanFinishV2, server_url: str) -> dict:
@@ -463,6 +515,24 @@ async def _start_completion_review(
     from backend.scans.fp_review_policy import _scan_fp_review_settings
     from backend.scans.fp_review import _start_fp_review
     auto_fp_review, _fp_review_method = _scan_fp_review_settings(scan_id, scan)
+
+    store = get_scan_store()
+    if hasattr(store, "get_scan_auto_resume"):
+        reservation = await run_store_call(store, "get_scan_auto_resume", scan_id)
+        if reservation is not None and reservation.get("lease_until", 0) > time.time():
+            # A very fast Agent can finish before the mixed continuation has
+            # dispatched its review items. That caller owns this handoff.
+            return
+
+    meta = await run_store_call(get_scan_store(), "get_scan_meta", scan_id)
+    if meta is not None and getattr(meta, "auto_resume_state", "") == "paused":
+        return
+    if meta is not None and getattr(meta, "auto_resume_enabled", False):
+        # Existing failed/partial reviews belong to the bounded continuation
+        # coordinator. This fallback may only start the initial review job.
+        existing_job = await run_store_call(get_scan_store(), "get_fp_review_by_scan", scan_id)
+        if existing_job is not None:
+            return
 
     if final_status == ScanItemStatus.COMPLETE and confirmed > 0:
         try:

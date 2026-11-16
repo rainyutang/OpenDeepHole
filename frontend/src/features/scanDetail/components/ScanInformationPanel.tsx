@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { updateScanCodeGraph } from "../../../api/scans";
 import { STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID, canonicalMiningEngineLabel } from "../../../miningEngines";
 import { selectedScanPaths } from "../../../scanPaths";
+import { autoResumeLabel } from "../../../scanAutoResume";
 import type { ScanCodeGraphState, ScanStatus as ScanStatusType } from "../../../types/scans";
 import { formatDateTime } from "../../modelPool/presentation";
 import {
@@ -156,6 +157,13 @@ export function ScanInformationPanel({
 
           <ScanInformationSection title="扫描过程">
             <div className="space-y-3">
+              <ScanInformationToggle
+                label="自动续扫"
+                enabled={scan.auto_resume_enabled === true}
+                detail={scan.auto_resume_enabled
+                  ? `${autoResumeLabel(scan)}。${scan.auto_resume_reason || "扫描结束后自动继续未完成和失败任务，最多追加 3 轮。"}`
+                  : "本次扫描未启用"}
+              />
               <ScanInformationToggle
                 label="威胁分析"
                 enabled={threatAnalysisSelected}

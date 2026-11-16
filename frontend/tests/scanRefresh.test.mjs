@@ -228,3 +228,34 @@ test("scan changes abort owned FP and index reads without cancelling another ove
   assert.equal((await shared.promise).processed_candidates, 99);
   assert.equal(observed.scan.processed_candidates, 1, "a disposed hook must not apply its old response");
 });
+
+for (const newerExecution of [true, false]) {
+  test(`late FP-only overview preserves ${newerExecution ? "a new review execution" : "same-execution live progress"}`, async () => {
+    const { refreshFullState } = await server.ssrLoadModule("/src/hooks/scanSSE/refreshState.ts");
+    const { createFpReviewHandlers } = await server.ssrLoadModule("/src/features/scanDetail/events/createFpReviewHandlers.ts");
+    const initial = { ...fixture().review, execution_revision: 1, status: newerExecution ? "error" : "running" };
+    let current = initial;
+    const setFpReview = (update) => { current = typeof update === "function" ? update(current) : update; };
+    const setters = { getScan: () => fixture().scan, getFpReview: () => current, setFpReview, setScan() {}, setIndexStatus() {} };
+    const handlers = createFpReviewHandlers({ scanId: "s", state: { setFpReview }, resources: { scheduleOverviewSummaryRefresh() {} } });
+    const pending = deferred();
+    const refresh = refreshFullState("s", setters, () => true, new Set(["fp-review"]), new AbortController().signal, pending.promise);
+    const revision = newerExecution ? 2 : 1;
+    if (newerExecution) handlers.onFpReviewStarted({ review_id: initial.review_id, execution_revision: 2, status: "running", total: 120, processed: 1 });
+    handlers.onFpReviewProgress({ review_id: initial.review_id, execution_revision: revision, total: 120, processed: 2, vuln_index: 2 });
+    if (newerExecution) {
+      handlers.onFpReviewStarted({ review_id: initial.review_id, execution_revision: 1, status: "running", total: 120, processed: 0 });
+      handlers.onFpReviewFinish({ review_id: initial.review_id, execution_revision: 1, status: "error", error_message: "old failure" });
+      handlers.onFpReviewProgress({ review_id: initial.review_id, execution_revision: 1, total: 120, processed: 0, vuln_index: 0 });
+    }
+    pending.resolve({ ...initial, results: [] });
+    await refresh;
+    assert.equal(current.execution_revision, revision);
+    assert.equal(current.status, "running");
+    assert.equal(current.processed, 2);
+    assert.equal(current.results, initial.results, "overview must retain loaded results");
+    handlers.onFpReviewFinish({ review_id: initial.review_id, execution_revision: revision, status: "complete", error_message: null });
+    assert.equal(current.status, "complete");
+    assert.equal(current.execution_revision, revision);
+  });
+}

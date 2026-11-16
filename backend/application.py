@@ -54,6 +54,8 @@ class ScanRuntimeState:
     running_scans: dict[str, ScanStatus] = field(default_factory=dict)
     scan_owners: dict[str, str] = field(default_factory=dict)
     scan_index_statuses: dict[str, dict] = field(default_factory=dict)
+    auto_resume_wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    resume_heartbeats: dict[str, asyncio.Task] = field(default_factory=dict)
 
 
 _RESPONSE_WAITER_FIELDS = {
@@ -138,6 +140,7 @@ class BackendRuntime:
         """Drain worker-owned tasks before closing the persistent store."""
         tasks = set(self.agents.agent_disconnect_tasks.values())
         tasks.update(self.agents.agent_touch_tasks.values())
+        tasks.update(self.scans.resume_heartbeats.values())
         current = asyncio.current_task()
         tasks.discard(current)
         for task in tasks:
@@ -151,6 +154,7 @@ class BackendRuntime:
             waiters.clear()
         self.agents.agent_disconnect_tasks.clear()
         self.agents.agent_touch_tasks.clear()
+        self.scans.resume_heartbeats.clear()
 
 
 _default_runtime = BackendRuntime()

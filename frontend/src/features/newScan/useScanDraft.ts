@@ -31,6 +31,7 @@ export function useScanDraft() {
       setThreatAnalysisEnabled: field('threatAnalysisEnabled'),
       setThreatAnalysisMethod: field('threatAnalysisMethod'),
       setAutoFpReview: field('autoFpReview'),
+      setAutoResumeEnabled: field('autoResumeEnabled'),
       setFpReviewMethod: field('fpReviewMethod'),
       setReviewNotesEnabled: field('reviewNotesEnabled'),
       setReviewNoteIds: field('reviewNoteIds')

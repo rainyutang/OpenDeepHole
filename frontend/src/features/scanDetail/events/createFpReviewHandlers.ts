@@ -1,4 +1,5 @@
 import type { ScanSSEHandlers } from "../../../hooks/scanSSE/protocol";
+import { isOlderFpReviewExecution } from "../../../scanRuntime/audit";
 import type { ScanEventContext } from "./context";
 
 export function createFpReviewHandlers({ scanId, state, resources }: ScanEventContext): Pick<ScanSSEHandlers, "onFpReviewStarted" | "onFpReviewProgress" | "onFpReviewStageOutput" | "onFpReviewResult" | "onFpReviewFinish"> {
@@ -6,8 +7,9 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
   const { scheduleOverviewSummaryRefresh } = resources;
   return {
     onFpReviewStarted: (data) => {
-      setFpReview((prev) => ({
+      setFpReview((prev) => isOlderFpReviewExecution(prev, data) ? prev : ({
         review_id: data.review_id,
+        execution_revision: data.execution_revision ?? (prev?.review_id === data.review_id ? prev.execution_revision : undefined),
         scan_id: scanId,
         method: data.method ?? prev?.method ?? "adversarial",
         status: data.status,
@@ -26,9 +28,10 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
     },
     onFpReviewProgress: (data) => {
       setFpReview((prev) => {
-        if (!prev || prev.review_id !== data.review_id) return prev;
+        if (!prev || prev.review_id !== data.review_id || isOlderFpReviewExecution(prev, data)) return prev;
         return {
           ...prev,
+          execution_revision: data.execution_revision ?? prev.execution_revision,
           status: "running",
           processed: data.processed ?? prev.processed,
           current_vuln_index: data.vuln_index,
@@ -40,7 +43,7 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
     },
     onFpReviewStageOutput: (data) => {
       setFpReview((prev) => {
-        if (!prev || prev.review_id !== data.review_id) return prev;
+        if (!prev || prev.review_id !== data.review_id || isOlderFpReviewExecution(prev, data)) return prev;
         const results = [...prev.results];
         const existingIndex = results.findIndex((result) => result.vuln_index === data.vuln_index);
         if (existingIndex >= 0) {
@@ -68,12 +71,12 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
             created_at: new Date().toISOString(),
           });
         }
-        return { ...prev, status: "running", results };
+        return { ...prev, execution_revision: data.execution_revision ?? prev.execution_revision, status: "running", results };
       });
     },
     onFpReviewResult: (data) => {
       setFpReview((prev) => {
-        if (!prev || prev.review_id !== data.review_id) return prev;
+        if (!prev || prev.review_id !== data.review_id || isOlderFpReviewExecution(prev, data)) return prev;
         const existing = prev.results.find((result) => result.vuln_index === data.vuln_index);
         const newResult = {
           vuln_index: data.vuln_index,
@@ -96,6 +99,7 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
         };
         return {
           ...prev,
+          execution_revision: data.execution_revision ?? prev.execution_revision,
           status: "running",
           results: [
             ...prev.results.filter((result) => result.vuln_index !== data.vuln_index),
@@ -107,9 +111,10 @@ export function createFpReviewHandlers({ scanId, state, resources }: ScanEventCo
     },
     onFpReviewFinish: (data) => {
       setFpReview((prev) => {
-        if (!prev || prev.review_id !== data.review_id) return prev;
+        if (!prev || prev.review_id !== data.review_id || isOlderFpReviewExecution(prev, data)) return prev;
         return {
           ...prev,
+          execution_revision: data.execution_revision ?? prev.execution_revision,
           status: data.status,
           error_message: data.error_message,
           current_vuln_index: null,

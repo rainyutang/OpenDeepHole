@@ -3,6 +3,7 @@ import { getFpReviewOverview } from "../../api/fpReview";
 import { getAgentIndexStatus } from "../../api/scans";
 
 import { mergeScanOverview } from "../../scanRuntime/scanSnapshots";
+import { isOlderFpReviewExecution } from "../../scanRuntime/audit";
 import type { FpReviewJob } from "../../types/fpReview";
 import { SSEStateSetters } from './protocol';
 
@@ -12,7 +13,7 @@ export const STATE_RESOURCES: readonly StateResource[] = ["overview", "fp-review
 
 export async function refreshFullState(
   scanId: string,
-  { getScan, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
+  { getScan, getFpReview, setScan, setFpReview, setIndexStatus }: SSEStateSetters,
   isCurrent: () => boolean,
   resources: ReadonlySet<StateResource>,
   signal: AbortSignal,
@@ -30,9 +31,17 @@ export async function refreshFullState(
     });
   })(), (async () => {
     if (!resources.has("fp-review")) return;
+    const requestedFrom = getFpReview();
     const job = await (reviewRequest ?? getFpReviewOverview(scanId, signal));
     if (!isCurrent()) return;
-    if (job) setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
+    if (job) setFpReview((previous) => {
+      if (!previous) return job;
+      if (isOlderFpReviewExecution(previous, job)) return previous;
+      const newerExecution = previous.review_id === job.review_id
+        && (job.execution_revision ?? 0) > (previous.execution_revision ?? 0);
+      if (previous !== requestedFrom && !newerExecution) return previous;
+      return { ...previous, ...job, results: previous.results };
+    });
   })(), (async () => {
     if (!resources.has("index-status")) return;
     const index = await getAgentIndexStatus(scanId, signal);

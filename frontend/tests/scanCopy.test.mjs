@@ -46,7 +46,7 @@ function fixture(overrides = {}) {
     agent_key: "original-agent", scan_name: "", product: "Saved product",
     project_path: "/repo/project", code_scan_paths: ["/repo/project/src", "/repo/project/include/api.h"],
     scan_mode: "custom", threat_analysis_enabled: true, threat_analysis_method: "saved-threat",
-    mining_engines: [{ engine_id: "static_candidate" }], auto_fp_review: false, fp_review_method: "staged",
+    mining_engines: [{ engine_id: "static_candidate" }], auto_fp_review: false, fp_review_method: "staged", auto_resume_enabled: true,
     knowledge_base: { enabled: false, project_id: "", project_name: "" },
     vulnerability_validation: { enabled: false, method_id: "", values: {} },
     code_graph_mcp: null, review_notes_enabled: false, review_note_ids: [], multi_versions: [],
@@ -131,7 +131,7 @@ test("copy restores all custom form selections, requires a new name, and submits
   await submit(root);
   assert.equal(submissions.length, 1);
   const payload = submissions[0];
-  for (const key of ["agent_key", "product", "project_path", "code_scan_paths", "scan_mode", "threat_analysis_enabled", "threat_analysis_method", "mining_engines", "auto_fp_review", "fp_review_method", "knowledge_base", "vulnerability_validation", "code_graph_mcp", "review_notes_enabled", "review_note_ids"]) {
+  for (const key of ["agent_key", "product", "project_path", "code_scan_paths", "scan_mode", "threat_analysis_enabled", "threat_analysis_method", "mining_engines", "auto_fp_review", "auto_resume_enabled", "fp_review_method", "knowledge_base", "vulnerability_validation", "code_graph_mcp", "review_notes_enabled", "review_note_ids"]) {
     assert.deepEqual(payload[key], source[key], `Copied ${key} must retain the saved value`);
   }
   assert.equal(payload.scan_name, "Copied scan");
@@ -430,4 +430,27 @@ test("ordinary creation keeps its original defaults and never requests a copy co
   assert.equal(submissions[0].scan_mode, "standard");
   assert.equal(submissions[0].agent_key, "default-agent");
   assert.ok(requests.every((request) => !request.url.endsWith("/copy-config")));
+});
+
+for (const scanMode of ["standard", "quick", "custom", "multi_version"]) {
+  test(`new ${scanMode} scans enable automatic resume and copy only its switch`, async () => {
+    const { defaultScanDraft, scanRequestFromDraft, scanDraftInitialization } = await server.ssrLoadModule("/src/features/newScan/draftModel.ts");
+    const draft = { ...defaultScanDraft(), scanMode };
+    assert.equal(scanRequestFromDraft(draft, [], null).auto_resume_enabled, true);
+    const copied = scanDraftInitialization([], [], [], fixture({ scan_mode: scanMode, auto_resume_enabled: false,
+      auto_resume_count: 3, auto_resume_state: "exhausted", auto_resume_reason: "已达上限" }));
+    const payload = scanRequestFromDraft({ ...draft, ...copied }, [], null);
+    assert.equal(payload.auto_resume_enabled, false);
+    for (const field of ["auto_resume_count", "auto_resume_state", "auto_resume_reason"]) assert.equal(field in payload, false);
+  });
+}
+
+test("automatic resume switch is visible in fixed modes and can be disabled", async () => {
+  const { root, submissions } = await mount({ source: fixture({ scan_mode: "standard" }) });
+  const toggle = () => root.root.findByProps({ "aria-label": "自动续扫" });
+  assert.equal(toggle().props["aria-checked"], true);
+  await act(async () => toggle().props.onClick());
+  await fillName(root);
+  await submit(root);
+  assert.equal(submissions[0].auto_resume_enabled, false);
 });

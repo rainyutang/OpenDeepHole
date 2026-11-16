@@ -63,6 +63,7 @@ export interface CreateScanInput {
   feedback_ids?: string[];
   code_graph_mcp?: AgentMcpConfig | null;
   auto_fp_review?: boolean;
+  auto_resume_enabled?: boolean;
   fp_review_method?: FpReviewMethod;
   review_notes_enabled?: boolean;
   review_note_ids?: string[];

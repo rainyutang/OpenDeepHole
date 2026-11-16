@@ -24,7 +24,10 @@ from backend.scans.configuration import (
 )
 from backend.scans.feedback_selection import _selected_feedback_entries
 from backend.scans.fp_review import _start_fp_review
-from backend.scans.fp_review_policy import _fp_review_resume_state
+from backend.scans.fp_review_policy import (
+    _automatic_fp_review_resume_state,
+    _fp_review_resume_state,
+)
 from backend.scans.resume_execution import (
     ResumeCheckpoint,
     capture_resume_checkpoint,
@@ -261,15 +264,15 @@ async def _finish_resume(
     fp_resume_count: int,
     claimed_execution_revision: int | None,
     server_url: str,
+    *,
+    resume_round: str | None = None,
+    automatic: bool = False,
 ) -> ScanStartResponse:
     agent_id = selected.agent_id
     incomplete_threat_tasks = plan.incomplete_threat_tasks
     candidate_payload = plan.candidate_payload
     resume_threat_analysis = plan.resume_threat_analysis
     retry_mining_engine_ids = plan.retry_mining_engine_ids
-    total_candidates = checkpoint.total_candidates
-    processed_offset = checkpoint.processed_offset
-    progress = checkpoint.progress
     logger.info(
         "Continuing scan %s via agent %s: candidates=%s threat_tasks=%d engines=%s threat_analysis=%s",
         scan_id,
@@ -281,16 +284,25 @@ async def _finish_resume(
     )
     from backend.application import publish
 
+    persisted = await run_store_call(get_scan_store(), "load_scan_runtime", scan_id)
+    if persisted is None:
+        raise ApplicationError(404, "Scan not found")
+    current, current_meta = persisted
+    if current_meta.execution_revision != execution_revision or current.status == ScanItemStatus.CANCELLED:
+        raise ApplicationError(409, "续扫已被停止或执行轮次已变化")
+    if resume_round is not None:
+        from backend.scans.auto_resume import verify_resume_dispatch
+        await verify_resume_dispatch(scan_id, resume_round)
     publish(scan_id, "scan_status", {
         "execution_revision": execution_revision,
-        "status": ScanItemStatus.PENDING,
-        "progress": progress,
-        "total_candidates": total_candidates,
-        "processed_candidates": processed_offset,
-        "error_message": "",
+        "status": current.status,
+        "progress": current.progress,
+        "total_candidates": current.total_candidates,
+        "processed_candidates": current.processed_candidates,
+        "error_message": current.error_message or "",
         "opencode_pool": (
-            scan.opencode_pool.model_dump(mode="json")
-            if scan.opencode_pool is not None
+            current.opencode_pool.model_dump(mode="json")
+            if current.opencode_pool is not None
             else None
         ),
     })
@@ -300,7 +312,8 @@ async def _finish_resume(
             server_url,
             raise_on_error=False,
             require_unresolved=True,
-            allow_cancelled=claimed_execution_revision is None,
+            allow_cancelled=claimed_execution_revision is None and not automatic,
+            resume_round=resume_round,
         )
         if fp_resume is None:
             logger.warning(
@@ -319,6 +332,8 @@ async def _continue_scan(
     server_url_override: str = "",
     skip_owner_check: bool = False,
     claimed_execution_revision: int | None = None,
+    auto_resume_round: str | None = None,
+    auto_resume_expected_revision: int | None = None,
 ) -> ScanStartResponse:
     """Continue all unfinished and retryable work for one scan."""
     if not skip_owner_check:
@@ -333,6 +348,12 @@ async def _continue_scan(
         raise ApplicationError(status_code=404, detail="Scan not found")
 
     scan, meta = result
+    automatic = auto_resume_round is not None
+    if automatic and (
+        meta.execution_revision != auto_resume_expected_revision
+        or scan.status == ScanItemStatus.CANCELLED
+    ):
+        raise ApplicationError(status_code=409, detail="自动续扫已被停止或执行轮次已变化")
     if claimed_execution_revision is not None and (
         meta.execution_revision != claimed_execution_revision
         or scan.status != ScanItemStatus.CANCELLED
@@ -352,11 +373,24 @@ async def _continue_scan(
         run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
         run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
     )
-    fp_review_running, fp_resume_count = _fp_review_resume_state(
-        scan.vulnerabilities,
-        latest_fp_review_result_map(fp_verdicts.get(scan_id, [])),
-        fp_states.get(scan_id, []),
-    )
+    latest_fp_results = latest_fp_review_result_map(fp_verdicts.get(scan_id, []))
+    review_states = fp_states.get(scan_id, [])
+    review_jobs = await asyncio.gather(*(
+        run_store_call(store, "get_fp_review_job_state", review_id)
+        for review_id, _status in review_states
+    ))
+    expected_fp_revisions = {
+        job.review_id: (job.execution_revision, job.status.value)
+        for job in review_jobs if job is not None
+    }
+    if automatic:
+        fp_review_running, fp_resume_count = _automatic_fp_review_resume_state(
+            scan, latest_fp_results, review_states,
+        )
+    else:
+        fp_review_running, fp_resume_count = _fp_review_resume_state(
+            scan.vulnerabilities, latest_fp_results, review_states,
+        )
     # Restart recovery owns a fenced scan revision. Independent reviews are
     # adopted/recovered separately and must not veto restoration of that scan.
     if fp_review_running and claimed_execution_revision is None:
@@ -365,10 +399,24 @@ async def _continue_scan(
     if not plan.resume_main_scan and fp_resume_count == 0:
         raise ApplicationError(status_code=400, detail="当前扫描没有可续扫的任务")
     if not plan.resume_main_scan:
-        await _start_fp_review(
-            scan_id, server_url, raise_on_error=True,
-            require_unresolved=True, allow_cancelled=True,
+        from backend.scans.fp_review import preflight_fp_review
+        from backend.scans.auto_resume import acquire_resume_dispatch, finish_resume_dispatch
+
+        await preflight_fp_review(meta)
+        resume_round = await acquire_resume_dispatch(
+            scan_id, automatic=automatic, expected_revision=meta.execution_revision,
+            server_url=server_url, expected_fp_revisions=expected_fp_revisions,
         )
+        try:
+            await _start_fp_review(
+                scan_id, server_url, raise_on_error=True,
+                require_unresolved=True, allow_cancelled=not automatic,
+                resume_round=resume_round,
+            )
+        except Exception as exc:
+            await finish_resume_dispatch(scan_id, resume_round, failed=True, reason=str(exc))
+            raise
+        await finish_resume_dispatch(scan_id, resume_round)
         logger.info("Continuing scan %s with FP-review work only: unresolved=%d", scan_id, fp_resume_count)
         return ScanStartResponse(scan_id=scan_id)
     if meta.threat_analysis_enabled:
@@ -385,14 +433,37 @@ async def _continue_scan(
     selected = await _prepare_resume_agent(scan_id, meta, current_user, claimed_execution_revision)
     checkpoint = capture_resume_checkpoint(scan, meta, processed_keys, plan)
     payload = await _resume_payload(scan_id, meta, selected, plan, checkpoint, server_url)
-    revision, command = await claim_and_prepare_resume(
-        scan_id, scan, meta, selected, plan, checkpoint, payload, server_url, claimed_execution_revision,
-    )
-    await dispatch_resume(scan_id, scan, current_user, selected, plan, checkpoint, command)
-    return await _finish_resume(
-        scan_id, scan, selected, plan, checkpoint, revision,
-        fp_resume_count, claimed_execution_revision, server_url,
-    )
+    from backend.scans.auto_resume import acquire_resume_dispatch, finish_resume_dispatch
+
+    # Agent process recovery already owns its fenced revision. It must not
+    # consume another automatic round or conflict with the restored wave.
+    resume_round = None
+    if claimed_execution_revision is None:
+        resume_round = await acquire_resume_dispatch(
+            scan_id, automatic=automatic, expected_revision=meta.execution_revision,
+            server_url=server_url, expected_fp_revisions=expected_fp_revisions,
+        )
+    try:
+        revision, command = await claim_and_prepare_resume(
+            scan_id, scan, meta, selected, plan, checkpoint, payload, server_url,
+            claimed_execution_revision, resume_round=resume_round,
+        )
+        await dispatch_resume(
+            scan_id, scan, current_user, selected, plan, checkpoint, command,
+            resume_round=resume_round,
+        )
+        response = await _finish_resume(
+            scan_id, scan, selected, plan, checkpoint, revision,
+            fp_resume_count, claimed_execution_revision, server_url,
+            resume_round=resume_round, automatic=automatic,
+        )
+    except Exception as exc:
+        if resume_round is not None:
+            await finish_resume_dispatch(scan_id, resume_round, failed=True, reason=str(exc))
+        raise
+    if resume_round is not None:
+        await finish_resume_dispatch(scan_id, resume_round)
+    return response
 
 
 async def resume_scan(

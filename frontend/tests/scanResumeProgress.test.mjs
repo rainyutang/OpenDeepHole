@@ -663,3 +663,27 @@ test("all failed static rules stay failed when the overall scan completes", asyn
   assert.match(text(root.toJSON()), /存在失败的静态规则/);
   assert.match(text(root.toJSON()), /异常/);
 });
+
+for (const autoState of ["pending", "waiting", "running"]) {
+  test(`automatic resume ${autoState} keeps stop available and hides manual resume`, async () => {
+    installApi({ ...overview(), auto_resume_enabled: true, auto_resume_count: 1,
+      auto_resume_state: autoState, auto_resume_reason: "等待客户端完成清理" });
+    const root = await mount();
+    const labels = root.root.findAllByType("button").map(text);
+    assert.equal(labels.includes("续扫"), false);
+    assert.equal(labels.includes("停止扫描"), true);
+    assert.match(text(root.toJSON()), /1\/3/);
+    assert.match(text(root.toJSON()), /等待客户端完成清理/);
+  });
+}
+
+test("automatic resume SSE updates show exhausted count and restore manual resume", async () => {
+  const state = installApi({ ...overview(), auto_resume_enabled: true, auto_resume_count: 2, auto_resume_state: "waiting" });
+  const root = await mount();
+  state.overview = { ...state.overview, auto_resume_count: 3, auto_resume_state: "exhausted", auto_resume_reason: "仍有失败任务，可手动续扫" };
+  await notify(["scan_status", { status: "complete", execution_revision: 1, auto_resume_enabled: true,
+    auto_resume_count: 3, auto_resume_state: "exhausted", auto_resume_reason: state.overview.auto_resume_reason }]);
+  assert.match(text(root.toJSON()), /自动续扫已达上限（3\/3）/);
+  assert.equal(root.root.findAllByType("button").map(text).includes("续扫"), true);
+  assert.equal(root.root.findAllByType("button").map(text).includes("停止扫描"), false);
+});

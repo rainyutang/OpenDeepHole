@@ -424,3 +424,26 @@ test("only clears a pool snapshot when the caller marks null as authoritative", 
     null,
   );
 });
+
+test("historical scans default automatic resume off and current state survives normalization", () => {
+  const old = runtime.normalizeScanStatus({ scan_id: "s", status: "complete" });
+  assert.equal(old.auto_resume_enabled, false);
+  assert.equal(old.auto_resume_count, 0);
+  assert.equal(old.auto_resume_state, "idle");
+  const current = runtime.normalizeScanStatus({ ...old, auto_resume_enabled: true, auto_resume_count: 2,
+    auto_resume_state: "waiting", auto_resume_reason: "等待客户端上线" });
+  assert.equal(current.auto_resume_count, 2);
+  assert.equal(current.auto_resume_state, "waiting");
+  assert.equal(current.auto_resume_reason, "等待客户端上线");
+});
+
+test("a GET started before automatic resume state changes cannot undo the live change", () => {
+  const before = runtime.normalizeScanStatus({ scan_id: "s", status: "complete", execution_revision: 1,
+    auto_resume_enabled: true, auto_resume_count: 0, auto_resume_state: "idle" });
+  const live = { ...before, auto_resume_state: "waiting", auto_resume_reason: "等待客户端上线" };
+  const merged = runtime.mergeScanSnapshot(live, before, before);
+  assert.equal(merged.auto_resume_state, "waiting");
+  assert.equal(merged.auto_resume_reason, "等待客户端上线");
+  const next = { ...live, execution_revision: 2, status: "pending", auto_resume_count: 1, auto_resume_state: "running" };
+  assert.equal(runtime.mergeScanSnapshot(next, before), next);
+});

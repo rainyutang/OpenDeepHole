@@ -269,7 +269,9 @@ class ScanStoreBase(ABC):
         static_total_files: int | None = None,
         static_scanned_files: int | None = None,
         static_analysis_done: bool | None = None,
-    ) -> None:
+        expected_revision: int | None = None,
+        expected_agent_session_id: str | None = None,
+    ) -> bool:
         """Incrementally update progress fields on the scans row.
 
         Use *clear_current_candidate=True* to set current_candidate to NULL.
@@ -286,6 +288,7 @@ class ScanStoreBase(ABC):
         agent_id: str | None = None,
         agent_session_id: str | None = None,
         claimed_revision: int | None = None,
+        resume_round: str | None = None,
     ) -> int | None:
         """Atomically claim a terminal scan and bind its execution identity.
 
@@ -640,7 +643,9 @@ class ScanStoreBase(ABC):
         *,
         agent_session_id: str,
         force_new: bool = False,
-    ) -> int:
+        resume_round: str | None = None,
+        expected_revision: int | None = None,
+    ) -> int | None:
         """Bind an FP-review execution, reusing the active process revision.
 
         Repeated automatic dispatches to the same Agent process must share one
@@ -828,7 +833,9 @@ class ScanStoreBase(ABC):
         current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
-    ) -> None:
+        expected_revision: int | None = None,
+        expected_agent_session_id: str | None = None,
+    ) -> bool:
         """Update status/progress on an FP review job."""
 
     @abstractmethod

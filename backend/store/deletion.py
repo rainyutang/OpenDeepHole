@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS scan_deletions (
 # Dependency order matters: current pointers precede immutable bodies, and FP
 # children precede FP jobs. Independent feedback is deliberately absent.
 SCAN_CHILDREN = (
+    "scan_auto_resume",
     "scan_shares",
     "scan_review_notes",
     "validation_output_chunks", "validation_update_receipts", "scan_task_current", "opencode_task_reports", "scan_task_versions",
@@ -69,12 +70,17 @@ class ScanDeletionMixin:
             if row is None:
                 self._conn.commit()
                 return None
+            if self.is_scan_deleted(scan_id):
+                self._conn.commit()
+                return {"scan_id": scan_id, "status": "pending"}
             if row["status"] in {"pending", "analyzing", "auditing"}:
                 raise ValueError("Cannot delete a running scan")
             active_fp = self._conn.execute("SELECT 1 FROM fp_review_jobs WHERE scan_id = ? AND status IN ('pending', 'running') LIMIT 1", (scan_id,)).fetchone()
             active_validation = self._conn.execute("SELECT 1 FROM vulnerability_validations WHERE scan_id = ? AND (running = 1 OR status IN ('pending', 'queued', 'running')) LIMIT 1", (scan_id,)).fetchone()
             if active_fp or active_validation:
                 raise ValueError("Cannot delete a scan with active FP review or validation")
+            self._conn.execute("UPDATE scans SET auto_resume_state = 'paused', auto_resume_reason = '扫描已删除' WHERE scan_id = ?", (scan_id,))
+            self._conn.execute("UPDATE scan_auto_resume SET round_id = '', lease_until = 0 WHERE scan_id = ?", (scan_id,))
             now = utc_now()
             self._conn.execute("INSERT INTO scan_deletions (scan_id, project_id, user_id, requested_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(scan_id) DO NOTHING",
                 (scan_id, row["project_id"], row["user_id"] or "", now, now))

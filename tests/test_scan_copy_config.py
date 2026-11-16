@@ -48,7 +48,7 @@ def env(request, tmp_path, monkeypatch):
         code_scan_paths=["/project/src/a.c", "/project/src/lib"],
         scan_mode="custom", threat_analysis_enabled=True,
         threat_analysis_method="deephole_compact_threat_analysis",
-        auto_fp_review=False, fp_review_method="adversarial",
+        auto_resume_enabled=True, auto_fp_review=False, fp_review_method="adversarial",
         mining_engines=[
             MiningEngineSelection(engine_id="static_candidate", engine_label="Static"),
             MiningEngineSelection(engine_id="threat_pattern_audit", engine_label="Patterns", enabled=False),
@@ -111,7 +111,7 @@ def test_copy_reads_all_saved_form_inputs_without_results_or_credentials(env):
         "scan_mode", "product", "knowledge_base", "vulnerability_validation",
         "code_graph_mcp", "review_notes_enabled", "review_note_ids", "multi_versions",
         "threat_analysis_enabled", "threat_analysis_method", "mining_engines",
-        "auto_fp_review", "fp_review_method",
+        "auto_resume_enabled", "auto_fp_review", "fp_review_method",
     }
     assert payload["agent_key"] == "stable-agent"
     assert payload["scan_name"] == ""
@@ -121,6 +121,7 @@ def test_copy_reads_all_saved_form_inputs_without_results_or_credentials(env):
     assert payload["threat_analysis_enabled"] is True
     assert payload["threat_analysis_method"] == "deephole_compact_threat_analysis"
     assert payload["mining_engines"] == [{"engine_id": "static_candidate"}]
+    assert payload["auto_resume_enabled"] is True
     assert payload["auto_fp_review"] is False
     assert payload["fp_review_method"] == "adversarial"
     assert payload["knowledge_base"] == {"enabled": True, "project_id": "kb-id", "project_name": "Saved KB"}
@@ -174,6 +175,7 @@ def test_copy_modes_use_current_profiles_or_preserve_custom_inputs(env, mode, ex
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["scan_mode"] == expected
+    assert payload["auto_resume_enabled"] is True
     if expected == "custom":
         assert payload["mining_engines"] == [{"engine_id": "static_candidate"}]
         assert payload["auto_fp_review"] is False

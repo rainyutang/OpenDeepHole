@@ -158,6 +158,7 @@ class IntegrationScanRequest(BaseModel):
     vulnerability_validation: ScanVulnerabilityValidationRequest = Field(
         default_factory=ScanVulnerabilityValidationRequest
     )
+    auto_resume_enabled: bool = True
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     threat_analysis_method: str | None = None
@@ -418,6 +419,7 @@ async def create_integration_scan(
             validation_environment=body.validation_environment,
             knowledge_base=body.knowledge_base,
             vulnerability_validation=body.vulnerability_validation,
+            auto_resume_enabled=body.auto_resume_enabled,
             auto_fp_review=body.auto_fp_review,
             fp_review_method=body.fp_review_method,
             threat_analysis_method=body.threat_analysis_method,

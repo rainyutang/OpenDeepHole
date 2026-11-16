@@ -119,6 +119,8 @@ async def claim_and_prepare_resume(
     resume_payload: dict,
     server_url: str,
     claimed_execution_revision: int | None,
+    *,
+    resume_round: str | None = None,
 ) -> tuple[int, dict]:
     store = get_scan_store()
     agent_id, agent = selected.agent_id, selected.agent
@@ -141,6 +143,7 @@ async def claim_and_prepare_resume(
         agent_id=agent_id,
         agent_session_id=agent.agent_session_id,
         claimed_revision=claimed_execution_revision,
+        resume_round=resume_round,
     )
     if not claimed:
         raise ApplicationError(status_code=400, detail="Scan is already running")
@@ -249,6 +252,8 @@ async def dispatch_resume(
     plan: ResumePlan,
     checkpoint: ResumeCheckpoint,
     command: dict,
+    *,
+    resume_round: str | None = None,
 ) -> None:
     from backend.agents.gateway import send_agent_command
     store = get_scan_store()
@@ -259,6 +264,12 @@ async def dispatch_resume(
     previous_candidate_audits = checkpoint.previous_candidate_audits
     previous_threat_analysis_run = checkpoint.previous_threat_analysis_run
     previous_mining_engine_runs = checkpoint.previous_mining_engine_runs
+    if resume_round is not None:
+        from backend.scans.auto_resume import verify_resume_dispatch
+
+        await verify_resume_dispatch(scan_id, resume_round)
+        if not await run_store_call(store, "mark_scan_resume_dispatch_started", scan_id, resume_round):
+            raise ApplicationError(status_code=409, detail="续扫已被停止或执行轮次已变化")
     get_runtime().scans.running_scans[scan_id] = scan
     get_runtime().scans.scan_owners[scan_id] = current_user.user_id
 
@@ -271,6 +282,23 @@ async def dispatch_resume(
             agent_id,
         )
         ok = False
+    if resume_round is not None:
+        try:
+            await verify_resume_dispatch(scan_id, resume_round)
+        except ApplicationError:
+            # A gateway send may suspend while the user stops the scan. If
+            # that start arrives after the stop command, stop its exact
+            # revision again without touching a competing newer execution.
+            current_meta = await run_store_call(store, "get_scan_meta", scan_id)
+            if current_meta is not None and current_meta.execution_revision == command.get("execution_revision"):
+                from backend.agents.gateway import request_agent_scan_stop
+                try:
+                    await request_agent_scan_stop(
+                        agent_id, scan_id, execution_revision=current_meta.execution_revision,
+                    )
+                except Exception:
+                    logger.warning("Failed to repeat stop after a cancelled resume dispatch for %s", scan_id, exc_info=True)
+            raise
     if not ok:
         if resume_threat_analysis or retry_mining_engine_ids:
             await run_store_call(

@@ -224,6 +224,7 @@ def _creation_records(
             if threat_analysis_enabled
             else None
         ),
+        auto_resume_enabled=configuration.auto_resume_enabled,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
         fp_review_method_selection=fp_review_method_selection,
@@ -261,6 +262,7 @@ def _creation_records(
         threat_analysis_method=threat_analysis_method,
         threat_analysis_method_selection=threat_analysis_method_selection,
         mining_engines=mining_engine_selections,
+        auto_resume_enabled=configuration.auto_resume_enabled,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
         fp_review_method_selection=fp_review_method_selection,

@@ -875,6 +875,10 @@ class ScanStatus(BaseModel):
     code_scan_path: str = ""
     code_scan_paths: list[str] = Field(default_factory=list)
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
+    auto_resume_enabled: bool = False
+    auto_resume_count: int = 0
+    auto_resume_state: Literal["idle", "pending", "running", "waiting", "paused", "exhausted"] = "idle"
+    auto_resume_reason: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
@@ -1834,6 +1838,7 @@ class CreateScanRequest(BaseModel):
     review_notes_enabled: bool = False
     review_note_ids: list[str] = Field(default_factory=list, max_length=200)
     code_graph_mcp: AgentMcpConfig | None = None
+    auto_resume_enabled: bool = True
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
@@ -1858,6 +1863,7 @@ class ScanCopyConfig(BaseModel):
     threat_analysis_enabled: bool | None = None
     threat_analysis_method: str | None = None
     mining_engines: list[MiningEngineRequest] | None = None
+    auto_resume_enabled: bool = False
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
 
@@ -1948,6 +1954,10 @@ class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
     created_at: str
+    auto_resume_enabled: bool = False
+    auto_resume_count: int = 0
+    auto_resume_state: Literal["idle", "pending", "running", "waiting", "paused", "exhausted"] = "idle"
+    auto_resume_reason: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
@@ -2007,6 +2017,10 @@ class ScanSummary(BaseModel):
     """扫描列表的摘要信息。"""
     scan_id: str
     project_id: str
+    auto_resume_enabled: bool = False
+    auto_resume_count: int = 0
+    auto_resume_state: Literal["idle", "pending", "running", "waiting", "paused", "exhausted"] = "idle"
+    auto_resume_reason: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     scan_name: str = ""

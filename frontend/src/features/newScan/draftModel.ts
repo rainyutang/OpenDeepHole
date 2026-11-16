@@ -55,6 +55,7 @@ export interface ScanDraft {
   threatAnalysisEnabled: boolean;
   threatAnalysisMethod: string;
   autoFpReview: boolean;
+  autoResumeEnabled: boolean;
   fpReviewMethod: string;
   reviewNotesEnabled: boolean;
   reviewNoteIds: string[];
@@ -82,6 +83,7 @@ export function defaultScanDraft(): ScanDraft {
     threatAnalysisEnabled: true,
     threatAnalysisMethod: "",
     autoFpReview: true,
+    autoResumeEnabled: true,
     fpReviewMethod: "",
     reviewNotesEnabled: false,
     reviewNoteIds: []
@@ -221,6 +223,7 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     threatAnalysisEnabled,
     threatAnalysisMethod,
     autoFpReview,
+    autoResumeEnabled,
     fpReviewMethod,
     reviewNotesEnabled,
     reviewNoteIds,
@@ -247,6 +250,7 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
     code_graph_mcp: scanMode !== "multi_version" && codeGraphMcp.enabled ? codeGraphMcp : null,
     review_notes_enabled: reviewNotesEnabled,
+    auto_resume_enabled: autoResumeEnabled,
     review_note_ids: reviewNotesEnabled ? reviewNoteIds : [],
     ...(scanMode === "custom" ? {
       threat_analysis_enabled: threatAnalysisEnabled,
@@ -273,6 +277,7 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
     next.projectPath = copied.project_path;
     next.codeScanPaths = copied.code_scan_paths?.length ? [...copied.code_scan_paths] : [copied.code_scan_path || copied.project_path];
     next.scanMode = mode as ScanMode;
+    next.autoResumeEnabled = copied.auto_resume_enabled ?? false;
     if (copied.multi_versions?.length) next.multiVersions = copied.multi_versions.map((version) => ({
       version_name: version.version_name, project_path: version.project_path,
       code_scan_paths: version.code_scan_paths?.length ? [...version.code_scan_paths] : [version.code_scan_path || version.project_path],

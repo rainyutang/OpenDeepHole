@@ -21,6 +21,16 @@ async def stop_scan(
     if loaded is None:
         raise ApplicationError(status_code=404, detail="Scan not found")
     stored_scan, meta = loaded
+    # Persist cancellation before touching the Agent, including the terminal
+    # window between two automatic rounds. A reserved dispatcher is fenced too.
+    from backend.scans.auto_resume import pause_auto_resume
+    await pause_auto_resume(scan_id)
+    # The dispatcher may have claimed the next execution while the first read
+    # was in flight. Stop the current durable identity after invalidating it.
+    loaded = await run_store_call(store, "load_scan", scan_id)
+    if loaded is None:
+        raise ApplicationError(status_code=404, detail="Scan not found")
+    stored_scan, meta = loaded
     live_scan = get_runtime().scans.running_scans.get(scan_id)
     core_running = stored_scan.status in {
         ScanItemStatus.PENDING,

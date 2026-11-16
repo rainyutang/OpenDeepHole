@@ -35,6 +35,8 @@
 
 续扫先由 `ResumePlan` 计算需要执行的候选、威胁分析、引擎和独立复核工作，再执行 Agent 准备、claim、状态重置、命令构造与派发。`ResumeCheckpoint` 保存失败补偿所需的原阶段和候选状态。历史候选索引、已完成结果、执行版本和用户停止优先级保持原语义。
 
+自动续扫由 `backend/scans/auto_resume.py` 在完成回调之外协调，共享上述续扫服务。扫描级持久化预留同时保护主流程和仅去误报的续扫；累计最多三轮，用户停止会撤销待办。配置、次数和恢复规则见 [扫描自动续扫](scan-auto-resume.md)。
+
 连接服务通过 `ReconnectState` 传递接管结果。WebSocket 发送 welcome 后启动后台恢复，并立即进入接收循环；恢复可以等待 stop RPC，接收循环持续处理回执和心跳。心跳仍先更新内存并 ACK，再合并持久化。
 
 `AgentGateway` 负责连接解析、命令发送和 RPC；`RpcBroker` 在成功、发送失败、超时、取消和异常时释放等待对象。`LocalAgentTransport` 只执行当前 worker 的本地发送，分布式消费者使用它投递已领取的命令，避免再次入队。

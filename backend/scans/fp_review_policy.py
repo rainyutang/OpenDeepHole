@@ -108,6 +108,28 @@ def _fp_review_resume_state(
     return False, unresolved
 
 
+def _automatic_fp_review_resume_state(
+    scan,
+    latest_fp_results: dict[int, FpReviewResult],
+    states: list[tuple[str, str]],
+) -> tuple[bool, int]:
+    """Respect explicit review settings and stops when continuing automatically.
+
+    States are ordered oldest first by the store. A manually started review
+    remains eligible for recovery when automatic first-time review is disabled.
+    """
+    active, unresolved = _fp_review_resume_state(
+        scan.vulnerabilities, latest_fp_results, states,
+    )
+    if active:
+        return True, 0
+    if states and states[-1][1] == FpReviewStatus.CANCELLED.value:
+        return False, 0
+    if not scan.auto_fp_review and not states:
+        return False, 0
+    return False, unresolved
+
+
 def _ensure_fp_review_job_for_scan(
     scan_id: str,
     scan: ScanStatus | None = None,
@@ -118,6 +140,10 @@ def _ensure_fp_review_job_for_scan(
 ) -> dict | None:
     """Create or reuse the scan-level FP review job for current confirmed findings."""
     store = get_scan_store()
+    if not allow_cancelled and hasattr(store, "get_scan_auto_resume"):
+        continuation = store.get_scan_auto_resume(scan_id)
+        if continuation is not None and continuation["auto_resume_state"] == "paused":
+            return {"cancelled": True}
     if scan is None:
         if scan_id in get_runtime().scans.running_scans:
             scan = get_runtime().scans.running_scans[scan_id]

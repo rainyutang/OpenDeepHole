@@ -1,4 +1,5 @@
 import { isPublicScan } from "../../../api/accessPolicy";
+import { autoResumeActive, autoResumeLabel } from "../../../scanAutoResume";
 import ScanShareButton from "../../../components/ScanShareButton";
 import { ThemeToggle } from "../../../components/ThemeToggle";
 import type { ScanStatus as ScanStatusType } from "../../../types/scans";
@@ -61,6 +62,8 @@ export function ScanDetailHeader({
   threatAnalysisResultTab,
   visibleErrorMessage,
 }: Props) {
+  const automaticResume = autoResumeActive(scan);
+  const automaticResumeLabel = autoResumeLabel(scan);
   return (
     <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
       <div className="mb-4 flex items-center justify-between gap-3 lg:hidden">
@@ -87,11 +90,13 @@ export function ScanDetailHeader({
             </div>
           </div>
           <span className="text-sm text-slate-400">
-            {scan.status === "cancelled"
+            {automaticResume ? "自动续扫中"
+              : scan.status === "cancelled"
               ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")
               : scan.status === "error" ? "扫描异常"
                 : isRunning ? "扫描中..." : isDone ? "扫描完成" : "扫描中..."}
           </span>
+          {automaticResumeLabel && <span role="status" className="text-xs text-amber-300" title={scan.auto_resume_reason || undefined}>{automaticResumeLabel}</span>}
           {scan.agent_name && (
             <span className="flex items-center gap-1.5 text-sm text-slate-400 border-l border-slate-600 pl-4">
               <span
@@ -111,7 +116,7 @@ export function ScanDetailHeader({
           {!sharedView && !isPublicScan(scanId) && <ScanShareButton scanId={scanId} />}
           {!sharedView && isDone && (
             <>
-              {scan.can_continue && (
+              {scan.can_continue && !automaticResume && (
                 <button
                   onClick={handleContinue}
                   disabled={continuing || !scan.agent_online}
@@ -174,7 +179,7 @@ export function ScanDetailHeader({
               </div>
             )}
           </div>
-          {!sharedView && isRunning && (
+          {!sharedView && (isRunning || automaticResume) && (
             <button
               onClick={handleStop}
               disabled={stopping}
@@ -194,6 +199,9 @@ export function ScanDetailHeader({
       />}
 
       {/* Error */}
+      {scan.auto_resume_enabled && scan.auto_resume_reason && (
+        <p className="mt-3 text-sm text-amber-300">{scan.auto_resume_reason}</p>
+      )}
       {visibleErrorMessage && (
         <div className={`mt-3 rounded-lg border p-2.5 text-sm ${scan.status === "complete"
             ? "border-amber-500/30 bg-amber-500/10 text-amber-300"

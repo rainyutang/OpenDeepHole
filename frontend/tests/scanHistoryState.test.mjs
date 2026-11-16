@@ -198,3 +198,19 @@ test("polling switches from active to idle cadence, pauses while hidden, and is 
   await visibleRefresh();
   assert.equal(requests.length, 4);
 });
+
+test("waiting automatic resume is stoppable and stays on active polling until exhausted", async () => {
+  const { root, requests } = await mount((_params, call) => page([summary("first", {
+    status: "complete", can_continue: true, agent_online: true, auto_resume_enabled: true,
+    auto_resume_count: call === 1 ? 1 : 3, auto_resume_state: call === 1 ? "waiting" : "exhausted",
+    auto_resume_reason: call === 1 ? "等待客户端上线" : "仍有失败任务",
+  })]));
+  assert.match(content(rows(root)[0]), /等待自动续扫（1\/3）/);
+  assert.ok(button(root, "停止"));
+  assert.equal(root.root.findAllByType("button").some((item) => content(item) === "续扫"), false);
+  await advance(5000);
+  assert.equal(requests.length, 2);
+  assert.match(content(rows(root)[0]), /自动续扫已达上限（3\/3）/);
+  assert.ok(button(root, "续扫"));
+  assert.equal(root.root.findAllByType("button").some((item) => content(item) === "停止"), false);
+});

@@ -62,7 +62,14 @@ export interface ScanProgressEstimate {
   active: boolean;
 }
 
-export interface ScanStatus {
+export interface ScanAutoResume {
+  auto_resume_enabled?: boolean;
+  auto_resume_count?: number;
+  auto_resume_state?: "idle" | "pending" | "running" | "waiting" | "paused" | "exhausted";
+  auto_resume_reason?: string;
+}
+
+export interface ScanStatus extends ScanAutoResume {
   scan_id: string;
   can_copy_scan?: boolean;
   execution_revision?: number;
@@ -213,7 +220,7 @@ export interface IndexStatus {
   error?: string;
 }
 
-export interface ScanSummary {
+export interface ScanSummary extends ScanAutoResume {
   scan_id: string;
   project_id: string;
   scan_mode?: string;

@@ -1,4 +1,5 @@
 import { scanPath } from "../routing";
+import { autoResumeActive, autoResumeLabel } from "../scanAutoResume";
 
 import AnnouncementBoard from "./AnnouncementBoard";
 
@@ -213,8 +214,9 @@ export default function ScanHistory({
                 <tbody>
                   {filteredScans.map((scan) => {
                     const coreRunning = isRunning(scan.status);
-                    const running = coreRunning || scan.fp_review_running;
-                    const st = scan.status === "complete" && scan.fp_review_running
+                    const automaticResume = autoResumeActive(scan);
+                    const running = coreRunning || scan.fp_review_running || automaticResume;
+                    const st = scan.status === "complete" && (scan.fp_review_running || automaticResume)
                       ? { ...STATUS_STYLES.pending, label: "进行中" }
                       : STATUS_STYLES[scan.status];
                     const canContinue = !running && !!scan.can_continue;
@@ -252,12 +254,13 @@ export default function ScanHistory({
                               {st.label}
                             </span>
                             {running && (
-                              <span className="inline-flex items-center gap-1 text-xs text-blue-300" title={scan.fp_review_running ? "去误报进行中" : "主扫描进行中"}>
+                              <span className="inline-flex items-center gap-1 text-xs text-blue-300" title={automaticResume ? autoResumeLabel(scan) : scan.fp_review_running ? "去误报进行中" : "主扫描进行中"}>
                                 <span className="inline-block h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
                                 {!coreRunning && scan.fp_review_running && "去误报进行中"}
                               </span>
                             )}
                           </span>
+                          {scan.auto_resume_enabled && <span className="mt-1 block text-xs text-amber-300" title={scan.auto_resume_reason || undefined}>{autoResumeLabel(scan)}</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-slate-300">
                           {scan.suspected_issue_count}

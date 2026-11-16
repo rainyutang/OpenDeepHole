@@ -289,7 +289,10 @@ async def agent_report_vulnerability(
                     reported_session_id,
                     scan_session_id,
                 )
-            if auto_fp_review and can_dispatch_immediately:
+            first_attempt = is_new_report or not (
+                meta is not None and getattr(meta, "auto_resume_enabled", False)
+            )
+            if auto_fp_review and can_dispatch_immediately and first_attempt:
                 ensured = await run_store_call(
                     store,
                     _ensure_fp_review_job_for_scan,

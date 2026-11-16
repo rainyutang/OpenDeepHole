@@ -29,6 +29,7 @@ export function scanExecutionRevision(value: ScanExecutionState | null | undefin
 export const progressFields = [
   "status", "error_message", "progress", "total_candidates", "processed_candidates",
   "static_total_files", "static_scanned_files", "static_analysis_done",
+  "auto_resume_enabled", "auto_resume_count", "auto_resume_state", "auto_resume_reason",
 ] as const;
 
 export interface ScanMetadataState {
@@ -178,6 +179,11 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     scan_mode: text(value.scan_mode) || "full",
     threat_analysis_enabled: value.threat_analysis_enabled === true,
     threat_analysis_method: text(value.threat_analysis_method),
+    auto_resume_enabled: value.auto_resume_enabled === true,
+    auto_resume_count: Math.max(0, Math.floor(finiteNumber(value.auto_resume_count))),
+    auto_resume_state: ["idle", "pending", "running", "waiting", "paused", "exhausted"].includes(text(value.auto_resume_state))
+      ? value.auto_resume_state as ScanStatus["auto_resume_state"] : "idle",
+    auto_resume_reason: text(value.auto_resume_reason),
     product: text(value.product),
     validation_environment: text(value.validation_environment),
     code_graph_mcp_enabled: value.code_graph_mcp_enabled === true,

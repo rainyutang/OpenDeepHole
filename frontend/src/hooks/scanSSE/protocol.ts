@@ -2,7 +2,7 @@ import type { ScanDetailResource } from "../../scanResourceRefresh";
 import { isRecord } from "../../scanRuntime/record";
 import { normalizeScanEvent } from "../../scanRuntime/scanSnapshots";
 import type { FpReviewJob, FpReviewMethod, FpReviewStatus } from "../../types/fpReview";
-import type { IndexStatus, ScanEvent, ScanStatus } from "../../types/scans";
+import type { IndexStatus, ScanAutoResume, ScanEvent, ScanStatus } from "../../types/scans";
 import type { MiningEngineRunStatus } from "../../types/mining";
 import type { OpenCodeCompletedTask } from "../../types/modelPool";
 import type { OutputSource, Vulnerability, VulnerabilityValidation } from "../../types/issues";
@@ -17,7 +17,7 @@ export const FP_REVIEW_STATUSES = new Set(["pending", "running", "complete", "er
 /*  SSE event payload types (mirror backend publish() shapes)          */
 /* ------------------------------------------------------------------ */
 
-export interface ScanStatusEvent {
+export interface ScanStatusEvent extends ScanAutoResume {
   execution_revision?: number;
   status: string | null;
   progress: number | null;
@@ -73,24 +73,26 @@ export interface ScanFinishEvent {
   error_message: string | null;
 }
 
-export interface FpReviewStartedEvent {
+interface FpReviewExecutionEvent {
   review_id: string;
+  execution_revision?: number;
+}
+
+export interface FpReviewStartedEvent extends FpReviewExecutionEvent {
   status: FpReviewStatus;
   total: number;
   processed?: number;
   method?: FpReviewMethod;
 }
 
-export interface FpReviewProgressEvent {
-  review_id: string;
+export interface FpReviewProgressEvent extends FpReviewExecutionEvent {
   vuln_index: number;
   active_indices?: number[] | null;
   processed?: number | null;
   total: number;
 }
 
-export interface FpReviewResultEvent {
-  review_id: string;
+export interface FpReviewResultEvent extends FpReviewExecutionEvent {
   vuln_index: number;
   verdict: "tp" | "fp";
   severity: "high" | "medium" | "low";
@@ -103,16 +105,14 @@ export interface FpReviewResultEvent {
   output_source?: OutputSource;
 }
 
-export interface FpReviewStageOutputEvent {
-  review_id: string;
+export interface FpReviewStageOutputEvent extends FpReviewExecutionEvent {
   vuln_index: number;
   stage: string;
   markdown: string;
   output_source?: OutputSource;
 }
 
-export interface FpReviewFinishEvent {
-  review_id: string;
+export interface FpReviewFinishEvent extends FpReviewExecutionEvent {
   status: FpReviewStatus;
   error_message: string | null;
   method?: FpReviewMethod;
@@ -225,6 +225,10 @@ export function isValidPayload(eventType: string, value: unknown): value is Reco
         && (value.static_total_files == null || isFiniteNumber(value.static_total_files))
         && (value.static_scanned_files == null || isFiniteNumber(value.static_scanned_files))
         && (value.static_analysis_done == null || typeof value.static_analysis_done === "boolean")
+        && (value.auto_resume_enabled === undefined || typeof value.auto_resume_enabled === "boolean")
+        && (value.auto_resume_count === undefined || isFiniteNumber(value.auto_resume_count))
+        && (value.auto_resume_state === undefined || ["idle", "pending", "running", "waiting", "paused", "exhausted"].includes(String(value.auto_resume_state)))
+        && (value.auto_resume_reason === undefined || isString(value.auto_resume_reason))
         && (value.opencode_pool === undefined || value.opencode_pool === null || isRecord(value.opencode_pool));
     case "opencode_task_report":
       return (isString(value.task_id) || isRecord(value.task) && isString(value.task.task_id))
@@ -250,12 +254,14 @@ export function isValidPayload(eventType: string, value: unknown): value is Reco
         && (value.error_message == null || isString(value.error_message));
     case "fp_review_started":
       return isString(value.review_id)
+        && (value.execution_revision === undefined || isFiniteNumber(value.execution_revision))
         && isString(value.status)
         && FP_REVIEW_STATUSES.has(value.status)
         && isFiniteNumber(value.total)
         && (value.processed == null || isFiniteNumber(value.processed));
     case "fp_review_progress":
       return isString(value.review_id)
+        && (value.execution_revision === undefined || isFiniteNumber(value.execution_revision))
         && isFiniteNumber(value.vuln_index)
         && isFiniteNumber(value.total)
         && (value.processed == null || isFiniteNumber(value.processed))
@@ -263,11 +269,13 @@ export function isValidPayload(eventType: string, value: unknown): value is Reco
           || (Array.isArray(value.active_indices) && value.active_indices.every(isFiniteNumber)));
     case "fp_review_stage_output":
       return isString(value.review_id)
+        && (value.execution_revision === undefined || isFiniteNumber(value.execution_revision))
         && isFiniteNumber(value.vuln_index)
         && isString(value.stage)
         && isString(value.markdown);
     case "fp_review_result":
       return isString(value.review_id)
+        && (value.execution_revision === undefined || isFiniteNumber(value.execution_revision))
         && isFiniteNumber(value.vuln_index)
         && (value.verdict === "tp" || value.verdict === "fp")
         && (value.severity === "high" || value.severity === "medium" || value.severity === "low")
@@ -276,6 +284,7 @@ export function isValidPayload(eventType: string, value: unknown): value is Reco
         && (value.stage_output_sources === undefined || isRecord(value.stage_output_sources));
     case "fp_review_finish":
       return isString(value.review_id)
+        && (value.execution_revision === undefined || isFiniteNumber(value.execution_revision))
         && isString(value.status)
         && FP_REVIEW_STATUSES.has(value.status)
         && (value.error_message == null || isString(value.error_message));

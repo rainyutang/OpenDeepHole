@@ -45,6 +45,7 @@ class ResolvedScanConfiguration:
     threat_analysis_enabled: bool
     threat_analysis_method: str
     threat_analysis_method_selection: ThreatAnalysisMethodSelection
+    auto_resume_enabled: bool
     auto_fp_review: bool
     fp_review_method: str
     fp_review_method_selection: FpReviewMethodSelection
@@ -225,6 +226,7 @@ def resolve_creation_configuration(
         threat_analysis_enabled=threat_analysis_enabled,
         threat_analysis_method=threat_analysis_method,
         threat_analysis_method_selection=threat_analysis_method_selection,
+        auto_resume_enabled=body.auto_resume_enabled,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
         fp_review_method_selection=fp_review_method_selection,

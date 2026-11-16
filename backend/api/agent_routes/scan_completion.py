@@ -11,8 +11,13 @@ public_router = APIRouter(route_class=ApplicationRoute)
 
 
 @router.post('/scan/{scan_id}/execution-failed')
-async def agent_scan_execution_failed(scan_id: str, body: AgentScanExecutionFailure) -> dict:
-    return await service.agent_scan_execution_failed(scan_id=scan_id, body=body)
+async def agent_scan_execution_failed(
+    scan_id: str, body: AgentScanExecutionFailure, request: Request = None,
+) -> dict:
+    return await service.agent_scan_execution_failed(
+        scan_id=scan_id, body=body,
+        server_url=str(request.base_url).rstrip('/') if request is not None else "",
+    )
 
 
 @router.post('/scan/{scan_id}/finish')

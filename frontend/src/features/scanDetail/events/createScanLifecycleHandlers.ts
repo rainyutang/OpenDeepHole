@@ -68,6 +68,10 @@ export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEv
           normalizeScanProgressEstimate(data.progress_estimate), revision ?? scanExecutionRevision(prev));
         if (progressEstimate !== prev.progress_estimate) patch.progress_estimate = progressEstimate;
         if (data.error_message !== undefined) patch.error_message = data.error_message;
+        if (data.auto_resume_enabled !== undefined) patch.auto_resume_enabled = data.auto_resume_enabled;
+        if (data.auto_resume_count !== undefined) patch.auto_resume_count = data.auto_resume_count;
+        if (data.auto_resume_state !== undefined) patch.auto_resume_state = data.auto_resume_state;
+        if (data.auto_resume_reason !== undefined) patch.auto_resume_reason = data.auto_resume_reason;
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
         const nextTotal = data.total_candidates ?? prev.total_candidates;
         const reportedProcessed = data.processed_candidates ?? prev.processed_candidates;

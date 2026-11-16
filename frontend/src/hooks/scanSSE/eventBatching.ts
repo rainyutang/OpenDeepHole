@@ -69,6 +69,10 @@ export function createScanEventBatcher({ handlersRef, stateSettersRef, lifetime 
       static_scanned_files: status.static_scanned_files ?? pendingStatus?.static_scanned_files ?? null,
       static_analysis_done: status.static_analysis_done ?? pendingStatus?.static_analysis_done ?? null,
       error_message: status.error_message !== undefined ? status.error_message : pendingStatus?.error_message,
+      auto_resume_enabled: status.auto_resume_enabled ?? pendingStatus?.auto_resume_enabled,
+      auto_resume_count: status.auto_resume_count ?? pendingStatus?.auto_resume_count,
+      auto_resume_state: status.auto_resume_state ?? pendingStatus?.auto_resume_state,
+      auto_resume_reason: status.auto_resume_reason ?? pendingStatus?.auto_resume_reason,
       opencode_pool: status.opencode_pool !== undefined
         ? status.opencode_pool
         : pendingStatus?.opencode_pool,

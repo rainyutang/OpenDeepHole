@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../../api/scans";
 import type { ScanSummary } from "../../types/scans";
 import { mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
+import { autoResumeActive } from "../../scanAutoResume";
 
 import { isRunning, projectName } from './historyModel';
 
@@ -39,7 +40,7 @@ export function useScanHistoryData(onViewScan: (scanId: string) => void, onVisib
 
   // 自适应轮询：有运行中扫描时 5s，全部空闲时降为 30s；页面不可见时暂停，
   // 重新可见时立即刷新一次。
-  const hasRunningScans = scans.some((s) => isRunning(s.status) || s.fp_review_running);
+  const hasRunningScans = scans.some((s) => isRunning(s.status) || s.fp_review_running || autoResumeActive(s));
   const hasRunningRef = useRef(hasRunningScans);
   hasRunningRef.current = hasRunningScans;
 

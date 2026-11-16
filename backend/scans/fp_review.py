@@ -1,6 +1,7 @@
 """Scan fp review services."""
 
 from deephole_client.scan_modes import component_scan_mode
+import asyncio
 from backend.application import ApplicationError, get_runtime, get_scan_store, run_store_call
 from backend.logger import get_logger
 from backend.models import FpReviewJob, FpReviewStatus, User
@@ -15,6 +16,28 @@ from backend.scans.fp_review_policy import (
 logger = get_logger(__name__)
 
 
+async def preflight_fp_review(meta) -> None:
+    """Check dispatch availability without creating a job or consuming a round."""
+    from backend.agents.runtime_updates import ensure_agent_accepting_tasks_async
+    from backend.agents.directory import resolve_agent_id_connection_async
+    from backend.agents.configuration import agent_config_has_explicit_model, get_scan_agent_config_async
+
+    await ensure_agent_accepting_tasks_async(meta.agent_key)
+    agent_id = await _resolve_scan_agent_id(meta)
+    resolved = await resolve_agent_id_connection_async(agent_id) if agent_id is not None else None
+    if resolved is None:
+        raise ApplicationError(
+            status_code=400,
+            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
+    config = await get_scan_agent_config_async(resolved[1], meta.agent_key)
+    if not agent_config_has_explicit_model(config):
+        raise ApplicationError(
+            status_code=400,
+            detail="扫描关联的客户端尚未配置启用的显式模型，请先完成客户端模型配置",
+        )
+
+
 async def _start_fp_review(
     scan_id: str,
     server_url: str,
@@ -23,6 +46,7 @@ async def _start_fp_review(
     require_unresolved: bool = False,
     allow_cancelled: bool = False,
     claimed_execution_revision: int | None = None,
+    resume_round: str | None = None,
 ) -> dict | None:
     """Start an AI false-positive review for eligible vulnerabilities in a scan.
 
@@ -75,6 +99,34 @@ async def _start_fp_review(
             f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
+    resolved_agent = await resolve_agent_id_connection_async(agent_id)
+    if resolved_agent is None:
+        return _fail(400, "Agent connection disappeared before FP review dispatch")
+    # Finish fallible payload preparation before marking any review running.
+    # Otherwise a connection/configuration failure strands the coordinator
+    # waiting for a worker which was never dispatched.
+    from backend.review_notes import scan_review_notes_payload
+    try:
+        selected_feedback = await run_store_call(
+            store, _selected_feedback_entries, scan_id, meta.feedback_ids,
+        )
+        feedback_entries = [entry.model_dump() for entry in selected_feedback]
+        review_notes = await scan_review_notes_payload(scan_id, store=store)
+        runtime_update = await create_agent_task_runtime_update_payload_async(
+            server_url, meta.agent_key,
+        )
+        if agent_id != meta.agent_id:
+            await run_store_call(
+                store, "update_scan_agent", scan_id, agent_id, meta.agent_name, meta.agent_key,
+            )
+    except Exception:
+        logger.exception("Failed to prepare FP review dispatch for scan %s", scan_id)
+        return _fail(502, "去误报派发准备失败，请稍后重试")
+
+    if resume_round is not None:
+        from backend.scans.auto_resume import verify_resume_dispatch
+        await verify_resume_dispatch(scan_id, resume_round)
+
     fp_job_info = await run_store_call(
         store,
         _ensure_fp_review_job_for_scan,
@@ -92,30 +144,8 @@ async def _start_fp_review(
     review_id = str(fp_job_info["review_id"])
     method = str(fp_job_info["method"])
 
-    # Update stored agent_id if it changed
-    if agent_id != meta.agent_id:
-        await run_store_call(
-            store,
-            "update_scan_agent",
-            scan_id,
-            agent_id,
-            meta.agent_name,
-            meta.agent_key,
-        )
-
-    selected_feedback = await run_store_call(
-        store,
-        _selected_feedback_entries,
-        scan_id,
-        meta.feedback_ids,
-    )
-    feedback_entries = [entry.model_dump() for entry in selected_feedback]
-
     dispatched_items = not fp_job_info.get("no_unresolved")
     if dispatched_items:
-        resolved_agent = await resolve_agent_id_connection_async(agent_id)
-        if resolved_agent is None:
-            return _fail(400, "Agent connection disappeared before FP review dispatch")
         execution_revision = claimed_execution_revision
         if execution_revision is None:
             previous_status = str(fp_job_info.get("previous_status") or "")
@@ -133,7 +163,19 @@ async def _start_fp_review(
                 review_id,
                 agent_session_id=resolved_agent[1].agent_session_id,
                 force_new=force_new_execution,
+                **({
+                    "resume_round": resume_round,
+                    "expected_revision": int(fp_job_info.get("execution_revision") or 0),
+                } if resume_round is not None else {}),
             )
+            if execution_revision is None:
+                await run_store_call(
+                    store, "update_fp_review_job", review_id, status="error",
+                    error_message="去误报派发已中断",
+                    expected_revision=int(fp_job_info.get("execution_revision") or 0),
+                    expected_agent_session_id=str(fp_job_info.get("execution_agent_session_id") or ""),
+                )
+                return _fail(409, "去误报任务已被停止或执行轮次已变化")
         from backend.application import publish
         publish(scan_id, "fp_review_started", {
             "review_id": review_id,
@@ -143,12 +185,10 @@ async def _start_fp_review(
             "total": int(fp_job_info.get("total") or len(confirmed)),
             "processed": int(fp_job_info.get("processed") or 0),
         })
-        from backend.review_notes import scan_review_notes_payload
-
-        ok = await send_agent_command(agent_id, {
+        command = {
             "type": "fp_review",
             "scan_id": scan_id,
-            "review_notes": await scan_review_notes_payload(scan_id, store=store),
+            "review_notes": review_notes,
             "execution_revision": execution_revision,
             "scan_mode": component_scan_mode(meta.scan_mode),
             "review_id": review_id,
@@ -169,11 +209,45 @@ async def _start_fp_review(
                 if meta.knowledge_base_mcp is not None
                 else None
             ),
-            "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
-                server_url,
-                meta.agent_key,
-            ),
-        })
+            "agent_runtime_update": runtime_update,
+        }
+        try:
+            if resume_round is not None:
+                await verify_resume_dispatch(scan_id, resume_round)
+                current_job = await run_store_call(store, "get_fp_review_job_state", review_id)
+                if (
+                    current_job is None
+                    or current_job.status == FpReviewStatus.CANCELLED
+                    or current_job.execution_revision != execution_revision
+                ):
+                    raise ApplicationError(409, "去误报任务已被停止或执行轮次已变化")
+                if not await run_store_call(store, "mark_scan_resume_dispatch_started", scan_id, resume_round):
+                    raise ApplicationError(409, "续扫已被停止或执行轮次已变化")
+            ok = await send_agent_command(agent_id, command)
+            if resume_round is not None:
+                try:
+                    await verify_resume_dispatch(scan_id, resume_round)
+                except ApplicationError:
+                    current_job = await run_store_call(store, "get_fp_review_job_state", review_id)
+                    if current_job is not None and current_job.execution_revision == execution_revision:
+                        try:
+                            await asyncio.wait_for(send_agent_command(agent_id, {
+                                "type": "fp_review_stop", "scan_id": scan_id, "review_id": review_id,
+                            }), timeout=5)
+                        except Exception:
+                            logger.warning("Failed to repeat stop after cancelled FP dispatch %s", review_id, exc_info=True)
+                    raise
+        except Exception as exc:
+            await run_store_call(
+                store, "update_fp_review_job", review_id, status="error",
+                error_message="去误报派发失败，请稍后重试",
+                expected_revision=execution_revision,
+                expected_agent_session_id=resolved_agent[1].agent_session_id,
+            )
+            if isinstance(exc, ApplicationError):
+                return _fail(exc.status_code, str(exc.detail))
+            logger.exception("Failed to dispatch FP review for scan %s", scan_id)
+            return _fail(502, "去误报派发失败，请稍后重试")
         if not ok:
             await run_store_call(
                 store,
@@ -181,9 +255,12 @@ async def _start_fp_review(
                 review_id,
                 status="error",
                 error_message="Agent not connected",
+                expected_revision=execution_revision,
+                expected_agent_session_id=resolved_agent[1].agent_session_id,
             )
             publish(scan_id, "fp_review_finish", {
                 "review_id": review_id,
+                "execution_revision": execution_revision,
                 "status": FpReviewStatus.ERROR.value,
                 "method": method,
                 "error_message": "Agent not connected",

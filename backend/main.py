@@ -120,10 +120,14 @@ async def _application_lifespan(app: FastAPI):
     event_loop_monitor_task = asyncio.create_task(monitor_event_loop_lag())
     from backend.storage_maintenance import run_storage_maintenance
     storage_maintenance_task = asyncio.create_task(run_storage_maintenance(store, config.storage.maintenance))
+    from backend.scans.auto_resume import run_auto_resume_scheduler
+    auto_resume_task = asyncio.create_task(run_auto_resume_scheduler())
     logger.info("DeepHole 2.0 backend started on port %d", config.server.port)
     try:
         yield
     finally:
+        auto_resume_task.cancel()
+        await asyncio.gather(auto_resume_task, return_exceptions=True)
         storage_maintenance_task.cancel()
         await asyncio.gather(storage_maintenance_task, return_exceptions=True)
         if runtime_update_task is not None:

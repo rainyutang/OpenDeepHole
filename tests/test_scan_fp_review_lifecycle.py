@@ -84,6 +84,12 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         get_runtime().scans.running_scans.clear()
         get_runtime().scans.scan_owners.clear()
+        config_patch = patch("backend.agents.configuration.get_scan_agent_config_async", new=AsyncMock(return_value=object()))
+        model_patch = patch("backend.agents.configuration.agent_config_has_explicit_model", return_value=True)
+        config_patch.start()
+        model_patch.start()
+        self.addCleanup(config_patch.stop)
+        self.addCleanup(model_patch.stop)
 
     def tearDown(self) -> None:
         get_runtime().scans.running_scans.clear()

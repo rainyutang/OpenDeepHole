@@ -92,10 +92,13 @@ from .pattern_audit import (
 )
 from .review_notes import REVIEW_NOTES_SCHEMA, ReviewNotesStoreMixin
 from .code_graph import ScanCodeGraphStoreMixin
+from .auto_resume import AUTO_RESUME_SCHEMA, AUTO_RESUME_COLUMNS, AUTO_RESUME_JOB_COLUMNS, ScanAutoResumeMixin
 
 STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS, **PATTERN_AUDIT_COLUMNS}
+STORAGE_COLUMNS["scan_auto_resume"] = AUTO_RESUME_JOB_COLUMNS
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
+    **AUTO_RESUME_COLUMNS,
     "execution_product": "TEXT",
     "code_scan_paths_json": "TEXT NOT NULL DEFAULT '[]'",
     "metadata_revision": "INTEGER NOT NULL DEFAULT 0",
@@ -1010,6 +1013,7 @@ _SCHEMA += FILE_INVENTORY_SCHEMA
 _SCHEMA += MODEL_USAGE_SCHEMA
 _SCHEMA += PATTERN_AUDIT_SCHEMA
 _SCHEMA += REVIEW_NOTES_SCHEMA
+_SCHEMA += AUTO_RESUME_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1031,7 +1035,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -2053,6 +2057,10 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                 else "[]",
                 MultiVersionTarget,
             ),
+            auto_resume_enabled=bool(row["auto_resume_enabled"]),
+            auto_resume_count=int(row["auto_resume_count"]),
+            auto_resume_state=str(row["auto_resume_state"]),
+            auto_resume_reason=str(row["auto_resume_reason"]),
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             threat_analysis_method=(
@@ -2135,6 +2143,10 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         return ScanMeta(
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
+            auto_resume_enabled=bool(row["auto_resume_enabled"]),
+            auto_resume_count=int(row["auto_resume_count"]),
+            auto_resume_state=str(row["auto_resume_state"]),
+            auto_resume_reason=str(row["auto_resume_reason"]),
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             threat_analysis_method=(
@@ -2242,7 +2254,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                      scan_mode, threat_analysis_enabled, threat_analysis_method,
                      threat_analysis_method_selection_json,
                      threat_analysis_run_json,
-                     auto_fp_review, fp_review_method,
+                     auto_resume_enabled, auto_fp_review, fp_review_method,
                      fp_review_method_selection_json,
                      product, validation_environment,
                      knowledge_base_enabled, vulnerability_validation_enabled,
@@ -2252,7 +2264,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                      vulnerability_validation_json, mining_engines_json,
                      mining_engine_runs_json, multi_versions_json,
                      execution_product, metadata_revision, code_graph_mcp_revision, code_graph_mcp_applied_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2342,6 +2354,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                         if scan.threat_analysis_run is not None
                         else "{}"
                     ),
+                    int(meta.auto_resume_enabled),
                     int(meta.auto_fp_review),
                     str(
                         getattr(
@@ -2510,7 +2523,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
     def load_scan_runtime(self, scan_id: str):
         with self._lock:
             row = self._conn.execute(
-                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+                "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
             ).fetchone()
             return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
 
@@ -2533,7 +2546,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)
@@ -2542,6 +2555,10 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         return ScanSummary(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            auto_resume_enabled=bool(row["auto_resume_enabled"]),
+            auto_resume_count=int(row["auto_resume_count"]),
+            auto_resume_state=str(row["auto_resume_state"]),
+            auto_resume_reason=str(row["auto_resume_reason"]),
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
@@ -2587,7 +2604,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         )
 
     def _scan_summary_columns(self) -> str:
-        columns = 's.agent_name, s.created_at, s.knowledge_base_enabled, s.metadata_revision, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
+        columns = 's.auto_resume_enabled, s.auto_resume_count, s.auto_resume_state, s.auto_resume_reason, s.agent_name, s.created_at, s.knowledge_base_enabled, s.metadata_revision, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
         for column, legacy_key in (("total_task_count", "total_tasks"), ("completed_task_count", "completed_task_count")):
             legacy = (
                 f"COALESCE((NULLIF(s.opencode_pool, '')::jsonb ->> '{legacy_key}')::BIGINT, 0)"
@@ -3110,7 +3127,9 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         static_total_files: int | None = None,
         static_scanned_files: int | None = None,
         static_analysis_done: bool | None = None,
-    ) -> None:
+        expected_revision: int | None = None,
+        expected_agent_session_id: str | None = None,
+    ) -> bool:
         updates: list[str] = []
         params: list = []
 
@@ -3145,16 +3164,20 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
             params.append(int(static_analysis_done))
 
         if not updates:
-            return
+            return False
 
         with self._lock:
             params.append(scan_id)
             sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
+            if expected_revision is not None:
+                sql += " AND (execution_revision <= 0 OR (execution_revision = ? AND execution_agent_session_id = ?)) AND NOT (status = 'cancelled' AND error_message = '用户手动停止')"
+                params.extend((expected_revision, expected_agent_session_id or ""))
             if is_terminal_scan_status(status):
                 row = self._conn.execute(
                     f"{sql} RETURNING opencode_pool",
                     params,
                 ).fetchone()
+                changed = row is not None
                 if row is not None:
                     self._conn.execute(
                         "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
@@ -3164,8 +3187,9 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
                         ),
                     )
             else:
-                self._conn.execute(sql, params)
+                changed = self._conn.execute(sql, params).rowcount > 0
             self._conn.commit()
+            return changed
 
     def claim_scan_for_resume(
         self,
@@ -3177,6 +3201,7 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         agent_id: str | None = None,
         agent_session_id: str | None = None,
         claimed_revision: int | None = None,
+        resume_round: str | None = None,
     ) -> int | None:
         """Claim one terminal scan for resume across processes and workers."""
         if claimed_revision is not None and (
@@ -3184,6 +3209,16 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         ):
             raise ValueError("Recovery must retain its expected execution revision")
         with self._lock:
+            self._locked_scan(scan_id, include_pool=False)
+            reservation = self._get_scan_auto_resume_locked(scan_id)
+            import time
+            if reservation is None or reservation["finish_until"] > time.time():
+                self._conn.commit()
+                return None
+            if resume_round is not None:
+                if not reservation or reservation["round_id"] != resume_round or reservation["lease_until"] <= time.time() or reservation["auto_resume_state"] == "paused":
+                    self._conn.commit()
+                    return None
             row = self._conn.execute(
                 """\
                 UPDATE scans
@@ -5279,12 +5314,26 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         *,
         agent_session_id: str,
         force_new: bool = False,
-    ) -> int:
+        resume_round: str | None = None,
+        expected_revision: int | None = None,
+    ) -> int | None:
         """Return one stable revision for repeated same-process dispatches."""
         normalized_session_id = str(agent_session_id or "").strip()
         if not normalized_session_id:
             raise ValueError("agent_session_id is required")
         with self._lock:
+            if resume_round is not None or expected_revision is not None:
+                job = self._conn.execute("SELECT scan_id FROM fp_review_jobs WHERE review_id = ?", (review_id,)).fetchone()
+                if job is None:
+                    self._conn.commit()
+                    return None
+                self._locked_scan(job["scan_id"], include_pool=False)
+                current = self._conn.execute("SELECT status, execution_revision FROM fp_review_jobs WHERE review_id = ?", (review_id,)).fetchone()
+                reservation = self._get_scan_auto_resume_locked(job["scan_id"])
+                import time
+                if not current or current["status"] == "cancelled" or (expected_revision is not None and current["execution_revision"] != expected_revision) or (resume_round is not None and (not reservation or reservation["round_id"] != resume_round or reservation["lease_until"] <= time.time() or reservation["auto_resume_state"] == "paused")):
+                    self._conn.commit()
+                    return None
             row = self._conn.execute(
                 """\
                 UPDATE fp_review_jobs
@@ -6196,7 +6245,9 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
         current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
-    ) -> None:
+        expected_revision: int | None = None,
+        expected_agent_session_id: str | None = None,
+    ) -> bool:
         updates: list[str] = []
         params: list = []
         if status is not None:
@@ -6222,14 +6273,16 @@ class SqliteScanStore(ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAud
             updates.append("error_message = ?")
             params.append(error_message)
         if not updates:
-            return
+            return False
         with self._lock:
             params.append(review_id)
-            self._conn.execute(
-                f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
-                params,
-            )
+            sql = f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?"
+            if expected_revision is not None:
+                sql += " AND (execution_revision <= 0 OR (execution_revision = ? AND execution_agent_session_id = ?)) AND status <> 'cancelled'"
+                params.extend((expected_revision, expected_agent_session_id or ""))
+            changed = self._conn.execute(sql, params).rowcount > 0
             self._conn.commit()
+            return changed
 
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
         with self._lock:

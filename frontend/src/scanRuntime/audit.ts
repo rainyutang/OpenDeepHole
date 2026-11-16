@@ -2,6 +2,15 @@ import type { FpReviewJob, FpReviewResult } from "../types/fpReview";
 import type { ThreatAuditTask, ThreatPatternAuditTask } from "../types/audit";
 import { isRecord, text, finiteNumber, recordArray, stringRecord } from './record';
 
+export function isOlderFpReviewExecution(
+  current: Pick<FpReviewJob, "review_id" | "execution_revision"> | null,
+  incoming: Pick<FpReviewJob, "review_id" | "execution_revision">,
+): boolean {
+  return current?.review_id === incoming.review_id
+    && incoming.execution_revision !== undefined
+    && incoming.execution_revision < (current.execution_revision ?? 0);
+}
+
 export function normalizePatternTask(value: unknown): ThreatPatternAuditTask {
   const raw = isRecord(value) ? value : {};
   return {
