@@ -51,7 +51,7 @@ interface Props {
   scan: ScanStatusType;
   sharedView: boolean;
   issuesView: React.ReactNode;
-  snapshot: Pick<ScanSnapshotState, "gitHistory" | "isRunning" | "isDone" | "fpReview" | "indexStatus" | "threatResultRevision" | "coverageRevision" | "patternTaskRevision" | "launchingValidations" | "stoppingValidations" | "fpReviewHydrated">;
+  snapshot: Pick<ScanSnapshotState, "gitHistory" | "isRunning" | "isDone" | "fpReview" | "indexStatus" | "threatResultRevision" | "coverageRevision" | "patternTaskRevision" | "taskHistoryRevision" | "launchingValidations" | "stoppingValidations" | "fpReviewHydrated">;
   navigation: Pick<ReturnType<typeof useScanNavigation>, "activeTab" | "activeEngineId" | "auditNavigation" | "setActiveTab" | "threatAnalysisResultTab" | "setThreatAnalysisResultTab">;
   resources: Pick<DetailResources, "detailFailedResources" | "loadDetailResource" | "detailLoadingResources">;
   pagination: Pick<ReturnType<typeof useDetailPagination>, "fpReviewPageFailed" | "setFpReviewPageRetry" | "fpReviewPageLoading">;
@@ -115,6 +115,7 @@ export function ScanDetailContent({
     threatResultRevision,
     coverageRevision,
     patternTaskRevision,
+    taskHistoryRevision,
     launchingValidations,
     stoppingValidations,
     fpReviewHydrated,
@@ -235,6 +236,7 @@ export function ScanDetailContent({
           {activeTab === "overview" && (
             <ScanOverview
               scan={scan}
+              taskHistoryRevision={taskHistoryRevision}
               issueCount={issueCount}
               continuableCount={continuableCount}
               variantIssueCount={variantIssueCount}

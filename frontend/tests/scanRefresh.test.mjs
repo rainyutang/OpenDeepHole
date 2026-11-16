@@ -77,7 +77,7 @@ function installApi(value, intercept = async () => undefined) {
   };
   return calls;
 }
-async function mount(value) {
+async function mount(value, handlers = {}) {
   const observed = { resultRefreshes: 0 };
   function Harness({ scanId = value.scan.scan_id }) {
     const [scan, setScan] = useState(value.scan);
@@ -87,6 +87,7 @@ async function mount(value) {
       onStateRefresh: () => { observed.resultRefreshes += 1; },
       onScanVulnerability: ({ index, vulnerability }) => setScan((previous) => ({ ...previous,
         vulnerabilities: previous.vulnerabilities.map((item) => item.vuln_index === index ? { ...vulnerability, vuln_index: index } : item) })),
+      ...handlers,
     }, { getScan: () => scan, getFpReview: () => review, setScan, setFpReview: setReview, setIndexStatus: setIndex });
     Object.assign(observed, { scan, review, index, ...state });
     return null;
@@ -103,6 +104,169 @@ async function notify(...events) {
   });
 }
 const count = (calls, suffix) => calls.filter((call) => call.url.endsWith(suffix)).length;
+
+function patternFixture() {
+  const value = fixture();
+  value.scan.threat_pattern_audit_tasks = Array.from({ length: 150 }, (_, index) => ({
+    task_id: String(index).padStart(4, "0"), scan_id: "s", status: "cancelled", created_at: "2026-11-16T00:00:00Z",
+  }));
+  return value;
+}
+function patternPages(value, config) {
+  if (!config.url.endsWith("/threat-pattern-audit-tasks")) return undefined;
+  const offset = Number(config.params?.cursor ?? 0);
+  const end = offset + 50;
+  return { items: value.scan.threat_pattern_audit_tasks.slice(offset, end), next_cursor: end < 150 ? String(end) : null };
+}
+
+test("a resumed execution ignores late engine terminal reports, including pending status batches", async () => {
+  const value = fixture();
+  installApi(value);
+  const runs = [];
+  await mount(value, { onMiningEngineRun: (event) => runs.push(event.run.status) });
+  const report = (execution_revision, status) => ["mining_engine_run", {
+    execution_revision, run: { engine_id: "threat_pattern_audit", status }, runs: [],
+  }];
+  await notify(["scan_status", { status: "auditing", execution_revision: 2 }], report(1, "cancelled"));
+  assert.deepEqual(runs, []);
+  await notify(report(2, "running"));
+  assert.deepEqual(runs, ["running"]);
+});
+
+test("spaced task cancellations share one refresh per second without rereading result bodies", async () => {
+  const value = patternFixture(), calls = installApi(value, (config) => patternPages(value, config));
+  const { observed } = await mount(value);
+  for (let index = 0; index < 6; index += 1) {
+    await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status", execution_revision: 1 }]);
+  }
+  await act(async () => { await wait(250); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 6);
+  assert.equal(count(calls, "/overview"), 2);
+  assert.equal(observed.resultRefreshes, 0);
+  assert.equal(calls.length, 8);
+});
+
+test("a thousand task notifications form one batch and delegated iterative pages avoid generic reads", async () => {
+  const value = patternFixture(), calls = installApi(value, (config) => patternPages(value, config));
+  let taskRefreshes = 0;
+  await mount(value, { ownsPatternTaskPages: () => true,
+    onDetailRefreshState: (resources, refreshing) => { if (refreshing && resources.includes("threat-pattern-audit-tasks")) taskRefreshes += 1; } });
+  await notify(...Array.from({ length: 1000 }, () => ["resource_changed", {
+    resource: "threat-pattern-audit-tasks", change: "task_status",
+  }]));
+  assert.equal(taskRefreshes, 1);
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 0);
+  assert.equal(count(calls, "/overview"), 1);
+});
+
+test("inactive task caches stay dirty until visited while summaries settle normally", async () => {
+  const value = patternFixture(), calls = installApi(value, (config) => patternPages(value, config));
+  let active = [];
+  const { observed } = await mount(value, { activeTaskCollections: () => active });
+  const cached = observed.scan.threat_pattern_audit_tasks;
+  value.scan = { ...value.scan, threat_pattern_audit_tasks: value.scan.threat_pattern_audit_tasks.map((task) => ({ ...task, status: "completed" })) };
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status", execution_revision: 1 }]);
+  await act(async () => { await wait(1050); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 0);
+  assert.equal(count(calls, "/overview"), 1);
+  assert.equal(observed.scan.threat_pattern_audit_tasks, cached);
+  active = ["threat-pattern-audit-tasks"];
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 3);
+  assert.equal(observed.scan.threat_pattern_audit_tasks[0].status, "completed");
+  active = [];
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  active = ["threat-pattern-audit-tasks"];
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 3, "a clean cache does not refresh on every visit");
+  assert.equal(observed.resultRefreshes, 0);
+});
+
+test("iterative notices do not mark the shared pattern cache clean or refresh it on unrelated pages", async () => {
+  const value = patternFixture(), calls = installApi(value, (config) => patternPages(value, config));
+  let active = ["threat-pattern-audit-tasks"], delegated = true, taskRefreshes = 0;
+  const { observed } = await mount(value, {
+    activeTaskCollections: () => active, ownsPatternTaskPages: () => delegated,
+    onDetailRefreshState: (resources, refreshing) => {
+      if (refreshing && resources.includes("threat-pattern-audit-tasks")) taskRefreshes += 1;
+    },
+  });
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status" }]);
+  await act(async () => { await wait(1050); });
+  assert.equal(taskRefreshes, 1, "delegated dirtiness must not schedule repeatedly");
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 0);
+  active = []; delegated = false;
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 0);
+  active = ["threat-pattern-audit-tasks"];
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 3);
+  assert.equal(taskRefreshes, 2);
+});
+
+test("hidden resync and a new execution retain deferred task refreshes and reject old notices", async () => {
+  const value = patternFixture(), calls = installApi(value, (config) => patternPages(value, config));
+  let active = [];
+  const { observed } = await mount(value, { activeTaskCollections: () => active });
+  document.hidden = true;
+  await notify(["resync_required", {}]);
+  assert.equal(calls.length, 0);
+  value.scan = { ...value.scan, execution_revision: 2, status: "auditing" };
+  await act(async () => { document.hidden = false; document.dispatchEvent(new Event("visibilitychange")); await wait(400); });
+  assert.equal(observed.scan.execution_revision, 2);
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 0);
+  await notify(["scan_finish", { status: "cancelled", execution_revision: 2 }]);
+  await act(async () => { await wait(800); });
+  active = ["threat-pattern-audit-tasks"];
+  await act(async () => { observed.refreshDetails([]); await wait(); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 3, "new executions refresh the loaded task span on entry");
+  const before = calls.length;
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status", execution_revision: 1 }]);
+  assert.equal(calls.length, before);
+});
+
+test("late task invalidation gets a trailing refresh while light progress remains independent", async () => {
+  const value = patternFixture(), pending = deferred();
+  let block = true;
+  const calls = installApi(value, async (config) => {
+    if (block && config.url.endsWith("/threat-pattern-audit-tasks")) { block = false; await pending.promise; }
+    return patternPages(value, config);
+  });
+  const { observed } = await mount(value);
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status" }]);
+  value.scan = { ...value.scan, processed_candidates: 12 };
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status" }],
+    ["resource_changed", { resource: "overview" }]);
+  assert.equal(observed.scan.processed_candidates, 12);
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 1);
+  await act(async () => { pending.resolve(); await wait(1000); });
+  assert.equal(count(calls, "/threat-pattern-audit-tasks"), 6);
+  assert.equal(observed.scan.threat_pattern_audit_tasks.length, 150);
+});
+
+test("stop reconciliation and duplicate final events do not trigger full detail reloads", async () => {
+  const value = fixture(), calls = installApi(value);
+  const { observed } = await mount(value);
+  await act(async () => { observed.refreshStopped(); await wait(); });
+  assert.deepEqual(calls.map((call) => call.url), ["/api/v2/scans/s/overview"]);
+  calls.length = 0;
+  await notify(["scan_finish", { status: "cancelled", error_message: null, execution_revision: 1 }],
+    ["scan_finish", { status: "cancelled", error_message: null, execution_revision: 1 }]);
+  assert.equal(count(calls, "/overview"), 1);
+  await notify(["scan_finish", { status: "cancelled", error_message: null, execution_revision: 1 }]);
+  assert.equal(count(calls, "/overview"), 1);
+  assert.equal(calls.length, 1);
+  await notify(["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status", execution_revision: 0 }]);
+  assert.equal(calls.length, 1, "old execution notices cannot revive old task work");
+});
+
+test("old resource notices are discarded before a newer batched status has rendered", async () => {
+  const value = fixture(), calls = installApi(value);
+  await mount(value);
+  await notify(["scan_status", { execution_revision: 2, status: "auditing" }],
+    ["resource_changed", { resource: "threat-pattern-audit-tasks", change: "task_status", execution_revision: 1 }]);
+  assert.equal(calls.length, 0);
+});
 
 for (const kind of ["authenticated", "integration", "shared"]) {
   test(`overview invalidations read only one overview and preserve loaded details (${kind})`, async () => {

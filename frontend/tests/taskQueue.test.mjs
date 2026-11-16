@@ -12,7 +12,7 @@ const { compareTaskHistory } = await server.ssrLoadModule("/src/taskOrder.ts");
 const originalAdapter = client.api.defaults.adapter;
 const roots = [];
 globalThis.localStorage = { getItem: () => null };
-globalThis.document = { hidden: false };
+globalThis.document = Object.assign(new EventTarget(), { hidden: false });
 
 afterEach(async () => {
   await act(async () => { roots.splice(0).forEach((root) => root.unmount()); });
@@ -20,6 +20,9 @@ afterEach(async () => {
   client.setPublicScanAccess(null);
 });
 after(async () => { delete globalThis.localStorage; delete globalThis.document; await server.close(); });
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const settleHistory = () => act(async () => { await wait(1050); });
 
 function response(config, data) { return { config, data, status: 200, statusText: "OK", headers: {} }; }
 function text(node) {
@@ -54,6 +57,39 @@ async function mount(value = pool()) {
   roots.push(root);
   return root;
 }
+
+test("pool heartbeats do not read history and same-count revisions coalesce with a trailing refresh", async () => {
+  let calls = 0;
+  let resolvePending;
+  let block = false;
+  let revision = 1;
+  client.api.defaults.adapter = async (config) => {
+    calls += 1;
+    const captured = revision;
+    if (block) { block = false; await new Promise((resolve) => { resolvePending = resolve; }); }
+    return response(config, { items: [task("same", "2026-11-16T00:00:00Z", { revision: captured })], next_cursor: null });
+  };
+  const root = await mount();
+  for (let index = 0; index < 10; index += 1) {
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: String(index), global_running: index }) })));
+  }
+  await settleHistory();
+  assert.equal(calls, 1);
+  block = true;
+  revision = 2;
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool(), refreshRevision: 1 })));
+  await settleHistory();
+  assert.equal(calls, 2);
+  revision = 3;
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool(), refreshRevision: 2 })));
+  await act(async () => { resolvePending(); await wait(1050); });
+  assert.equal(calls, 3);
+  revision = 4;
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s",
+    pool: pool({ completed_tasks: [task("same", "2026-11-16T00:00:00Z", { revision: 4 })] }), refreshRevision: 2 })));
+  await settleHistory();
+  assert.equal(calls, 4, "embedded history changes remain compatible without an SSE event");
+});
 
 test("planned-only work is hidden until it enters the queue, while shared runtime collection retains it", async () => {
   const { collectScanQueueTasks } = await server.ssrLoadModule("/src/features/scanDetail/model/taskQueue.ts");
@@ -229,6 +265,7 @@ for (const kind of ["", "candidate_audit"]) {
       await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({
         completed_task_count: completedCount, updated_at: `arrival-${arrival}`,
       }) })));
+      await settleHistory();
       assert.deepEqual(calls.at(-1).ids, firstPageIds, "late completions do not alter the newest history page");
       assert.equal(calls.at(-1).kind, kind);
       assert.equal(hasHistoryButton(root), true, "a new scan completion can be an older report outside the first page");
@@ -397,7 +434,8 @@ for (const publicAccess of [false, true]) {
     await act(async () => button(root, "加载更多历史任务").props.onClick());
     assert.match(text(root.toJSON()), /已加载 100 条/);
     refreshed = true;
-    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...value, updated_at: "new" } })));
+    await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: { ...value, updated_at: "new" }, refreshRevision: 1 })));
+    await settleHistory();
     assert.equal(ids(root)[2], "latest");
     assert.match(text(root.toJSON()), /已加载 101 条/);
     assert.match(text(root.toJSON()), /完整任务 Prompt/);
@@ -425,7 +463,8 @@ test("older page responses cannot replace a newer execution already refreshed", 
   let loading;
   act(() => { loading = button(root, "加载更多历史任务").props.onClick(); });
   refreshed = true;
-  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "new" }) })));
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "new" }), refreshRevision: 1 })));
+  await settleHistory();
   await act(async () => { resolvePage([task("same", "2026-09-08T01:00:00Z", { outcome: "failure" })]); await loading; });
   assert.deepEqual(ids(root), ["same"]);
   assert.equal(text(rows(root)[0].findAllByType("td")[0]), "成功");
@@ -446,6 +485,7 @@ test("more than 50 new completions are paged without skipping the interval befor
   await act(async () => button(root, "加载更多历史任务").props.onClick());
   newest = 237;
   await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ completed_task_count: newest }) })));
+  await settleHistory();
   for (let i = 0; i < 3; i += 1) await act(async () => button(root, "加载更多历史任务").props.onClick());
   assert.deepEqual(cursors, ["58", "188", "138", "8"]);
   const loaded = ids(root);
@@ -510,7 +550,8 @@ test("repeated cursor errors retain history and the retry boundary through refre
   assert.match(text(root.toJSON()), /历史任务加载失败/);
   assert.match(text(root.toJSON()), /已加载 50 条/);
 
-  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "refresh" }) })));
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ updated_at: "refresh" }), refreshRevision: 1 })));
+  await settleHistory();
   assert.match(text(root.toJSON()), /历史任务加载失败/);
   await act(async () => button(root, "重试加载历史任务").props.onClick());
   assert.equal(firstPageCalls, 3);
@@ -826,6 +867,7 @@ test("queued task details do not become stale running or historical details", as
   assert.match(text(root.toJSON()), /2 阶段正文/);
   terminal = true;
   await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool() })));
+  await settleHistory();
   await act(async () => rows(root)[0].props.onClick());
   assert.match(text(root.toJSON()), /3 阶段正文/);
   assert.equal(calls, 3);

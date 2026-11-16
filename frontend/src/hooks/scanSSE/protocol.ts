@@ -135,6 +135,7 @@ export interface ThreatAuditTaskEvent {
 }
 
 export interface MiningEngineRunEvent {
+  execution_revision?: number;
   run: MiningEngineRunStatus;
   runs: MiningEngineRunStatus[];
 }
@@ -144,6 +145,9 @@ export interface MiningEngineRunEvent {
 /* ------------------------------------------------------------------ */
 
 export interface ScanSSEHandlers {
+  ownsPatternTaskPages?: () => boolean;
+  activeTaskCollections?: () => readonly ScanDetailResource[];
+  onTaskHistoryRefresh?: () => void;
   onDetailRefreshState?: (resources: readonly ScanDetailResource[], refreshing: boolean) => void;
   onStateRefresh?: () => void;
   onScanStatus?: (data: ScanStatusEvent) => void;

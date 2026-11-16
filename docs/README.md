@@ -48,6 +48,7 @@
 - [生产环境扩展与迁移](production_scaling.md)：PostgreSQL、多 Worker、代理与运行指标。
 - [扫描历史存储迁移](database-storage-migration.md)：存储升级、回填与回滚。
 - [存储基准测试](database-storage-benchmark.md)：测试范围、命令和结果解释。
+- [扫描状态上报与停止收尾](scan-status-reporting.md)：运行时增量、续扫隔离、数据库开销与请求合并。
 - [PostgreSQL 测试缓存](testing-postgres.md)：使用已有本机缓存运行数据库回归。
 - [更新日志](../CHANGELOG.md)：按日期记录项目变化。
 

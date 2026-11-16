@@ -97,14 +97,26 @@ async def agent_report_mining_engine_run(scan_id: str, body: MiningEngineRunStat
             store=store,
         )
     body = _validated_mining_engine_run(meta, body)
-    runs = await run_store_call(store, "update_mining_engine_run", scan_id, body)
+    try:
+        runs, settled_engines = await run_store_call(
+            store, "update_mining_engine_run", scan_id, body, return_settled=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not runs:
         _scan_not_found(
             scan_id,
             endpoint="mining-engine-run",
             store=store,
         )
-    scan = await _ensure_running_scan(scan_id)
+    # The store may retain a newer terminal run instead of a late running report.
+    body = next(item for item in runs if item.engine_id == body.engine_id)
+    # Modern reports have already checked the durable execution. Updating a
+    # lifecycle row does not require loading every task/result after a stop.
+    scan = (get_runtime().scans.running_scans.get(scan_id)
+            if body.execution_revision > 0 else await _ensure_running_scan(scan_id))
+    if scan is not None and body.execution_revision > 0 and scan.execution_revision != body.execution_revision:
+        scan = None
     if scan is not None:
         scan.mining_engine_runs = runs
     if body.engine_id == constants._STATIC_CANDIDATE_ENGINE_ID:
@@ -113,10 +125,15 @@ async def agent_report_mining_engine_run(scan_id: str, body: MiningEngineRunStat
         )
     from backend.application import publish
 
-    publish(scan_id, "mining_engine_run", {
+    notice = {
         "run": body.model_dump(mode="json"),
         "runs": [item.model_dump(mode="json") for item in runs],
-    })
+    }
+    if body.execution_revision > 0:
+        notice["execution_revision"] = body.execution_revision
+    publish(scan_id, "mining_engine_run", notice)
+    from backend.scans.pattern_task_reports import publish_pattern_task_settlement
+    publish_pattern_task_settlement(scan_id, settled_engines, body.execution_revision or meta.execution_revision)
     return {"ok": True, "run": body.model_dump(mode="json")}
 
 

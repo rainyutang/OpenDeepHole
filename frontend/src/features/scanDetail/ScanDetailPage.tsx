@@ -6,7 +6,7 @@ import EditScanMetadataDialog from "../../components/EditScanMetadataDialog";
 import FeedbackManager from "../../components/FeedbackManager";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import VulnerabilityList from "../issues/VulnerabilityList";
-import { canonicalMiningEngineLabel, isPatternAuditEngine } from "../../miningEngines";
+import { canonicalMiningEngineLabel, isPatternAuditEngine, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
 import type { ScanNavigation } from "../../routing";
 import { findIndexedVulnerability } from "../../scanRuntime/issues";
 import { mergeScanCodeGraph, mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
@@ -175,13 +175,16 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   }, [exportMenuOpen]);
 
   useScanHydration(scanId, scanSnapshotState, { setSelectedFeedbackIds, setEditingScan });
-  const events = useScanEvents(scanId, scanSnapshotState, detailResources, { refresh: refreshThreatAnalysis, acceptAnalysis: acceptThreatAnalysis });
+  const events = useScanEvents(scanId, scanSnapshotState, detailResources, { refresh: refreshThreatAnalysis, acceptAnalysis: acceptThreatAnalysis },
+    activeTab === "mining" && activeEngineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID,
+    activeTab !== "mining" ? undefined : isPatternAuditEngine(activeEngineId) ? "threat-pattern-audit-tasks"
+      : activeEngineId === THREAT_AUDIT_ENGINE_ID ? "threat-audit-tasks" : undefined);
   const { refreshFailures, refreshDetails } = events;
 
   const pagination = useDetailPagination(scanId, scanSnapshotState, detailResources, { activeTab, activeEngineId, logOpen, refreshFailures });
   const { fpReviewPageLoading, fpReviewPageFailed, fpReviewRefreshFailed, requiredDetailResources } = pagination;
 
-  const actions = useScanActions(scanId, scanSnapshotState, refreshDetails, setExportMenuOpen);
+  const actions = useScanActions(scanId, scanSnapshotState, refreshDetails, setExportMenuOpen, events.refreshStopped);
   const {
     stopping,
     continuing,

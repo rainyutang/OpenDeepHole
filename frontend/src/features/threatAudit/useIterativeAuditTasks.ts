@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getScanPatternTaskDetail, getScanPatternTasksPage } from "../../api/client";
 import { mergePatternTasks } from "../../scanRuntime";
+import { createCoalescedRefresh } from "../../hooks/scanSSE/coalescedRefresh";
 import type { ThreatPatternAuditTask } from "../../types";
 
 /** Fetch summaries only; selected rounds load their clues separately. */
@@ -16,6 +17,7 @@ export function useIterativeAuditTasks(scanId: string, engineId: string, enabled
   savedRef.current = saved;
   const failedRefreshRef = useRef(false);
   const revisionRef = useRef(refreshRevision);
+  const refreshRef = useRef<() => void>(() => {});
   const loadPage = useCallback(async (after: string | null, refresh = false) => {
     controllerRef.current?.abort();
     const controller = new AbortController();
@@ -62,13 +64,15 @@ export function useIterativeAuditTasks(scanId: string, engineId: string, enabled
     loadedPagesRef.current = 0;
     extraIdsRef.current.clear();
     revisionRef.current = refreshRevision;
-    if (enabled) void loadPage(null, true);
-    return () => controllerRef.current?.abort();
+    const scheduler = createCoalescedRefresh(async () => { if (enabled) await loadPage(null, true); });
+    refreshRef.current = () => scheduler.request();
+    if (enabled) scheduler.request(true);
+    return () => { scheduler.dispose(); controllerRef.current?.abort(); };
   }, [enabled, loadPage]);
   useEffect(() => {
     if (revisionRef.current === refreshRevision) return;
     revisionRef.current = refreshRevision;
-    if (enabled) void loadPage(null, true);
+    if (enabled) refreshRef.current();
   }, [enabled, loadPage, refreshRevision]);
   const addTask = useCallback((task: ThreatPatternAuditTask) => {
     if (!savedRef.current.some((item) => item.task_id === task.task_id)) extraIdsRef.current.add(task.task_id);

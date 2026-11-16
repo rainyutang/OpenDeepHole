@@ -2,17 +2,52 @@ import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
 
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const { ThreatAuditFindingBadge, ThreatAuditResults } = await server.ssrLoadModule("/src/features/threatAudit/ThreatAuditResults.tsx");
 const client = await server.ssrLoadModule("/src/api/client.ts");
+const { useThreatAuditResults } = await server.ssrLoadModule("/src/features/auditResults/useAuditResults.ts");
 const originalAdapter = client.api.defaults.adapter;
 globalThis.localStorage = { getItem: () => null };
+const roots = [];
 
-afterEach(() => {
+afterEach(async () => {
+  await TestRenderer.act(async () => roots.splice(0).forEach((root) => root.unmount()));
   client.api.defaults.adapter = originalAdapter;
   client.setPublicScanAccess(null);
+});
+
+test("task status changes retain result bodies while explicit same-count edits revalidate", async () => {
+  let calls = 0;
+  client.api.defaults.adapter = async (config) => {
+    calls += 1;
+    return { config, status: 200, statusText: "OK", headers: {}, data: [result()] };
+  };
+  const vulnerabilities = [];
+  const task = { task_id: "task-a", status: "running", result_vuln_indexes: [], output_source: {} };
+  function Harness({ status = "running", revision = 0, source = {}, indexes = [] }) {
+    useThreatAuditResults({ scan_id: "scan-a", execution_revision: 1, vulnerabilities,
+      threat_audit_tasks: [{ ...task, status, output_source: source, result_vuln_indexes: indexes, updated_at: status }] }, ["task-a"], null, revision);
+    return null;
+  }
+  let root;
+  await TestRenderer.act(async () => { root = TestRenderer.create(createElement(Harness)); });
+  roots.push(root);
+  assert.equal(calls, 1);
+  await TestRenderer.act(async () => root.update(createElement(Harness, { status: "cancelled" })));
+  await TestRenderer.act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.equal(calls, 1);
+  await TestRenderer.act(async () => root.update(createElement(Harness, { status: "cancelled", revision: 1 })));
+  await TestRenderer.act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.equal(calls, 2);
+  await TestRenderer.act(async () => root.update(createElement(Harness, { status: "cancelled", revision: 1, source: { path: "new-result.json" } })));
+  await TestRenderer.act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.equal(calls, 2, "a cancellation's Session metadata does not change result bodies");
+  await TestRenderer.act(async () => root.update(createElement(Harness, { status: "completed", revision: 1, indexes: [7] })));
+  await TestRenderer.act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.equal(calls, 3, "new finding links are still fetched");
 });
 after(async () => { delete globalThis.localStorage; await server.close(); });
 

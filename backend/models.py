@@ -289,6 +289,9 @@ class MiningEngineRunStatus(BaseModel):
     total_candidates: int | None = Field(default=None, ge=0)
     processed_candidates: int | None = Field(default=None, ge=0)
     static_analysis_errors: list[StaticAnalysisError] = Field(default_factory=list)
+    # Report identity is separate from the provenance of reused artifacts.
+    execution_revision: int = Field(default=0, ge=0)
+    report_agent_session_id: str = ""
 
     @model_validator(mode="after")
     def _canonicalize_engine_label(self):

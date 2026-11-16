@@ -17,7 +17,7 @@ export function useScanSSE(
   scanId: string,
   handlers: ScanSSEHandlers,
   stateSetters: SSEStateSetters,
-): { connected: boolean; overviewFailed: boolean; refreshOverview: () => void; failedResources: ReadonlySet<ScanDetailResource>; refreshDetails: (resources?: readonly ScanDetailResource[]) => void } {
+): { connected: boolean; overviewFailed: boolean; refreshOverview: () => void; refreshStopped: (reviewChanged?: boolean) => void; failedResources: ReadonlySet<ScanDetailResource>; refreshDetails: (resources?: readonly ScanDetailResource[]) => void } {
   const [connected, setConnected] = useState(false);
   const [overviewFailed, setOverviewFailed] = useState(false);
   const [failedResources, setFailedResources] = useState<Set<ScanDetailResource>>(new Set());
@@ -37,6 +37,9 @@ export function useScanSSE(
   activeScanIdRef.current = scanId;
   const requestStateRef = useRef<(resources: readonly StateResource[]) => void>(() => { });
   const refreshState = useCallback(() => requestStateRef.current(STATE_RESOURCES), []);
+  const refreshStopped = useCallback((reviewChanged = false) => {
+    requestStateRef.current(reviewChanged ? ["overview", "fp-review"] : ["overview"]);
+  }, []);
 
   useEffect(() => connectScanStream({
     scanId,
@@ -51,5 +54,5 @@ export function useScanSSE(
     refreshState,
   }), [scanId, refreshState]);
 
-  return { connected, overviewFailed, refreshOverview: refreshState, failedResources, refreshDetails };
+  return { connected, overviewFailed, refreshOverview: refreshState, refreshStopped, failedResources, refreshDetails };
 }

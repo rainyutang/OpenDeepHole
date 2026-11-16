@@ -111,11 +111,12 @@ async def agent_scan_execution_failed(
     from backend.application import publish
 
     store = get_scan_store()
-    changed = await run_store_call(
+    changed, settled_engines = await run_store_call(
         store, "fail_scan_execution", scan_id,
         agent_session_id=body.agent_session_id,
         execution_revision=body.execution_revision,
         error_message=body.error_message,
+        return_settled=True,
     )
     if changed:
         live = get_runtime().scans.running_scans.get(scan_id)
@@ -127,6 +128,8 @@ async def agent_scan_execution_failed(
             "status": "error", "error_message": body.error_message,
             "opencode_pool": {"execution_revision": body.execution_revision, "agent_session_id": body.agent_session_id},
         })
+        from backend.scans.pattern_task_reports import publish_pattern_task_settlement
+        publish_pattern_task_settlement(scan_id, settled_engines, body.execution_revision)
         from backend.scans.auto_resume import notify_auto_resume
         await notify_auto_resume(scan_id, server_url)
     return {"ok": True, "changed": changed}
@@ -258,7 +261,7 @@ async def _persist_scan_finish(scan_id: str, body: AgentScanFinish):
         await _reconcile_finished_vulnerabilities(scan_id, body, store=store, meta=meta)
     )
 
-    changed = await run_store_call(
+    changed, settled_engines = await run_store_call(
         store,
         "update_scan_progress",
         scan_id,
@@ -270,9 +273,13 @@ async def _persist_scan_finish(scan_id: str, body: AgentScanFinish):
         clear_current_candidate=True,
         expected_revision=body.execution_revision,
         expected_agent_session_id=body.agent_session_id,
+        return_settled=True,
     )
     if not changed:
         return None
+
+    from backend.scans.pattern_task_reports import publish_pattern_task_settlement
+    publish_pattern_task_settlement(scan_id, settled_engines, body.execution_revision)
 
     scan = get_runtime().scans.running_scans.get(scan_id)
     final_pool = await _persist_finished_pool(

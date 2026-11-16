@@ -131,6 +131,9 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
                                if key in detail})
             if event_type in {"fp_review_result", "fp_review_stage_output"}:
                 notice["change"] = "result" if event_type == "fp_review_result" else "stage_output"
+            if event_type == "threat_pattern_audit_task":
+                notice.update({key: data[key] for key in ("change", "execution_revision", "engine_ids")
+                               if key in data})
             return "resource_changed", notice
         if event_type == "scan_status" and isinstance(data.get("opencode_pool"), dict):
             from backend.store.history import TASK_METADATA_FIELDS

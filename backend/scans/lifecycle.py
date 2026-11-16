@@ -17,7 +17,7 @@ async def stop_scan(
     """Stop the main scan and every active false-positive review task."""
     await _check_scan_owner(scan_id, current_user)
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan", scan_id)
+    loaded = await run_store_call(store, "load_scan_runtime", scan_id)
     if loaded is None:
         raise ApplicationError(status_code=404, detail="Scan not found")
     stored_scan, meta = loaded
@@ -27,7 +27,7 @@ async def stop_scan(
     await pause_auto_resume(scan_id)
     # The dispatcher may have claimed the next execution while the first read
     # was in flight. Stop the current durable identity after invalidating it.
-    loaded = await run_store_call(store, "load_scan", scan_id)
+    loaded = await run_store_call(store, "load_scan_runtime", scan_id)
     if loaded is None:
         raise ApplicationError(status_code=404, detail="Scan not found")
     stored_scan, meta = loaded
@@ -44,15 +44,26 @@ async def stop_scan(
         "用户手动停止",
     )
 
+    settled_engines: list[str] = []
     if core_running:
-        await run_store_call(
+        changed, settled_engines = await run_store_call(
             store,
             "update_scan_progress",
             scan_id,
             status=ScanItemStatus.CANCELLED,
             error_message="用户手动停止",
             clear_current_candidate=True,
+            expected_revision=meta.execution_revision,
+            expected_agent_session_id=meta.execution_agent_session_id,
+            return_settled=True,
         )
+        if not changed:
+            latest = await run_store_call(store, "load_scan_runtime", scan_id)
+            if latest is None:
+                raise ApplicationError(status_code=404, detail="Scan not found")
+            if (latest[1].execution_revision != meta.execution_revision
+                or latest[1].execution_agent_session_id != meta.execution_agent_session_id):
+                raise ApplicationError(status_code=409, detail="扫描执行轮次已变化，请刷新后重试停止")
         scan = get_runtime().scans.running_scans.pop(scan_id, None)
         if scan is not None:
             scan.status = ScanItemStatus.CANCELLED
@@ -77,7 +88,7 @@ async def stop_scan(
     if core_running or cancelled_review_ids:
         from backend.application import publish
 
-        refreshed = await run_store_call(store, "load_scan_overview", scan_id)
+        refreshed = await run_store_call(store, "load_scan_runtime", scan_id)
         persisted = refreshed[0] if refreshed is not None else stored_scan
         terminal_pool = terminal_opencode_pool_status(persisted.opencode_pool)
         publish(scan_id, "scan_status", {
@@ -90,6 +101,8 @@ async def stop_scan(
                 else None
             ),
         })
+        from backend.scans.pattern_task_reports import publish_pattern_task_settlement
+        publish_pattern_task_settlement(scan_id, settled_engines, persisted.execution_revision)
 
     agent_stop_state = "not_required"
     agent_id = await _resolve_scan_agent_id(meta)

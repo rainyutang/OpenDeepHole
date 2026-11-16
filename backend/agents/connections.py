@@ -149,6 +149,9 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 "incremental_opencode_task_reports": (
                     incremental_opencode_task_reports
                 ),
+                "server_owned_pattern_task_settlement": reported_capabilities.get(
+                    "server_owned_pattern_task_settlement"
+                ) is True,
             },
         })
         for command in reconnect.pending_scan_stops:

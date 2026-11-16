@@ -137,12 +137,16 @@ class ReportOutbox:
     def next_sequence(self, scope: str) -> int:
         """Persistent sequence allocation; gaps are harmless, reuse is not."""
         with self._lock:
-            row = self._conn.execute(
-                "INSERT INTO report_sequences (scope, sequence) VALUES (?, 1) ON CONFLICT(scope) DO UPDATE SET sequence = report_sequences.sequence + 1 RETURNING sequence",
-                (scope,),
-            ).fetchone()
+            sequence = self._next_sequence_locked(scope)
             self._conn.commit()
-            return int(row[0])
+            return sequence
+
+    def _next_sequence_locked(self, scope: str) -> int:
+        row = self._conn.execute(
+            "INSERT INTO report_sequences (scope, sequence) VALUES (?, 1) ON CONFLICT(scope) DO UPDATE SET sequence = report_sequences.sequence + 1 RETURNING sequence",
+            (scope,),
+        ).fetchone()
+        return int(row[0])
 
     def enqueue(
         self,
@@ -154,10 +158,15 @@ class ReportOutbox:
         payload: dict[str, Any],
         query: dict[str, str] | None = None,
         timeout_seconds: float = 30.0,
+        sequence_scope: str | None = None,
     ) -> PendingReport:
         now = datetime.now(timezone.utc).isoformat()
         normalized_target = target_url.rstrip("/")
-        with self._lock:
+        with self._lock, self._conn:
+            if sequence_scope is not None:
+                # Allocate ordering metadata in the same durable transaction
+                # as the report, avoiding a second FULL-synchronous commit.
+                payload = {**payload, "report_sequence": self._next_sequence_locked(sequence_scope)}
             self._conn.execute(
                 """
                 INSERT INTO pending_reports (

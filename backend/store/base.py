@@ -145,7 +145,8 @@ class ScanStoreBase(ABC):
         self,
         scan_id: str,
         run: MiningEngineRunStatus,
-    ) -> list[MiningEngineRunStatus]:
+        *, return_settled: bool = False,
+    ) -> list[MiningEngineRunStatus] | tuple[list[MiningEngineRunStatus], list[str]]:
         """Create or replace one mining-engine lifecycle row."""
         raise NotImplementedError
 
@@ -214,7 +215,12 @@ class ScanStoreBase(ABC):
         raise NotImplementedError
 
     def upsert_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask, *,
-                                        return_changed: bool = False) -> ThreatPatternAuditTask | tuple[ThreatPatternAuditTask, bool]:
+                                        return_changed: bool = False,
+                                        return_change_kind: bool = False,
+                                        execution_revision: int | None = None,
+                                        report_agent_session_id: str | None = None,
+                                        report_sequence: int | None = None,
+                                        ) -> ThreatPatternAuditTask | tuple[ThreatPatternAuditTask, bool] | tuple[ThreatPatternAuditTask, bool, str]:
         raise NotImplementedError
 
     def get_threat_pattern_audit_task_detail(self, scan_id: str, task_id: str) -> dict | None:
@@ -271,7 +277,8 @@ class ScanStoreBase(ABC):
         static_analysis_done: bool | None = None,
         expected_revision: int | None = None,
         expected_agent_session_id: str | None = None,
-    ) -> bool:
+        return_settled: bool = False,
+    ) -> bool | tuple[bool, list[str]]:
         """Incrementally update progress fields on the scans row.
 
         Use *clear_current_candidate=True* to set current_candidate to NULL.
@@ -687,7 +694,8 @@ class ScanStoreBase(ABC):
     def fail_scan_execution(
         self, scan_id: str, *, agent_session_id: str,
         execution_revision: int, error_message: str,
-    ) -> bool:
+        return_settled: bool = False,
+    ) -> bool | tuple[bool, list[str]]:
         """Fail only the matching pending execution without replacing results."""
         raise NotImplementedError
 

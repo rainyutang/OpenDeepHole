@@ -12,8 +12,8 @@ import { mergeRecentScanEvents } from "../model/scan";
 import type { DetailResource } from "../model/types";
 import type { ScanEventContext } from "./context";
 
-export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEventContext): Pick<ScanSSEHandlers, "onDetailRefreshState" | "onStateRefresh" | "onScanStatus" | "onOpenCodeTaskReport" | "onScanEvents" | "onScanFinish" | "onIndexStatus"> {
-  const { setScan, pendingInitialOpenCodePoolRef, setThreatResultRevision, setPatternTaskRevision, setIndexStatus } = state;
+export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEventContext): Pick<ScanSSEHandlers, "onTaskHistoryRefresh" | "onDetailRefreshState" | "onStateRefresh" | "onScanStatus" | "onOpenCodeTaskReport" | "onScanEvents" | "onScanFinish" | "onIndexStatus"> {
+  const { setScan, pendingInitialOpenCodePoolRef, setThreatResultRevision, setPatternTaskRevision, setTaskHistoryRevision, setIndexStatus } = state;
   const {
     setDetailLoadingResources,
     setDetailFailedResources,
@@ -24,6 +24,7 @@ export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEv
     scheduleOverviewSummaryRefresh,
   } = resources;
   return {
+    onTaskHistoryRefresh: () => setTaskHistoryRevision((value) => value + 1),
     onDetailRefreshState: (resources, refreshing) => {
       if (!resources.length) return;
       for (const resource of resources) {
@@ -118,6 +119,7 @@ export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEv
       scheduleOverviewSummaryRefresh();
     },
     onOpenCodeTaskReport: (data) => {
+      setTaskHistoryRevision((value) => value + 1);
       setScan((prev) => {
         if (!prev) return prev;
         const pool = prev.opencode_pool ?? {
@@ -183,7 +185,6 @@ export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEv
           }
           : prev,
       );
-      scheduleOverviewSummaryRefresh(0);
     },
     onIndexStatus: (data) => {
       setIndexStatus(data);

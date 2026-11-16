@@ -1,7 +1,7 @@
 import { scanSSEUrl, notifyShareUnavailable } from "../../api/accessPolicy";
 
 import type { ScanDetailResource } from "../../scanResourceRefresh";
-import { isOlderScanExecution, normalizeScanEvent } from "../../scanRuntime/scanSnapshots";
+import { isOlderScanExecution, normalizeScanEvent, scanExecutionRevision } from "../../scanRuntime/scanSnapshots";
 import { normalizeScanCandidate } from "../../scanRuntime/candidates";
 import { normalizeThreatTask, normalizePatternTask } from "../../scanRuntime/audit";
 import { normalizeValidation, normalizeVulnerability } from "../../scanRuntime/issues";
@@ -98,7 +98,8 @@ export function connectScanStream({
     setConnected(true);
   });
 
-  const coordinator = createScanResourceCoordinator({ scanId, handlersRef, stateSettersRef, activeScanIdRef, lifetime, setOverviewFailed, setFailedResources });
+  const coordinator = createScanResourceCoordinator({ scanId, handlersRef, stateSettersRef, activeScanIdRef, lifetime, setOverviewFailed, setFailedResources,
+    pendingExecutionRevision: () => scanExecutionRevision(batcher.pendingStatus()) });
   const { requestCollections, queueCoverageIssues } = coordinator;
   requestStateRef.current = coordinator.requestState;
   requestDetailsRef.current = requestCollections;
@@ -134,6 +135,7 @@ export function connectScanStream({
       || isOlderScanExecution(stateSettersRef.current.getScan(), d)) return;
     flushPendingStatus();
     handlersRef.current.onScanFinish?.(d);
+    coordinator.requestFinalRefresh(d.execution_revision);
     handlersRef.current.onThreatAnalysisRefresh?.();
   });
   handle<FpReviewStartedEvent>("fp_review_started", (d) => handlersRef.current.onFpReviewStarted?.(d));
@@ -163,7 +165,11 @@ export function connectScanStream({
   handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.({
     task: normalizeThreatTask(d.task),
   }));
-  handle<MiningEngineRunEvent>("mining_engine_run", (d) => handlersRef.current.onMiningEngineRun?.(d));
+  handle<MiningEngineRunEvent>("mining_engine_run", (d) => {
+    if (isOlderScanExecution(batcher.pendingStatus(), d)
+      || isOlderScanExecution(stateSettersRef.current.getScan(), d)) return;
+    handlersRef.current.onMiningEngineRun?.(d);
+  });
   handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));
 
   es.onopen = () => {
@@ -180,6 +186,7 @@ export function connectScanStream({
   // Fallback poll every 30s as safety net
   const fallbackTimer = setInterval(() => {
     refreshState();
+    if (!document.hidden) handlersRef.current.onTaskHistoryRefresh?.();
     handlersRef.current.onThreatAnalysisRefresh?.();
   }, 30_000);
 

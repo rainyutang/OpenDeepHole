@@ -15,6 +15,7 @@ export function useScanActions(
   state: ScanSnapshotState,
   refreshDetails: (resources?: readonly ScanDetailResource[]) => void,
   setExportMenuOpen: React.Dispatch<React.SetStateAction<boolean>>,
+  refreshStopped: (reviewChanged?: boolean) => void,
 ) {
   const { scan, scanRef, setScan, setFpReview, setLaunchingValidations, setStoppingValidations } = state;
 
@@ -113,10 +114,7 @@ export function useScanActions(
       if (result.agent_stop_state === "pending") {
         alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
       }
-      const request = getScanOverviewRequest(scanId, scanRef.current);
-      const next = await request.promise;
-      setScan((previous) => previous?.scan_id === scanId ? mergeScanOverview(previous, next, request.requestedFrom) : previous);
-      refreshDetails();
+      refreshStopped(Boolean(result.fp_review_ids?.length));
     } catch {
       // The next poll can still reconcile an Agent-side stop.
     } finally {

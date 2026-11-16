@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 from typing import Awaitable, Callable, Optional
+from weakref import WeakValueDictionary
 
 import httpx
 
@@ -247,6 +248,8 @@ class Reporter:
         self._validation_streamed_fields: dict[tuple[str, int, int], set[str]] = {}
         self._validation_delta_sequences: dict[tuple[str, int, int], int] = {}
         self._validation_delta_lock = asyncio.Lock()
+        self._pattern_report_sequences: dict[str, int] = {}
+        self._pattern_report_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._opencode_pool_push_failures: dict[str, tuple[int, float]] = {}
         self._opencode_pool_stale_identities: set[_PoolIdentity] = set()
         self._opencode_pool_wakeups: dict[str, set[asyncio.Event]] = {}
@@ -365,6 +368,12 @@ class Reporter:
             return bound[1]
         return self._scan_execution_revisions.get(scan_id, 0)
 
+    def pattern_task_report_identity(self, scan_id: str) -> tuple[str, int] | None:
+        revision = self.scan_execution_revision(scan_id)
+        if self.capabilities.get("server_owned_pattern_task_settlement") and revision > 0:
+            return self.agent_session_id, revision
+        return None
+
     def set_scan_execution(self, scan_id: str, revision: int) -> int:
         scope_id = str(scan_id)
         previous = self._pool_identity(scope_id)
@@ -435,8 +444,9 @@ class Reporter:
         result["scan_executions"] = self._outbox.pending_scan_executions(self.server_url)
         for key in self._outbox.pending_dedupe_keys(self.server_url):
             parts = key.split(":")
-            if len(parts) == 3 and parts[0] == "scan" and parts[2] == "finish":
-                result["scans"].append(parts[1])
+            if len(parts) >= 3 and parts[0] == "scan" and parts[2] == "finish":
+                if parts[1] not in result["scans"]:
+                    result["scans"].append(parts[1])
             elif (
                 len(parts) == 5
                 and parts[0] == "scan"
@@ -672,6 +682,7 @@ class Reporter:
         timeout: float = 30.0,
         on_delivered: _OutboxDeliveryCallback | None = None,
         wait_for_delivery: bool = False,
+        sequence_scope: str | None = None,
     ) -> httpx.Response | None:
         if self._outbox is None:
             response = await self._client.post(
@@ -701,6 +712,7 @@ class Reporter:
                 payload=payload,
                 query=query,
                 timeout_seconds=timeout,
+                **({"sequence_scope": sequence_scope} if sequence_scope is not None else {}),
             )
             self._discard_stale_outbox_deliveries(report)
             waiter = None
@@ -1324,6 +1336,12 @@ class Reporter:
     ) -> None:
         """Create or update one mining-engine lifecycle state."""
         snapshot = MiningEngineRunStatus.model_validate(run)
+        identity = self.pattern_task_report_identity(scan_id)
+        if identity is not None:
+            snapshot = snapshot.model_copy(update={
+                "report_agent_session_id": identity[0],
+                "execution_revision": identity[1],
+            })
         self._mining_engine_run_snapshots.setdefault(scan_id, {})[
             snapshot.engine_id
         ] = snapshot.model_copy(deep=True)
@@ -1371,9 +1389,12 @@ class Reporter:
             THREAT_ANALYSIS_TERMINAL_STATUSES | MINING_ENGINE_TERMINAL_STATUSES
         ):
             resource = str(payload.get("engine_id") or label)
+            dedupe_key = f"scan:{scan_id}:{label}:{resource}"
+            if payload.get("execution_revision") and payload.get("report_agent_session_id"):
+                dedupe_key += f":{payload['report_agent_session_id']}:{payload['execution_revision']}"
             await self._queue_post(
                 stream_key=f"scan:{scan_id}",
-                dedupe_key=f"scan:{scan_id}:{label}:{resource}",
+                dedupe_key=dedupe_key,
                 path=endpoint,
                 payload=payload,
                 timeout=10.0,
@@ -1624,6 +1645,47 @@ class Reporter:
             )
             return task
         task.output_source = self._with_agent_source(task.output_source)
+        identity = self.pattern_task_report_identity(scan_id) if kind == "threat-pattern-audit" else None
+        if identity is not None:
+            # One task's updates retain order while unrelated tasks can report
+            # concurrently. A retry reuses the sequence saved in the outbox.
+            scope = f"scan:{scan_id}:pattern-task:{task.task_id}:{identity[0]}:{identity[1]}"
+            # A shared counter still orders every task's reports (gaps are
+            # harmless), without retaining a permanent row for each task/round.
+            sequence_scope = f"pattern-tasks:{self.server_url}:{identity[0]}"
+            lock = self._pattern_report_locks.setdefault(scope, asyncio.Lock())
+            async with lock:
+                payload = {
+                    **task.model_dump(),
+                    "execution_revision": identity[1],
+                    "report_agent_session_id": identity[0],
+                }
+                if self._outbox is None:
+                    sequence = self._pattern_report_sequences.get(sequence_scope, 0) + 1
+                    self._pattern_report_sequences[sequence_scope] = sequence
+                    payload["report_sequence"] = sequence
+                try:
+                    response = await self._queue_post(
+                        stream_key=f"scan:{scan_id}",
+                        dedupe_key=scope,
+                        path=f"/api/agent/scan/{scan_id}/{kind}-task",
+                        payload=payload,
+                        timeout=10.0,
+                        sequence_scope=sequence_scope if self._outbox is not None else None,
+                    )
+                except (httpx.HTTPError, ValueError):
+                    # Direct delivery has no durable receipt. Let the tracker
+                    # retry this snapshot instead of marking it as published.
+                    if self._outbox is None:
+                        return None
+                    raise
+                if self._outbox is not None:
+                    # None means queued/deferred, not lost: enqueue completed
+                    # before delivery, so the durable worker owns retries now.
+                    return task
+                if response is not None:
+                    return task
+                return None
         if self._outbox is not None and task.status in {
             "completed",
             "failed",
@@ -1891,9 +1953,15 @@ class Reporter:
         else:
             finish_path = f"/api/agent/scan/{scan_id}/finish"
         if self._outbox is not None:
+            dedupe_key = f"scan:{scan_id}:finish"
+            identity = self.pattern_task_report_identity(scan_id)
+            if identity is not None:
+                # Reusing an old round's row would move this finish ahead of
+                # the resumed round's newly enqueued task/result reports.
+                dedupe_key += f":{identity[0]}:{identity[1]}"
             await self._queue_post(
                 stream_key=f"scan:{scan_id}",
-                dedupe_key=f"scan:{scan_id}:finish",
+                dedupe_key=dedupe_key,
                 path=finish_path,
                 payload=payload,
                 timeout=60.0,

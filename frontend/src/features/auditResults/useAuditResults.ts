@@ -127,8 +127,14 @@ async function getCandidateAuditResultBatches(scanId: string, indexes: number[],
 }
 
 export function useThreatAuditResults(scan: ScanStatus, taskIds: string[], fpReview: FpReviewJob | null, revision: number, patternMode = false) {
+  const ids = new Set(taskIds);
+  const tasks = patternMode ? scan.threat_pattern_audit_tasks : scan.threat_audit_tasks;
+  // Status, timestamps and Session provenance do not change linked findings.
+  // Explicit result invalidations still refresh same-count report edits.
+  const resultSignature = JSON.stringify((tasks ?? []).filter((task) => ids.has(task.task_id))
+    .map((task) => [task.task_id, task.result_vuln_indexes]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
   return useAuditResults(scan.scan_id, taskIds, patternMode ? getScanThreatPatternAuditResults : getScanThreatAuditResults, threatId,
-    [patternMode ? scan.threat_pattern_audit_tasks : scan.threat_audit_tasks, scan.vulnerabilities, fpReview?.results, revision]);
+    [resultSignature, scan.execution_revision, scan.vulnerabilities, fpReview?.results, revision]);
 }
 
 export function useCandidateAuditResults(scan: ScanStatus, indexes: number[], fpReview: FpReviewJob | null, revision: number) {

@@ -721,6 +721,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,
+                        "server_owned_pattern_task_settlement": True,
                         "scan_code_graph_updates": True,
                         "scan_paths_probe": True,
                     },

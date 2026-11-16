@@ -380,10 +380,13 @@ for (const kind of ["authenticated", "integration", "shared"]) {
       });
       assertReadingPreserved(root, detail);
     }
+    assert.equal(calls.slice(before).filter((c) => c.url.endsWith("/threat-audit-tasks")).length, 0);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    assertReadingPreserved(root, detail);
     const refreshed = calls.slice(before);
     assert.equal(refreshed.filter((c) => /\/(vulnerabilities|validations|fp-review\/results)$/.test(c.url)).length, 0);
-    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-audit-tasks")).length, 3);
-    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-pattern-audit-tasks")).length, 3);
+    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-audit-tasks")).length, 0);
+    assert.equal(refreshed.filter((c) => c.url.endsWith("/threat-pattern-audit-tasks")).length, 0);
   });
 }
 
@@ -629,7 +632,7 @@ for (const [resource, field, engine, label] of [
 ]) {
   test(`${resource} refreshes later loaded pages and retains the remaining cursor`, async () => {
     const value = fixture();
-    value.overview = { mining_engines: [{ engine_id: engine, engine_label: label, enabled: true }] };
+    value.overview = { execution_revision: 1, mining_engines: [{ engine_id: engine, engine_label: label, enabled: true }] };
     const tasks = Array.from({ length: 125 }, (_, index) => ({
       task_id: `task-${String(index).padStart(3, "0")}`, scan_id: "s", status: "running", created_at: "2026-10-22T00:00:00Z",
       code_path: "src/main.c", module_name: "parser", pattern_id: "pattern", pattern_name: "parse",
@@ -657,5 +660,27 @@ for (const [resource, field, engine, label] of [
     assert.deepEqual(pages.map((c) => c.params.cursor ?? null), [null, "50"]);
     await act(async () => button(root, "加载更多审计任务").props.onClick());
     assert.equal(taskScan()[field].length, 125);
+    await openIssues(root);
+    const beforeHidden = calls.filter((c) => c.url.endsWith(`/${resource}`)).length;
+    tasks[80].status = "cancelled";
+    await notify("resource_changed", { resource, change: "task_status" });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1050)); });
+    assert.equal(calls.filter((c) => c.url.endsWith(`/${resource}`)).length, beforeHidden);
+    await act(async () => navigation.props.onClick());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1050)); });
+    assert.equal(taskScan()[field][80].status, "cancelled");
+    assert.equal(taskScan()[field].length, 125, "deferred refresh retains the loaded page span");
+    assert.equal(calls.filter((c) => c.url.endsWith(`/${resource}`)).length, beforeHidden + 3);
+    await openIssues(root);
+    const beforeResume = calls.filter((c) => c.url.endsWith(`/${resource}`)).length;
+    tasks[80].status = "running";
+    value.overview = { ...value.overview, execution_revision: 2, status: "auditing" };
+    await notify("scan_status", { execution_revision: 2, status: "auditing" });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1050)); });
+    assert.equal(calls.filter((c) => c.url.endsWith(`/${resource}`)).length, beforeResume);
+    await act(async () => navigation.props.onClick());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1050)); });
+    assert.equal(taskScan()[field][80].status, "running", "automatic resume invalidates a cached task page without a task notice");
+    assert.equal(calls.filter((c) => c.url.endsWith(`/${resource}`)).length, beforeResume + 3);
   });
 }

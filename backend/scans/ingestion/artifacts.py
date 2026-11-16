@@ -175,9 +175,11 @@ async def agent_list_threat_audit_tasks(scan_id: str) -> list[ThreatAuditTask]:
 
 async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> dict:
     """Agent creates or updates one module/pattern audit task."""
-    from backend.scans.ingestion.state import _ensure_running_scan
+    from backend.application import get_runtime
+    from backend.scans.pattern_task_reports import pattern_report_identity
     try:
         task = ThreatPatternAuditTask(**body)
+        identity = pattern_report_identity(body)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid threat audit task: {exc}") from exc
 
@@ -193,25 +195,35 @@ async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> di
             task = task.model_copy(update={
                 "result_vuln_indexes": result_indexes,
             })
-    task, changed = await run_store_call(
-        store,
-        "upsert_threat_pattern_audit_task",
-        scan_id,
-        task,
-        return_changed=True,
-    )
+    try:
+        task, changed, change_kind = await run_store_call(
+            store, "upsert_threat_pattern_audit_task", scan_id, task,
+            return_change_kind=True, **identity,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not changed:
         return {"ok": True, "task": task.model_dump()}
 
-    scan = await _ensure_running_scan(scan_id)
-    if scan is not None:
-        tasks = [item for item in scan.threat_pattern_audit_tasks if item.task_id != task.task_id]
-        tasks.append(task)
-        tasks.sort(key=lambda item: (item.created_at, item.task_id))
-        scan.threat_pattern_audit_tasks = tasks
+    # Reports already persist their own task row. Never hydrate the full scan
+    # after a stop or on a worker without a local runtime cache.
+    scan = get_runtime().scans.running_scans.get(scan_id)
+    if scan is not None and (not identity or scan.execution_revision == identity["execution_revision"]):
+        for index, existing in enumerate(scan.threat_pattern_audit_tasks):
+            if existing.task_id == task.task_id:
+                scan.threat_pattern_audit_tasks[index] = task
+                break
+        else:
+            scan.threat_pattern_audit_tasks.append(task)
 
     from backend.application import publish
-    publish(scan_id, "threat_pattern_audit_task", {"task": task.model_dump(exclude={"followup_clues"})})
+    notice = {"task": task.model_dump(exclude={"followup_clues"})}
+    if identity:
+        notice.update(change=change_kind, execution_revision=identity["execution_revision"],
+                      engine_ids=[task.engine_id])
+    publish(scan_id, "threat_pattern_audit_task", notice)
     return {"ok": True, "task": task.model_dump()}
 
 

@@ -2,7 +2,7 @@ import { getScanDetailItem } from "../../api/scanDetails";
 import { getFpReviewOverview } from "../../api/fpReview";
 import { isScanDetailResource, refreshScanResource, SCAN_DETAIL_RESOURCES } from "../../scanResourceRefresh";
 
-import type { ScanDetailResource } from "../../scanResourceRefresh";
+import type { RefreshedScanResource, ScanDetailResource } from "../../scanResourceRefresh";
 import { isRecord } from "../../scanRuntime/record";
 import { scanExecutionRevision } from "../../scanRuntime/scanSnapshots";
 import { normalizeScanCandidate } from "../../scanRuntime/candidates";
@@ -14,7 +14,7 @@ import type { StateResource } from './refreshState';
 import type { MutableRefObject, Dispatch, SetStateAction } from 'react';
 interface StreamLifetime { disposed: boolean }
 
-export function createScanResourceCoordinator({ scanId, handlersRef, stateSettersRef, activeScanIdRef, lifetime, setOverviewFailed, setFailedResources }: {
+export function createScanResourceCoordinator({ scanId, handlersRef, stateSettersRef, activeScanIdRef, lifetime, setOverviewFailed, setFailedResources, pendingExecutionRevision }: {
   scanId: string;
   handlersRef: MutableRefObject<ScanSSEHandlers>;
   stateSettersRef: MutableRefObject<SSEStateSetters>;
@@ -22,9 +22,21 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
   lifetime: StreamLifetime;
   setOverviewFailed: Dispatch<SetStateAction<boolean>>;
   setFailedResources: Dispatch<SetStateAction<Set<ScanDetailResource>>>;
+  pendingExecutionRevision: () => number | undefined;
 }) {
   let resourceTimer: number | null = null;
-  const pendingResources = new Map<string, { resource: string; index?: number }>();
+  type Notice = { resource: string; index?: number; resultsChanged?: boolean; taskSummaryPending?: boolean; delegated?: boolean };
+  const pendingResources = new Map<string, Notice>();
+  const taskCollections = new Set(["threat-audit-tasks", "threat-pattern-audit-tasks"]);
+  const taskIsVisible = (resource: string) => !handlersRef.current.activeTaskCollections
+    || handlersRef.current.activeTaskCollections().includes(resource as ScanDetailResource);
+  const taskIsDelegated = (resource: string) => resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.();
+  const needsRead = (notice: Notice) => !taskCollections.has(notice.resource) || notice.taskSummaryPending
+    || (taskIsVisible(notice.resource) && (!taskIsDelegated(notice.resource) || !notice.delegated));
+  const lastTaskRefresh = new Map<string, number>();
+  let resourceTimerAt = Infinity;
+  let finalRefreshKey = "";
+  let taskExecutionRevision = scanExecutionRevision(stateSettersRef.current.getScan());
   const resourceVersions = new Map<ScanDetailResource, number>();
   const resourceController = new AbortController();
   setFailedResources(new Set());
@@ -56,6 +68,7 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
   };
   const reloadResources = async () => {
     resourceTimer = null;
+    resourceTimerAt = Infinity;
     if (lifetime.disposed || document.hidden) return;
     if (resourceRunning) {
       // Progress and time estimates must keep advancing while a large
@@ -70,22 +83,38 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
     coverageIssuesDirty = false;
     const refreshConnectionArtifacts = connectionRefresh;
     connectionRefresh = false;
+    const notices = [...pendingResources.entries()].filter(([, notice]) => needsRead(notice) && (!taskCollections.has(notice.resource)
+      || Date.now() >= (lastTaskRefresh.get(notice.resource) ?? -Infinity) + 1000));
+    notices.forEach(([key, notice]) => {
+      if (taskCollections.has(notice.resource) && (!taskIsVisible(notice.resource) || taskIsDelegated(notice.resource))) {
+        // An engine-specific page can consume the notice without validating
+        // the separate shared cache. Keep that cache dirty until it is read.
+        pendingResources.set(key, { ...notice, taskSummaryPending: false,
+          delegated: taskIsVisible(notice.resource) && Boolean(taskIsDelegated(notice.resource)) });
+      } else pendingResources.delete(key);
+    });
+    const readyNotices = notices.map(([, notice]) => notice);
+    const visibleTaskResultsChanged = readyNotices.some((notice) => taskCollections.has(notice.resource)
+      && taskIsVisible(notice.resource) && notice.resultsChanged);
+    if (readyNotices.some((notice) => notice.taskSummaryPending) || visibleTaskResultsChanged) {
+      pendingState.add("overview");
+      pendingResultRefresh ||= visibleTaskResultsChanged;
+    }
     const stateResources = stateRunning ? new Set<StateResource>() : new Set(pendingState);
-    const notices = [...pendingResources.values()];
-    pendingResources.clear();
-    const collections = reloadAll ? [...SCAN_DETAIL_RESOURCES] : Array.from(new Set(
-      notices.filter((notice) => typeof notice.index !== "number").map((notice) => notice.resource).filter(isScanDetailResource),
-    ));
+    const collections = (reloadAll ? [...SCAN_DETAIL_RESOURCES] : Array.from(new Set(
+      readyNotices.filter((notice) => typeof notice.index !== "number").map((notice) => notice.resource).filter(isScanDetailResource),
+    ))).filter((resource) => !taskCollections.has(resource) || taskIsVisible(resource));
+    readyNotices.filter((notice) => taskCollections.has(notice.resource)).forEach((notice) => lastTaskRefresh.set(notice.resource, Date.now()));
     const versions = new Map(collections.map((resource) => [resource, resourceVersions.get(resource)]));
     // Artifact invalidations also apply when another notice requires a full
     // scan refresh. The overview itself intentionally has no artifact body.
-    if (reloadAll || refreshConnectionArtifacts || notices.some((notice) => notice.resource === "threat-analysis")) {
+    if (reloadAll || refreshConnectionArtifacts || readyNotices.some((notice) => notice.resource === "threat-analysis")) {
       handlersRef.current.onThreatAnalysisRefresh?.(true);
     }
-    if (reloadAll || refreshConnectionArtifacts || notices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
+    if (reloadAll || refreshConnectionArtifacts || readyNotices.some((notice) => ["threat-analysis", "file-inventory"].includes(notice.resource))) {
       handlersRef.current.onThreatCoverageRefresh?.();
     }
-    if (reloadAll || refreshConnectionArtifacts || refreshCoverageIssues || notices.some((notice) => notice.resource === "file-inventory")) {
+    if (reloadAll || refreshConnectionArtifacts || refreshCoverageIssues || readyNotices.some((notice) => notice.resource === "file-inventory")) {
       handlersRef.current.onCoverageIssuesRefresh?.();
     }
     handlersRef.current.onDetailRefreshState?.(collections, true);
@@ -99,7 +128,9 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
     try {
       if (source?.scan_id === scanId && collections.length) {
         const results = await Promise.allSettled(collections.map((resource) => (
-          refreshScanResource(resource, source, review, resourceController.signal, reviewRequest)
+          resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.()
+            ? Promise.resolve<RefreshedScanResource>({})
+            : refreshScanResource(resource, source, review, resourceController.signal, reviewRequest)
         )));
         if (lifetime.disposed) return;
         const failed = new Set(collections.filter((_, index) => results[index].status === "rejected"));
@@ -110,7 +141,10 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
         const issueResources = collections.filter((resource) => ["vulnerabilities", "validations", "fp-review"].includes(resource));
         if (issueResources.some((resource) => stale.has(resource))) issueResources.forEach((resource) => stale.add(resource));
         if (issueResources.some((resource) => failed.has(resource))) issueResources.forEach((resource) => failed.add(resource));
-        for (const resource of stale) pendingResources.set(`${resource}:collection`, { resource });
+        for (const resource of stale) {
+          const key = `${resource}:collection`;
+          pendingResources.set(key, { ...pendingResources.get(key), resource });
+        }
         const updates = results.flatMap((result, index) => result.status === "fulfilled"
           && !stale.has(collections[index]) && !failed.has(collections[index]) ? [result.value] : []);
         if (updates.length) {
@@ -122,7 +156,7 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
           ...[...previous].filter((resource) => !collections.includes(resource)), ...failed,
         ]));
       }
-      for (const notice of notices) {
+      for (const notice of readyNotices) {
         if (lifetime.disposed) break;
         if (typeof notice.index !== "number" || !["candidates", "vulnerabilities", "validations", "fp-review"].includes(notice.resource)) continue;
         try {
@@ -151,28 +185,51 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
     }
   };
   const scheduleResources = () => {
-    const detailsReady = !resourceRunning && (fullRefresh || pendingResources.size || coverageIssuesDirty || connectionRefresh);
-    if (resourceTimer == null && (detailsReady || (!stateRunning && pendingState.size))) {
-      resourceTimer = window.setTimeout(reloadResources, 150);
-    }
+    const readable = [...pendingResources.values()].filter(needsRead);
+    const detailsReady = !resourceRunning && (fullRefresh || readable.length || coverageIssuesDirty || connectionRefresh);
+    if (!detailsReady && (stateRunning || !pendingState.size)) return;
+    const normalReady = fullRefresh || coverageIssuesDirty || connectionRefresh
+      || (!stateRunning && pendingState.size) || readable.some((notice) => !taskCollections.has(notice.resource));
+    const nextTask = Math.min(...readable.map((notice) => (lastTaskRefresh.get(notice.resource) ?? -Infinity) + 1000));
+    const due = normalReady ? Date.now() + 150 : Math.max(Date.now() + 150, nextTask);
+    if (resourceTimer != null && resourceTimerAt <= due) return;
+    if (resourceTimer != null) window.clearTimeout(resourceTimer);
+    resourceTimerAt = due;
+    resourceTimer = window.setTimeout(reloadResources, Math.max(0, due - Date.now()));
   };
   const requestState = (resources: readonly StateResource[]) => {
     for (const resource of resources) pendingState.add(resource);
     if (resources.includes("fp-review")) pendingResultRefresh = true;
     scheduleResources();
   };
-  const requestCollections = (resources: readonly ScanDetailResource[]) => {
+  const requestCollections = (resources: readonly ScanDetailResource[], resultsChanged = true) => {
+    const revision = scanExecutionRevision(stateSettersRef.current.getScan());
+    if (revision !== taskExecutionRevision) {
+      if (taskExecutionRevision !== undefined && revision !== undefined && revision > taskExecutionRevision) {
+        // Automatic resume can change the execution before any task notice.
+        // Preserve the displayed rows but invalidate both audit caches.
+        resources = [...new Set<ScanDetailResource>([...resources, "threat-audit-tasks", "threat-pattern-audit-tasks"])];
+      }
+      taskExecutionRevision = revision;
+      lastTaskRefresh.clear();
+    }
     for (const resource of resources) {
       resourceVersions.set(resource, (resourceVersions.get(resource) ?? 0) + 1);
-      pendingResources.set(`${resource}:collection`, { resource });
+      const previous = pendingResources.get(`${resource}:collection`);
+      pendingResources.set(`${resource}:collection`, { resource, resultsChanged: resultsChanged || previous?.resultsChanged,
+        taskSummaryPending: taskCollections.has(resource) });
     }
-    pendingState.add("overview");
-    pendingResultRefresh = true;
+    if (resources.some((resource) => !taskCollections.has(resource))) {
+      pendingState.add("overview");
+      pendingResultRefresh ||= resultsChanged;
+    }
     if (resources.includes("fp-review")) pendingState.add("fp-review");
     scheduleResources();
   };
   const requestFullRefresh = () => {
     fullRefresh = true;
+    lastTaskRefresh.clear();
+    handlersRef.current.onTaskHistoryRefresh?.();
     STATE_RESOURCES.forEach((resource) => pendingState.add(resource));
     requestCollections(SCAN_DETAIL_RESOURCES);
   };
@@ -181,10 +238,17 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
     try {
       const notice = JSON.parse(event.data);
       if (!isRecord(notice) || typeof notice.resource !== "string") throw new Error("Invalid resource notice");
+      if (typeof notice.execution_revision === "number"
+        && notice.execution_revision < Math.max(scanExecutionRevision(stateSettersRef.current.getScan()) ?? 0,
+          pendingExecutionRevision() ?? 0)) return;
       // A large task-pool update invalidates the overview only. It does not
       // imply that finding, review, validation or audit collections changed.
       if (notice.resource === "overview") {
         requestState(["overview"]);
+        return;
+      }
+      if (taskCollections.has(notice.resource)) {
+        requestCollections([notice.resource as ScanDetailResource], notice.change !== "task_status");
         return;
       }
       pendingState.add("overview");
@@ -218,6 +282,15 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
 
   return {
     requestState, requestCollections, requestFullRefresh, queueCoverageIssues, onResourceChanged,
+    requestFinalRefresh(revision: number | undefined) {
+      const key = String(revision ?? scanExecutionRevision(stateSettersRef.current.getScan()) ?? 0);
+      if (key === finalRefreshKey) return;
+      finalRefreshKey = key;
+      pendingState.add("overview");
+      // Terminal ETA/status reconciliation must not wait for detail throttling.
+      if (!document.hidden) startStateRefresh(new Set<StateResource>(["overview"]));
+      handlersRef.current.onTaskHistoryRefresh?.();
+    },
     onOpen() {
       if (connectionInterrupted) requestFullRefresh();
       connectionInterrupted = false;

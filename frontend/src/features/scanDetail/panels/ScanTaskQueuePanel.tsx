@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { getScanTaskDetail, getScanTasksPage } from "../../../api/scanDetails";
 import { isInvalidTaskCursorError } from "../../../api/errors";
 import { compareTaskHistory, shouldMergeTaskHistory } from "../../../taskOrder";
+import { createCoalescedRefresh } from "../../../hooks/scanSSE/coalescedRefresh";
 import type { OpenCodePoolStatus } from "../../../types/modelPool";
 import { thCls } from "../../modelPool/ModelPoolDashboard";
 import { formatDateTime, formatDuration, formatTokenCount, SCAN_QUEUE_TASK_KINDS, scanQueueTaskKind } from "../../modelPool/presentation";
@@ -26,25 +27,26 @@ import {
 } from "../model/taskQueue";
 import type { ScanQueueTask } from "../model/types";
 
-export function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null; }) {
-  return <ScanTaskQueueFilter key={scanId} scanId={scanId} pool={pool} />;
+export function ScanTaskQueuePanel({ scanId, pool, refreshRevision = 0 }: { scanId: string; pool: OpenCodePoolStatus | null; refreshRevision?: number; }) {
+  return <ScanTaskQueueFilter key={scanId} scanId={scanId} pool={pool} refreshRevision={refreshRevision} />;
 }
 
-function ScanTaskQueueFilter({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null; }) {
+function ScanTaskQueueFilter({ scanId, pool, refreshRevision }: { scanId: string; pool: OpenCodePoolStatus | null; refreshRevision: number; }) {
   const [taskKind, setTaskKind] = useState<ScanQueueTaskKind | "">("");
   const filterInteracted = useRef(false);
   // A new scan starts with all types. A new type gets its own history, cursors
   // and expanded detail state; an old request cannot populate the new list.
-  return <ScanTaskQueueContent key={taskKind} scanId={scanId} pool={pool} taskKind={taskKind}
+  return <ScanTaskQueueContent key={taskKind} scanId={scanId} pool={pool} taskKind={taskKind} refreshRevision={refreshRevision}
     focusFilter={filterInteracted.current} onTaskKindChange={(kind) => {
       filterInteracted.current = true;
       setTaskKind(kind);
     }} />;
 }
 
-function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindChange }: {
+function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindChange, refreshRevision }: {
   scanId: string;
   pool: OpenCodePoolStatus | null;
+  refreshRevision: number;
   taskKind: ScanQueueTaskKind | "";
   focusFilter: boolean;
   onTaskKindChange: (kind: ScanQueueTaskKind | "") => void;
@@ -70,6 +72,12 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
   const historyPageFailed = useRef(false);
   const historyGeneration = useRef(0);
   const historyController = useRef<AbortController | null>(null);
+  const poolRef = useRef(pool);
+  poolRef.current = pool;
+  const refreshHistoryRef = useRef<() => void>(() => {});
+  const historySignal = JSON.stringify([pool?.execution_revision, pool?.agent_session_id,
+    pool?.completed_task_count, pool?.completed_tasks, refreshRevision]);
+  const historySignalRef = useRef(historySignal);
   useEffect(() => () => {
     historyGeneration.current += 1;
     historyController.current?.abort();
@@ -94,36 +102,55 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
   };
   useEffect(() => {
     let cancelled = false;
-    const generation = historyGeneration.current;
-    if (document.hidden) return;
     const controller = new AbortController();
-    getScanTasksPage(scanId, undefined, undefined, controller.signal, taskKind).then((result) => {
-      if (cancelled || generation !== historyGeneration.current) return;
-      const newestKnown = historyRef.current.reduce<Record<string, unknown> | null>(
-        (newest, task) => !newest || compareTaskHistory(task, newest) < 0 ? task : newest, null);
-      const last = result.items[result.items.length - 1];
-      if (loadedMore.current && newestKnown && last && result.next_cursor && compareTaskHistory(last, newestKnown) < 0) {
-        // A refresh can contain more than 50 new completions. Fill this new
-        // interval before continuing from the older history page boundary.
-        const gap = { cursor: result.next_cursor, boundary: newestKnown };
-        setHistoryGaps((previous) => [gap, ...previous]);
-      }
-      mergeHistory(result.items);
-      // A newly reported task may have an old finish time, beyond the first
-      // page. Reopen exhausted history once when the scan count actually grows;
-      // never compare that global count with the number loaded for this type.
-      const completedCount = pool?.completed_task_count ?? 0;
-      if (!historyPageFailed.current && (!loadedMore.current
-        || (nextCursorRef.current == null && completedCount > lastCompletedCount.current))) {
-        nextCursorRef.current = result.next_cursor;
-        setNextCursor(result.next_cursor);
-        lastCompletedCount.current = completedCount;
-      }
-      // A successful first-page refresh does not repair a failed older page.
-      setHistoryError(historyPageFailed.current);
-    }).catch(() => { if (!cancelled && generation === historyGeneration.current) setHistoryError(true); });
-    return () => { cancelled = true; controller.abort(); };
-  }, [scanId, pool, taskKind]);
+    let hiddenDirty = false;
+    const scheduler = createCoalescedRefresh(async () => {
+      if (document.hidden) { hiddenDirty = true; return; }
+      hiddenDirty = false;
+      const generation = historyGeneration.current;
+      const completedCount = poolRef.current?.completed_task_count ?? 0;
+      await getScanTasksPage(scanId, undefined, undefined, controller.signal, taskKind).then((result) => {
+        if (cancelled || generation !== historyGeneration.current) return;
+        const newestKnown = historyRef.current.reduce<Record<string, unknown> | null>(
+          (newest, task) => !newest || compareTaskHistory(task, newest) < 0 ? task : newest, null);
+        const last = result.items[result.items.length - 1];
+        if (loadedMore.current && newestKnown && last && result.next_cursor && compareTaskHistory(last, newestKnown) < 0) {
+          // A refresh can contain more than 50 new completions. Fill this new
+          // interval before continuing from the older history page boundary.
+          const gap = { cursor: result.next_cursor, boundary: newestKnown };
+          setHistoryGaps((previous) => [gap, ...previous]);
+        }
+        mergeHistory(result.items);
+        // A newly reported task may have an old finish time, beyond the first
+        // page. Reopen exhausted history once when the scan count actually grows;
+        // never compare that global count with the number loaded for this type.
+        if (!historyPageFailed.current && (!loadedMore.current
+          || (nextCursorRef.current == null && completedCount > lastCompletedCount.current))) {
+          nextCursorRef.current = result.next_cursor;
+          setNextCursor(result.next_cursor);
+          lastCompletedCount.current = completedCount;
+        }
+        // A successful first-page refresh does not repair a failed older page.
+        setHistoryError(historyPageFailed.current);
+      }).catch(() => { if (!cancelled && generation === historyGeneration.current) setHistoryError(true); });
+    });
+    refreshHistoryRef.current = () => scheduler.request();
+    const onVisible = () => { if (!document.hidden && hiddenDirty) scheduler.request(); };
+    document.addEventListener("visibilitychange", onVisible);
+    historySignalRef.current = historySignal;
+    scheduler.request(true);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      scheduler.dispose();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [scanId, taskKind]);
+  useEffect(() => {
+    if (historySignalRef.current === historySignal) return;
+    historySignalRef.current = historySignal;
+    refreshHistoryRef.current();
+  }, [historySignal]);
   const loadHistory = async () => {
     if (historyLoading) return;
     setHistoryLoading(true);

@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS threat_pattern_audit_tasks (
     created_at TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL DEFAULT '',
     finished_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
+    updated_at TEXT NOT NULL DEFAULT '',
+    execution_revision INTEGER NOT NULL DEFAULT 0,
+    report_agent_session_id TEXT NOT NULL DEFAULT '',
+    report_sequence INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pattern_audit_tasks_cursor
     ON threat_pattern_audit_tasks(scan_id, created_at, task_id);
@@ -40,6 +43,9 @@ PATTERN_AUDIT_COLUMNS = {"threat_pattern_audit_tasks": {
     "parent_task_id": "TEXT NOT NULL DEFAULT ''",
     "has_more_findings": "INTEGER",
     "followup_clues": "TEXT NOT NULL DEFAULT ''",
+    "execution_revision": "INTEGER NOT NULL DEFAULT 0",
+    "report_agent_session_id": "TEXT NOT NULL DEFAULT ''",
+    "report_sequence": "INTEGER NOT NULL DEFAULT 0",
 }}
 PATTERN_AUDIT_ENGINE_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_pattern_audit_engine_cursor "
@@ -50,6 +56,28 @@ PATTERN_AUDIT_PARENT_INDEX = (
     "ON threat_pattern_audit_tasks(scan_id, parent_task_id) WHERE parent_task_id != ''"
 )
 _JSON_FIELDS = {"code_paths", "result_vuln_indexes", "output_source"}
+_UNFINISHED = {"pending", "queued", "running"}
+_ENGINE_TERMINAL = {"success", "error", "cancelled", "skipped"}
+_SCAN_TERMINAL = {"complete", "error", "cancelled"}
+
+
+def _report_identity_matches(scan, revision: int, session: str) -> bool:
+    return (
+        int(scan["execution_revision"] or 0) == revision
+        and str(scan["execution_agent_session_id"] or "") == session
+    )
+
+
+def _pattern_result_changed(previous, current) -> bool:
+    if previous is None:
+        return current.status == "completed" or bool(current.result_vuln_indexes)
+    return any(
+        getattr(previous, field) != getattr(current, field)
+        for field in ("result_vuln_indexes", "has_more_findings", "followup_clues")
+    ) or (
+        current.status == "completed"
+        and (previous.status != current.status or previous.output_source != current.output_source)
+    )
 
 
 def _task(row) -> ThreatPatternAuditTask:
@@ -60,22 +88,120 @@ def _task(row) -> ThreatPatternAuditTask:
 
 
 class PatternAuditStoreMixin:
+    def _locked_pattern_scan(self, scan_id: str):
+        """Fence lifecycle reports without materializing a scan or its task pool."""
+        if not getattr(self, "distributed", False) and not self._conn.in_transaction:
+            self._conn.execute("BEGIN IMMEDIATE")
+        suffix = " FOR UPDATE" if getattr(self, "distributed", False) else ""
+        return self._conn.execute(
+            "SELECT scan_id, status, execution_revision, execution_agent_session_id, "
+            "mining_engine_runs_json FROM scans WHERE scan_id = ?" + suffix, (scan_id,),
+        ).fetchone()
+
+    def _settle_unfinished_pattern_tasks_locked(self, scan_id: str, engine_id: str | None = None) -> list[str]:
+        """Close persisted work in the caller's transaction, with bounded reads.
+
+        This also settles old unvisited resume-chain rows. Completed results and
+        their provenance are left untouched; no task body is hydrated here.
+        """
+        condition = "scan_id = ? AND status IN ('pending', 'queued', 'running')"
+        parameters = [scan_id]
+        if engine_id is not None:
+            condition += " AND engine_id = ?"
+            parameters.append(engine_id)
+        engines = [row["engine_id"] for row in self._conn.execute(
+            "SELECT DISTINCT engine_id FROM threat_pattern_audit_tasks WHERE " + condition,
+            parameters,
+        ).fetchall()]
+        if engines:
+            now = datetime.now(timezone.utc).isoformat()
+            self._conn.execute(
+                "UPDATE threat_pattern_audit_tasks SET status = 'cancelled', "
+                "finished_at = CASE WHEN finished_at = '' THEN ? ELSE finished_at END, updated_at = ? "
+                "WHERE " + condition, [now, now, *parameters],
+            )
+        return sorted(engines)
+
     def upsert_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask, *,
-                                        return_changed: bool = False) -> ThreatPatternAuditTask | tuple[ThreatPatternAuditTask, bool]:
+                                        return_changed: bool = False, return_change_kind: bool = False,
+                                        execution_revision: int | None = None,
+                                        report_agent_session_id: str | None = None,
+                                        report_sequence: int | None = None):
         now = datetime.now(timezone.utc).isoformat()
         stored = task.model_copy(update={"scan_id": scan_id, "created_at": task.created_at or now,
                                          "updated_at": now})
+        modern = any(value is not None for value in (execution_revision, report_agent_session_id, report_sequence))
+        if modern and (not execution_revision or not report_agent_session_id or not report_sequence
+                       or execution_revision < 0 or report_sequence < 0):
+            raise ValueError("Invalid pattern task report identity")
+
+        def result(value, changed, kind="task_status"):
+            if return_change_kind:
+                return value, changed, kind
+            return (value, changed) if return_changed else value
+
         with self._lock:
-            self._conn.execute("UPDATE scans SET scan_id = scan_id WHERE scan_id = ?", (scan_id,))
-            existing = self.list_threat_pattern_audit_tasks(scan_id, task_id=task.task_id, limit=1)
-            if existing:
-                stored.created_at = existing[0].created_at
+            scan = self._locked_pattern_scan(scan_id)
+            if scan is None:
+                raise KeyError(scan_id)
+            if modern and not _report_identity_matches(scan, execution_revision, report_agent_session_id):
+                raise ValueError("stale scan execution")
+            row = self._conn.execute(
+                "SELECT * FROM threat_pattern_audit_tasks WHERE task_id = ?", (task.task_id,),
+            ).fetchone()
+            if row is not None and row["scan_id"] != scan_id:
+                raise ValueError("Pattern task belongs to another scan")
+            previous = _task(row) if row is not None else None
+            same_round = bool(row is not None and modern and row["execution_revision"] == execution_revision)
+            same_execution = bool(row is not None and modern
+                and row["execution_revision"] == execution_revision
+                and row["report_agent_session_id"] == report_agent_session_id)
+            if row is not None and ((not modern and row["report_sequence"] > 0)
+                                    or (same_execution and row["report_sequence"] >= report_sequence)):
+                self._conn.commit()
+                return result(previous, False)
+            if modern:
+                closed = scan["status"] in _SCAN_TERMINAL
+                if not closed:
+                    closed = any(
+                        run.get("engine_id") == stored.engine_id
+                        and run.get("status") in _ENGINE_TERMINAL
+                        and run.get("execution_revision") == execution_revision
+                        for run in json.loads(scan["mining_engine_runs_json"] or "[]")
+                    )
+                if closed and stored.status in _UNFINISHED:
+                    stored.status = "cancelled"
+                    stored.finished_at = stored.finished_at or (previous.finished_at if previous else "") or now
+            if previous is not None:
+                stored.created_at = previous.created_at
                 # A delayed status snapshot must not erase already delivered findings.
-                stored.result_vuln_indexes = sorted(set(stored.result_vuln_indexes + existing[0].result_vuln_indexes))
-                if stored.model_dump(exclude={"updated_at"}) == existing[0].model_dump(exclude={"updated_at"}):
+                stored.result_vuln_indexes = sorted(set(stored.result_vuln_indexes + previous.result_vuln_indexes))
+                if modern:
+                    if previous.status not in _UNFINISHED | {"cancelled"} and (
+                        stored.status == "cancelled" or (same_round and stored.status in _UNFINISHED)
+                    ):
+                        stored = previous.model_copy(deep=True)
+                    elif same_round or stored.status == "cancelled":
+                        stored.output_source = previous.output_source.model_copy(update={
+                            key: value for key, value in stored.output_source.model_dump().items() if value
+                        })
+                        if not stored.followup_clues:
+                            stored.followup_clues = previous.followup_clues
+                        if stored.has_more_findings is None:
+                            stored.has_more_findings = previous.has_more_findings
+                if stored.model_dump(exclude={"updated_at"}) == previous.model_dump(exclude={"updated_at"}):
+                    if modern:
+                        self._conn.execute(
+                            "UPDATE threat_pattern_audit_tasks SET execution_revision = ?, "
+                            "report_agent_session_id = ?, report_sequence = ? WHERE task_id = ? AND scan_id = ?",
+                            (execution_revision, report_agent_session_id, report_sequence, stored.task_id, scan_id),
+                        )
                     self._conn.commit()
-                    return (existing[0], False) if return_changed else existing[0]
+                    return result(previous, False)
             value = stored.model_dump(mode="json")
+            if modern:
+                value.update(execution_revision=execution_revision, report_agent_session_id=report_agent_session_id,
+                             report_sequence=report_sequence)
             if value["has_more_findings"] is not None:
                 value["has_more_findings"] = int(value["has_more_findings"])
             columns = list(value)
@@ -89,7 +215,7 @@ class PatternAuditStoreMixin:
                 "WHERE threat_pattern_audit_tasks.scan_id = excluded.scan_id", values,
             )
             self._conn.commit()
-        return (stored, True) if return_changed else stored
+        return result(stored, True, "result" if _pattern_result_changed(previous, stored) else "task_status")
 
     def get_threat_pattern_audit_task_detail(self, scan_id: str, task_id: str) -> dict | None:
         tasks = self.list_threat_pattern_audit_tasks(scan_id, task_id=task_id, limit=1)

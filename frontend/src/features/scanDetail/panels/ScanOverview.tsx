@@ -41,6 +41,7 @@ import { ScanTaskQueuePanel } from "./ScanTaskQueuePanel";
 
 export function ScanOverview({
   scan,
+  taskHistoryRevision = 0,
   issueCount,
   continuableCount,
   variantIssueCount,
@@ -58,6 +59,7 @@ export function ScanOverview({
   coverage,
 }: {
   scan: ScanStatusType;
+  taskHistoryRevision?: number;
   issueCount: number;
   continuableCount: number;
   variantIssueCount: number;
@@ -151,7 +153,7 @@ export function ScanOverview({
       </div>
 
       <ScanTokenUsagePanel usage={scan.opencode_pool?.token_usage ?? null} />
-      <ScanTaskQueuePanel key={scan.scan_id} scanId={scan.scan_id} pool={scan.opencode_pool ?? null} />
+      <ScanTaskQueuePanel key={scan.scan_id} scanId={scan.scan_id} pool={scan.opencode_pool ?? null} refreshRevision={taskHistoryRevision} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_22rem]">
         <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">

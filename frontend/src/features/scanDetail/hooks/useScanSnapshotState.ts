@@ -28,6 +28,7 @@ export function useScanSnapshotState() {
   const [threatResultRevision, setThreatResultRevision] = useState(0);
 
   const [patternTaskRevision, setPatternTaskRevision] = useState(0);
+  const [taskHistoryRevision, setTaskHistoryRevision] = useState(0);
 
   const [coverageRevision, setCoverageRevision] = useState(0);
 
@@ -79,6 +80,8 @@ export function useScanSnapshotState() {
     setThreatResultRevision,
     patternTaskRevision,
     setPatternTaskRevision,
+    taskHistoryRevision,
+    setTaskHistoryRevision,
     coverageRevision,
     setCoverageRevision,
     coverageIssuesRevision,

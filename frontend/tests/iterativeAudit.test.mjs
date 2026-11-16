@@ -226,6 +226,7 @@ test("SSE resync refreshes every loaded iterative page even when the global firs
   Object.assign(tasks[24], { status: "completed", updated_at: "2026-11-12T01:00:00Z" });
   const before = requests.filter((request) => request.url.endsWith("/threat-pattern-audit-tasks")).length;
   await act(async () => root.update(createElement(ThreatAuditPanel, props(value, { taskRevision: 1 }))));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1050)); });
   assert.match(text(rowButtons(root)[4]), /已完成/);
   const refreshed = requests.filter((request) => request.url.endsWith("/threat-pattern-audit-tasks")).slice(before);
   assert.deepEqual(refreshed.map((request) => request.params.cursor ?? null), [null, "page-2"]);

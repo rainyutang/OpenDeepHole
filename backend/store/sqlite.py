@@ -2431,40 +2431,49 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
         self,
         scan_id: str,
         run: MiningEngineRunStatus,
-    ) -> list[MiningEngineRunStatus]:
+        *,
+        return_settled: bool = False,
+    ):
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT mining_engine_runs_json FROM scans WHERE scan_id = ?",
-                (scan_id,),
-            )
-            row = cur.fetchone()
+            row = self._locked_pattern_scan(scan_id)
             if row is None:
-                return []
+                self._conn.commit()
+                return ([], []) if return_settled else []
+            revision = getattr(run, "execution_revision", 0)
+            session = getattr(run, "report_agent_session_id", "")
+            modern = bool(revision or session)
+            if modern and (revision != int(row["execution_revision"] or 0)
+                           or not session or session != row["execution_agent_session_id"]):
+                raise ValueError("stale scan execution")
             runs = _json_model_list(
                 row["mining_engine_runs_json"],
                 MiningEngineRunStatus,
             )
             by_id = {item.engine_id: item for item in runs}
+            previous = by_id.get(run.engine_id)
+            terminal_statuses = {"success", "error", "cancelled", "skipped"}
+            if previous is not None and (
+                (not modern and getattr(previous, "execution_revision", 0) > 0)
+                or (modern and getattr(previous, "execution_revision", 0) == revision
+                    and previous.status in terminal_statuses and run.status not in terminal_statuses)
+            ):
+                self._conn.commit()
+                return (runs, []) if return_settled else runs
+            if modern and row["status"] in {"complete", "error", "cancelled"} and run.status not in terminal_statuses:
+                run = run.model_copy(update={"status": "cancelled", "finished_at": run.finished_at or datetime.now(timezone.utc).isoformat()})
             by_id[run.engine_id] = run
             ordered = sorted(
                 by_id.values(),
                 key=lambda item: (item.engine_label, item.engine_id),
             )
-            self._conn.execute(
-                "UPDATE scans SET mining_engine_runs_json = ? WHERE scan_id = ?",
-                (
-                    json.dumps(
-                        [
-                            item.model_dump(mode="json")
-                            for item in ordered
-                        ],
-                        ensure_ascii=False,
-                    ),
-                    scan_id,
-                ),
-            )
+            if previous != run:
+                self._conn.execute(
+                    "UPDATE scans SET mining_engine_runs_json = ? WHERE scan_id = ?",
+                    (json.dumps([item.model_dump(mode="json") for item in ordered], ensure_ascii=False), scan_id),
+                )
+            settled = self._settle_unfinished_pattern_tasks_locked(scan_id, run.engine_id) if modern and run.status in terminal_statuses else []
             self._conn.commit()
-            return ordered
+            return (ordered, settled) if return_settled else ordered
 
     def update_threat_analysis_run(
         self,
@@ -3129,7 +3138,8 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
         static_analysis_done: bool | None = None,
         expected_revision: int | None = None,
         expected_agent_session_id: str | None = None,
-    ) -> bool:
+        return_settled: bool = False,
+    ):
         updates: list[str] = []
         params: list = []
 
@@ -3164,9 +3174,10 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
             params.append(int(static_analysis_done))
 
         if not updates:
-            return False
+            return (False, []) if return_settled else False
 
         with self._lock:
+            settled = []
             params.append(scan_id)
             sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
             if expected_revision is not None:
@@ -3186,10 +3197,11 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
                             scan_id,
                         ),
                     )
+                    settled = self._settle_unfinished_pattern_tasks_locked(scan_id)
             else:
                 changed = self._conn.execute(sql, params).rowcount > 0
             self._conn.commit()
-            return changed
+            return (changed, settled) if return_settled else changed
 
     def claim_scan_for_resume(
         self,
@@ -5518,6 +5530,7 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
                     "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
                     (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
                 )
+                self._settle_unfinished_pattern_tasks_locked(scan_id)
             self._conn.commit()
             return row is not None
 
@@ -5587,8 +5600,10 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
     def fail_scan_execution(
         self, scan_id: str, *, agent_session_id: str,
         execution_revision: int, error_message: str,
-    ) -> bool:
+        return_settled: bool = False,
+    ):
         with self._lock:
+            settled = []
             row = self._conn.execute(
                 """UPDATE scans SET status = 'error', error_message = ?,
                        current_candidate = NULL
@@ -5602,8 +5617,9 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
                     "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
                     (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
                 )
+                settled = self._settle_unfinished_pattern_tasks_locked(scan_id)
             self._conn.commit()
-            return row is not None
+            return (row is not None, settled) if return_settled else row is not None
 
     def claim_fp_review_for_agent_recovery(
         self,
