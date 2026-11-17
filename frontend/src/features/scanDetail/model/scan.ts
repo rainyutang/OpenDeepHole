@@ -18,7 +18,7 @@ import type { OpenCodePoolStatus, OpenCodeTokenUsage } from "../../../types/mode
 import type { OutputSource, Vulnerability } from "../../../types/issues";
 import type { ThreatAnalysis } from "../../../types/threatAnalysis";
 import { poolTaskName, poolTaskType } from "../../modelPool/presentation";
-import { getThreatAnalysisResultCounts, isThreatAnalysisResultReady } from "../../threatAnalysis/analysisModel";
+import { getThreatAnalysisResultCounts, isModuleThreatsOnlyAnalysis, isThreatAnalysisResultReady } from "../../threatAnalysis/analysisModel";
 import type { CheckerDisplayMetadata, FlowNodeStatus } from "./types";
 
 export const MAX_LOG_LINES = 200;
@@ -348,6 +348,9 @@ export function threatAnalysisSummary(analysis: ThreatAnalysis): string {
     return "不支持的威胁分析格式";
   }
   const counts = getThreatAnalysisResultCounts(analysis);
+  if (isModuleThreatsOnlyAnalysis(analysis)) {
+    return `${counts.highRiskModules} 高风险模块 · ${counts.moduleThreats} 模块攻击威胁`;
+  }
   return `${counts.valueAssets} 价值资产 · ${counts.highRiskModules} 高风险模块 · ${counts.internalNodes} 内部节点 · ${counts.attackTrees} 攻击树`;
 }
 

@@ -185,6 +185,11 @@ async def _resume_payload(
         "scan_mode": meta.scan_mode,
         "threat_analysis_enabled": meta.threat_analysis_enabled,
         "threat_analysis_method": meta.threat_analysis_method,
+        "threat_analysis_generate_attack_tree": (
+            meta.threat_analysis_method_selection.generate_attack_tree
+            if meta.threat_analysis_method_selection is not None
+            else True
+        ),
         "scan_name": meta.scan_name,
         "product": meta.runtime_product,
         "validation_environment": meta.validation_environment,

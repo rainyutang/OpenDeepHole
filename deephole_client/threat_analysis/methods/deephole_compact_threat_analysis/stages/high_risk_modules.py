@@ -177,8 +177,9 @@ def _category_map_prompt(
 
 def _merge_prompt(candidate_files: Sequence[str | Path]) -> str:
     return (
-        "请根据 skill 要求合并多个按高风险特征拆分识别的高风险模块候选 JSON，"
-        "处理命名不一致、功能重叠和同一模块命中多个高风险特征的情况，"
+        "请根据 skill 要求合并初轮按高风险特征拆分识别的高风险模块候选 JSON 与未覆盖路径补充识别的高风险模块候选 JSON，"
+        "处理命名不一致、功能重叠、同一模块命中多个高风险特征，以及补充识别路径归属于已有高风险模块的情况"
+        "（将同模块的补充代码目录、面临威胁、高风险特征与判定依据合并到同一模块中，独立职责模块保留为独立条目），"
         "合并结果使用本 Skill 规定字段的高风险模块 JSON 数组。"
         "候选文件："
         + ", ".join(str(path) for path in candidate_files)

@@ -101,3 +101,66 @@ test("fixed-audit explanation is available on keyboard focus and dismisses with 
   await act(async () => label.props.onMouseLeave());
   assert.equal(root.root.findAllByProps({ role: "tooltip" }).length, 0);
 });
+
+test("module_threats_only mode shows high-risk modules by default and renders concise per-module threat tables", async () => {
+  const { threatAnalysisSummary } = await server.ssrLoadModule("/src/features/scanDetail/model/scan.ts");
+  const value = {
+    entrypoint_result: { result: true },
+    artifacts: {
+      value_asset_path: { content: [] },
+      high_risk_modules_path: { content: [{
+        模块名称: "请求解析模块",
+        代码目录: "src/parser",
+        面临威胁: "外部请求破坏解析状态",
+        是否外部暴露面: "是",
+        判断为高风险模块的原因: "直接暴露解析入口",
+      }] },
+      attack_tree_path: { content: {
+        analysis_mode: "module_threats_only",
+        attack_trees: [],
+        module_threats: [{
+          module_name: "请求解析模块",
+          attack_patterns: [{
+            pattern_id: "ODH-NATIVE-01",
+            pattern_name: "越界写入破坏内存状态",
+            description: "拷贝外部报文体时长度未受限",
+          }],
+        }],
+        unassigned_module_pattern_baselines: [baseline("请求解析模块", null, [pattern("ODH-SYS-08", "命令注入")])],
+      } },
+    },
+  };
+  const coverageData = {
+    inventory: null,
+    analysis_ready: true,
+    modules: [{ id: "module-0", name: "请求解析模块", paths: ["src/parser"], scan_relative_paths: ["src/parser"], mapped_paths: ["src/parser"] }],
+    targets: [],
+    unmapped: [],
+  };
+  let defaultRoot;
+  await act(async () => {
+    defaultRoot = create(createElement(ThreatAnalysisPanel, {
+      scanId: "no-tree", coverageRevision: 0, analysis: value, events: [], loading: false, isDone: true,
+      methodLabel: "DeepHole精简威胁分析", resultTab: "valueAssets", onResultTabChange() {},
+      coverageState: { data: coverageData, tree: null, loading: false, error: "", refresh() {} },
+    }));
+  });
+  roots.push(defaultRoot);
+  const tabLabels = defaultRoot.root.findAllByProps({ role: "tab" }).map(text);
+  assert.deepEqual(tabLabels, ["高风险模块", "模块攻击威胁"]);
+  // Default URL tab "valueAssets" falls back to "highRiskModules" so high-risk modules remain visible immediately.
+  assert.match(text(defaultRoot.toJSON()), /请求解析模块.*src\/parser/);
+
+  let threatTabRoot;
+  await act(async () => {
+    threatTabRoot = create(createElement(ThreatAnalysisPanel, {
+      scanId: "no-tree", coverageRevision: 0, analysis: value, events: [], loading: false, isDone: true,
+      methodLabel: "DeepHole精简威胁分析", resultTab: "moduleThreats", onResultTabChange() {},
+      coverageState: { data: null, tree: null, loading: false, error: "", refresh() {} },
+    }));
+  });
+  roots.push(threatTabRoot);
+  assert.match(text(threatTabRoot.toJSON()), /面临的攻击模式.*威胁描述.*ODH-NATIVE-01 越界写入破坏内存状态.*拷贝外部报文体时长度未受限/);
+  assert.match(text(threatTabRoot.toJSON()), /高风险模块固定审计模式.*请求解析模块.*命令注入/);
+  assert.equal(threatAnalysisSummary(value), "1 高风险模块 · 1 模块攻击威胁");
+});

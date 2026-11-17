@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 from threat_analysis_harness.stages.base import SUCCEEDED, TaskJson, TaskResultJson
 from threat_analysis_harness import validate_attack_tree as tree_validation
 from threat_analysis_harness import validate_high_risk_modules as module_validation
+from threat_analysis_harness import validate_module_threats as module_threat_validation
 
 
 TaskAgentCapability = Literal["low", "high"]
@@ -20,7 +21,11 @@ TaskAgentRun = Callable[..., Awaitable[Any]]
 _DEFAULT_TASK_AGENT_TASK_TYPE = "threat_analysis"
 _DEFAULT_REQUIRED_CAPABILITY: TaskAgentCapability = "high"
 _FAILED = "failed"
-_MODULE_FILE_TASK_TYPES = {"high_risk_module_map", "high_risk_module_merge"}
+_MODULE_FILE_TASK_TYPES = {
+    "high_risk_module_map",
+    "high_risk_module_supplement",
+    "high_risk_module_merge",
+}
 
 
 class TaskAgentSubmitter:
@@ -72,11 +77,16 @@ class TaskAgentSubmitter:
         output_path = Path(str(task["output_path"]))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         module_file_output = task.get("task_type") in _MODULE_FILE_TASK_TYPES
-        file_output = module_file_output or task.get("task_type") == "attack_tree_by_asset"
+        module_threat_file_output = task.get("task_type") == "module_attack_threats"
+        file_output = (
+            module_file_output
+            or module_threat_file_output
+            or task.get("task_type") == "attack_tree_by_asset"
+        )
         output_schema = _task_output_schema(task)
         validation_options: dict[str, Any] = {}
         if file_output:
-            if not module_file_output and output_schema is None:
+            if not (module_file_output or module_threat_file_output) and output_schema is None:
                 raise ValueError("Attack tree file output requires a task schema")
             # Resume has already selected reusable files. A new task must not
             # succeed by reading a leftover output; same-Session repairs edit it.
@@ -84,6 +94,8 @@ class TaskAgentSubmitter:
                 output_path.unlink(missing_ok=True)
             if module_file_output:
                 command = module_validation.validation_command(output_path.resolve())
+            elif module_threat_file_output:
+                command = module_threat_validation.validation_command(output_path.resolve())
             else:
                 schema_path = output_path.with_suffix(output_path.suffix + ".schema.json").resolve()
                 schema_path.write_text(json.dumps(output_schema, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -93,6 +105,9 @@ class TaskAgentSubmitter:
                 try:
                     if module_file_output:
                         await module_validation.validate_file_async(output_path.resolve())
+                    elif module_threat_file_output:
+                        await module_threat_validation.validate_file_async(output_path.resolve())
+                        module_threat_validation.validate_file(output_path)
                     else:
                         await tree_validation.validate_file_async(output_path.resolve(), schema_path)
                         # Check the host schema too; the model cannot edit this copy.
@@ -182,10 +197,12 @@ class TaskAgentSubmitter:
         output = getattr(result, "structured", None)
         if file_output:
             try:
-                output = (
-                    module_validation.validate_file(output_path) if module_file_output
-                    else tree_validation.validate_file(output_path, output_schema)
-                )
+                if module_file_output:
+                    output = module_validation.validate_file(output_path)
+                elif module_threat_file_output:
+                    output = module_threat_validation.validate_file(output_path)
+                else:
+                    output = tree_validation.validate_file(output_path, output_schema)
             except ValueError as exc:
                 log_path.write_text(str(exc), encoding="utf-8")
                 return _result_json(
@@ -269,6 +286,16 @@ def build_task_agent_prompt(task: Mapping[str, Any]) -> str:
             f"\n\n将高风险模块 JSON 数组写入：{output_path}\n"
             "字段格式遵循本 Skill 的输出要求。\n"
             f"写入后可执行以下命令校验文件：\n{command}\n"
+        )
+    if task.get("task_type") == "module_attack_threats":
+        output_path = Path(str(task["output_path"])).resolve()
+        command = module_threat_validation.validation_command(output_path)
+        runtime_prompt += (
+            f"\n\n3. 唯一攻击模式库：{module_threat_validation.CATALOG_PATH}\n"
+            f"4. 将当前模块的攻击威胁简洁 JSON 数组直接写入：{output_path}\n"
+            "   数组中每个元素仅包含 pattern_id、pattern_name、description 三个字段，"
+            "pattern_id 与 pattern_name 必须成对原样匹配模式库且不得重复；无适用模式时输出 []。\n"
+            f"5. 写完后执行以下命令自检：\n{command}\n"
         )
     if task.get("task_type") == "attack_tree_by_asset":
         output_path = Path(str(task["output_path"])).resolve()

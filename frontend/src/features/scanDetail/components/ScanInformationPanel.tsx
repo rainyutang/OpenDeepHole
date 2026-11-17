@@ -167,7 +167,9 @@ export function ScanInformationPanel({
               <ScanInformationToggle
                 label="威胁分析"
                 enabled={threatAnalysisSelected}
-                detail={threatAnalysisSelected ? `方法：${threatAnalysisMethodLabel(scan)}` : "本次扫描未启用"}
+                detail={threatAnalysisSelected
+                  ? `方法：${threatAnalysisMethodLabel(scan)}${scan.threat_analysis_method === "deephole_compact_threat_analysis" && scan.threat_analysis_method_selection?.generate_attack_tree === false ? "（不生成攻击树，仅分析模块攻击威胁）" : ""}`
+                  : "本次扫描未启用"}
               />
 
               <div className="rounded-xl border border-slate-700 bg-slate-950/50 p-4">

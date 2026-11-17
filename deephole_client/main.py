@@ -221,6 +221,12 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
                 if "threat_analysis_method" in msg
                 else None
             ),
+            threat_analysis_generate_attack_tree=(
+                bool(msg.get("threat_analysis_generate_attack_tree"))
+                if "threat_analysis_generate_attack_tree" in msg
+                and msg.get("threat_analysis_generate_attack_tree") is not None
+                else None
+            ),
             product=msg.get("product"),
             validation_environment=msg.get("validation_environment"),
             vulnerability_validation=(
@@ -325,6 +331,9 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             threat_analysis_method=str(
                 msg.get("threat_analysis_method")
                 or "deephole_threat_analysis"
+            ),
+            threat_analysis_generate_attack_tree=bool(
+                msg.get("threat_analysis_generate_attack_tree", True)
             ),
             product=msg.get("product", ""),
             validation_environment=msg.get("validation_environment", ""),

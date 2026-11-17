@@ -44,6 +44,7 @@ class ResolvedScanConfiguration:
     scan_mode: str
     threat_analysis_enabled: bool
     threat_analysis_method: str
+    threat_analysis_generate_attack_tree: bool
     threat_analysis_method_selection: ThreatAnalysisMethodSelection
     auto_resume_enabled: bool
     auto_fp_review: bool
@@ -165,6 +166,41 @@ def resolve_creation_configuration(
             status_code=422,
             detail="快速模式和标准模式固定使用默认威胁分析方法",
         )
+    if fixed_profile and body.threat_analysis_generate_attack_tree is False:
+        raise ApplicationError(
+            status_code=422,
+            detail="快速模式和标准模式固定生成攻击树",
+        )
+    if (
+        requested_scan_mode == SCAN_MODE_MULTI_VERSION
+        and body.threat_analysis_generate_attack_tree is False
+    ):
+        raise ApplicationError(
+            status_code=422,
+            detail="多版本测试模式不支持关闭攻击树生成",
+        )
+    threat_analysis_generate_attack_tree = True
+    if body.threat_analysis_generate_attack_tree is False:
+        if (
+            not threat_analysis_enabled
+            or threat_analysis_method != "deephole_compact_threat_analysis"
+        ):
+            raise ApplicationError(
+                status_code=422,
+                detail="仅启用 DeepHole精简威胁分析 时可关闭攻击树生成",
+            )
+        if any(
+            item.enabled and item.engine_id == "threat_audit"
+            for item in mining_engine_selections
+        ):
+            raise ApplicationError(
+                status_code=422,
+                detail="DeepHole基于攻击威胁的漏洞挖掘引擎依赖攻击树产物，请启用生成攻击树或改用基于攻击模式的漏洞挖掘引擎",
+            )
+        threat_analysis_generate_attack_tree = False
+    threat_analysis_method_selection = threat_analysis_method_selection.model_copy(
+        update={"generate_attack_tree": threat_analysis_generate_attack_tree}
+    )
     auto_fp_review = (
         True
         if fixed_profile
@@ -225,6 +261,7 @@ def resolve_creation_configuration(
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
         threat_analysis_method=threat_analysis_method,
+        threat_analysis_generate_attack_tree=threat_analysis_generate_attack_tree,
         threat_analysis_method_selection=threat_analysis_method_selection,
         auto_resume_enabled=body.auto_resume_enabled,
         auto_fp_review=auto_fp_review,

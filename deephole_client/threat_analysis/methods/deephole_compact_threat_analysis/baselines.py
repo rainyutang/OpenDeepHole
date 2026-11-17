@@ -94,6 +94,19 @@ def add_module_pattern_baselines(
                         if identity:
                             covered.add((name, identity))
 
+    for record in supplemented.get("module_threats", []) or []:
+        if not isinstance(record, dict):
+            continue
+        name = _text(record.get("module_name") or record.get("模块名称"))
+        if name not in module_names:
+            continue
+        for pattern in record.get("attack_patterns", []) or []:
+            if (isinstance(pattern, dict)
+                    and _text(pattern.get("pattern_name") or pattern.get("pattern_id"))):
+                identity = _text(pattern.get("pattern_id")) or _text(pattern.get("pattern_name"))
+                if identity:
+                    covered.add((name, identity))
+
     baseline_patterns = _baseline_patterns()
     for name in module_names:
         patterns = [copy.deepcopy(pattern) for pattern in baseline_patterns

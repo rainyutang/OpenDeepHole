@@ -83,14 +83,20 @@ def scope_prompt(code_root: Path, scope: ScanScope) -> str:
 
 
 def tree_scope_fingerprint(
-    scope: ScanScope, modules: Sequence[dict[str, Any]], value_assets: Sequence[dict[str, Any]],
+    scope: ScanScope,
+    modules: Sequence[dict[str, Any]],
+    value_assets: Sequence[dict[str, Any]],
+    *,
+    generate_attack_tree: bool = True,
 ) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "policy_version": SCOPE_POLICY_VERSION,
         "scan_scope": scope.identity(),
         "high_risk_modules": modules,
         "value_assets": value_assets,
     }
+    if not generate_attack_tree:
+        payload["generate_attack_tree"] = False
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {"policy_version": SCOPE_POLICY_VERSION, "sha256": hashlib.sha256(encoded).hexdigest()}
 

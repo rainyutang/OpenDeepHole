@@ -21,11 +21,26 @@
 
 精简方法的高风险模块识别（map）和合并（merge）任务均由模型将 JSON 数组写入指定文件，
 通过方法目录中的 `validate_high_risk_modules.py --output <文件>` 检查原有高风险模块 Schema。
+初轮五类并行 map 完成后，方法读取同一扫描的文件清单 `coverage-input/file-inventory.json`（缺失时本地采集），
+仅排除 `.xxx` 隐藏路径与项目生成的 `code_index.db`（含 `-wal`、`-shm`、`-journal`），不做其他目录或后缀过滤，
+也不自动下拆顶层大目录；每轮按 `(path.count("/"), -remaining_files, path)` 选取最多 5 个最浅的不重叠未覆盖路径，
+复用 `deephole-compact-high-risk-module-map` 迭代补查最多 3 轮（已补查路径子树记入 `supplement-state.json` 不重复下钻），
+随后将初轮候选与全部补查候选统一送入单次 `high-risk-module-merge` 合并（支持向已有高风险模块补充未覆盖路径或新增独立模块）。
 两个阶段都允许 `[]`；字段、类型、必填项及额外字段限制沿用原契约，不增加模块语义判断。
 模型调用使用 `output_schema=None`，宿主只读取已通过文件校验的结果，不消费聊天或结构化回复中的 JSON。
 模型可运行任务绑定的精确命令自检，宿主在回复结束后必须独立校验；首次失败回传原 Session 纠正一次，
-仍失败则进入现有重试策略。续扫逐份校验 map 与 merge 缓存；任一 map 需要重跑时，merge 也重新执行，
+仍失败则进入现有重试策略。续扫逐份校验 map、supplement 与 merge 缓存；任一候选变化时，merge 重新执行，
 避免旧合并结果遗漏重建后的候选。价值资产阶段保持原有处理，不批量迁移已完成扫描。
+
+自定义模式选择 `deephole_compact_threat_analysis` 时可配置“生成攻击树”开关（`generate_attack_tree`，默认开启；标准模式固定开启）。
+当 `generate_attack_tree=False` 时，方法跳过价值资产识别（`value-assets.json` 写入 `[]`）与攻击树构建，
+对每个裁剪后的高风险模块独立创建 1 个 `module_attack_threats` 任务（使用 `deephole-compact-module-attack-threats` Skill，不合并多模块、不做 LLM 二次 merge）。
+提示词严格限定仅检查该高风险模块自身 `代码目录` 内的代码，禁止探索其它源码、禁止过度探索或挖掘具体漏洞，
+直接从私有 51 项模式库输出简洁列表 `[{ "pattern_id", "pattern_name", "description" }]`，经 `validate_module_threats.py --output <文件>` 校验后，
+由 Python 汇总写入 `attack_trees.json`（`analysis_mode: "module_threats_only"`、`attack_trees: []`、`module_threats: [...]`），
+并继续按去重规则补齐下述 15 项固定审计模式。该模式可驱动 `threat_pattern_audit` 与 `threat_pattern_iterative_audit`，
+威胁分析页默认仍展示高风险模块并提供简洁的“模块攻击威胁”双列表格页签，首页覆盖图同样完整展示高风险模块与攻击模式关联；
+依赖攻击树叶子节点的旧版 `threat_audit` 引擎与 `generate_attack_tree=False` 互斥。
 
 精简方法目录作为 Agent 的稳定只读资源写入 OpenCode 配置，并保留每任务的只读授权，
 使校验脚本、Schema 与 Skill 资源可被读取；旧配置缺少这些规则时自动刷新。产物写权限复用
@@ -185,6 +200,7 @@ def run_threat_analysis(
 | `product_mcp` | `None` | 本次扫描启用的知识库 MCP 名称；方法不使用时可以忽略 |
 | `attack_modes` | `None` | 预留的攻击模式映射；方法不使用时可以忽略 |
 | `code_paths` | `None` | 可选的绝对文件/目录列表；目录包含子树，文件仅包含自身。工作目录 `code_path` 为这些目标的最小公共父目录，所有产物相对路径以该目录为基准 |
+| `generate_attack_tree` | `True`（可选） | 仅 `deephole_compact_threat_analysis` 等声明该参数的方法接收；为 `False` 时跳过价值资产与攻击树，仅输出高风险模块及逐模块攻击威胁列表 |
 
 `project_path`、`scan_mode`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
 不会传给原生入口。

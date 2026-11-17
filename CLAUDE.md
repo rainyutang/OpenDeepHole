@@ -71,12 +71,14 @@ revision checks when changing reconnect, resume or result delivery. See
 6. Stream accepted results through `report_vulnerabilities()`. Confirmed issues
    may enqueue independent FP-review and validation work before scanning finishes.
 
-The default new-scan threat method is `opencode_lightweight_threat_analysis`.
-Native, compact, Codex lightweight and coverage-guided methods remain selectable.
-Native methods accept five base parameters plus optional `code_paths`; legacy
-five-parameter methods only support a single directory. Artifact formats and
-resume/fallback behavior are specified in the
-[threat-analysis README](deephole_client/threat_analysis/README.md).
+The default new-scan threat method is `opencode_lightweight_threat_analysis` (standard
+mode uses `deephole_compact_threat_analysis`). Native, compact, Codex lightweight and
+coverage-guided methods remain selectable. Native methods accept five base parameters
+plus optional `code_paths` (and optional `generate_attack_tree` on compact analysis,
+which also runs up to 3 uncovered-path module supplement rounds before merging and can
+emit `module_threats_only` without building attack trees); legacy five-parameter
+methods only support a single directory. Artifact formats and resume/fallback behavior
+are specified in the [threat-analysis README](deephole_client/threat_analysis/README.md).
 
 Multi-version mode accepts 2–5 version scopes. Static groups use each Checker's
 vulnerability-specific Skill; baseline threat auditing reuses

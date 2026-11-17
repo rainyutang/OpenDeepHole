@@ -172,6 +172,9 @@ async def _run_scan(task, is_resume: bool) -> None:
             scan_mode=task.scan_mode,
             threat_analysis_enabled=task.threat_analysis_enabled,
             threat_analysis_method=task.threat_analysis_method,
+            threat_analysis_generate_attack_tree=getattr(
+                task, "threat_analysis_generate_attack_tree", True,
+            ),
             product=task.product,
             validation_environment=task.validation_environment,
             vulnerability_validation=task.vulnerability_validation,
@@ -208,6 +211,7 @@ async def handle_task(
     scan_mode: str = "custom",
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
+    threat_analysis_generate_attack_tree: bool = True,
     product: str = "",
     validation_environment: str = "",
     vulnerability_validation: dict | None = None,
@@ -241,6 +245,7 @@ async def handle_task(
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
         threat_analysis_method=threat_analysis_method,
+        threat_analysis_generate_attack_tree=threat_analysis_generate_attack_tree,
         product=product,
         validation_environment=validation_environment,
         vulnerability_validation=vulnerability_validation,
@@ -366,6 +371,7 @@ async def handle_resume(
     scan_mode: Optional[str] = None,
     threat_analysis_enabled: Optional[bool] = None,
     threat_analysis_method: Optional[str] = None,
+    threat_analysis_generate_attack_tree: Optional[bool] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
     vulnerability_validation: Optional[dict] = None,
@@ -442,6 +448,14 @@ async def handle_resume(
             "deephole_threat_analysis",
         ))
     )
+    resolved_threat_analysis_generate_attack_tree = (
+        bool(threat_analysis_generate_attack_tree)
+        if threat_analysis_generate_attack_tree is not None
+        else bool(previous_value(
+            "threat_analysis_generate_attack_tree",
+            True,
+        ))
+    )
     resolved_product = (
         product
         if product is not None
@@ -494,6 +508,7 @@ async def handle_resume(
         scan_mode=resolved_scan_mode,
         threat_analysis_enabled=resolved_threat_analysis_enabled,
         threat_analysis_method=resolved_threat_analysis_method,
+        threat_analysis_generate_attack_tree=resolved_threat_analysis_generate_attack_tree,
         product=resolved_product,
         validation_environment=resolved_validation_environment,
         vulnerability_validation=vulnerability_validation,

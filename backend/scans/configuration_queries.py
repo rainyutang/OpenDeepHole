@@ -135,6 +135,11 @@ async def get_scan_copy_config(
         **({
             "threat_analysis_enabled": meta.threat_analysis_enabled,
             "threat_analysis_method": meta.threat_analysis_method,
+            "threat_analysis_generate_attack_tree": (
+                meta.threat_analysis_method_selection.generate_attack_tree
+                if meta.threat_analysis_method_selection is not None
+                else True
+            ),
             "mining_engines": [MiningEngineRequest(engine_id=item.engine_id) for item in meta.mining_engines if item.enabled],
             "auto_fp_review": meta.auto_fp_review,
             "fp_review_method": meta.fp_review_method,

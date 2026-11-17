@@ -110,8 +110,8 @@ def test_copy_reads_all_saved_form_inputs_without_results_or_credentials(env):
         "agent_key", "project_path", "code_scan_path", "code_scan_paths", "scan_name",
         "scan_mode", "product", "knowledge_base", "vulnerability_validation",
         "code_graph_mcp", "review_notes_enabled", "review_note_ids", "multi_versions",
-        "threat_analysis_enabled", "threat_analysis_method", "mining_engines",
-        "auto_resume_enabled", "auto_fp_review", "fp_review_method",
+        "threat_analysis_enabled", "threat_analysis_method", "threat_analysis_generate_attack_tree",
+        "mining_engines", "auto_resume_enabled", "auto_fp_review", "fp_review_method",
     }
     assert payload["agent_key"] == "stable-agent"
     assert payload["scan_name"] == ""
@@ -120,6 +120,7 @@ def test_copy_reads_all_saved_form_inputs_without_results_or_credentials(env):
     assert payload["code_scan_paths"] == ["/project/src/a.c", "/project/src/lib"]
     assert payload["threat_analysis_enabled"] is True
     assert payload["threat_analysis_method"] == "deephole_compact_threat_analysis"
+    assert payload["threat_analysis_generate_attack_tree"] is True
     assert payload["mining_engines"] == [{"engine_id": "static_candidate"}]
     assert payload["auto_resume_enabled"] is True
     assert payload["auto_fp_review"] is False
@@ -181,8 +182,27 @@ def test_copy_modes_use_current_profiles_or_preserve_custom_inputs(env, mode, ex
         assert payload["auto_fp_review"] is False
     else:
         assert all(payload[key] is None for key in (
-            "mining_engines", "threat_analysis_enabled", "threat_analysis_method", "auto_fp_review", "fp_review_method",
+            "mining_engines", "threat_analysis_enabled", "threat_analysis_method",
+            "threat_analysis_generate_attack_tree", "auto_fp_review", "fp_review_method",
         ))
+
+
+def test_copy_preserves_compact_generate_attack_tree_disabled(env):
+    from backend.models import ThreatAnalysisMethodSelection
+
+    env.meta.threat_analysis_method_selection = ThreatAnalysisMethodSelection(
+        method_id="deephole_compact_threat_analysis",
+        method_label="DeepHole精简威胁分析",
+        description="snapshot",
+        generate_attack_tree=False,
+    )
+    env.store.save_scan(env.status, env.meta)
+    response = env.get()
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["threat_analysis_generate_attack_tree"] is False
+    parsed = CreateScanRequest.model_validate(payload)
+    assert parsed.threat_analysis_generate_attack_tree is False
 
 
 def test_copy_preserves_multiversion_baseline_and_legacy_scope(env):

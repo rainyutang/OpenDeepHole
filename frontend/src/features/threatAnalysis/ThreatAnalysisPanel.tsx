@@ -8,16 +8,19 @@ import { useThreatCoverage } from "./useThreatCoverage";
 import "./ThreatAnalysisPanel.css";
 import {
   ThreatAnalysisResultTab,
-  THREAT_ANALYSIS_RESULT_TABS,
+  visibleThreatAnalysisTabs,
+  isModuleThreatsOnlyAnalysis,
   getThreatAnalysisResultCounts,
   artifactContent,
   artifactArray,
   attackTreesFromAnalysis,
+  moduleThreatsFromAnalysis,
   collectInternalNodes,
   isRecord,
   recordItems,
 } from './analysisModel';
 import { AttackTrees } from './AttackTrees';
+import { ModuleThreats } from './ModuleThreats';
 import { ValueAssetsTable, HighRiskModulesTable, InternalNodesTable } from './AnalysisTables';
 import { ThreatAnalysisError, PanelHeading, ArtifactPaths, ThreatEventList, EmptyState } from './AnalysisSupportingViews';
 
@@ -60,6 +63,8 @@ export function ThreatAnalysisPanel({
     "high_risk_modules_path",
   );
   const trees = attackTreesFromAnalysis(analysis);
+  const moduleThreats = moduleThreatsFromAnalysis(analysis);
+  const moduleThreatsOnly = isModuleThreatsOnlyAnalysis(analysis);
   const attackTreeArtifact = artifactContent(analysis, "attack_tree_path");
   const unassignedBaselines = isRecord(attackTreeArtifact)
     ? recordItems<NativeThreatModulePatternBaseline>(attackTreeArtifact.unassigned_module_pattern_baselines)
@@ -102,21 +107,25 @@ export function ThreatAnalysisPanel({
     );
   }
 
+  const tabs = visibleThreatAnalysisTabs(analysis);
+  const effectiveResultTab = tabs.some((item) => item.key === resultTab)
+    ? resultTab
+    : tabs[0].key;
   const counts = getThreatAnalysisResultCounts(analysis);
 
   const handleTabKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
     current: ThreatAnalysisResultTab,
   ) => {
-    const currentIndex = THREAT_ANALYSIS_RESULT_TABS.findIndex((item) => item.key === current);
+    const currentIndex = tabs.findIndex((item) => item.key === current);
     let nextIndex: number | null = null;
-    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % THREAT_ANALYSIS_RESULT_TABS.length;
-    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + THREAT_ANALYSIS_RESULT_TABS.length) % THREAT_ANALYSIS_RESULT_TABS.length;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
     if (event.key === "Home") nextIndex = 0;
-    if (event.key === "End") nextIndex = THREAT_ANALYSIS_RESULT_TABS.length - 1;
+    if (event.key === "End") nextIndex = tabs.length - 1;
     if (nextIndex === null) return;
     event.preventDefault();
-    const nextTab = THREAT_ANALYSIS_RESULT_TABS[nextIndex].key;
+    const nextTab = tabs[nextIndex].key;
     onResultTabChange(nextTab);
     document.getElementById(`threat-analysis-tab-${nextTab}`)?.focus();
   };
@@ -130,8 +139,9 @@ export function ThreatAnalysisPanel({
         <header className="threat-analysis-viewer__header">
           <h2 className="threat-analysis-viewer__title">威胁分析结果</h2>
           <p className="threat-analysis-viewer__summary">
-            方法：{methodLabel} · {assets.length} 个价值资产 / {modules.length} 个高风险模块 /{" "}
-            {internalNodes.length} 个内部节点 / {trees.length} 棵攻击树
+            {moduleThreatsOnly
+              ? `方法：${methodLabel} · ${modules.length} 个高风险模块 / ${moduleThreats.length} 个模块攻击威胁`
+              : `方法：${methodLabel} · ${assets.length} 个价值资产 / ${modules.length} 个高风险模块 / ${internalNodes.length} 个内部节点 / ${trees.length} 棵攻击树`}
           </p>
         </header>
 
@@ -140,29 +150,18 @@ export function ThreatAnalysisPanel({
           aria-label="威胁分析结果页签"
           role="tablist"
         >
-          {THREAT_ANALYSIS_RESULT_TABS.map((item) => (
+          {tabs.map((item) => (
             <button
-
               key={item.key}
-
               id={`threat-analysis-tab-${item.key}`}
-
               type="button"
-
               role="tab"
-
               aria-controls={`threat-analysis-panel-${item.key}`}
-
-              aria-selected={resultTab === item.key}
-
-              tabIndex={resultTab === item.key ? 0 : -1}
-
+              aria-selected={effectiveResultTab === item.key}
+              tabIndex={effectiveResultTab === item.key ? 0 : -1}
               onKeyDown={(event) => handleTabKeyDown(event, item.key)}
-
               onClick={() => onResultTabChange(item.key)}
-
-              className={`threat-analysis-viewer__tab ${resultTab === item.key ? "is-active" : ""
-                }`}
+              className={`threat-analysis-viewer__tab ${effectiveResultTab === item.key ? "is-active" : ""}`}
             >
               {item.label}
             </button>
@@ -170,27 +169,21 @@ export function ThreatAnalysisPanel({
         </nav>
 
         <section
-
-          id={`threat-analysis-panel-${resultTab}`}
-
+          id={`threat-analysis-panel-${effectiveResultTab}`}
           role="tabpanel"
-
-          aria-labelledby={`threat-analysis-tab-${resultTab}`}
-
+          aria-labelledby={`threat-analysis-tab-${effectiveResultTab}`}
           className="threat-analysis-viewer__panel"
         >
           <PanelHeading
-
-            title={THREAT_ANALYSIS_RESULT_TABS.find((item) => item.key === resultTab)?.label ?? ""}
-
-            count={counts[resultTab]}
-
-            unit={THREAT_ANALYSIS_RESULT_TABS.find((item) => item.key === resultTab)?.unit ?? "项"}
+            title={tabs.find((item) => item.key === effectiveResultTab)?.label ?? ""}
+            count={counts[effectiveResultTab]}
+            unit={tabs.find((item) => item.key === effectiveResultTab)?.unit ?? "项"}
           />
-          {resultTab === "valueAssets" && <ValueAssetsTable assets={assets} />}
-          {resultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} coverage={coverageState.data} pathError={coverageState.error} />}
-          {resultTab === "internalNodes" && <InternalNodesTable nodes={internalNodes} />}
-          {resultTab === "attackTrees" && <AttackTrees trees={trees} unassignedBaselines={unassignedBaselines} />}
+          {effectiveResultTab === "valueAssets" && <ValueAssetsTable assets={assets} />}
+          {effectiveResultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} coverage={coverageState.data} pathError={coverageState.error} />}
+          {effectiveResultTab === "internalNodes" && <InternalNodesTable nodes={internalNodes} />}
+          {effectiveResultTab === "attackTrees" && <AttackTrees trees={trees} unassignedBaselines={unassignedBaselines} />}
+          {effectiveResultTab === "moduleThreats" && <ModuleThreats moduleThreats={moduleThreats} unassignedBaselines={unassignedBaselines} />}
         </section>
       </section>
 
@@ -200,5 +193,11 @@ export function ThreatAnalysisPanel({
   );
 }
 
-export { THREAT_ANALYSIS_RESULT_TABS, getThreatAnalysisResultCounts, isThreatAnalysisResultReady } from './analysisModel';
+export {
+  THREAT_ANALYSIS_RESULT_TABS,
+  visibleThreatAnalysisTabs,
+  isModuleThreatsOnlyAnalysis,
+  getThreatAnalysisResultCounts,
+  isThreatAnalysisResultReady,
+} from './analysisModel';
 export type { ThreatAnalysisResultTab, ThreatAnalysisResultCounts } from './analysisModel';

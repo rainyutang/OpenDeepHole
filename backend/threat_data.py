@@ -51,6 +51,12 @@ def parse_threat_analysis_data(data: dict[str, Any]) -> dict[str, Any]:
         raise TypeError(
             "attack_tree_path content must be an object with an attack_trees array"
         )
+    if (
+        "module_threats" in attack_tree_content
+        and attack_tree_content["module_threats"] is not None
+        and not isinstance(attack_tree_content["module_threats"], list)
+    ):
+        raise TypeError("attack_tree_path module_threats must be a JSON array")
     if not isinstance(artifacts["high_risk_modules_path"]["content"], list):
         raise TypeError("high_risk_modules_path content must be a JSON array")
     return data

@@ -71,6 +71,7 @@ OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID = (
     "opencode_coverage_guided_lightweight_threat_analysis"
 )
 DEEPHOLE_THREAT_ANALYSIS_METHOD_ID = "deephole_threat_analysis"
+DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID = "deephole_compact_threat_analysis"
 LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS = frozenset({
     CODEX_THREAT_ANALYSIS_METHOD_ID,
     OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
@@ -82,8 +83,13 @@ def _threat_analysis_scan_scope(
     project_path: Path,
     code_scan_path: Path,
     code_scan_paths: list[Path] | None = None,
+    *,
+    generate_attack_tree: bool = True,
 ) -> dict[str, Any]:
-    return resolve_scan_scope(project_path, code_scan_path, code_scan_paths).identity()
+    identity = resolve_scan_scope(project_path, code_scan_path, code_scan_paths).identity()
+    if not generate_attack_tree:
+        identity = {**identity, "generate_attack_tree": False}
+    return identity
 
 
 def _stored_threat_analysis_matches_scope(
@@ -92,14 +98,17 @@ def _stored_threat_analysis_matches_scope(
     project_path: Path,
     code_scan_path: Path,
     code_scan_paths: list[Path] | None = None,
+    generate_attack_tree: bool = True,
 ) -> bool:
     expected = resolve_scan_scope(project_path, code_scan_path, code_scan_paths)
     scope = bundle.get("scan_scope")
     if scope is None:
         # Historical opaque bundles are already scoped by their immutable
         # scan_id, so absence of optional metadata remains compatible.
-        return expected.is_legacy_directory
+        return bool(generate_attack_tree) and expected.is_legacy_directory
     if not isinstance(scope, dict):
+        return False
+    if bool(scope.get("generate_attack_tree", True)) != bool(generate_attack_tree):
         return False
     return scope_identity_matches(scope, expected)
 
@@ -632,6 +641,7 @@ async def run_scan(
     scan_mode: str = SCAN_MODE_CUSTOM,
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
+    threat_analysis_generate_attack_tree: bool = True,
     vulnerability_validation: dict[str, Any] | None = None,
     code_graph_mcp: dict[str, Any] | None = None,
     knowledge_base_mcp: dict[str, Any] | None = None,
@@ -676,6 +686,7 @@ async def run_scan(
             retry_threat_audit_task_ids=retry_threat_audit_task_ids,
             scan_mode=scan_mode, threat_analysis_enabled=threat_analysis_enabled,
             threat_analysis_method=threat_analysis_method,
+            threat_analysis_generate_attack_tree=threat_analysis_generate_attack_tree,
             vulnerability_validation=vulnerability_validation,
             code_graph_mcp=code_graph_mcp, knowledge_base_mcp=knowledge_base_mcp,
             mining_engines=mining_engines, codex_model_ids=codex_model_ids,
@@ -711,7 +722,8 @@ async def _run_scan_pipeline(
     scan_mode: str,
     threat_analysis_enabled: bool,
     threat_analysis_method: str,
-    vulnerability_validation: dict[str, Any] | None,
+    threat_analysis_generate_attack_tree: bool = True,
+    vulnerability_validation: dict[str, Any] | None = None,
     code_graph_mcp: dict[str, Any] | None,
     knowledge_base_mcp: dict[str, Any] | None,
     mining_engines: list[dict[str, Any]] | None,
@@ -1138,6 +1150,7 @@ async def _run_scan_pipeline(
                         project_path=project,
                         code_scan_path=scan_root,
                         code_scan_paths=code_scan_paths,
+                        generate_attack_tree=bool(threat_analysis_generate_attack_tree),
                     ):
                         raise ValueError("stored scan scope does not match resume paths")
                     restored = restore_json_artifacts(
@@ -1202,7 +1215,10 @@ async def _run_scan_pipeline(
                             "Codex CodeGraph MCP configuration failed: "
                             + mcp_result.error
                         )
-                if method_id == OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID:
+                if method_id in {
+                    OPENCODE_COVERAGE_GUIDED_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
+                    DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID,
+                }:
                     await prepare_coverage_inventory(
                         project=project, scan_root=scan_root, output_path=output_path,
                         start=start_file_inventory, cancel_event=cancel_event,
@@ -1216,6 +1232,11 @@ async def _run_scan_pipeline(
                     code_paths=code_scan_paths,
                     output_path=output_path,
                     is_resume=resume,
+                    generate_attack_tree=(
+                        bool(threat_analysis_generate_attack_tree)
+                        if method_id == DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID
+                        else True
+                    ),
                     product_mcp=(
                         str(
                             knowledge_base_mcp.get("name")
@@ -1393,6 +1414,11 @@ async def _run_scan_pipeline(
                 project,
                 scan_root,
                 code_scan_paths,
+                generate_attack_tree=(
+                    bool(threat_analysis_generate_attack_tree)
+                    if threat_analysis_method_id == DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID
+                    else True
+                ),
             )
             await reporter.push_threat_analysis(scan_id, artifact_bundle)
             run.status = "success"

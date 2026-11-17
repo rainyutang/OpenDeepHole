@@ -28,7 +28,7 @@ export interface CoverageTarget {
   fallback: boolean;
   sources: Array<{
     tree_id: string; path_id: string; path_name: string; description: string;
-    source_kind?: "compact_baseline";
+    source_kind?: "compact_baseline" | "module_threat";
     node_id?: string | null;
   }>;
 }

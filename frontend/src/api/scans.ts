@@ -55,6 +55,7 @@ export interface CreateScanInput {
   scan_mode?: string;
   threat_analysis_enabled?: boolean;
   threat_analysis_method?: string;
+  threat_analysis_generate_attack_tree?: boolean;
   product: string;
   knowledge_base?: { enabled: boolean; project_id: string; project_name: string };
   vulnerability_validation?: { enabled: boolean; method_id: string; values: Record<string, unknown> };
@@ -75,7 +76,7 @@ export interface CreateScanInput {
   }>;
 }
 
-type ProfileFields = "threat_analysis_enabled" | "threat_analysis_method" | "mining_engines" | "auto_fp_review" | "fp_review_method";
+type ProfileFields = "threat_analysis_enabled" | "threat_analysis_method" | "threat_analysis_generate_attack_tree" | "mining_engines" | "auto_fp_review" | "fp_review_method";
 
 export type ScanCopyConfig = Omit<CreateScanInput, ProfileFields> & {
   [K in ProfileFields]?: CreateScanInput[K] | null;

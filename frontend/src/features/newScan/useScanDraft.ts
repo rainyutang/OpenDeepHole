@@ -30,6 +30,7 @@ export function useScanDraft() {
       setCodeGraphMcp: field('codeGraphMcp'),
       setThreatAnalysisEnabled: field('threatAnalysisEnabled'),
       setThreatAnalysisMethod: field('threatAnalysisMethod'),
+      setThreatAnalysisGenerateAttackTree: field('threatAnalysisGenerateAttackTree'),
       setAutoFpReview: field('autoFpReview'),
       setAutoResumeEnabled: field('autoResumeEnabled'),
       setFpReviewMethod: field('fpReviewMethod'),

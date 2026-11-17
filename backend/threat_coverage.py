@@ -80,6 +80,39 @@ def analysis_targets(attack_tree: dict, modules: list, fallback: str) -> list[di
                     }
                     if source not in targets[key]["sources"]:
                         targets[key]["sources"].append(source)
+    for record in attack_tree.get("module_threats") or []:
+        if not isinstance(record, dict):
+            continue
+        name = _text(record.get("module_name") or record.get("模块名称"))
+        if not name:
+            continue
+        paths = _module_paths(by_name.get(name, {}))
+        for pattern in record.get("attack_patterns") or []:
+            if not isinstance(pattern, dict) or not _text(pattern.get("pattern_name") or pattern.get("pattern_id")):
+                continue
+            pattern_id = _text(pattern.get("pattern_id"))
+            pattern_name = _text(pattern.get("pattern_name")) or pattern_id
+            key = (name, pattern_id or pattern_name)
+            if key not in targets:
+                targets[key] = {
+                    "id": hashlib.sha1("\0".join(key).encode()).hexdigest()[:20],
+                    "module_name": name, "pattern_id": pattern_id, "pattern_name": pattern_name,
+                    "paths": paths or [fallback], "fallback": not paths, "sources": [],
+                }
+            source = {
+                "source_kind": "module_threat",
+                "tree_id": "",
+                "path_id": "",
+                "path_name": "模块攻击威胁",
+                "description": _text(
+                    pattern.get("description")
+                    or pattern.get("association_description")
+                    or pattern.get("pattern_description")
+                    or pattern.get("攻击模式描述")
+                ),
+            }
+            if source not in targets[key]["sources"]:
+                targets[key]["sources"].append(source)
     for name, pattern, source in iter_module_pattern_baselines(attack_tree, by_name):
         pattern_id = _text(pattern.get("pattern_id"))
         pattern_name = _text(pattern.get("pattern_name")) or pattern_id

@@ -32,6 +32,7 @@ _ALLOWED_KEYS = {
     "is_resume",
     "product_mcp",
     "attack_modes",
+    "generate_attack_tree",
     "task_agent_config",
     "output",
     "cancel_event",
@@ -321,10 +322,13 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
                 raise RuntimeError(
                     "threat_analysis_harness does not export run_threat_analysis"
                 )
-            if "code_paths" not in inspect.signature(native_entry).parameters:
+            sig_params = inspect.signature(native_entry).parameters
+            if "code_paths" not in sig_params:
                 if scope.paths != (scan_path,):
                     raise ValueError(f"threat-analysis method {manifest.method_id} does not support explicit file or multi-path inputs")
                 native_kwargs.pop("code_paths", None)
+            if "generate_attack_tree" not in sig_params:
+                native_kwargs.pop("generate_attack_tree", None)
             return native_entry(**native_kwargs)
 
     try:
@@ -350,6 +354,7 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
                 is_resume=bool(kwargs.get("is_resume", False)),
                 product_mcp=kwargs.get("product_mcp"),
                 attack_modes=attack_modes,
+                generate_attack_tree=bool(kwargs.get("generate_attack_tree", True)),
             )
     finally:
         await asyncio.sleep(0)

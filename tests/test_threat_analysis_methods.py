@@ -167,7 +167,7 @@ def test_method_entry_has_the_documented_optional_scope_contract(method_id) -> N
 
     assert Path(module.__file__).resolve() == manifest.directory / "__init__.py"
     signature = inspect.signature(module.run_threat_analysis)
-    assert list(signature.parameters) == [
+    expected_params = [
         "code_path",
         "output_path",
         "is_resume",
@@ -175,12 +175,17 @@ def test_method_entry_has_the_documented_optional_scope_contract(method_id) -> N
         "attack_modes",
         "code_paths",
     ]
+    if manifest.method_id == "deephole_compact_threat_analysis":
+        expected_params.append("generate_attack_tree")
+    assert list(signature.parameters) == expected_params
     assert signature.parameters["code_path"].default is inspect.Parameter.empty
     assert signature.parameters["output_path"].default is inspect.Parameter.empty
     assert signature.parameters["is_resume"].default is False
     assert signature.parameters["product_mcp"].default is None
     assert signature.parameters["attack_modes"].default is None
     assert signature.parameters["code_paths"].default is None
+    if manifest.method_id == "deephole_compact_threat_analysis":
+        assert signature.parameters["generate_attack_tree"].default is True
 
 
 def test_copied_source_harness_loads_without_rewriting_native_imports(
@@ -323,3 +328,85 @@ def test_legacy_scan_migration_adds_builtin_method_defaults(tmp_path: Path) -> N
     assert loaded_scan.threat_analysis_method == DEFAULT_THREAT_ANALYSIS_METHOD_ID
     assert loaded_scan.threat_analysis_method_selection is None
     assert loaded_meta.threat_analysis_method == DEFAULT_THREAT_ANALYSIS_METHOD_ID
+
+
+def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_path: Path) -> None:
+    from backend.models import AgentRemoteConfig, CreateScanRequest, MiningEngineRequest, User
+    from backend.scans.creation_config import resolve_creation_configuration
+
+    user = User(user_id="u1", username="tester", role="user")
+    remote_cfg = AgentRemoteConfig()
+
+    valid = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="custom",
+            threat_analysis_enabled=True,
+            threat_analysis_method="deephole_compact_threat_analysis",
+            threat_analysis_generate_attack_tree=False,
+            mining_engines=[MiningEngineRequest(engine_id="threat_pattern_audit")],
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert valid.threat_analysis_generate_attack_tree is False
+    assert valid.threat_analysis_method_selection.generate_attack_tree is False
+
+    store = SqliteScanStore(tmp_path / "compact-no-tree.db")
+    scan = ScanStatus(
+        scan_id="scan-compact-no-tree",
+        status=ScanItemStatus.PENDING,
+        progress=0,
+        total_candidates=0,
+        processed_candidates=0,
+        vulnerabilities=[],
+        threat_analysis_method=valid.threat_analysis_method,
+        threat_analysis_method_selection=valid.threat_analysis_method_selection,
+    )
+    meta = ScanMeta(
+        scan_items=[],
+        created_at="2026-11-17T00:00:00+00:00",
+        threat_analysis_method=valid.threat_analysis_method,
+        threat_analysis_method_selection=valid.threat_analysis_method_selection,
+    )
+    store.save_scan(scan, meta)
+    loaded_scan, loaded_meta = store.load_scan("scan-compact-no-tree")  # type: ignore[misc]
+    store.close()
+    assert loaded_scan.threat_analysis_method_selection is not None
+    assert loaded_scan.threat_analysis_method_selection.generate_attack_tree is False
+    assert loaded_meta.threat_analysis_method_selection is not None
+    assert loaded_meta.threat_analysis_method_selection.generate_attack_tree is False
+
+    for invalid_kwargs in (
+        dict(scan_mode="standard", threat_analysis_generate_attack_tree=False),
+        dict(
+            scan_mode="custom",
+            threat_analysis_enabled=True,
+            threat_analysis_method="opencode_lightweight_threat_analysis",
+            threat_analysis_generate_attack_tree=False,
+            mining_engines=[MiningEngineRequest(engine_id="threat_pattern_audit")],
+        ),
+        dict(
+            scan_mode="custom",
+            threat_analysis_enabled=True,
+            threat_analysis_method="deephole_compact_threat_analysis",
+            threat_analysis_generate_attack_tree=False,
+            mining_engines=[MiningEngineRequest(engine_id="threat_audit")],
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_creation_configuration(
+                CreateScanRequest(
+                    agent_key="agent-1",
+                    project_path="/repo/project",
+                    product="Demo",
+                    **invalid_kwargs,
+                ),
+                remote_cfg,
+                user,
+                None,
+            )
+        assert exc_info.value.status_code == 422

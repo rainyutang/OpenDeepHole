@@ -44,6 +44,17 @@ export interface NativeThreatModulePatternBaseline {
   attack_patterns: NativeThreatAttackPattern[];
 }
 
+export interface NativeThreatModuleThreatPattern {
+  pattern_id: string;
+  pattern_name: string;
+  description: string;
+}
+
+export interface NativeThreatModuleThreat {
+  module_name: string;
+  attack_patterns: NativeThreatModuleThreatPattern[];
+}
+
 export interface NativeThreatAttackPath {
   path_id: string;
   path_name: string;
@@ -81,7 +92,9 @@ export interface NativeThreatAttackTree {
 }
 
 export interface NativeThreatAttackTreeArtifact {
+  analysis_mode?: "attack_tree" | "module_threats_only" | string;
   attack_trees: NativeThreatAttackTree[];
+  module_threats?: NativeThreatModuleThreat[];
   unassigned_module_pattern_baselines?: NativeThreatModulePatternBaseline[];
 }
 
@@ -116,6 +129,7 @@ export interface ThreatAnalysisMethodSelection {
   method_id: string;
   method_label: string;
   description: string;
+  generate_attack_tree?: boolean;
 }
 
 export interface ThreatAnalysisMethodCatalogItem {

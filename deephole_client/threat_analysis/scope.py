@@ -19,18 +19,29 @@ def normalize_code_paths(code_root: Path, code_paths: Sequence[str | Path] | Non
     return tuple(selected)
 
 
-def prepare_method_scope(code_root: Path, artifact_root: Path,
-                         code_paths: Sequence[str | Path] | None, is_resume: bool) -> tuple[tuple[Path, ...], bool]:
+def prepare_method_scope(
+    code_root: Path,
+    artifact_root: Path,
+    code_paths: Sequence[str | Path] | None,
+    is_resume: bool,
+    *,
+    generate_attack_tree: bool = True,
+) -> tuple[tuple[Path, ...], bool]:
     selected = normalize_code_paths(code_root, code_paths)
-    identity = {"root": str(code_root.resolve()), "paths": sorted(str(path) for path in selected),
-                "kinds": {str(path): "directory" if path.is_dir() else "file" for path in selected}}
+    identity: dict[str, object] = {
+        "root": str(code_root.resolve()),
+        "paths": sorted(str(path) for path in selected),
+        "kinds": {str(path): "directory" if path.is_dir() else "file" for path in selected},
+    }
+    if not generate_attack_tree:
+        identity["generate_attack_tree"] = False
     context = artifact_root / "analysis-scope.json"
     if is_resume:
         try:
             previous = json.loads(context.read_text(encoding="utf-8"))
             is_resume = previous == identity
         except FileNotFoundError:
-            is_resume = selected == (code_root.resolve(),)
+            is_resume = generate_attack_tree and selected == (code_root.resolve(),)
         except (OSError, ValueError):
             is_resume = False
     context.parent.mkdir(parents=True, exist_ok=True)

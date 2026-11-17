@@ -96,6 +96,8 @@ def _install_submitter(monkeypatch, native, modules):
                           if asset["资产类别"] == task["metadata"]["asset_category"]]
             elif kind == "high_risk_module_map":
                 output = [module for module in modules if module[task["metadata"]["high_risk_field"]] == "是"]
+            elif kind == "high_risk_module_supplement":
+                output = []
             elif kind == "high_risk_module_merge":
                 output = modules
             else:

@@ -100,6 +100,7 @@ def validate_patterns(data: Mapping[str, Any]) -> None:
         for path_index, path in enumerate(_objects(tree.get("attack_paths", []), f"{location}.attack_paths")):
             validate_list(path.get("attack_patterns"), f"{location}.attack_paths[{path_index}].attack_patterns")
         validate_baselines(tree.get("module_pattern_baselines", []), f"{location}.module_pattern_baselines")
+    validate_baselines(data.get("module_threats", []), "$.module_threats")
     validate_baselines(data.get("unassigned_module_pattern_baselines", []), "$.unassigned_module_pattern_baselines")
 
 

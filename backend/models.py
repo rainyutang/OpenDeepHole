@@ -325,6 +325,7 @@ class ThreatAnalysisMethodSelection(BaseModel):
     method_id: str
     method_label: str
     description: str = ""
+    generate_attack_tree: bool = True
 
 
 class ThreatAnalysisMethodCatalogItem(BaseModel):
@@ -1826,6 +1827,7 @@ class CreateScanRequest(BaseModel):
     scan_mode: str = "custom"
     threat_analysis_enabled: bool | None = None
     threat_analysis_method: str | None = None
+    threat_analysis_generate_attack_tree: bool | None = None
     product: str = ""
     knowledge_base: ScanKnowledgeBaseRequest = Field(
         default_factory=ScanKnowledgeBaseRequest
@@ -1865,6 +1867,7 @@ class ScanCopyConfig(BaseModel):
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     threat_analysis_enabled: bool | None = None
     threat_analysis_method: str | None = None
+    threat_analysis_generate_attack_tree: bool | None = None
     mining_engines: list[MiningEngineRequest] | None = None
     auto_resume_enabled: bool = False
     auto_fp_review: bool | None = None

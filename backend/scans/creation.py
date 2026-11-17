@@ -418,6 +418,7 @@ async def _dispatch_creation(
         "scan_mode": scan_mode,
         "threat_analysis_enabled": threat_analysis_enabled,
         "threat_analysis_method": threat_analysis_method,
+        "threat_analysis_generate_attack_tree": configuration.threat_analysis_generate_attack_tree,
         "scan_name": scan_name,
         "product": product,
         "validation_environment": "",

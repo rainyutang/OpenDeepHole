@@ -246,11 +246,46 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
 
 
 # Final artifacts extend the AI output without changing its task schema.
+MODULE_THREAT_PATTERN_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["pattern_id", "pattern_name", "description"],
+    "properties": {
+        "pattern_id": NON_EMPTY_STRING,
+        "pattern_name": NON_EMPTY_STRING,
+        "description": NON_EMPTY_STRING,
+    },
+    "additionalProperties": False,
+}
+
+MODULE_THREAT_LIST_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": MODULE_THREAT_PATTERN_ITEM_SCHEMA,
+}
+
+MODULE_THREAT_RECORD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["module_name", "attack_patterns"],
+    "properties": {
+        "module_name": NON_EMPTY_STRING,
+        "attack_patterns": MODULE_THREAT_LIST_SCHEMA,
+    },
+    "additionalProperties": False,
+}
+
+
 def _final_attack_tree_schema() -> dict[str, Any]:
     from copy import deepcopy
 
     schema = deepcopy(ATTACK_TREE_SCHEMA)
     schema["properties"]["attack_trees"]["minItems"] = 0
+    schema["properties"]["analysis_mode"] = {
+        "type": "string",
+        "enum": ["attack_tree", "module_threats_only"],
+    }
+    schema["properties"]["module_threats"] = {
+        "type": "array",
+        "items": MODULE_THREAT_RECORD_SCHEMA,
+    }
     baseline = {
         "type": "object",
         "required": ["module_name", "node_id", "source", "attack_patterns"],

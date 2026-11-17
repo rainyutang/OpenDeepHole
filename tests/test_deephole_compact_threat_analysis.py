@@ -42,8 +42,16 @@ def test_compact_method_preserves_original_implementation_and_prompts():
         for relative, path in _method_files(COMPACT_ROOT).items()
     }
     assert compact_files.keys() - original_files.keys() == {
-        "baselines.py", "module_scope.py", "validate_attack_tree.py",
-        "artifact_validation.py", "validate_high_risk_modules.py",
+        "baselines.py",
+        "coverage_supplement.py",
+        "module_scope.py",
+        "validate_attack_tree.py",
+        "validate_module_threats.py",
+        "artifact_validation.py",
+        "validate_high_risk_modules.py",
+        "stages/module_threats.py",
+        "skills/module-threats/module-attack-threats/SKILL.md",
+        "skills/module-threats/module-attack-threats/references/attack_mode.json",
     }
     assert original_files.keys() - compact_files.keys() == set()
     attack_skill = "skills/attack-trees/attack-tree-by-asset/"
@@ -465,3 +473,329 @@ def test_pipeline_without_assets_still_produces_unassigned_baselines(tmp_path, c
     artifact = json.loads(Path(result["attack_tree_path"]).read_text(encoding="utf-8"))
     assert artifact["attack_trees"] == []
     assert len(artifact["unassigned_module_pattern_baselines"][0]["attack_patterns"]) == 15
+
+
+def test_module_threat_skill_and_catalog_match_private_51_modes():
+    skill_dir = COMPACT_ROOT / "skills/module-threats/deephole-compact-module-attack-threats"
+    catalog = skill_dir / "references/attack_mode.json"
+    prompt = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert catalog.read_bytes() == COMPACT_CATALOG.read_bytes()
+    assert "禁止探索其它源码" in prompt
+    assert "禁止过度探索与问题挖掘" in prompt
+    assert "51 项" in prompt
+    assert "pattern_id" in prompt and "pattern_name" in prompt and "description" in prompt
+
+
+def test_select_uncovered_targets_excludes_only_hidden_and_code_index_without_splitting_umbrella_dirs(compact_native):
+    supplement = importlib.import_module(compact_native.__name__ + ".coverage_supplement")
+    entries = [
+        {"path": ".", "kind": "directory"},
+        {"path": ".git", "kind": "directory"},
+        {"path": ".git/config", "kind": "file"},
+        {"path": ".env", "kind": "file"},
+        {"path": "code_index.db", "kind": "file"},
+        {"path": "code_index.db-wal", "kind": "file"},
+        {"path": "code_index.db-shm", "kind": "file"},
+        {"path": "sub", "kind": "directory"},
+        {"path": "sub/code_index.db-journal", "kind": "file"},
+        {"path": "src", "kind": "directory"},
+        {"path": "src/parser", "kind": "directory"},
+        {"path": "src/parser/a.c", "kind": "file"},
+        {"path": "src/auth", "kind": "directory"},
+        {"path": "src/auth/login.c", "kind": "file"},
+        {"path": "umbrella", "kind": "directory"},
+        *[{"path": f"umbrella/f{i}.c", "kind": "file"} for i in range(10)],
+        {"path": "tests", "kind": "directory"},
+        {"path": "tests/test_main.py", "kind": "file"},
+        {"path": "docs", "kind": "directory"},
+        {"path": "docs/README.md", "kind": "file"},
+        {"path": "third_party", "kind": "directory"},
+        {"path": "third_party/zlib.c", "kind": "file"},
+        {"path": "build", "kind": "directory"},
+        {"path": "build/out.txt", "kind": "file"},
+    ]
+    inventory = {
+        "schema_version": 1,
+        "snapshot_id": "snap-1",
+        "status": "complete",
+        "project_path": "/project",
+        "scan_root": "/project",
+        "captured_at": "2026-11-17T00:00:00+00:00",
+        "entries": entries,
+        "issues": [],
+        "issue_count": 0,
+        "excluded_paths": [],
+    }
+    first_round = supplement.select_uncovered_targets(inventory, [_module()])
+    # Umbrella dir stays intact (not auto-split), non-code/test/docs/build/third_party are kept,
+    # while .git/.env and code_index.db* (including sub/ which only holds code_index.db-journal) are excluded.
+    assert first_round == ["umbrella", "build", "docs", "tests", "third_party"]
+    second_round = supplement.select_uncovered_targets(inventory, [_module()], inspected_paths=first_round)
+    assert second_round == ["src/auth"]
+    assert supplement.select_uncovered_targets(inventory, [_module()], inspected_paths=first_round + second_round) == []
+
+
+def test_pipeline_supplements_up_to_three_rounds_of_five_paths_then_merges_once(
+    tmp_path, compact_native, monkeypatch,
+):
+    code_root = tmp_path / "source"
+    (code_root / "src/parser").mkdir(parents=True)
+    (code_root / "src/parser/main.c").write_text("int main_parser(void) { return 0; }", encoding="utf-8")
+    (code_root / ".hidden_dir").mkdir(parents=True)
+    (code_root / ".hidden_dir/secret.c").write_text("int s;", encoding="utf-8")
+    (code_root / "code_index.db").write_text("sqlite", encoding="utf-8")
+    (code_root / "code_index.db-wal").write_text("wal", encoding="utf-8")
+    for idx in range(17):
+        mod_dir = code_root / f"pkg_{idx:02d}" / "inner"
+        mod_dir.mkdir(parents=True)
+        (mod_dir / "handler.c").write_text("int h;", encoding="utf-8")
+
+    supplement_targets: list[list[str]] = []
+    merge_inputs: list[list[str]] = []
+    supplement_ext = {
+        **_module(),
+        "代码目录": "pkg_00",
+        "判断为高风险模块的原因": "补充解析扩展入口。",
+    }
+    supplement_new = {
+        **_module(),
+        "模块名称": "补充管理模块",
+        "代码目录": "pkg_05",
+        "是否涉及设备或系统对外提供管理和控制接口相关的代码": "是",
+        "判断为高风险模块的原因": "未覆盖目录中的管理接口。",
+    }
+    merged_modules = [
+        {**_module(), "代码目录": ["src/parser", "pkg_00"]},
+        supplement_new,
+    ]
+
+    def submit_tasks(_submitter, tasks, *, timeout=None):
+        results = []
+        for task in tasks:
+            kind = task["task_type"]
+            if kind == "value_asset_map":
+                output = []
+            elif kind == "high_risk_module_map":
+                output = [_module()] if task["metadata"]["high_risk_field"] == "是否涉及web相关处理" else []
+            elif kind == "high_risk_module_supplement":
+                targets = task["metadata"]["target_paths"]
+                supplement_targets.append(targets)
+                assert "高风险模块候选摘要" in task["runtime_prompt"]
+                if task["metadata"]["round"] == 1:
+                    output = [supplement_ext]
+                elif task["metadata"]["round"] == 2:
+                    output = [supplement_new]
+                else:
+                    output = []
+            elif kind == "high_risk_module_merge":
+                merge_inputs.append(list(task["input_files"]))
+                assert "补充识别路径归属于已有高风险模块" in task["runtime_prompt"]
+                output = merged_modules
+            else:
+                pytest.fail(f"Unexpected task type: {kind}")
+            Path(task["output_path"]).write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
+            results.append({
+                "task_id": task["task_id"],
+                "task_type": kind,
+                "status": "succeeded",
+                "output_path": task["output_path"],
+                "output": output,
+                "metadata": task["metadata"],
+            })
+        return results
+
+    monkeypatch.setattr(compact_native.TaskAgentSubmitter, "submit_tasks", submit_tasks)
+    output_root = tmp_path / "analysis"
+    result = compact_native.run_threat_analysis(code_root, output_root)
+    assert result["result"] is True, result
+    assert supplement_targets == [
+        [f"pkg_{i:02d}" for i in range(0, 5)],
+        [f"pkg_{i:02d}" for i in range(5, 10)],
+        [f"pkg_{i:02d}" for i in range(10, 15)],
+    ]
+    # Round 1 only returned pkg_00, yet pkg_01..pkg_04 were NOT re-drilled into pkg_01/inner in round 2!
+    assert len(merge_inputs) == 1
+    assert len(merge_inputs[0]) == 5 + 3
+    assert json.loads(Path(result["high_risk_modules_path"]).read_text(encoding="utf-8")) == merged_modules
+
+    # Resume reuses completed supplement + merge + trees without calling submit_tasks.
+    monkeypatch.setattr(
+        compact_native.TaskAgentSubmitter,
+        "submit_tasks",
+        lambda *_a, **_k: pytest.fail("Should not re-run on resume"),
+    )
+    assert compact_native.run_threat_analysis(code_root, output_root, is_resume=True) == result
+
+
+def test_pipeline_without_attack_tree_analyzes_one_module_per_task_and_supports_resume(
+    tmp_path, compact_native, monkeypatch,
+):
+    from backend.threat_coverage import build_threat_coverage
+
+    code_root = tmp_path / "source"
+    (code_root / "src/parser").mkdir(parents=True)
+    (code_root / "src/parser/a.c").write_text("int a;", encoding="utf-8")
+    (code_root / "src/internal").mkdir(parents=True)
+    (code_root / "src/internal/b.c").write_text("int b;", encoding="utf-8")
+
+    mod_a = _module()
+    mod_b = {
+        **_module(),
+        "模块名称": "内部处理模块",
+        "代码目录": "src/internal",
+        "是否外部暴露面": "否",
+    }
+    modes = json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))
+    ai_pattern = {
+        "pattern_id": "ODH-NATIVE-01",
+        "pattern_name": next(m["攻击模式名称"] for m in modes if m["攻击模式编号"] == ["ODH-NATIVE-01"]),
+        "description": "解析外部输入长度时可能发生越界写入。",
+    }
+    proto_pattern = {
+        "pattern_id": "ODH-PROTO-01",
+        "pattern_name": next(m["攻击模式名称"] for m in modes if m["攻击模式编号"] == ["ODH-PROTO-01"]),
+        "description": "协议消息边界校验不一致导致解析歧义。",
+    }
+
+    seen_batches: list[list[dict]] = []
+
+    def submit_tasks(_submitter, tasks, *, timeout=None):
+        seen_batches.append(tasks)
+        results = []
+        for task in tasks:
+            kind = task["task_type"]
+            assert kind != "value_asset_map", "Value assets must be skipped when generate_attack_tree=False"
+            assert kind != "attack_tree_by_asset", "Attack trees must be skipped when generate_attack_tree=False"
+            if kind == "high_risk_module_map":
+                output = [mod_a, mod_b] if task["metadata"]["high_risk_field"] == "是否涉及web相关处理" else []
+            elif kind == "high_risk_module_merge":
+                output = [mod_a, mod_b]
+            elif kind == "module_attack_threats":
+                assert task["skill_name"] == "deephole-compact-module-attack-threats"
+                assert "不要探索其它源码" in task["runtime_prompt"]
+                assert "不要做过度的代码探索" in task["runtime_prompt"]
+                assert len(task["input_files"]) == 1
+                assert task["input_files"][0] in {str((code_root / "src/parser").resolve()), str((code_root / "src/internal").resolve())}
+                output = [ai_pattern, proto_pattern] if task["metadata"]["module_name"] == mod_a["模块名称"] else []
+            else:
+                pytest.fail(f"Unexpected task type: {kind}")
+            Path(task["output_path"]).write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
+            results.append({
+                "task_id": task["task_id"],
+                "task_type": kind,
+                "status": "succeeded",
+                "output_path": task["output_path"],
+                "output": output,
+                "metadata": task["metadata"],
+            })
+        return results
+
+    monkeypatch.setattr(compact_native.TaskAgentSubmitter, "submit_tasks", submit_tasks)
+    output_root = tmp_path / "analysis"
+    result = compact_native.run_threat_analysis(
+        code_root,
+        output_root,
+        generate_attack_tree=False,
+    )
+    assert result["result"] is True, result
+    assert [len(batch) for batch in seen_batches] == [5, 1, 2]
+    assert [t["task_type"] for t in seen_batches[-1]] == ["module_attack_threats", "module_attack_threats"]
+
+    bundle = parse_threat_analysis_data(collect_json_artifacts(result, output_root=output_root))
+    assert bundle["artifacts"]["value_asset_path"]["content"] == []
+    assert bundle["artifacts"]["high_risk_modules_path"]["content"] == [mod_a, mod_b]
+    envelope = bundle["artifacts"]["attack_tree_path"]["content"]
+    assert envelope["analysis_mode"] == "module_threats_only"
+    assert envelope["attack_trees"] == []
+    assert envelope["module_threats"] == [
+        {"module_name": mod_a["模块名称"], "attack_patterns": [ai_pattern, proto_pattern]},
+        {"module_name": mod_b["模块名称"], "attack_patterns": []},
+    ]
+    baselines = {item["module_name"]: item["attack_patterns"] for item in envelope["unassigned_module_pattern_baselines"]}
+    # mod_a already had ODH-NATIVE-01 from AI, so only 14 fixed baselines are supplemented; mod_b gets all 15.
+    assert len(baselines[mod_a["模块名称"]]) == 14
+    assert "ODH-NATIVE-01" not in {p["pattern_id"] for p in baselines[mod_a["模块名称"]]}
+    assert len(baselines[mod_b["模块名称"]]) == 15
+
+    # Downstream audit engines and threat coverage consume both module_threats and baselines.
+    audit_targets = _build_targets(envelope, [mod_a, mod_b], fallback_code_path=code_root)
+    assert len(audit_targets) == 16 + 15
+    inv = {
+        "schema_version": 1,
+        "snapshot_id": "s1",
+        "status": "complete",
+        "project_path": str(code_root),
+        "scan_root": str(code_root),
+        "captured_at": "2026-11-17T00:00:00+00:00",
+        "entries": [
+            {"path": ".", "kind": "directory"},
+            {"path": "src", "kind": "directory"},
+            {"path": "src/parser", "kind": "directory"},
+            {"path": "src/parser/a.c", "kind": "file"},
+            {"path": "src/internal", "kind": "directory"},
+            {"path": "src/internal/b.c", "kind": "file"},
+        ],
+        "issues": [],
+        "issue_count": 0,
+        "excluded_paths": [],
+    }
+    coverage = build_threat_coverage(inv, bundle)
+    assert coverage["analysis_ready"] is True
+    assert [m["name"] for m in coverage["modules"]] == [mod_a["模块名称"], mod_b["模块名称"]]
+    assert len(coverage["targets"]) == 16 + 15
+    proto_target = next(t for t in coverage["targets"] if t["pattern_id"] == "ODH-PROTO-01")
+    assert proto_target["sources"] == [{
+        "source_kind": "module_threat",
+        "tree_id": "",
+        "path_id": "",
+        "path_name": "模块攻击威胁",
+        "description": proto_pattern["description"],
+    }]
+
+    # Resume with same generate_attack_tree=False reuses all artifacts.
+    monkeypatch.setattr(
+        compact_native.TaskAgentSubmitter,
+        "submit_tasks",
+        lambda *_a, **_k: pytest.fail("Should reuse module_threats_only artifacts on resume"),
+    )
+    assert compact_native.run_threat_analysis(
+        code_root, output_root, is_resume=True, generate_attack_tree=False,
+    ) == result
+
+
+def test_validate_module_threats_enforces_schema_and_51_pattern_catalog(tmp_path, compact_native):
+    validator = importlib.import_module(compact_native.__name__ + ".validate_module_threats")
+    tree_validator = importlib.import_module(compact_native.__name__ + ".validate_attack_tree")
+    modes = json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))
+    first = modes[0]
+    valid = [{
+        "pattern_id": "、".join(first["攻击模式编号"]),
+        "pattern_name": first["攻击模式名称"],
+        "description": "模块直接处理外部缓冲区长度。",
+    }]
+    output_file = tmp_path / "module-threat.json"
+    output_file.write_text(json.dumps(valid, ensure_ascii=False), encoding="utf-8")
+    assert validator.validate_file(output_file) == valid
+    assert validator.main(["--output", str(output_file)]) == 0
+
+    for invalid in [
+        [{"pattern_id": "UNKNOWN-01", "pattern_name": "未知模式", "description": "不在51项中"}],
+        [{**valid[0], "pattern_name": "被篡改的名称"}],
+        [{**valid[0], "description": "   "}],
+        [valid[0], valid[0]],
+        [{**valid[0], "extra": True}],
+    ]:
+        output_file.write_text(json.dumps(invalid, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(ValueError):
+            validator.validate_file(output_file)
+        assert validator.main(["--output", str(output_file)]) == 1
+
+    schemas = importlib.import_module(compact_native.__name__ + ".schemas")
+    envelope_file = tmp_path / "attack_trees.json"
+    envelope = {
+        "analysis_mode": "module_threats_only",
+        "attack_trees": [],
+        "module_threats": [{"module_name": "请求解析模块", "attack_patterns": valid}],
+    }
+    envelope_file.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+    assert tree_validator.validate_file(envelope_file, schemas.FINAL_ATTACK_TREE_SCHEMA) == envelope

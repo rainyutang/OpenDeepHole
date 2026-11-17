@@ -121,6 +121,7 @@ test("route parsing and building retain identities, engine and threat result sel
     const path = routing.scanPath("id with space", state);
     assert.ok(path.startsWith(`/scans/id%20with%20space/${section}`));
   }
+  assert.equal(routing.parseScanRoute("threat", "?view=moduleThreats").threatResult, "moduleThreats");
   assert.equal(routing.parseScanRoute("unknown"), null);
   const state = routing.parseScanRoute("mining", "?engine=custom%2Fengine");
   const access = { scanId: "s", token: "t+&?", kind: "shared" };

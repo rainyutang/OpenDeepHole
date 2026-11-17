@@ -1,7 +1,7 @@
 import type { AgentValidatorField } from "../types/agents";
 import ScanCodeGraphMcpEditor from "./ScanCodeGraphMcpEditor";
 import { ReviewNotesSelector } from "./ReviewNotes";
-import { canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis } from "../miningEngines";
+import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis } from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
 import PageHeader from "./PageHeader";
 import { agentOwnerLabel } from "../agentPresentation";
@@ -70,6 +70,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     setCodeGraphMcp,
     setThreatAnalysisEnabled,
     setThreatAnalysisMethod,
+    setThreatAnalysisGenerateAttackTree,
     setAutoFpReview,
     setAutoResumeEnabled,
     setFpReviewMethod,
@@ -91,6 +92,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     codeGraphMcp,
     threatAnalysisEnabled,
     threatAnalysisMethod,
+    threatAnalysisGenerateAttackTree,
     autoFpReview,
     autoResumeEnabled,
     fpReviewMethod,
@@ -237,13 +239,22 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
           <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">威胁分析</h2><p className="mt-1 text-xs text-slate-500">可单独运行，也为依赖威胁分析产物的漏洞挖掘引擎提供输入。</p></div><Toggle
             checked={threatAnalysisEnabled}
             onChange={() => { const next = !threatAnalysisEnabled; setThreatAnalysisEnabled(next); if (!next) setMiningEngines((current) => Object.fromEntries(Object.entries(current).map(([engineId, value]) => [engineId, miningEngineRequiresThreatAnalysis(engineId) ? { selected: false } : value]))); }}
-            label="启用威胁分析" /></div>{threatAnalysisEnabled && <div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label
+            label="启用威胁分析" /></div>{threatAnalysisEnabled && <><div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label
               key={method.method_id}
               className={`cursor-pointer rounded-lg border p-3 ${threatAnalysisMethod === method.method_id ? "border-emerald-500 bg-emerald-500/10" : "border-slate-600"}`}><input
                 className="mr-3"
                 type="radio"
                 checked={threatAnalysisMethod === method.method_id}
-                onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>
+                onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>{threatAnalysisMethod === "deephole_compact_threat_analysis" && <div className="mt-4 flex items-start justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3.5"><div><h3 className="text-sm font-medium text-slate-200">生成攻击树</h3><p className="mt-1 text-xs text-slate-400">关闭后跳过价值资产识别与攻击树构建，仅逐个高风险模块直接分析可能面临的攻击模式，适合搭配基于攻击模式的漏洞挖掘引擎。</p></div><Toggle
+                  checked={threatAnalysisGenerateAttackTree}
+                  onChange={() => {
+                    const next = !threatAnalysisGenerateAttackTree;
+                    setThreatAnalysisGenerateAttackTree(next);
+                    if (!next && miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected) {
+                      setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } }));
+                    }
+                  }}
+                  label="生成攻击树" /></div>}</>}</Card>
 
           <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2>{unavailableEngines.map((id) => <label key={id} className="mt-3 block text-sm text-amber-300"><input type="checkbox" checked onChange={() => setMiningEngines((current) => ({ ...current, [id]: { selected: false } }))} /> {id}（引擎不可用，请取消选择）</label>)}<p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => {
             const enabled = miningEngines[engine.engine_id]?.selected ?? false; return <label
@@ -252,7 +263,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
                 className="mr-3"
                 type="checkbox"
                 checked={enabled}
-                onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>;
+                onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisGenerateAttackTree(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>;
           })}</div></Card>
 
           <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动去误报</h2><p className="mt-1 text-xs text-slate-500">扫描后自动复核已确认问题。</p></div><Toggle checked={autoFpReview} onChange={() => setAutoFpReview((value) => !value)} label="自动去误报" /></div><div className="mt-4 grid gap-3 md:grid-cols-2">{fpMethods.map((method) => <label

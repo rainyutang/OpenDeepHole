@@ -194,6 +194,8 @@ def test_regenerated_map_invalidates_previously_successful_merge(tmp_path, compa
             elif task["task_type"] == "high_risk_module_map":
                 field = task["metadata"]["high_risk_field"]
                 output = copy.deepcopy(state["candidate"]) if module[field] == "是" else []
+            elif task["task_type"] == "high_risk_module_supplement":
+                output = []
             else:
                 assert task["task_type"] == "high_risk_module_merge"
                 output = []
@@ -222,6 +224,10 @@ def test_regenerated_map_invalidates_previously_successful_merge(tmp_path, compa
         changed_path.unlink()
     state["candidate"] = []
     resumed = pipeline.run(input_files=[source], code_root=source, resume=True)
-    assert [task["task_id"] for task in state["tasks"]] == [changed_task["task_id"], "high-risk-module-merge"]
+    assert [task["task_id"] for task in state["tasks"]] == [
+        changed_task["task_id"],
+        "high-risk-module-supplement-001",
+        "high-risk-module-merge",
+    ]
     assert resumed.high_risk_modules == []
     assert json.loads((layout.high_risk_final_dir / "high-risk-module-merge.json").read_text(encoding="utf-8")) == []

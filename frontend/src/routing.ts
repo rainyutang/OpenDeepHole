@@ -20,7 +20,7 @@ const sections: Record<ScanTab, string> = {
   validation: "validation", fp_review: "fp-review", issues: "issues",
   review_notes: "review-notes",
 };
-const threatResults: ThreatAnalysisResultTab[] = ["valueAssets", "highRiskModules", "internalNodes", "attackTrees"];
+const threatResults: ThreatAnalysisResultTab[] = ["valueAssets", "highRiskModules", "internalNodes", "attackTrees", "moduleThreats"];
 
 export function parseScanRoute(section: string | undefined, search = ""): ScanRouteState | null {
   const tab = section === undefined ? "overview"

@@ -2,12 +2,18 @@ import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
   NativeThreatHighRiskModule,
+  NativeThreatModuleThreat,
   NativeThreatTreeNode,
   NativeThreatValueAsset,
   ThreatAnalysis,
 } from "../../types/threatAnalysis";
 
-export type ThreatAnalysisResultTab = "valueAssets" | "highRiskModules" | "internalNodes" | "attackTrees";
+export type ThreatAnalysisResultTab =
+  | "valueAssets"
+  | "highRiskModules"
+  | "internalNodes"
+  | "attackTrees"
+  | "moduleThreats";
 
 export interface TreeNodeLike {
   node_id?: string | null;
@@ -50,6 +56,41 @@ export const THREAT_ANALYSIS_RESULT_TABS: Array<{
     { key: "attackTrees", label: "攻击树", unit: "棵" },
   ];
 
+export const MODULE_THREATS_ONLY_RESULT_TABS: Array<{
+  key: ThreatAnalysisResultTab;
+  label: string;
+  unit: "项" | "棵";
+}> = [
+    { key: "highRiskModules", label: "高风险模块", unit: "项" },
+    { key: "moduleThreats", label: "模块攻击威胁", unit: "项" },
+  ];
+
+export function isModuleThreatsOnlyAnalysis(
+  analysis: ThreatAnalysis | null | undefined,
+): boolean {
+  const content = artifactContent(analysis ?? null, "attack_tree_path");
+  if (!isRecord(content)) {
+    return false;
+  }
+  if (content.analysis_mode === "module_threats_only") {
+    return true;
+  }
+  const trees = Array.isArray(content.attack_trees) ? content.attack_trees : [];
+  return trees.length === 0 && Array.isArray(content.module_threats);
+}
+
+export function visibleThreatAnalysisTabs(
+  analysis: ThreatAnalysis | null | undefined,
+): Array<{
+  key: ThreatAnalysisResultTab;
+  label: string;
+  unit: "项" | "棵";
+}> {
+  return isModuleThreatsOnlyAnalysis(analysis)
+    ? MODULE_THREATS_ONLY_RESULT_TABS
+    : THREAT_ANALYSIS_RESULT_TABS;
+}
+
 export function isThreatAnalysisResultReady(analysis: ThreatAnalysis | null | undefined): analysis is ThreatAnalysis {
   if (analysis?.entrypoint_result?.result !== true || !analysis.artifacts) return false;
   const assets = analysis.artifacts.value_asset_path?.content;
@@ -71,12 +112,24 @@ export function getThreatAnalysisResultCounts(
   const assets = artifactArray<NativeThreatValueAsset>(normalized, "value_asset_path");
   const modules = artifactArray<NativeThreatHighRiskModule>(normalized, "high_risk_modules_path");
   const trees = attackTreesFromAnalysis(normalized);
+  const moduleThreats = moduleThreatsFromAnalysis(normalized);
   return {
     valueAssets: assets.length,
     highRiskModules: modules.length,
     internalNodes: collectInternalNodes(trees).length,
     attackTrees: trees.length,
+    moduleThreats: moduleThreats.length,
   };
+}
+
+export function moduleThreatsFromAnalysis(
+  analysis: ThreatAnalysis | null,
+): NativeThreatModuleThreat[] {
+  const content = artifactContent(analysis, "attack_tree_path");
+  if (!isRecord(content) || !Array.isArray(content.module_threats)) {
+    return [];
+  }
+  return recordItems<NativeThreatModuleThreat>(content.module_threats);
 }
 
 export function artifactContent(

@@ -61,7 +61,17 @@ def existing_success_result(
             output = validate_file(Path(output_path), task["output_schema"])
         except (ValueError, OSError, KeyError):
             return None
-    elif task.get("task_type") in {"high_risk_module_map", "high_risk_module_merge"}:
+    elif task.get("task_type") == "module_attack_threats":
+        from threat_analysis_harness.validate_module_threats import validate_file
+        try:
+            output = validate_file(Path(output_path))
+        except (ValueError, OSError):
+            return None
+    elif task.get("task_type") in {
+        "high_risk_module_map",
+        "high_risk_module_supplement",
+        "high_risk_module_merge",
+    }:
         from threat_analysis_harness.validate_high_risk_modules import validate_file
         try:
             output = validate_file(Path(output_path))

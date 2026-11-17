@@ -162,6 +162,7 @@ class IntegrationScanRequest(BaseModel):
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     threat_analysis_method: str | None = None
+    threat_analysis_generate_attack_tree: bool | None = None
     agent_config: AgentRemoteConfig = Field(default_factory=AgentRemoteConfig)
     code_graph_mcp: AgentMcpConfig | None = None
 
@@ -423,6 +424,7 @@ async def create_integration_scan(
             auto_fp_review=body.auto_fp_review,
             fp_review_method=body.fp_review_method,
             threat_analysis_method=body.threat_analysis_method,
+            threat_analysis_generate_attack_tree=body.threat_analysis_generate_attack_tree,
             checkers=checker_names,
             feedback_ids=[],
             code_graph_mcp=code_graph_mcp,

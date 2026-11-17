@@ -4,7 +4,7 @@ import type { MiningEngineCatalogItem } from "../../types/mining";
 import type { ScanConfigMemory } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
-import { canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
+import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
 
 import type { AgentMcpConfig } from "../../types/agents";
 import type { CreateScanInput, ScanCopyConfig } from "../../api/scans";
@@ -54,6 +54,7 @@ export interface ScanDraft {
   codeGraphMcp: AgentMcpConfig;
   threatAnalysisEnabled: boolean;
   threatAnalysisMethod: string;
+  threatAnalysisGenerateAttackTree: boolean;
   autoFpReview: boolean;
   autoResumeEnabled: boolean;
   fpReviewMethod: string;
@@ -82,6 +83,7 @@ export function defaultScanDraft(): ScanDraft {
     codeGraphMcp: defaultScanCodeGraphMcp(),
     threatAnalysisEnabled: true,
     threatAnalysisMethod: "",
+    threatAnalysisGenerateAttackTree: true,
     autoFpReview: true,
     autoResumeEnabled: true,
     fpReviewMethod: "",
@@ -155,6 +157,7 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
     validationValues,
     threatAnalysisEnabled,
     threatAnalysisMethod,
+    threatAnalysisGenerateAttackTree,
     fpReviewMethod,
   } = draft;
   const {
@@ -199,6 +202,14 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
     if (!enabledEngineCount && !threatAnalysisEnabled) return "请至少启用威胁分析或选择一个漏洞挖掘引擎";
     if (selectedThreatDependentEngine && !threatAnalysisEnabled) return `${canonicalMiningEngineLabel(selectedThreatDependentEngine.engine_id, selectedThreatDependentEngine.label)}要求本次扫描启用威胁分析`;
     if (threatAnalysisEnabled && !threatAnalysisMethod) return "没有可用的威胁分析方法";
+    if (
+      threatAnalysisEnabled
+      && threatAnalysisMethod === "deephole_compact_threat_analysis"
+      && !threatAnalysisGenerateAttackTree
+      && draft.miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected
+    ) {
+      return "DeepHole基于攻击威胁的漏洞挖掘引擎依赖攻击树产物，请启用生成攻击树或改用基于攻击模式的漏洞挖掘引擎";
+    }
     if (!fpReviewMethod) return "没有可用的去误报方法";
   }
 
@@ -222,6 +233,7 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     codeGraphMcp,
     threatAnalysisEnabled,
     threatAnalysisMethod,
+    threatAnalysisGenerateAttackTree,
     autoFpReview,
     autoResumeEnabled,
     fpReviewMethod,
@@ -255,6 +267,9 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     ...(scanMode === "custom" ? {
       threat_analysis_enabled: threatAnalysisEnabled,
       threat_analysis_method: threatAnalysisMethod,
+      ...(threatAnalysisMethod === "deephole_compact_threat_analysis"
+        ? { threat_analysis_generate_attack_tree: threatAnalysisGenerateAttackTree }
+        : {}),
       mining_engines: miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).map((engine) => ({ engine_id: engine.engine_id })),
       auto_fp_review: autoFpReview,
       fp_review_method: fpReviewMethod,
@@ -284,6 +299,7 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
     }));
     if (copied.threat_analysis_enabled != null) next.threatAnalysisEnabled = copied.threat_analysis_enabled;
     if (copied.threat_analysis_method != null) next.threatAnalysisMethod = copied.threat_analysis_method;
+    if (copied.threat_analysis_generate_attack_tree != null) next.threatAnalysisGenerateAttackTree = copied.threat_analysis_generate_attack_tree;
     if (copied.mining_engines != null) next.miningEngines = Object.fromEntries(copied.mining_engines.map((engine) => [engine.engine_id, { selected: true }]));
     if (copied.auto_fp_review != null) next.autoFpReview = copied.auto_fp_review;
     if (copied.fp_review_method != null) next.fpReviewMethod = copied.fp_review_method;

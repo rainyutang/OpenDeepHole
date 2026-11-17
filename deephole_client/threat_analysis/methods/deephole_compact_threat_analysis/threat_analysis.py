@@ -22,6 +22,7 @@ def run_threat_analysis(
     product_mcp: str | None = None,
     attack_modes: Mapping[str, Any] | None = None,
     code_paths: list[str | Path] | None = None,
+    generate_attack_tree: bool = True,
 ) -> dict[str, Any]:
     """Run threat analysis and return a JSON-serializable result object.
 
@@ -33,8 +34,15 @@ def run_threat_analysis(
     try:
         code_root = _required_path(code_path, "code_path")
         artifact_root = _required_path(output_path, "output_path")
+        enable_attack_tree = bool(generate_attack_tree)
 
-        selected_paths, is_resume = prepare_method_scope(code_root, artifact_root, code_paths, is_resume)
+        selected_paths, is_resume = prepare_method_scope(
+            code_root,
+            artifact_root,
+            code_paths,
+            is_resume,
+            generate_attack_tree=enable_attack_tree,
+        )
         layout = ThreatAnalysisLayout(artifact_root)
         submitter = TaskAgentSubmitter()
         # The platform facade binds a synchronous, thread-safe log callback.
@@ -44,7 +52,12 @@ def run_threat_analysis(
             layout=layout,
             progress_reporter=SimpleNamespace(emit=on_output) if on_output else None,
         )
-        pipeline.run(input_files=list(selected_paths), code_root=code_root, resume=bool(is_resume))
+        pipeline.run(
+            input_files=list(selected_paths),
+            code_root=code_root,
+            resume=bool(is_resume),
+            generate_attack_tree=enable_attack_tree,
+        )
 
         return {
             "result": True,

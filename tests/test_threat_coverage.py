@@ -603,3 +603,55 @@ def test_frozen_inventory_is_replaced_when_selection_or_filter_policy_changes(co
     narrowed = {**current, "snapshot_id": "selected-file", "code_scan_paths": ["/project/src/auth/a.c"]}
     assert upload(narrowed)
     assert [entry["path"] for entry in env.store.get_threat_coverage(env.scan_id)["inventory"]["entries"]] == [".", "auth", "auth/a.c"]
+
+
+def test_module_threats_only_coverage_and_stored_bundle_guard(audit_scope):
+    bundle = analysis()
+    bundle["artifacts"]["attack_tree_path"]["content"] = {
+        "analysis_mode": "module_threats_only",
+        "attack_trees": [],
+        "module_threats": [{
+            "module_name": "认证",
+            "attack_patterns": [{
+                "pattern_id": "ODH-PROTO-01",
+                "pattern_name": "协议边界解析歧义",
+                "description": "认证模块解析外部报文边界。",
+            }],
+        }],
+        "unassigned_module_pattern_baselines": [{
+            "module_name": "其它",
+            "node_id": None,
+            "source": "compact_baseline",
+            "attack_patterns": [{
+                "pattern_id": "ODH-NATIVE-01",
+                "pattern_name": "越界写入破坏内存状态",
+                "association_description": "预设固定审计。",
+            }],
+        }],
+    }
+    trees = bundle["artifacts"]["attack_tree_path"]["content"]
+    modules = bundle["artifacts"]["high_risk_modules_path"]["content"]
+
+    engine_targets = _build_targets(trees, modules, fallback_code_path=audit_scope.root, scan_scope=audit_scope)
+    coverage = build_threat_coverage(inventory(), bundle)
+    assert coverage["analysis_ready"] is True
+    assert [item["name"] for item in coverage["modules"]] == ["认证", "其它"]
+    assert {(t["module_name"], t["pattern_id"]) for t in engine_targets} == {
+        ("认证", "ODH-PROTO-01"),
+        ("其它", "ODH-NATIVE-01"),
+    }
+    assert {(t["module_name"], t["pattern_id"]) for t in coverage["targets"]} == {
+        ("认证", "ODH-PROTO-01"),
+        ("其它", "ODH-NATIVE-01"),
+    }
+
+    no_tree_scope = scanner._threat_analysis_scan_scope(
+        audit_scope.project, audit_scope.root, generate_attack_tree=False,
+    )
+    bundle["scan_scope"] = no_tree_scope
+    assert scanner._stored_threat_analysis_matches_scope(
+        bundle, project_path=audit_scope.project, code_scan_path=audit_scope.root, generate_attack_tree=False,
+    )
+    assert not scanner._stored_threat_analysis_matches_scope(
+        bundle, project_path=audit_scope.project, code_scan_path=audit_scope.root, generate_attack_tree=True,
+    )
