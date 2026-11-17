@@ -93,8 +93,23 @@ from .pattern_audit import (
 from .review_notes import REVIEW_NOTES_SCHEMA, ReviewNotesStoreMixin
 from .code_graph import ScanCodeGraphStoreMixin
 from .auto_resume import AUTO_RESUME_SCHEMA, AUTO_RESUME_COLUMNS, AUTO_RESUME_JOB_COLUMNS, ScanAutoResumeMixin
+from .user_management import (
+    SCAN_SUMMARY_UNREADY_INDEX,
+    SCAN_SUSPECTED_PARTIAL_INDEX,
+    USER_DEPARTMENT_INDEX,
+    USER_MANAGEMENT_COLUMNS,
+    USER_MANAGEMENT_SCHEMA,
+    UserManagementStoreMixin,
+    normalize_employee_id,
+)
 
-STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS, **PATTERN_AUDIT_COLUMNS}
+STORAGE_COLUMNS = {
+    **HISTORY_COLUMNS,
+    **BODY_COLUMNS,
+    **VALIDATION_COLUMNS,
+    **PATTERN_AUDIT_COLUMNS,
+    **USER_MANAGEMENT_COLUMNS,
+}
 STORAGE_COLUMNS["scan_auto_resume"] = AUTO_RESUME_JOB_COLUMNS
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
@@ -882,7 +897,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'user',
     agent_token   TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    employee_id   TEXT NOT NULL DEFAULT '',
+    department_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -1014,6 +1031,7 @@ _SCHEMA += MODEL_USAGE_SCHEMA
 _SCHEMA += PATTERN_AUDIT_SCHEMA
 _SCHEMA += REVIEW_NOTES_SCHEMA
 _SCHEMA += AUTO_RESUME_SCHEMA
+_SCHEMA += USER_MANAGEMENT_SCHEMA
 
 
 class _SqliteTransactionLock:
@@ -1035,7 +1053,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -1080,6 +1098,9 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
                         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self._conn.execute(PATTERN_AUDIT_ENGINE_INDEX)
             self._conn.execute(PATTERN_AUDIT_PARENT_INDEX)
+            self._conn.execute(USER_DEPARTMENT_INDEX)
+            self._conn.execute(SCAN_SUSPECTED_PARTIAL_INDEX)
+            self._conn.execute(SCAN_SUMMARY_UNREADY_INDEX)
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scan_task_versions_name "
                 "ON scan_task_versions(scan_id, json_extract(metadata_json, '$.task_name'))"
@@ -6400,13 +6421,32 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
     # -- Users --
 
     def create_user(
-        self, user_id: str, username: str, password_hash: str, role: str, agent_token: str
+        self,
+        user_id: str,
+        username: str,
+        password_hash: str,
+        role: str,
+        agent_token: str,
+        *,
+        employee_id: str = "",
+        department_id: str = "",
     ) -> None:
+        normalized_employee_id = normalize_employee_id(employee_id)
+        raw_department_id = (department_id or "").strip()
         with self._lock:
+            self._begin_write_locked()
+            resolved_department_id, _ = (
+                self._validate_department_locked(raw_department_id)
+                if raw_department_id
+                else ("", "")
+            )
             self._conn.execute(
                 """\
-                INSERT INTO users (user_id, username, password_hash, role, agent_token, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (
+                    user_id, username, password_hash, role, agent_token,
+                    created_at, employee_id, department_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -6414,9 +6454,9 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
                     password_hash,
                     role,
                     agent_token,
-                    __import__("datetime").datetime.now(
-                        __import__("datetime").timezone.utc
-                    ).isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
+                    normalized_employee_id,
+                    resolved_department_id,
                 ),
             )
             self._conn.commit()
@@ -6429,25 +6469,42 @@ class SqliteScanStore(ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesS
             role=row["role"],
             agent_token=row["agent_token"],
             created_at=row["created_at"],
+            employee_id=str(row["employee_id"] or ""),
+            department_id=str(row["department_id"] or ""),
         )
 
     def get_user_by_id(self, user_id: str) -> UserInDB | None:
-        cur = self._conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        cur = self._conn.execute(
+            "SELECT user_id, username, password_hash, role, agent_token, "
+            "created_at, employee_id, department_id FROM users WHERE user_id = ?",
+            (user_id,),
+        )
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def get_user_by_username(self, username: str) -> UserInDB | None:
-        cur = self._conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        cur = self._conn.execute(
+            "SELECT user_id, username, password_hash, role, agent_token, "
+            "created_at, employee_id, department_id FROM users WHERE username = ?",
+            (username,),
+        )
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def get_user_by_agent_token(self, agent_token: str) -> UserInDB | None:
-        cur = self._conn.execute("SELECT * FROM users WHERE agent_token = ?", (agent_token,))
+        cur = self._conn.execute(
+            "SELECT user_id, username, password_hash, role, agent_token, "
+            "created_at, employee_id, department_id FROM users WHERE agent_token = ?",
+            (agent_token,),
+        )
         row = cur.fetchone()
         return self._row_to_user(row) if row else None
 
     def list_users(self) -> list[UserInDB]:
-        cur = self._conn.execute("SELECT * FROM users ORDER BY created_at")
+        cur = self._conn.execute(
+            "SELECT user_id, username, password_hash, role, agent_token, "
+            "created_at, employee_id, department_id FROM users ORDER BY created_at"
+        )
         return [self._row_to_user(row) for row in cur.fetchall()]
 
     # -- Announcements --

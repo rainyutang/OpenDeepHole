@@ -1,4 +1,13 @@
-import type { TokenResponse, User } from "../types/auth";
+import type {
+  AdminUserSummary,
+  DeleteDepartmentResponse,
+  Department,
+  SortDirection,
+  TokenResponse,
+  User,
+  UserProfileInput,
+  UserSortField,
+} from "../types/auth";
 import { api } from "./transport";
 
 export async function login(username: string, password: string): Promise<TokenResponse> {
@@ -43,16 +52,62 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   await api.put("/api/auth/password", { old_password: oldPassword, new_password: newPassword });
 }
 
-export async function listUsers(): Promise<User[]> {
-  const { data } = await api.get<User[]>("/api/auth/users");
+export async function listUsers(params?: {
+  department_id?: string;
+  sort_by?: UserSortField;
+  sort_order?: SortDirection;
+}): Promise<AdminUserSummary[]> {
+  const { data } = await api.get<AdminUserSummary[]>(
+    "/api/auth/users",
+    params ? { params } : undefined,
+  );
   return data;
 }
 
-export async function createUser(username: string, password: string, role: string): Promise<User> {
-  const { data } = await api.post<User>("/api/auth/users", { username, password, role });
+export async function createUser(
+  username: string,
+  password: string,
+  role: string,
+  profile?: UserProfileInput,
+): Promise<AdminUserSummary> {
+  const { data } = await api.post<AdminUserSummary>("/api/auth/users", {
+    username,
+    password,
+    role,
+    employee_id: profile?.employee_id ?? "",
+    department_id: profile?.department_id ?? "",
+  });
+  return data;
+}
+
+export async function updateUserProfile(
+  userId: string,
+  profile: Required<UserProfileInput>,
+): Promise<AdminUserSummary> {
+  const { data } = await api.put<AdminUserSummary>(`/api/auth/users/${userId}/profile`, profile);
   return data;
 }
 
 export async function deleteUser(userId: string): Promise<void> {
   await api.delete(`/api/auth/users/${userId}`);
+}
+
+export async function listDepartments(): Promise<Department[]> {
+  const { data } = await api.get<Department[]>("/api/auth/departments");
+  return data;
+}
+
+export async function createDepartment(name: string): Promise<Department> {
+  const { data } = await api.post<Department>("/api/auth/departments", { name });
+  return data;
+}
+
+export async function updateDepartment(departmentId: string, name: string): Promise<Department> {
+  const { data } = await api.put<Department>(`/api/auth/departments/${departmentId}`, { name });
+  return data;
+}
+
+export async function deleteDepartment(departmentId: string): Promise<DeleteDepartmentResponse> {
+  const { data } = await api.delete<DeleteDepartmentResponse>(`/api/auth/departments/${departmentId}`);
+  return data;
 }

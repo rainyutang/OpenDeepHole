@@ -174,7 +174,7 @@ test("homepage scan links open a new tab while ordinary page navigation supports
 test("functional page titles match their entry buttons and retain the common return action", async () => {
   stored.set("auth_user", JSON.stringify({ ...user, role: "admin" }));
   installApi((config) => {
-    if (["/api/review-notes", "/api/auth/users"].includes(config.url)) return [];
+    if (["/api/review-notes", "/api/auth/users", "/api/auth/departments"].includes(config.url)) return [];
     if (config.url === "/api/agent/runtime/manifest") return { hash: "runtime" };
     if (["/api/threat-analysis-methods", "/api/fp-review-methods"].includes(config.url)) return { methods: [] };
     return undefined;
@@ -345,6 +345,7 @@ test("Agent selection comes from the URL and admin pages enforce the existing ro
   await go(router, "/admin/users");
   assert.equal(router.state.location.pathname, "/");
   assert.ok(!calls.some((config) => config.url === "/api/auth/users"));
+  assert.ok(!calls.some((config) => config.url === "/api/auth/departments"));
   await go(router, "/missing-page");
   assert.match(content(root.toJSON()), /页面不存在/);
 });

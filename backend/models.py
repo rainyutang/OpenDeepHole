@@ -67,6 +67,28 @@ class FpReviewMethod(str, Enum):
 
 # --- User / Auth models ---
 
+class Department(BaseModel):
+    department_id: str
+    name: str
+    user_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class CreateDepartmentRequest(BaseModel):
+    name: str
+
+
+class UpdateDepartmentRequest(BaseModel):
+    name: str
+
+
+class DeleteDepartmentResponse(BaseModel):
+    ok: bool = True
+    department_id: str
+    cleared_user_count: int = 0
+
+
 class User(BaseModel):
     user_id: str
     username: str
@@ -75,8 +97,19 @@ class User(BaseModel):
     created_at: str = ""
 
 
+class AdminUserSummary(User):
+    employee_id: str = ""
+    department_id: str = ""
+    department_name: str = ""
+    scan_count: int = 0
+    suspected_issue_count: int = 0
+
+
 class UserInDB(User):
     password_hash: str
+    employee_id: str = ""
+    department_id: str = ""
+    department_name: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -93,6 +126,13 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     role: str = "user"
+    employee_id: str = ""
+    department_id: str = ""
+
+
+class UpdateUserProfileRequest(BaseModel):
+    employee_id: str = ""
+    department_id: str = ""
 
 
 class RegisterRequest(BaseModel):

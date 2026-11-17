@@ -12,7 +12,9 @@ from abc import ABC, abstractmethod
 from backend.scan_metrics import VulnStat
 from backend.file_inventory import FileInventoryUpload
 from backend.models import (
+    AdminUserSummary,
     CandidateAuditTaskResult,
+    Department,
     VulnerabilityAuditSource,
     Candidate,
     FeedbackEntry,
@@ -43,6 +45,14 @@ from backend.models import (
 
 class DuplicateScanNameError(ValueError):
     """Raised when a user already owns a scan with the requested name."""
+
+
+class DuplicateDepartmentError(ValueError):
+    """Raised when a department with the same name already exists."""
+
+
+class DepartmentNotFoundError(LookupError):
+    """Raised when referencing a department_id that does not exist."""
 
 
 class ScanStoreBase(ABC):
@@ -864,7 +874,15 @@ class ScanStoreBase(ABC):
 
     @abstractmethod
     def create_user(
-        self, user_id: str, username: str, password_hash: str, role: str, agent_token: str
+        self,
+        user_id: str,
+        username: str,
+        password_hash: str,
+        role: str,
+        agent_token: str,
+        *,
+        employee_id: str = "",
+        department_id: str = "",
     ) -> None:
         """Create a new user."""
 
@@ -895,6 +913,48 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def count_users(self) -> int:
         """Return the total number of users."""
+
+    def update_user_profile(
+        self,
+        user_id: str,
+        *,
+        employee_id: str | None = None,
+        department_id: str | None = None,
+    ) -> UserInDB | None:
+        """Update a user's employee_id and/or department_id."""
+        raise NotImplementedError
+
+    def list_admin_users(
+        self,
+        *,
+        department_id: str | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "asc",
+    ) -> list[AdminUserSummary]:
+        """Return users with department info, scan_count and suspected_issue_count."""
+        raise NotImplementedError
+
+    def get_admin_user_summary(self, user_id: str) -> AdminUserSummary | None:
+        """Return a single user's admin summary with department and scan/issue counts."""
+        raise NotImplementedError
+
+    # -- Department Pool --
+
+    def list_departments(self) -> list[Department]:
+        """Return all departments ordered stably with user counts."""
+        raise NotImplementedError
+
+    def create_department(self, name: str) -> Department:
+        """Create a new department in the pool."""
+        raise NotImplementedError
+
+    def update_department(self, department_id: str, name: str) -> Department | None:
+        """Rename an existing department. Returns None if not found."""
+        raise NotImplementedError
+
+    def delete_department(self, department_id: str) -> dict | None:
+        """Delete a department and unassign its users. Returns None if not found."""
+        raise NotImplementedError
 
     # -- Announcements --
 

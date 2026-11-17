@@ -46,7 +46,229 @@ _CREATE_INDEX = re.compile(
     r"^CREATE\s+(?:UNIQUE\s+)?INDEX\b",
     flags=re.IGNORECASE,
 )
+_PG_TRIGGER_FN = re.compile(
+    r"^CREATE\s+OR\s+REPLACE\s+FUNCTION\s+(\w+)\(\)\s+RETURNS\s+trigger\s+LANGUAGE\s+plpgsql\s+AS\s+\$\$(.*)\$\$$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_PG_CREATE_TRIGGER = re.compile(
+    r"^CREATE\s+TRIGGER\s+(\w+)\b",
+    flags=re.IGNORECASE,
+)
 _SCHEMA_BOOTSTRAP_LOCK_KEY = 5711767769877594435
+
+
+def _sql_tokens(sql: str) -> list[str]:
+    """Tokenize SQL keywords and punctuation, ignoring comments and literals."""
+    tokens: list[str] = []
+    length = len(sql)
+    index = 0
+    while index < length:
+        char = sql[index]
+        if char.isspace():
+            index += 1
+        elif char == "-" and index + 1 < length and sql[index + 1] == "-":
+            newline = sql.find("\n", index + 2)
+            index = length if newline < 0 else newline + 1
+        elif char == "/" and index + 1 < length and sql[index + 1] == "*":
+            depth = 1
+            index += 2
+            while index < length and depth > 0:
+                if sql[index] == "/" and index + 1 < length and sql[index + 1] == "*":
+                    depth += 1
+                    index += 2
+                elif sql[index] == "*" and index + 1 < length and sql[index + 1] == "/":
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+        elif char in {"'", '"'}:
+            quote = char
+            index += 1
+            while index < length:
+                if sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2
+                    else:
+                        index += 1
+                        break
+                else:
+                    index += 1
+        elif char == "$":
+            tag_match = re.match(r"\$[A-Za-z_0-9]*\$", sql[index:])
+            if tag_match:
+                tag = tag_match.group(0)
+                closing = sql.find(tag, index + len(tag))
+                index = length if closing < 0 else closing + len(tag)
+            else:
+                index += 1
+        elif char in {"(", ")", ",", ";"}:
+            tokens.append(char)
+            index += 1
+        elif char.isalpha() or char == "_":
+            start = index
+            index += 1
+            while index < length and (sql[index].isalnum() or sql[index] in {"_", "$"}):
+                index += 1
+            tokens.append(sql[start:index].upper())
+        else:
+            index += 1
+    return tokens
+
+
+def _tokens_readonly(tokens: list[str], start: int = 0, end: int | None = None) -> bool:
+    stop = len(tokens) if end is None else end
+    if start >= stop:
+        return False
+    first = tokens[start]
+    if first in {"SELECT", "SHOW", "VALUES"}:
+        return True
+    if first == "(":
+        depth = 1
+        idx = start + 1
+        while idx < stop and depth > 0:
+            if tokens[idx] == "(":
+                depth += 1
+            elif tokens[idx] == ")":
+                depth -= 1
+            idx += 1
+        if depth != 0 or not _tokens_readonly(tokens, start + 1, idx - 1):
+            return False
+        if idx < stop and tokens[idx] in {"UNION", "INTERSECT", "EXCEPT"}:
+            idx += 1
+            if idx < stop and tokens[idx] in {"ALL", "DISTINCT"}:
+                idx += 1
+            return _tokens_readonly(tokens, idx, stop)
+        return True
+    if first == "EXPLAIN":
+        idx = start + 1
+        if idx < stop and tokens[idx] == "(":
+            depth = 1
+            idx += 1
+            while idx < stop and depth > 0:
+                if tokens[idx] == "(":
+                    depth += 1
+                elif tokens[idx] == ")":
+                    depth -= 1
+                idx += 1
+        else:
+            while idx < stop and tokens[idx] in {"ANALYZE", "VERBOSE"}:
+                idx += 1
+        return _tokens_readonly(tokens, idx, stop)
+    if first != "WITH":
+        return False
+    idx = start + 1
+    if idx < stop and tokens[idx] == "RECURSIVE":
+        idx += 1
+    while idx < stop:
+        if tokens[idx] in {"(", ")", ",", ";"}:
+            return False
+        idx += 1
+        # Optional CTE column list: cte_name(col1, col2, ...)
+        if idx < stop and tokens[idx] == "(":
+            depth = 1
+            idx += 1
+            while idx < stop and depth > 0:
+                if tokens[idx] == "(":
+                    depth += 1
+                elif tokens[idx] == ")":
+                    depth -= 1
+                idx += 1
+            if depth != 0:
+                return False
+        if idx >= stop or tokens[idx] != "AS":
+            return False
+        idx += 1
+        if idx < stop and tokens[idx] == "NOT":
+            idx += 1
+        if idx < stop and tokens[idx] == "MATERIALIZED":
+            idx += 1
+        if idx >= stop or tokens[idx] != "(":
+            return False
+        body_start = idx + 1
+        depth = 1
+        idx += 1
+        while idx < stop and depth > 0:
+            if tokens[idx] == "(":
+                depth += 1
+            elif tokens[idx] == ")":
+                depth -= 1
+            idx += 1
+        if depth != 0 or not _tokens_readonly(tokens, body_start, idx - 1):
+            return False
+        if idx < stop and tokens[idx] == ",":
+            idx += 1
+            continue
+        return _tokens_readonly(tokens, idx, stop)
+    return False
+
+
+def _is_readonly_sql(sql: str) -> bool:
+    tokens = _sql_tokens(sql)
+    if not tokens:
+        return False
+    statements: list[tuple[int, int]] = []
+    start = 0
+    depth = 0
+    for idx, token in enumerate(tokens):
+        if token == "(":
+            depth += 1
+        elif token == ")" and depth > 0:
+            depth -= 1
+        elif token == ";" and depth == 0:
+            if idx > start:
+                statements.append((start, idx))
+            start = idx + 1
+    if start < len(tokens):
+        statements.append((start, len(tokens)))
+    return bool(statements) and all(
+        _tokens_readonly(tokens, seg_start, seg_end)
+        for seg_start, seg_end in statements
+    )
+
+
+def _summary_triggers_already_installed(
+    connection: Any,
+    summary_trigger_statements: list[str],
+) -> bool:
+    """Check whether PostgreSQL already has identical summary triggers installed.
+
+    Allows existing deployments that predate ``scan-storage-triggers-v1`` to
+    add unrelated tables/columns without resetting ``scan_summary_state``.
+    """
+    expected_fns: dict[str, str] = {}
+    expected_triggers: set[str] = set()
+    for statement in summary_trigger_statements:
+        fn_match = _PG_TRIGGER_FN.match(statement.strip())
+        if fn_match:
+            expected_fns[fn_match.group(1).lower()] = fn_match.group(2).strip()
+            continue
+        trig_match = _PG_CREATE_TRIGGER.match(statement.strip())
+        if trig_match:
+            expected_triggers.add(trig_match.group(1).lower())
+    if not expected_fns or not expected_triggers:
+        return False
+    fn_rows = connection.execute(
+        "SELECT p.proname, p.prosrc "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = current_schema() AND p.proname = ANY(%s)",
+        (sorted(expected_fns),),
+    ).fetchall()
+    installed_fns = {
+        str(row["proname"]).lower(): str(row["prosrc"] or "").strip()
+        for row in fn_rows
+    }
+    if installed_fns != expected_fns:
+        return False
+    trig_rows = connection.execute(
+        "SELECT DISTINCT t.tgname "
+        "FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid = t.tgrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = current_schema() AND NOT t.tgisinternal AND t.tgname = ANY(%s)",
+        (sorted(expected_triggers),),
+    ).fetchall()
+    installed_triggers = {str(row["tgname"]).lower() for row in trig_rows}
+    return installed_triggers == expected_triggers
 
 
 class _CompatRow(dict):
@@ -183,8 +405,7 @@ class _Connection:
 
     @staticmethod
     def _is_write(sql: str) -> bool:
-        first = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ""
-        return first not in {"SELECT", "SHOW", "EXPLAIN"}
+        return not _is_readonly_sql(sql)
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> _Cursor:
         state = self._state()
@@ -373,7 +594,12 @@ def _sqlite_schema() -> list[str]:
         rows = [
             row
             for row in rows
-            if str(row[1]) != "idx_scans_user_scan_name_unique" and str(row[0]) != "trigger"
+            if str(row[1])
+            not in {
+                "idx_scans_user_scan_name_unique",
+                "storage_idx_checker_totals_suspected",
+            }
+            and str(row[0]) != "trigger"
         ]
         # PostgreSQL requires referenced tables to exist when a foreign key is
         # declared.  SQLite's catalog ordering is alphabetical, so create the
@@ -471,18 +697,31 @@ class PostgresScanStore(SqliteScanStore):
             )
             schema_statements = _sqlite_schema()
             import hashlib
+            summary_trig = summary_triggers(postgres=True)
+            deletion_trig = list(deletion_triggers(postgres=True))
+            trigger_signature = hashlib.sha256(json.dumps([
+                summary_trig, deletion_trig,
+            ], sort_keys=True).encode()).hexdigest()
             schema_signature = hashlib.sha256(json.dumps([
                 schema_statements, STORAGE_COLUMNS, _COORDINATION_SCHEMA,
-                summary_triggers(postgres=True), list(deletion_triggers(postgres=True)),
+                summary_trig, deletion_trig,
             ], sort_keys=True).encode()).hexdigest()
             fingerprint_sql = "SELECT MD5(COALESCE(string_agg(c.relname || ':' || a.attname || ':' || a.atttypid::text || ':' || a.attnotnull::text, ',' ORDER BY c.relname, a.attnum), '')) AS fingerprint FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped"
             ledger_exists = connection.execute("SELECT to_regclass('schema_migrations') AS name").fetchone()["name"]
+            marker = None
+            trigger_marker = None
             if ledger_exists:
                 marker = connection.execute("SELECT cursor_json FROM schema_migrations WHERE name = 'scan-storage-expand-v1' AND status = 'complete'").fetchone()
-                if marker:
+                trigger_marker = connection.execute("SELECT cursor_json FROM schema_migrations WHERE name = 'scan-storage-triggers-v1' AND status = 'complete'").fetchone()
+                if marker and trigger_marker:
                     saved = json.loads(marker["cursor_json"])
+                    saved_trig = json.loads(trigger_marker["cursor_json"])
                     fingerprint = connection.execute(fingerprint_sql).fetchone()["fingerprint"]
-                    if saved.get("signature") == schema_signature and saved.get("fingerprint") == fingerprint:
+                    if (
+                        saved.get("signature") == schema_signature
+                        and saved.get("fingerprint") == fingerprint
+                        and saved_trig.get("signature") == trigger_signature
+                    ):
                         return
             old_columns = {(row["table_name"], row["column_name"]) for row in connection.execute(
                 "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name IN ('scans', 'scan_candidates')"
@@ -551,6 +790,15 @@ class PostgresScanStore(SqliteScanStore):
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
             for statement in deferred_indexes:
                 connection.execute(statement)
+            # Build the partial summary index immediately on empty databases;
+            # populated production databases build the exact same index name
+            # online via prepare_storage_online_indexes() (CONCURRENTLY).
+            if connection.execute("SELECT 1 FROM scan_checker_totals LIMIT 1").fetchone() is None:
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS storage_idx_checker_totals_suspected "
+                    "ON scan_checker_totals(scan_id, fp_review_issue_count) "
+                    "WHERE fp_review_issue_count > 0"
+                )
             if legacy_data_needed:
                 connection.execute(
                     "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
@@ -656,13 +904,32 @@ class PostgresScanStore(SqliteScanStore):
                 "idx_fp_review_jobs_created_order "
                 "ON fp_review_jobs(created_order)"
             )
-            for statement in summary_triggers(postgres=True):
+            if trigger_marker is not None:
+                triggers_changed = (
+                    json.loads(trigger_marker["cursor_json"]).get("signature")
+                    != trigger_signature
+                )
+            elif marker is not None and _summary_triggers_already_installed(
+                connection,
+                summary_trig,
+            ):
+                triggers_changed = False
+            else:
+                triggers_changed = True
+            for statement in summary_trig:
                 connection.execute(statement)
-            for statement in deletion_triggers(postgres=True):
+            for statement in deletion_trig:
                 connection.execute(statement)
-            # A changed trigger definition may change aggregate semantics.
-            # Existing summaries must be reverified before serving them.
-            connection.execute("UPDATE scan_summary_state SET ready = 0")
+            # Only invalidate precomputed summaries when trigger semantics
+            # actually changed, matching SQLite's scan-storage-triggers-v1 rule.
+            if triggers_changed:
+                connection.execute("UPDATE scan_summary_state SET ready = 0")
+            connection.execute(
+                "INSERT INTO schema_migrations (name, status, cursor_json) "
+                "VALUES ('scan-storage-triggers-v1', 'complete', %s) "
+                "ON CONFLICT(name) DO UPDATE SET status = 'complete', cursor_json = excluded.cursor_json",
+                (json.dumps({"signature": trigger_signature}),),
+            )
             fingerprint = connection.execute(fingerprint_sql).fetchone()["fingerprint"]
             connection.execute("INSERT INTO schema_migrations (name, status, cursor_json) VALUES ('scan-storage-expand-v1', 'complete', %s) ON CONFLICT(name) DO UPDATE SET status = 'complete', cursor_json = excluded.cursor_json",
                 (json.dumps({"signature": schema_signature, "fingerprint": fingerprint}),))
@@ -684,6 +951,7 @@ class PostgresScanStore(SqliteScanStore):
             "storage_idx_stream_expiry": "scan_stream_events(created_at, id)",
             "storage_idx_sessions_disconnected": "agent_sessions(disconnected_at)",
             "storage_idx_workers_seen": "backend_workers(last_seen)",
+            "storage_idx_checker_totals_suspected": "scan_checker_totals(scan_id, fp_review_issue_count) WHERE fp_review_issue_count > 0",
         }
         with self._pool.connection() as connection:
             connection.autocommit = True

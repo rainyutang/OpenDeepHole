@@ -21,7 +21,12 @@ export {
   changePassword,
   listUsers,
   createUser,
+  updateUserProfile,
   deleteUser,
+  listDepartments,
+  createDepartment,
+  updateDepartment,
+  deleteDepartment,
 } from "./auth";
 export { getAnnouncements, getAdminAnnouncements, createAnnouncement, updateAnnouncement, deleteAnnouncement } from "./announcements";
 export {
