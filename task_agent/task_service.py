@@ -133,6 +133,11 @@ class OpenCodeExecutionContext:
         compare=False,
         repr=False,
     )
+    on_session_id: Callable[[OutputSource], Any] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
     cancel_event: Any = field(default=None, compare=False, repr=False)
 
 
@@ -175,6 +180,7 @@ def set_opencode_execution_context(
     knowledge_base_mcp: Any = _INHERIT_CONTEXT_VALUE,
     on_output: Callable[[str], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     on_invocation_metadata: Callable[[OutputSource], Any] | None | object = _INHERIT_CONTEXT_VALUE,
+    on_session_id: Callable[[OutputSource], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     cancel_event: Any = _INHERIT_CONTEXT_VALUE,
 ) -> Token[OpenCodeExecutionContext]:
     """Bind Agent-owned scope for the current async execution tree.
@@ -254,6 +260,11 @@ def set_opencode_execution_context(
             if on_invocation_metadata is _INHERIT_CONTEXT_VALUE
             else on_invocation_metadata
         ),
+        on_session_id=(
+            current.on_session_id
+            if on_session_id is _INHERIT_CONTEXT_VALUE
+            else on_session_id
+        ),
         cancel_event=(
             current.cancel_event if cancel_event is _INHERIT_CONTEXT_VALUE else cancel_event
         ),
@@ -305,6 +316,7 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
         knowledge_base_mcp=copy.deepcopy(current.knowledge_base_mcp),
         on_output=current.on_output,
         on_invocation_metadata=current.on_invocation_metadata,
+        on_session_id=current.on_session_id,
         cancel_event=current.cancel_event,
     )
 
@@ -1123,18 +1135,26 @@ class OpenCodeTaskService:
 
                 await self._notify_lease_state(record, "running")
 
-                if (
-                    session_attempt == 1
-                    and task_policy is None
-                    and spec.attempt is None
-                    and lease.option.max_retries is not None
-                ):
-                    fresh_retry_count = max(0, int(lease.option.max_retries))
+                task_policy = _task_model_policy(record.execution_context)
+                previous_total_attempts = total_session_attempts
+                if session_attempt == 1:
+                    if task_policy is not None:
+                        fresh_retry_count = int(_cfg_value(task_policy, "max_retries", 0) or 0)
+                    elif spec.attempt is None and lease.option.max_retries is not None:
+                        fresh_retry_count = max(0, int(lease.option.max_retries))
+                    else:
+                        fresh_retry_count = (
+                            configured_retry_count if spec.attempt is None else int(spec.attempt)
+                        )
                     total_session_attempts = fresh_retry_count + 1
+                    if total_session_attempts != previous_total_attempts:
+                        await update_model_lease_context(
+                            lease,
+                            {"session_attempts": total_session_attempts},
+                        )
 
                 record.status = "running"
-                if not record.started_at:
-                    record.started_at = lease.started_at_iso or _now_iso()
+                record.started_at = lease.started_at_iso or _now_iso()
                 self._emit_task_progress(
                     record,
                     f"START task={record.task_id} "
@@ -1153,7 +1173,9 @@ class OpenCodeTaskService:
                 )
                 source.attempt = session_attempt
                 if context.on_invocation_metadata:
-                    context.on_invocation_metadata(source)
+                    invocation_outcome = context.on_invocation_metadata(source)
+                    if inspect.isawaitable(invocation_outcome):
+                        await invocation_outcome
 
                 def record_session(value: str) -> Awaitable[None]:
                     # Identity must survive a deadline that cancels the later
@@ -1174,10 +1196,20 @@ class OpenCodeTaskService:
                     source.serve_session_id = session_id
                     if not record.session_future.done():
                         record.session_future.set_result(session_id)
-                    return update_model_lease_context(lease, {
+                    pool_update = update_model_lease_context(lease, {
                         "serve_session_id": session_id,
                         "session_attempt": session_attempt,
                     })
+                    if context.on_session_id is None:
+                        return pool_update
+
+                    async def publish_session() -> None:
+                        await pool_update
+                        session_outcome = context.on_session_id(source)
+                        if inspect.isawaitable(session_outcome):
+                            await session_outcome
+
+                    return publish_session()
 
                 def record_model(value: str) -> None:
                     if value:
@@ -2447,7 +2479,10 @@ class OpenCodeTaskService:
                 failure_reason=failure_reason,
                 retry_ordinal=correction_retry_ordinal or None,
                 retry_total=spec.output_retry_count,
-                started_at=correction_retry_started_at_iso,
+                started_at=(
+                    correction_retry_started_at_iso
+                    or (correction_lease.started_at_iso if correction_lease is not None else "")
+                ),
                 duration_seconds=(
                     max(0.0, _execution_time(record) - correction_retry_started_at)
                     if correction_retry_started_at
@@ -2491,7 +2526,9 @@ class OpenCodeTaskService:
             correction_source.attempt = session_attempt
             correction_source.serve_session_id = session_id
             if context.on_invocation_metadata:
-                context.on_invocation_metadata(correction_source)
+                correction_invocation = context.on_invocation_metadata(correction_source)
+                if inspect.isawaitable(correction_invocation):
+                    await correction_invocation
             correction_lock = self._session_locks.setdefault(
                 session_id,
                 asyncio.Lock(),
@@ -3116,6 +3153,8 @@ def _model_pool_task_context(
         "retry_ordinal": session_attempt - 1,
         "session_attempts": total_session_attempts,
     }
+    if record.queued_at:
+        context["queued_at"] = record.queued_at
     if session_events:
         context["session_events"] = copy.deepcopy(session_events)
     # A planned task is consumed once. A fresh-session retry is still the same

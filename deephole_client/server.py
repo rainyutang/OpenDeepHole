@@ -876,14 +876,18 @@ async def _run_fp_review_worker(review_id: str) -> None:
 
             queue_wakeup: asyncio.Task | None = None
             wait_set: set[asyncio.Task] = set(in_flight)
+            queue_event = _fp_review_queue_events.setdefault(
+                review_id,
+                asyncio.Event(),
+            )
             if len(in_flight) < concurrency:
-                queue_event = _fp_review_queue_events.setdefault(
-                    review_id,
-                    asyncio.Event(),
-                )
                 queue_event.clear()
                 if _fp_review_queues.get(review_id):
                     continue
+                queue_wakeup = asyncio.create_task(queue_event.wait())
+                wait_set.add(queue_wakeup)
+            elif _fp_review_queues.get(review_id):
+                queue_event.clear()
                 queue_wakeup = asyncio.create_task(queue_event.wait())
                 wait_set.add(queue_wakeup)
             done, _ = await asyncio.wait(
@@ -1355,6 +1359,12 @@ def _pump_validation_environment(environment_key: str) -> None:
         )
     if queue is not None and not queue:
         _validation_queues.pop(environment_key, None)
+
+
+def refresh_fp_review_scheduling() -> None:
+    """Wake queued FP review workers so increased model concurrency takes effect immediately."""
+    for event in list(_fp_review_queue_events.values()):
+        event.set()
 
 
 def refresh_validation_scheduling() -> None:

@@ -150,6 +150,12 @@ export function IterativeAuditTaskDetail({
   const prompt = inlinePrompt || stringValue(loadedBody?.task?.prompt);
   const selected = details?.task_id === task.task_id ? details : task;
   const sessionId = stringValue(record?.serve_session_id) || selected.output_source?.serve_session_id || "";
+  const sessionAttempt = Math.max(1, Number(record?.session_attempt) || Number(selected.output_source?.attempt) || 1);
+  const sessionAttempts = Math.max(0, Number(record?.session_attempts) || 0);
+  const retryBadge = sessionAttempt > 1
+    ? (sessionAttempts > 1 ? `Fresh Session 第 ${sessionAttempt}/${sessionAttempts} 次` : `Fresh Session 第 ${sessionAttempt} 次`)
+    : "";
+  const effectiveStartedAt = (runtime?.status === "running" && stringValue(record?.started_at)) || selected.started_at;
   const model = runtime?.modelId || stringValue(record?.model) || stringValue(record?.model_id)
     || selected.output_source?.model || selected.output_source?.model_id || "—";
   const inputClues = parent?.followup_clues || "";
@@ -180,6 +186,7 @@ export function IterativeAuditTaskDetail({
       <div className="flex flex-wrap items-center gap-2">
         <span className="shrink-0 rounded bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">第 {task.iteration || 1} 轮</span>
         {statusBadge}
+        {retryBadge && <span className="shrink-0 rounded bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">{retryBadge}</span>}
         <span className="break-words text-sm font-semibold text-slate-100">{task.method_name}</span>
       </div>
       <div className="break-words text-sm text-slate-300">{task.surface_name}</div>
@@ -217,7 +224,7 @@ export function IterativeAuditTaskDetail({
     <details open={executionExpanded} onToggle={(event) => setExecutionExpanded(event.currentTarget.open)} className="rounded border border-slate-800 p-3">
       <summary className="cursor-pointer text-xs font-semibold text-slate-400">执行信息与 Token</summary>
       <dl className="mt-3 space-y-2 break-all text-xs text-slate-400">
-        {[["任务", task.task_id], ["状态", statusLabel], ["开始时间", selected.started_at], ["结束时间", selected.finished_at],
+        {[["任务", task.task_id], ["状态", statusLabel], ["Session 尝试", retryBadge], ["开始时间", effectiveStartedAt], ["结束时间", selected.finished_at],
           ["代码路径", (selected.code_paths || []).map((item) => item.path).join("\n")],
           ["记录", record?.record_id], ["修订", record?.revision],
         ].filter(([, value]) => value != null && value !== "").map(([label, value]) => <div key={String(label)}>

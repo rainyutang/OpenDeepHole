@@ -118,6 +118,7 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
     return binding ? Boolean(binding.modelId.trim()) : Boolean(model.model.trim());
   };
   const capacity = models.reduce((total, model) => model.enabled && configured(model) && Number.isInteger(model.max_concurrency) && model.max_concurrency > 0 ? total + model.max_concurrency : total, 0);
+  const highCapacity = models.reduce((total, model) => model.enabled && configured(model) && model.capability === "high" && Number.isInteger(model.max_concurrency) && model.max_concurrency > 0 ? total + model.max_concurrency : total, 0);
   const ready = models.some((model) => model.enabled && configured(model));
   return <fieldset disabled={saving} aria-label="模型配置" className="min-w-0 space-y-4 disabled:opacity-70">
     <div className="flex flex-wrap items-center gap-2">
@@ -133,7 +134,7 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
       <button type="button" onClick={onImport} disabled={!online} className={button}>从 opencode 读取</button>
       <button type="button" onClick={addManual} className={button}>手动添加 opencode 模型</button>
       <button type="button" onClick={() => addApi()} className={`${button} bg-blue-600 hover:bg-blue-500`}>添加 LLM API</button>
-      <span className="ml-auto inline-flex items-center gap-1 text-xs text-slate-400">总并发 <output className="font-semibold tabular-nums text-slate-100">{capacity}</output><LlmFieldHint label="总并发">已启用模型的并发容量之和。</LlmFieldHint></span>
+      <span className="ml-auto inline-flex items-center gap-1 text-xs text-slate-400">总并发 <output className="font-semibold tabular-nums text-slate-100">{capacity}</output>{capacity > 0 && highCapacity < capacity && <span className="text-amber-300">（高能力可用 {highCapacity}）</span>}<LlmFieldHint label="总并发">已启用模型的并发容量之和；扫描主要阶段默认仅调度高能力模型。</LlmFieldHint></span>
       {pool && <span className="text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
     </div>
     {!ready && <p className="text-xs text-amber-200">启用至少一个已配置的模型后才能启动或恢复扫描。</p>}

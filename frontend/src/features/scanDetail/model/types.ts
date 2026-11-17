@@ -25,6 +25,9 @@ export interface ScanQueueTask {
   scopeId: string;
   task: Record<string, unknown>;
   timestamp: string;
+  startedAt: string;
+  finishedAt: string;
+  queuedAt: string;
 }
 
 export interface ScanQueueSessionEvent {

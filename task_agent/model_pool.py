@@ -1531,6 +1531,25 @@ def _lease_matches_active(lease: ModelLease, task: dict[str, Any] | None) -> boo
     )
 
 
+def _current_attempt_started_at(context: dict[str, Any]) -> str:
+    if context.get("task_phase") not in {"json_format", "json_correction"}:
+        return ""
+    attempt = max(1, int(context.get("session_attempt") or 1))
+    raw_events = context.get("session_events")
+    if not isinstance(raw_events, list):
+        return ""
+    for event in reversed(raw_events):
+        if (
+            isinstance(event, dict)
+            and event.get("phase") == "business"
+            and max(1, int(event.get("session_attempt") or 1)) == attempt
+        ):
+            started_at = str(event.get("started_at") or "").strip()
+            if started_at:
+                return started_at
+    return ""
+
+
 def _finish_model_lease_locked(
     lease: ModelLease,
     active_task: dict[str, Any],
@@ -1594,6 +1613,7 @@ def _finish_model_lease_locked(
             state.quota_half_open_probe_in_flight = False
     if record_completion and active_task is not None and lease.stats_scope_id:
         context = dict(active_task.get("context") or {})
+        attempt_started_at = _current_attempt_started_at(context)
         prompt = context.get("prompt")
         if isinstance(prompt, str) and "prompt_length" not in context:
             context["prompt_length"] = len(prompt)
@@ -1605,7 +1625,7 @@ def _finish_model_lease_locked(
             "scope_id": lease.stats_scope_id,
             "model_id": lease.option.id,
             "model": lease.option.model,
-            "started_at": active_task.get("started_at", lease.started_at_iso),
+            "started_at": attempt_started_at or active_task.get("started_at", lease.started_at_iso),
             "finished_at": finished_at,
             "duration_seconds": duration_seconds,
             "outcome": normalized_outcome or "unknown",
@@ -1944,16 +1964,17 @@ def _stats_item_snapshot(
         health_penalty_level = 0
         last_health_failure_at = ""
         last_health_failure_kind = ""
-    active_tasks = [
-        {
-            "task_id": task["task_id"],
-            "scope_id": task.get("scope_id", ""),
-            "started_at": task.get("started_at", ""),
-            **dict(task.get("context") or {}),
-        }
-        for task in _active_tasks.values()
-        if task.get("model_id") == item.id and (not scope_id or task.get("scope_id") == scope_id)
-    ]
+    active_tasks = []
+    for task in _active_tasks.values():
+        if task.get("model_id") == item.id and (not scope_id or task.get("scope_id") == scope_id):
+            task_context = dict(task.get("context") or {})
+            attempt_started_at = _current_attempt_started_at(task_context)
+            active_tasks.append({
+                "task_id": task["task_id"],
+                "scope_id": task.get("scope_id", ""),
+                **task_context,
+                "started_at": attempt_started_at or task.get("started_at", ""),
+            })
     return {
         "id": item.id,
         "model": item.model,

@@ -190,3 +190,26 @@ def test_legacy_cli_budgets_become_matching_managed_policies(tmp_path, mining, f
         assert [payload["vulnerability_mining"][key] for key in MINING_FIELDS] == ([10800, 3600, 1800] if mining == 3600 else [mining] * 3)
         assert [payload["vulnerability_mining"][key] for key in RETRY_FIELDS] == ([1800] * 2 if mining == 3600 else [mining] * 2)
         assert [payload["false_positive"][key] for key in RETRY_FIELDS] == ([1800] * 2 if fp == 3600 else [fp] * 2)
+
+
+def test_live_platform_runtime_refresh_preserves_mining_subtimeouts(monkeypatch):
+    import backend.config as backend_config
+    from deephole_client.platform_runtime import refresh_platform_runtime_config
+    from task_agent.task_service import _policy_session_timeout
+
+    monkeypatch.setattr(backend_config, "_config", backend_config.AppConfig())
+    client = AgentConfig()
+    client.vulnerability_mining.threat_audit_timeout_seconds = 5400
+    client.vulnerability_mining.candidate_audit_timeout_seconds = 1500
+    client.vulnerability_mining.vulnerability_dedup_timeout_seconds = 900
+    refresh_platform_runtime_config(client)
+
+    mining_policy = backend_config._config.vulnerability_mining
+    assert mining_policy.threat_audit_timeout_seconds == 5400
+    assert mining_policy.candidate_audit_timeout_seconds == 1500
+    assert mining_policy.vulnerability_dedup_timeout_seconds == 900
+    context = OpenCodeExecutionContext(task_metadata={
+        "task_type": "vulnerability_mining",
+        "timeout_task_kind": "threat_audit",
+    })
+    assert _policy_session_timeout(context, mining_policy) == 5400

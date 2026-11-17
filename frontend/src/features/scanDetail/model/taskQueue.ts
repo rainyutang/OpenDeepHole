@@ -14,27 +14,38 @@ export function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueu
       scopeId: String(task.scope_id || pool.scope_id || ""),
       task,
       timestamp: String(task.planned_at || ""),
+      startedAt: "",
+      finishedAt: "",
+      queuedAt: "",
     });
   }
   for (const [index, task] of (pool.queued_tasks ?? []).entries()) {
+    const queuedAt = String(task.queued_at || "");
     out.push({
       id: String(task.task_id || task.request_id || `queued-${index}`),
       status: "queued",
       modelId: "",
       scopeId: String(task.scope_id || pool.scope_id || ""),
       task,
-      timestamp: String(task.queued_at || ""),
+      timestamp: queuedAt,
+      startedAt: "",
+      finishedAt: "",
+      queuedAt,
     });
   }
   for (const model of pool.models ?? []) {
     for (const [index, task] of (model.active_tasks ?? []).entries()) {
+      const startedAt = String(task.started_at || "");
       out.push({
         id: String(task.task_id || `${model.id}-running-${index}`),
         status: "running",
         modelId: model.id,
         scopeId: String(task.scope_id || pool.scope_id || ""),
         task,
-        timestamp: String(task.started_at || ""),
+        timestamp: startedAt,
+        startedAt,
+        finishedAt: "",
+        queuedAt: String(task.queued_at || ""),
       });
     }
   }
@@ -47,6 +58,9 @@ export function collectScanQueueTasks(pool: OpenCodePoolStatus | null): ScanQueu
       scopeId: String(task.scope_id || pool.scope_id || ""),
       task,
       timestamp: taskHistorySortTime(task),
+      startedAt: String(task.started_at || ""),
+      finishedAt: String(task.finished_at || ""),
+      queuedAt: String(task.queued_at || ""),
     });
   }
   return out.sort((a, b) => {
@@ -141,15 +155,24 @@ export function scanQueueTaskSessionEvents(
     }];
   }).sort((a, b) => a.sequence - b.sequence);
 
-  const sessionId = scanQueueTaskSessionId(task);
+  const taskPhase = String(task.task_phase || "").trim();
+  const formatSessionId = String(task.json_format_session_id || "").trim();
+  const sessionId = taskPhase === "json_format" && formatSessionId
+    ? formatSessionId
+    : scanQueueTaskSessionId(task);
+  const activePhase: ScanQueueSessionEvent["phase"] = taskPhase === "json_format"
+    ? "json_format"
+    : taskPhase === "json_correction"
+      ? "json_retry"
+      : "business";
   if (
     taskStatus === "running"
     && sessionId
-    && !events.some((event) => event.sessionId === sessionId && event.outcome === "running")
+    && !events.some((event) => event.sessionId === sessionId && event.phase === activePhase && event.outcome === "running")
   ) {
     events.push({
       sequence: events.length + 1,
-      phase: "business",
+      phase: activePhase,
       sessionId,
       sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
       retryOrdinal: 0,
@@ -164,12 +187,13 @@ export function scanQueueTaskSessionEvents(
       durationSeconds: null,
     });
   }
-  if (events.length === 0 && sessionId) {
+  const fallbackSessionId = scanQueueTaskSessionId(task);
+  if (events.length === 0 && fallbackSessionId) {
     const duration = Number(task.duration_seconds);
     events.push({
       sequence: 1,
       phase: "business",
-      sessionId,
+      sessionId: fallbackSessionId,
       sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
       retryOrdinal: 0,
       retryTotal: 0,
@@ -178,12 +202,19 @@ export function scanQueueTaskSessionEvents(
       model: String(task.model || "").trim(),
       failureKind: String(task.failure_kind || "").trim(),
       failureReason: String(task.failure_reason || "").trim(),
-      startedAt: String(task.started_at || fallbackTimestamp || ""),
+      startedAt: String(task.started_at || (taskStatus === "running" ? fallbackTimestamp : "") || ""),
       finishedAt: String(task.finished_at || ""),
       durationSeconds: Number.isFinite(duration) && duration >= 0 ? duration : null,
     });
   }
   return events;
+}
+
+export function scanQueueFreshSessionRetryLabel(task: Record<string, unknown>): string {
+  const attempt = Math.max(1, Number(task.session_attempt) || 1);
+  if (attempt <= 1) return "";
+  const total = Math.max(attempt, Number(task.session_attempts) || 0);
+  return total > 1 ? `Fresh Session 第 ${attempt}/${total} 次` : `Fresh Session 第 ${attempt} 次`;
 }
 
 export function scanQueueSessionEventLabel(event: ScanQueueSessionEvent): string {

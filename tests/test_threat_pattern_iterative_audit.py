@@ -377,3 +377,58 @@ def test_repeated_state_does_not_publish_duplicate_snapshots(harness):
 
     asyncio.run(run())
     assert [task.status for task in h.reporter.updates] == ["pending", "queued", "running", "completed"]
+
+
+def test_iterative_audit_binds_threat_audit_timeout_and_refreshes_fresh_session_time(harness, monkeypatch):
+    from task_agent.task_service import get_opencode_execution_context
+
+    h = harness
+    observed_kinds = []
+
+    async def invoke(**values):
+        ctx = get_opencode_execution_context()
+        observed_kinds.append(ctx.task_metadata.get("timeout_task_kind"))
+        await values["lease_state_callback"]("running")
+        await ctx.on_invocation_metadata({
+            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
+            "attempt": 1, "started_at": "2026-11-17T01:00:00+00:00",
+        })
+        await ctx.on_session_id({
+            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
+            "attempt": 1, "started_at": "2026-11-17T01:00:00+00:00", "serve_session_id": "ses-attempt-1",
+        })
+        await ctx.on_invocation_metadata({
+            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
+            "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00",
+        })
+        await ctx.on_session_id({
+            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
+            "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00", "serve_session_id": "ses-attempt-2",
+        })
+        path = h.work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps([finding(1, more=False, clues="")], ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        return OpenCodeResult(
+            status="success", text="done", structured=None, model="p/m1",
+            session_id="ses-attempt-2",
+            output_source={
+                "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
+                "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00", "serve_session_id": "ses-attempt-2",
+            },
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    assert asyncio.run(engine.run(**h.kwargs))["status"] == "success"
+    assert observed_kinds == ["threat_audit"]
+    running_updates = [item for item in h.reporter.updates if item.status == "running"]
+    assert any(
+        item.output_source.serve_session_id == "ses-attempt-1"
+        and item.started_at == "2026-11-17T01:00:00+00:00"
+        for item in running_updates
+    )
+    assert any(
+        item.output_source.serve_session_id == "ses-attempt-2"
+        and item.output_source.attempt == 2
+        and item.started_at == "2026-11-17T04:00:00+00:00"
+        for item in running_updates
+    )

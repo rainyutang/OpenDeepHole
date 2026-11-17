@@ -84,6 +84,7 @@ TASK_METADATA_FIELDS = frozenset({
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
     "token_category", "token_category_label", "mining_engine_id", "mining_engine_label",
     "execution_kind", "execution_id", "execution_revision", "agent_session_id",
+    "session_attempt", "session_attempts", "retry_ordinal", "task_phase", "json_format_session_id",
 })
 
 

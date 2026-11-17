@@ -12,6 +12,7 @@ import { SCAN_QUEUE_PAGE_SIZE, taskTokenUsage } from "../model/scan";
 import {
   collectScanQueueTasks,
   scanQueueFailureKindLabel,
+  scanQueueFreshSessionRetryLabel,
   scanQueueSessionEventLabel,
   scanQueueSessionOutcomeLabel,
   scanQueueSessionOutcomeTone,
@@ -89,6 +90,9 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
       item.task.execution_revision ?? pool?.execution_revision,
       item.task.agent_session_id ?? pool?.agent_session_id,
       item.task.serve_session_id,
+      item.task.session_attempt || 1,
+      item.task.started_at || "",
+      item.task.task_phase || "",
     ],
   ]);
   const mergeHistory = (incoming: Record<string, unknown>[]) => {
@@ -326,7 +330,8 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                   <th className={thCls}>状态</th>
                   <th className={thCls}>任务</th>
                   <th className={thCls}>模型</th>
-                  <th className={thCls}>时间</th>
+                  <th className={thCls}>开始时间</th>
+                  <th className={thCls}>结束时间</th>
                 </tr>
               </thead>
               <tbody>
@@ -360,6 +365,10 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                     task.modelId,
                     task.timestamp,
                   );
+                  const freshRetryLabel = scanQueueFreshSessionRetryLabel(detail);
+                  const startedAt = task.startedAt || (typeof detail.started_at === "string" ? detail.started_at.trim() : "");
+                  const finishedAt = task.finishedAt || (typeof detail.finished_at === "string" ? detail.finished_at.trim() : "");
+                  const queuedAt = task.queuedAt || (typeof detail.queued_at === "string" ? detail.queued_at.trim() : "");
                   return (
                     <Fragment key={taskKey}>
                       <tr
@@ -388,7 +397,17 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                               </svg>
                             </span>
                             <div className="min-w-0">
-                              <div className="font-medium text-slate-200">{scanQueueTaskTitle(task.task)}</div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-medium text-slate-200">{scanQueueTaskTitle(task.task)}</span>
+                                {freshRetryLabel && (
+                                  <StatusPill label={freshRetryLabel} tone={task.status === "running" ? "cyan" : "amber"} />
+                                )}
+                              </div>
+                              {!isExpanded && task.status === "running" && sessionId && (
+                                <div className="mt-1 break-all font-mono text-[11px] text-cyan-300">
+                                  Session：{sessionId}
+                                </div>
+                              )}
                               {task.scopeId && (
                                 <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
                               )}
@@ -399,12 +418,18 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                           {task.modelId || "-"}
                         </td>
                         <td className="px-3 py-3 align-top text-xs text-slate-500">
-                          {formatDateTime(task.timestamp)}
+                          <div>{startedAt ? formatDateTime(startedAt) : "-"}</div>
+                          {!startedAt && task.status === "queued" && queuedAt && (
+                            <div className="mt-0.5 text-[11px] text-slate-600">入队：{formatDateTime(queuedAt)}</div>
+                          )}
+                        </td>
+                        <td className="px-3 py-3 align-top text-xs text-slate-500">
+                          {isTerminal && finishedAt ? formatDateTime(finishedAt) : "-"}
                         </td>
                       </tr>
                       {isExpanded && (
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
-                          <td colSpan={4} className="px-3 pb-4 pt-0">
+                          <td colSpan={5} className="px-3 pb-4 pt-0">
                             {detailLoading === detailKey && <p className="mb-3 text-xs text-slate-400">正在加载完整 Prompt 和 Session 轨迹…</p>}
                             {detailError === detailKey && <button type="button" onClick={() => retryTask(detailKey)} className="mb-3 text-xs text-amber-300">完整任务加载失败，点击重试</button>}
 
@@ -463,7 +488,6 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                                 {sessionEvents.length > 0 ? (
                                   <div className="space-y-2">
                                     {sessionEvents.map((event) => {
-                                      const eventTime = event.finishedAt || event.startedAt;
                                       const eventModel = event.model || event.modelId;
                                       return (
                                         <div
@@ -482,15 +506,14 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                                           <div className="mt-2 select-text break-all font-mono text-xs text-cyan-300" title={event.sessionId || undefined}>
                                             {event.sessionId || "未记录 Session ID"}
                                           </div>
-                                          {(eventModel || eventTime || event.durationSeconds != null) && (
-                                            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
-                                              {eventModel && <span>模型：{eventModel}</span>}
-                                              {eventTime && <span>结束：{formatDateTime(eventTime)}</span>}
-                                              {event.durationSeconds != null && (
-                                                <span>耗时：{formatDuration(event.durationSeconds)}</span>
-                                              )}
-                                            </div>
-                                          )}
+                                          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                                            {eventModel && <span>模型：{eventModel}</span>}
+                                            <span>开始：{event.startedAt ? formatDateTime(event.startedAt) : "-"}</span>
+                                            <span>结束：{event.finishedAt ? formatDateTime(event.finishedAt) : "-"}</span>
+                                            {event.durationSeconds != null && (
+                                              <span>耗时：{formatDuration(event.durationSeconds)}</span>
+                                            )}
+                                          </div>
                                           {(event.failureKind || event.failureReason) && (
                                             <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 text-xs leading-relaxed text-amber-200">
                                               {event.failureKind && (

@@ -446,3 +446,44 @@ def test_real_prompt_clocks_cleanup_and_no_output_callback(monkeypatch, tmp_path
             assert "/session/root/abort" in posts
 
     asyncio.run(run())
+
+
+def test_deleted_child_session_404_releases_orphaned_pending_tool_input(monkeypatch, tmp_path):
+    async def run():
+        import task_agent.serve_client as serve
+
+        monkeypatch.setattr(serve, "_SERVE_EVENT_POLL_INTERVAL_SECONDS", 0.005)
+        clock = ResponseActivity(20)
+        root = activity_state(clock)
+        clock.start()
+        manager = OpenCodeServeManager()
+        manager._event_states["root"] = root
+        manager._event_directories["root"] = str(tmp_path)
+        manager._event_channel_healthy = lambda _: True
+        manager._dispatch_event({"type": "session.created", "properties": {"info": {"id": "child", "parentID": "root"}}})
+        manager._dispatch_event(event("message.part.updated", part=tool_part(session_id="child"), sessionID="child"))
+        polled = asyncio.Event()
+
+        async def respond(request):
+            if request.url.path == "/session/child/message/new":
+                polled.set()
+                return httpx.Response(404, json={"error": "not found"})
+            return httpx.Response(200, json=snapshot(""))
+
+        async with httpx.AsyncClient(base_url="http://serve", transport=httpx.MockTransport(respond)) as client:
+            task = asyncio.create_task(manager._poll_session_snapshots(
+                client=client, session_id="root", directory=tmp_path,
+                params={"directory": str(tmp_path)}, headers={}, state=root,
+            ))
+            try:
+                await asyncio.wait_for(polled.wait(), timeout=1)
+                await asyncio.sleep(0.01)
+                child_state = manager._event_child_states["child"][1]
+                assert not child_state.pending_tool_inputs
+                assert 19 < clock.remaining() <= 20
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(run())

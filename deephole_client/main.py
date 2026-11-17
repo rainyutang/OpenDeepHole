@@ -675,7 +675,11 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
     await notify_model_pool_config_changed()
     # Increasing an environment limit should start already queued validations
     # immediately; lowering it only affects subsequent dispatches.
-    from deephole_client.server import refresh_validation_scheduling
+    from deephole_client.server import (
+        refresh_fp_review_scheduling,
+        refresh_validation_scheduling,
+    )
+    refresh_fp_review_scheduling()
     refresh_validation_scheduling()
 
 

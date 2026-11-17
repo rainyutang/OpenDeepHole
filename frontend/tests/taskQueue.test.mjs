@@ -872,3 +872,114 @@ test("queued task details do not become stale running or historical details", as
   assert.match(text(root.toJSON()), /3 阶段正文/);
   assert.equal(calls, 3);
 });
+
+test("task queue displays start/end columns, Fresh Session retry badge, refreshed start time, and per-session start/end times", async () => {
+  const { formatDateTime } = await server.ssrLoadModule("/src/features/modelPool/presentation.ts");
+  const t1Start = "2026-11-17T01:00:00Z";
+  const t1End = "2026-11-17T04:00:00Z";
+  const t2Start = "2026-11-17T04:00:05Z";
+  const t2End = "2026-11-17T05:10:00Z";
+  let detailPayload = {
+    task_id: "iter-1",
+    revision: 1,
+    prompt: "迭代审计任务 Prompt",
+    started_at: t1Start,
+    serve_session_id: "ses_attempt_1",
+    session_attempt: 1,
+    session_attempts: 3,
+    session_events: [],
+  };
+  let historyItems = [];
+  client.api.defaults.adapter = async (config) => {
+    if (config.url.endsWith("/tasks")) return response(config, { items: historyItems, next_cursor: null });
+    return response(config, detailPayload);
+  };
+
+  const root = await mount(poolWithLiveTask({
+    task_id: "iter-1",
+    revision: 1,
+    task_type: "vulnerability_mining",
+    task_name: "threat-pattern-iterative-audit-abc-round-1",
+    started_at: t1Start,
+    serve_session_id: "ses_attempt_1",
+    session_attempt: 1,
+    session_attempts: 3,
+  }));
+  const headers = root.root.findAllByType("th").map((cell) => text(cell));
+  assert.deepEqual(headers, ["状态", "任务", "模型", "开始时间", "结束时间"]);
+  assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t1Start));
+  assert.equal(text(rows(root)[0].findAllByType("td")[4]), "-");
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /ses_attempt_1/);
+
+  detailPayload = {
+    ...detailPayload,
+    started_at: t2Start,
+    serve_session_id: "ses_attempt_2",
+    session_attempt: 2,
+    session_events: [{
+      sequence: 1,
+      phase: "business",
+      session_id: "ses_attempt_1",
+      session_attempt: 1,
+      outcome: "timeout",
+      failure_kind: "timeout",
+      failure_reason: "OpenCode session total timeout during message",
+      started_at: t1Start,
+      finished_at: t1End,
+      duration_seconds: 10800,
+    }],
+  };
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, {
+    scanId: "s",
+    pool: poolWithLiveTask({
+      task_id: "iter-1",
+      revision: 1,
+      task_type: "vulnerability_mining",
+      task_name: "threat-pattern-iterative-audit-abc-round-1",
+      started_at: t2Start,
+      serve_session_id: "ses_attempt_2",
+      session_attempt: 2,
+      session_attempts: 3,
+    }),
+  })));
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /Fresh Session 第 2\/3 次/);
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /ses_attempt_2/);
+  assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t2Start));
+  assert.equal(text(rows(root)[0].findAllByType("td")[4]), "-");
+
+  await act(async () => rows(root)[0].props.onClick());
+  const expandedText = text(root.toJSON());
+  assert.ok(expandedText.includes(`开始：${formatDateTime(t1Start)}`));
+  assert.ok(expandedText.includes(`结束：${formatDateTime(t1End)}`));
+  assert.ok(expandedText.includes(`开始：${formatDateTime(t2Start)}`));
+  assert.ok(expandedText.includes("结束：-"));
+
+  historyItems = [task("iter-1", t2End, {
+    started_at: t2Start,
+    serve_session_id: "ses_attempt_2",
+    session_attempt: 2,
+    session_attempts: 3,
+  })];
+  detailPayload = {
+    ...detailPayload,
+    finished_at: t2End,
+    outcome: "success",
+    session_events: [
+      ...detailPayload.session_events,
+      {
+        sequence: 2,
+        phase: "business",
+        session_id: "ses_attempt_2",
+        session_attempt: 2,
+        outcome: "success",
+        started_at: t2Start,
+        finished_at: t2End,
+        duration_seconds: 4195,
+      },
+    ],
+  };
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, { scanId: "s", pool: pool({ completed_task_count: 1, total_tasks: 1 }) })));
+  await settleHistory();
+  assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t2Start));
+  assert.equal(text(rows(root)[0].findAllByType("td")[4]), formatDateTime(t2End));
+});

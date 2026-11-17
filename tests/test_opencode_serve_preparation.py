@@ -244,3 +244,36 @@ def test_cancelled_health_check_cleans_up_and_never_publishes_ready(monkeypatch,
         with pytest.raises(asyncio.CancelledError):
             await preparation._task
     asyncio.run(run())
+
+
+def test_exited_launcher_adopts_healthy_listener_before_draining_active_sessions():
+    async def run():
+        class _ExitedLauncher:
+            pid = 54321
+
+            def poll(self):
+                return 0
+
+        manager = _manager()
+        manager._proc = _ExitedLauncher()
+        manager._active_sessions = 2
+
+        async def adopt():
+            manager._proc = _Process()
+            manager._ready_generation = manager._process_generation
+            return True
+
+        manager._try_adopt_owned_listener_locked = AsyncMock(side_effect=adopt)
+        preparation = await manager.prepare_prompt(**_runtime())
+        assert isinstance(preparation, serve.OpenCodeServePreparation)
+        await asyncio.wait_for(preparation.wait(), 0.2)
+        manager._try_adopt_owned_listener_locked.assert_awaited_once()
+        manager._start_locked.assert_not_awaited()
+        assert manager._active_sessions == 2
+        permit = await manager.prepare_prompt(**_runtime())
+        assert isinstance(permit, serve.OpenCodeServePermit)
+        await permit.release()
+        await manager._release_active_session()
+        await manager._release_active_session()
+
+    asyncio.run(run())

@@ -282,3 +282,51 @@ for (const kind of ["integration", "shared"]) test(`filtered summaries and full 
     assert.equal(request.params.token, "view-token");
   }
 });
+
+test("iterative audit detail shows Fresh Session retry badge and refreshed start time on timeout retry", async () => {
+  const runningTask = task(1, {
+    status: "running",
+    started_at: "2026-11-17T04:00:05Z",
+    finished_at: "",
+    has_more_findings: null,
+    followup_clues: "",
+    output_source: { backend: "opencode", tool: "opencode", model_id: "m1", model: "p/m1", attempt: 2, serve_session_id: "ses-fresh-2" },
+  });
+  fixture([runningTask]);
+  const value = scan([runningTask], {
+    status: "auditing",
+    opencode_pool: {
+      scope_id: "s",
+      global_running: 1,
+      global_queued: 0,
+      total_tasks: 1,
+      completed_task_count: 0,
+      models: [{
+        id: "m1",
+        active_tasks: [{
+          task_id: "live-iter-1",
+          task_type: "vulnerability_mining",
+          mining_engine_id: engineId,
+          task_name: "iterative-1",
+          started_at: "2026-11-17T04:00:05Z",
+          serve_session_id: "ses-fresh-2",
+          session_attempt: 2,
+          session_attempts: 3,
+          prompt: "迭代审计 Prompt",
+          token_usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        }],
+      }],
+      queued_tasks: [],
+      planned_tasks: [],
+      completed_tasks: [],
+      updated_at: "now",
+    },
+  });
+  const root = await mount(value);
+  const execution = root.root.findAllByType("details").find((item) => text(item.findByType("summary")) === "执行信息与 Token");
+  await act(async () => execution.props.onToggle({ currentTarget: { open: true } }));
+  const rendered = text(root.toJSON());
+  assert.match(rendered, /Fresh Session 第 2\/3 次/);
+  assert.match(rendered, /ses-fresh-2/);
+  assert.match(rendered, /2026-11-17T04:00:05Z/);
+});

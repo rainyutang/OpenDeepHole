@@ -56,7 +56,7 @@ _SERVE_VERSION_PROBE_TIMEOUT_SECONDS = 3.0
 _COMMAND_PROBE_STOP_TIMEOUT_SECONDS = 2.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS = 2.0
-_SERVE_REQUEST_REAP_TIMEOUT_SECONDS = 1.0
+_SERVE_REQUEST_REAP_TIMEOUT_SECONDS = 5.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS = 10.0
@@ -5628,6 +5628,8 @@ class OpenCodeServeManager:
                 if self._shutting_down:
                     raise asyncio.CancelledError()
                 key = self._current_provider_key(key)
+                if self._proc is not None and self._proc.poll() is not None:
+                    await self._try_adopt_owned_listener_locked()
                 if (
                     self._proc is not None and self._proc.poll() is None
                     and self._ready_generation == self._process_generation
@@ -8457,6 +8459,15 @@ class OpenCodeServeManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response is not None
+                    and exc.response.status_code == 404
+                    and current_id != session_id
+                    and pending
+                ):
+                    for key in pending:
+                        current_state._finish_tool_input(key)
                 if not self._event_poll_failure_reported:
                     self._event_poll_failure_reported = True
                     self._emit_event_diagnostic(

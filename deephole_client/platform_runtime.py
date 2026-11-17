@@ -79,7 +79,7 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
     current.threat_analysis = backend_config.ThreatAnalysisConfig(
         **raw["threat_analysis"],
     )
-    current.vulnerability_mining = backend_config.ModelTaskPolicyConfig(
+    current.vulnerability_mining = backend_config.MiningTaskPolicyConfig(
         **raw["vulnerability_mining"],
     )
     current.false_positive = backend_config.ModelTaskPolicyConfig(
