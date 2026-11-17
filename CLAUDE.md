@@ -20,10 +20,12 @@ optional product-specific validation.
   distributes resources but does not execute source analysis.
 - **Agent**: `deephole_client/` runs where the source lives. It receives commands
   over an outbound WebSocket and reports events/results over HTTP.
-- **Task Agent**: `task_agent/` owns OpenCode Serve, scheduling, model leases,
-  Sessions, retries, permissions and usage. OpenCode-backed business operations
-  call the public `run_opencode_task()` facade. The Codex threat-analysis method
-  and explicitly Codex-dependent engines use their separate Codex integration.
+- **Task Agent**: `task_agent/` owns OpenCode Serve (supporting both OpenCode 1.x
+  and OpenCode 2.x via `opencode_version: "1" | "2"` with separate `executable` /
+  `executable_v2` paths), scheduling, model leases, Sessions, retries, permissions
+  and usage. OpenCode-backed business operations call the public `run_opencode_task()`
+  facade. The Codex threat-analysis method and explicitly Codex-dependent engines
+  use their separate Codex integration.
 - **MCP**: CodeGraph and knowledge-base connections are optional per-scan
   capabilities. The Agent does not automatically start `mcp_server/` as a fallback.
 

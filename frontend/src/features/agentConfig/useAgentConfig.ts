@@ -20,6 +20,7 @@ import {
   AdvancedSection,
   CheckerProfileMode,
   defaultConfig,
+  normalizeAgentBaseConfig,
   validateAgentConfig,
   formatModelPickerError,
   buildImportedModels,
@@ -102,7 +103,7 @@ export function useAgentConfig(initialAgentKey = "") {
       getCheckers(),
     ]).then(([next, nextCatalog, nextCheckers]) => {
       if (requestId !== configRequest.current) return;
-      setConfig(includeUnscheduledLlmModels(next)); setCatalog(nextCatalog); setCheckers(nextCheckers); setDirty(false); setMessage("");
+      setConfig(normalizeAgentBaseConfig(includeUnscheduledLlmModels(next))); setCatalog(nextCatalog); setCheckers(nextCheckers); setDirty(false); setMessage("");
       savedProviders.current = JSON.stringify(next.llm_providers || {});
       editRevision.current += 1;
     }).catch(() => {

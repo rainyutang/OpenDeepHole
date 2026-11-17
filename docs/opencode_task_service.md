@@ -607,7 +607,8 @@ validator 不创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不�
 - `task_agent/api.py`：唯一公共调用与精简结果契约。
 - `task_agent/task_service.py`：内部队列、模型调度、权限、Session、JSON 纠正和重试。
 - `task_agent/model_pool.py`：模型 Lease、单模型并发、容量汇总、能力匹配、时间窗和统计。
-- `task_agent/serve_client.py`：Serve 生命周期、Session API、事件与消息流。
+- `task_agent/serve_client.py`：Serve 生命周期、Session API、事件与消息流（同时支持 OpenCode 1.x 与 OpenCode 2.x）。
+- `task_agent/_opencode_v2.py`：OpenCode 2.x 专属的 HTTP Basic Auth、二进制主版本校验、ESM V2 插件（`{ id, setup }`）、`/api/*` 路由及异步 Prompt 协调辅助模块。
 - `task_agent/host.py`：自包含组件与宿主之间的最小配置回调边界。
 - `task_agent/standalone.py`：独立 YAML 的校验、发现、宿主适配和一次性自举。
 - `deephole_client/opencode_integration.py`：DeepHole 2.0 全局 workspace、SKILL、MCP 与运行配置适配。

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -29,6 +30,25 @@ from urllib.parse import quote
 
 import httpx
 
+from ._opencode_v2 import (
+    FILE_WRITE_PLUGIN_V2_HASH,
+    FILE_WRITE_PLUGIN_V2_SOURCE,
+    KNOWLEDGE_PROJECT_PLUGIN_V2_HASH,
+    KNOWLEDGE_PROJECT_PLUGIN_V2_SOURCE,
+    OPENCODE_V1,
+    OPENCODE_V2,
+    api_path,
+    auto_reject_v2_interactive_event,
+    discover_v2_openapi_paths,
+    extract_provider_list_v2,
+    health_probe_paths,
+    normalize_message_envelope,
+    normalize_message_list,
+    normalize_opencode_version,
+    parse_health_response,
+    submit_and_resolve_v2_prompt,
+    verify_opencode_executable_version,
+)
 from .bash_commands import command_binding_metadata
 from .config_json import (
     is_sensitive_opencode_config_key,
@@ -575,6 +595,7 @@ class OpenCodeServeKey:
     env_hash: str = ""
     config_hash: str = ""
     serve_port_auto: bool = False
+    opencode_version: str = OPENCODE_V1
     config_content: str = field(default="", compare=False, repr=False)
     env_overrides: tuple[tuple[str, str], ...] = field(default_factory=tuple, compare=False, repr=False)
 
@@ -967,7 +988,19 @@ async def _run_command_text_async(
     proc: asyncio.subprocess.Process | None = None
     timed_out = False
     try:
-        popen_kwargs: dict[str, Any] = {}
+        probe_xdg_root = Path(tempfile.gettempdir()) / "opendeephole-command-probe-xdg"
+        probe_env = dict(os.environ)
+        with contextlib.suppress(OSError):
+            for subdir, env_name in (
+                ("config", "XDG_CONFIG_HOME"),
+                ("data", "XDG_DATA_HOME"),
+                ("state", "XDG_STATE_HOME"),
+                ("cache", "XDG_CACHE_HOME"),
+            ):
+                target_dir = probe_xdg_root / subdir
+                target_dir.mkdir(parents=True, exist_ok=True)
+                probe_env[env_name] = str(target_dir)
+        popen_kwargs: dict[str, Any] = {"env": probe_env}
         if sys.platform == "win32":
             creation_flag = int(
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0
@@ -1117,23 +1150,39 @@ def _write_private_text(path: Path, content: str) -> None:
             temporary_path.unlink()
 
 
-def _managed_file_write_plugin_path(cwd: Path) -> Path:
+def _managed_file_write_plugin_path(
+    cwd: Path,
+    *,
+    opencode_version: str = OPENCODE_V1,
+) -> Path:
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
+    plugin_hash = FILE_WRITE_PLUGIN_V2_HASH if is_v2 else _FILE_WRITE_PLUGIN_HASH
+    plugin_source = FILE_WRITE_PLUGIN_V2_SOURCE if is_v2 else _FILE_WRITE_PLUGIN_SOURCE
+    suffix_tag = "v2-" if is_v2 else ""
     plugin_path = (
         cwd
         / _SERVE_MANAGED_PLUGIN_DIRNAME
-        / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+        / f"opendeephole-file-write-{suffix_tag}{plugin_hash}.mjs"
     ).resolve()
-    _write_private_text(plugin_path, _FILE_WRITE_PLUGIN_SOURCE)
+    _write_private_text(plugin_path, plugin_source)
     return plugin_path
 
 
-def _managed_knowledge_project_plugin_path(cwd: Path) -> Path:
+def _managed_knowledge_project_plugin_path(
+    cwd: Path,
+    *,
+    opencode_version: str = OPENCODE_V1,
+) -> Path:
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
+    plugin_hash = KNOWLEDGE_PROJECT_PLUGIN_V2_HASH if is_v2 else _KNOWLEDGE_PROJECT_PLUGIN_HASH
+    plugin_source = KNOWLEDGE_PROJECT_PLUGIN_V2_SOURCE if is_v2 else _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+    suffix_tag = "v2-" if is_v2 else ""
     plugin_path = (
         cwd
         / _SERVE_MANAGED_PLUGIN_DIRNAME
-        / f"opendeephole-knowledge-project-{_KNOWLEDGE_PROJECT_PLUGIN_HASH}.mjs"
+        / f"opendeephole-knowledge-project-{suffix_tag}{plugin_hash}.mjs"
     ).resolve()
-    _write_private_text(plugin_path, _KNOWLEDGE_PROJECT_PLUGIN_SOURCE)
+    _write_private_text(plugin_path, plugin_source)
     return plugin_path
 
 
@@ -1194,6 +1243,7 @@ def _write_command_binding(
     success_markers: tuple[tuple[str, str], ...] = (),
     path_prepend: tuple[str, ...] = (),
     tool_rules: dict[str, bool] | None = None,
+    permission_rules: list[dict[str, str]] | None = None,
     task_type: str = "",
 ) -> tuple[Path, Path]:
     normalized_commands = tuple(dict.fromkeys(
@@ -1210,24 +1260,27 @@ def _write_command_binding(
     binding_path = _command_binding_path(cwd, session_id)
     audit_path = _command_audit_path(cwd, session_id)
     _remove_file(audit_path)
+    binding_payload: dict[str, Any] = {
+        "version": 2,
+        "binding_id": uuid.uuid4().hex,
+        "session_id": str(session_id),
+        "task_type": str(task_type or "").strip(),
+        "allowed_commands": list(normalized_commands),
+        "audit_path": str(audit_path),
+        "success_markers": dict(success_markers),
+        "path_prepend": list(path_prepend),
+        "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
+        "tool_rules": list((tool_rules if tool_rules is not None else {
+            tool_id: True for tool_id in sorted(_MANAGED_NATIVE_TOOL_IDS)
+        }).items()),
+        **match_metadata,
+    }
+    if permission_rules is not None:
+        binding_payload["permission_rules"] = list(permission_rules)
     _write_private_text(
         binding_path,
         json.dumps(
-            {
-                "version": 2,
-                "binding_id": uuid.uuid4().hex,
-                "session_id": str(session_id),
-                "task_type": str(task_type or "").strip(),
-                "allowed_commands": list(normalized_commands),
-                "audit_path": str(audit_path),
-                "success_markers": dict(success_markers),
-                "path_prepend": list(path_prepend),
-                "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
-                "tool_rules": list((tool_rules if tool_rules is not None else {
-                    tool_id: True for tool_id in sorted(_MANAGED_NATIVE_TOOL_IDS)
-                }).items()),
-                **match_metadata,
-            },
+            binding_payload,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -1425,8 +1478,14 @@ def _with_managed_runtime_fields(data: dict[str, Any]) -> dict[str, Any]:
     return _with_managed_compaction(_with_managed_model_limits(data))
 
 
-def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
+def _write_serve_config_file(
+    cwd: Path,
+    config_content: str,
+    *,
+    opencode_version: str = OPENCODE_V1,
+) -> Path:
     """Atomically publish the resolved config and managed runtime fields."""
+    normalized_version = normalize_opencode_version(opencode_version)
     raw = config_content or "{}"
     try:
         data = json.loads(raw)
@@ -1435,22 +1494,31 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
     if not isinstance(data, dict):
         raise ValueError("Resolved OpenCode config must be a JSON object")
     data = _with_managed_runtime_fields(data)
+    plugins: list[str] = []
+    if normalized_version == OPENCODE_V2 and "plugins" in data:
+        legacy_plural = data.pop("plugins")
+        if isinstance(legacy_plural, str) and legacy_plural.strip():
+            plugins.append(legacy_plural)
+        elif isinstance(legacy_plural, list):
+            plugins.extend(
+                str(value)
+                for value in legacy_plural
+                if isinstance(value, str) and value.strip()
+            )
     configured_plugins = data.get("plugin")
     if isinstance(configured_plugins, str):
-        plugins = [configured_plugins]
+        plugins.append(configured_plugins)
     elif isinstance(configured_plugins, list):
-        plugins = [
+        plugins.extend(
             str(value)
             for value in configured_plugins
             if isinstance(value, str) and value.strip()
-        ]
-    elif configured_plugins is None:
-        plugins = []
-    else:
+        )
+    elif configured_plugins is not None:
         raise ValueError("Resolved OpenCode config plugin must be a string or list")
     managed_plugins = [
-        _managed_file_write_plugin_path(cwd).as_uri(),
-        _managed_knowledge_project_plugin_path(cwd).as_uri(),
+        _managed_file_write_plugin_path(cwd, opencode_version=normalized_version).as_uri(),
+        _managed_knowledge_project_plugin_path(cwd, opencode_version=normalized_version).as_uri(),
     ]
     data["plugin"] = list(dict.fromkeys([*plugins, *managed_plugins]))
     normalized = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -1589,7 +1657,7 @@ def _log_serve_startup_output_updates(
 def _serve_startup_retry_kind(error: BaseException) -> str:
     text = str(error).lower()
     if isinstance(error, OpenCodeServeStartupError) and error.retry_kind:
-        return error.retry_kind
+        return "" if error.retry_kind == "config" else error.retry_kind
     if any(marker in text for marker in _SERVE_NON_PORT_FAILURE_MARKERS):
         return ""
     if any(marker in text for marker in _SERVE_BIND_FAILURE_MARKERS):
@@ -1628,8 +1696,14 @@ def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
     for name in _SERVE_DEBUG_ENV_NAMES:
         value = _serve_debug_env_value(name, env.get(name))
         lines.append(f"    {name}={value if value is not None else '(unset)'}")
-    lines.append("    OPENCODE_SERVER_PASSWORD=(cleared)")
-    lines.append("    OPENCODE_SERVER_USERNAME=(cleared)")
+    if "OPENCODE_SERVER_PASSWORD" in env:
+        lines.append("    OPENCODE_SERVER_PASSWORD=***")
+    else:
+        lines.append("    OPENCODE_SERVER_PASSWORD=(cleared)")
+    if "OPENCODE_SERVER_USERNAME" in env:
+        lines.append(f"    OPENCODE_SERVER_USERNAME={env['OPENCODE_SERVER_USERNAME']}")
+    else:
+        lines.append("    OPENCODE_SERVER_USERNAME=(cleared)")
     return lines
 
 
@@ -2290,6 +2364,8 @@ def _write_marker(
         "config_hash": key.config_hash,
         "created_at": time.time(),
     }
+    if key.opencode_version != OPENCODE_V1:
+        data["opencode_version"] = key.opencode_version
     if process_creation_times:
         data["process_creation_times"] = process_creation_times
     try:
@@ -3515,7 +3591,9 @@ async def _session_tree_token_entries(
     fallback_model: str,
     *,
     deadline: OperationDeadline | None = None,
+    opencode_version: str = OPENCODE_V1,
 ) -> tuple[dict[tuple[str, str, str], tuple[str, TokenCounters]], bool]:
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
     entries: dict[tuple[str, str, str], tuple[str, TokenCounters]] = {}
     complete = True
     pending = [root_session_id]
@@ -3527,13 +3605,25 @@ async def _session_tree_token_entries(
             continue
         visited.add(current)
         try:
+            msg_path = api_path(opencode_version, f"/session/{current}/message")
             response = await deadline.wait(client.get(
-                f"/session/{current}/message",
+                msg_path,
                 params=params,
                 headers=headers,
             ), phase="token_messages")
+            if is_v2 and response.status_code in {404, 405}:
+                response = await deadline.wait(client.get(
+                    f"/session/{current}/message",
+                    params=params,
+                    headers=headers,
+                ), phase="token_messages")
             response.raise_for_status()
-            messages = response.json()
+            raw_messages = response.json()
+            messages = (
+                normalize_message_list(raw_messages, fallback_session_id=current)
+                if is_v2
+                else raw_messages
+            )
             if isinstance(messages, list):
                 for message in messages:
                     entries.update(
@@ -3547,11 +3637,30 @@ async def _session_tree_token_entries(
             complete = False
             logger.debug("Failed to collect OpenCode messages for %s: %s", current, exc)
         try:
+            children_path = api_path(opencode_version, f"/session/{current}/children")
             response = await deadline.wait(client.get(
-                f"/session/{current}/children",
+                children_path,
                 params=params,
                 headers=headers,
             ), phase="token_children")
+            if is_v2 and response.status_code in {404, 405}:
+                list_params = {**params, "parentID": current}
+                response = await deadline.wait(client.get(
+                    "/api/session",
+                    params=list_params,
+                    headers=headers,
+                ), phase="token_children")
+                if response.status_code == 200:
+                    listed = response.json()
+                    if isinstance(listed, list):
+                        for child in listed:
+                            if not isinstance(child, dict):
+                                continue
+                            parent = str(child.get("parentID") or child.get("parentId") or "").strip()
+                            child_id = str(child.get("id") or "").strip()
+                            if parent == current and child_id and child_id not in visited:
+                                pending.append(child_id)
+                        continue
             response.raise_for_status()
             children = response.json()
             if isinstance(children, list):
@@ -4396,21 +4505,31 @@ def _completed_file_writes(
 
 
 def _event_session_id(props: dict[str, Any], *, event_type: str = "") -> str:
-    session_id = props.get("sessionID")
+    session_id = props.get("sessionID") or props.get("sessionId")
     if isinstance(session_id, str) and session_id:
         return session_id
-    for key in ("part", "info"):
+    for key in ("part", "info", "session", "request"):
         nested = props.get(key)
         if isinstance(nested, dict):
-            nested_session_id = nested.get("sessionID")
+            nested_session_id = nested.get("sessionID") or nested.get("sessionId")
             if isinstance(nested_session_id, str) and nested_session_id:
                 return nested_session_id
-    if event_type == "session.deleted" and isinstance(props.get("info"), dict):
+    if event_type in {
+        "session.deleted",
+        "session.created",
+        "session.updated",
+        "session.forked",
+    } and isinstance(props.get("info"), dict):
         return str(props["info"].get("id") or "")
     return ""
 
 
 def _tool_ids_from_response(value: object) -> list[str]:
+    if isinstance(value, dict):
+        for key in ("ids", "tools", "data"):
+            if isinstance(value.get(key), list):
+                value = value[key]
+                break
     if not isinstance(value, list):
         return []
     tool_ids: list[str] = []
@@ -5129,38 +5248,56 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.handle_part(props.get("part"))
     elif event_type == "message.part.delta":
         state.append_part_delta(props)
-    elif event_type == "session.next.text.delta":
+    elif event_type in {"session.next.text.started", "session.text.started"}:
+        state.note_progress()
+    elif event_type in {"session.next.text.delta", "session.text.delta"}:
         state.append_next_delta("text", props.get("delta") or "")
-    elif event_type == "session.next.text.ended":
+    elif event_type in {"session.next.text.ended", "session.text.ended"}:
         state.seen_next_text_event = True
         state.flush()
         state.reconcile_text("text", props.get("text") or "")
         state.flush()
-    elif event_type == "session.next.reasoning.delta":
+    elif event_type in {"session.next.reasoning.started", "session.reasoning.started"}:
+        state.note_progress()
+    elif event_type in {"session.next.reasoning.delta", "session.reasoning.delta"}:
         state.append_next_delta("reasoning", props.get("delta") or "")
-    elif event_type == "session.next.reasoning.ended":
+    elif event_type in {"session.next.reasoning.ended", "session.reasoning.ended"}:
         state.seen_next_reasoning_event = True
         state.flush()
         state.reconcile_text("reasoning", props.get("text") or "")
         state.flush()
-    elif event_type == "session.next.tool.called":
-        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
+    elif event_type in {
+        "session.next.tool.input.started",
+        "session.next.tool.input.delta",
+        "session.tool.input.started",
+        "session.tool.input.delta",
+    }:
+        state.note_progress()
+        call_id = str(props.get("callID") or props.get("id") or "")
+        message_id = str(props.get("messageID") or "v2")
+        if call_id:
+            state._track_tool_input(message_id, call_id, "pending")
+    elif event_type in {"session.next.tool.called", "session.tool.called", "session.tool.started"}:
+        call_id = str(props.get("callID") or props.get("id") or "")
+        state.finish_tool_inputs(call_id=call_id)
         state.emit_tool_call(
-            call_id=props.get("callID"),
-            tool_name=props.get("tool"),
-            input_value=props.get("input") or {},
+            call_id=call_id or props.get("callID"),
+            tool_name=props.get("tool") or props.get("name"),
+            input_value=props.get("input") or props.get("args") or {},
         )
-    elif event_type == "session.next.tool.success":
-        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
+    elif event_type in {"session.next.tool.success", "session.tool.success", "session.tool.completed"}:
+        call_id = str(props.get("callID") or props.get("id") or "")
+        state.finish_tool_inputs(call_id=call_id)
         state.emit_tool_result(
-            call_id=props.get("callID"),
+            call_id=call_id or props.get("callID"),
             status="success",
-            summary=_tool_content_summary(props.get("content")),
+            summary=_tool_content_summary(props.get("content") or props.get("output")),
         )
-    elif event_type == "session.next.tool.failed":
-        state.finish_tool_inputs(call_id=str(props.get("callID") or ""))
+    elif event_type in {"session.next.tool.failed", "session.tool.failed", "session.tool.error"}:
+        call_id = str(props.get("callID") or props.get("id") or "")
+        state.finish_tool_inputs(call_id=call_id)
         state.emit_tool_result(
-            call_id=props.get("callID"),
+            call_id=call_id or props.get("callID"),
             status="failed",
             summary=f"error={_error_summary(props.get('error') or '')}",
         )
@@ -5172,7 +5309,7 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.emit_session_error(props.get("error"))
     elif event_type == "session.deleted":
         state.close_progress()
-    elif event_type == "session.next.retried":
+    elif event_type in {"session.next.retried", "session.retried"}:
         state.emit_session_status({
             "type": "retry",
             "attempt": props.get("attempt"),
@@ -5268,7 +5405,9 @@ async def _recover_prompt_response(
     headers: dict[str, str],
     baseline_message_id: str,
     cancel_event: Any,
+    opencode_version: str = OPENCODE_V1,
 ) -> tuple[dict[str, Any] | None, str]:
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
     poll_params = dict(params)
     poll_params["limit"] = "2"
     deadline = (
@@ -5281,12 +5420,17 @@ async def _recover_prompt_response(
             raise asyncio.CancelledError()
         try:
             history_response = await client.get(
-                f"/session/{session_id}/message",
+                api_path(opencode_version, f"/session/{session_id}/message"),
                 params=poll_params,
                 headers=headers,
             )
             history_response.raise_for_status()
-            messages = history_response.json()
+            raw_messages = history_response.json()
+            messages = (
+                normalize_message_list(raw_messages, fallback_session_id=session_id)
+                if is_v2
+                else raw_messages
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -5347,7 +5491,9 @@ async def _replay_current_prompt_file_writes(
     baseline_message_id: str,
     response_message_id: str,
     state: "_ServeEventState",
+    opencode_version: str = OPENCODE_V1,
 ) -> None:
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
     poll_params = dict(params)
     poll_params["limit"] = "1000"
     deadline = (
@@ -5357,13 +5503,19 @@ async def _replay_current_prompt_file_writes(
     while True:
         try:
             response = await client.get(
-                f"/session/{session_id}/message",
+                api_path(opencode_version, f"/session/{session_id}/message"),
                 params=poll_params,
                 headers=headers,
             )
             response.raise_for_status()
+            raw_messages = response.json()
+            normalized_raw = (
+                normalize_message_list(raw_messages, fallback_session_id=session_id)
+                if is_v2
+                else raw_messages
+            )
             messages = _assistant_messages_after_baseline(
-                response.json(),
+                normalized_raw,
                 session_id=session_id,
                 baseline_message_id=baseline_message_id,
             )
@@ -5571,6 +5723,29 @@ class OpenCodeServeManager:
         self._scan_mcp_states: dict[str, dict[str, Any]] = {}
         self._scan_mcp_conditions: dict[str, asyncio.Condition] = {}
         self._scan_mcp_names: dict[str, set[str]] = {}
+        self._serve_auth: httpx.BasicAuth | None = None
+        self._serve_password: str = ""
+        self._discovered_v2_paths: frozenset[str] = frozenset()
+
+    def _active_opencode_version(self, explicit: str | None = None) -> str:
+        if explicit is not None:
+            return normalize_opencode_version(explicit)
+        if self._key is not None:
+            return normalize_opencode_version(self._key.opencode_version)
+        if self._applied_provider_key is not None:
+            return normalize_opencode_version(self._applied_provider_key.opencode_version)
+        return OPENCODE_V1
+
+    def _is_v2(self, explicit: str | None = None) -> bool:
+        return self._active_opencode_version(explicit) == OPENCODE_V2
+
+    def _http_client(self, **kwargs: Any) -> httpx.AsyncClient:
+        if self._serve_auth is not None and "auth" not in kwargs:
+            kwargs["auth"] = self._serve_auth
+        return httpx.AsyncClient(**kwargs)
+
+    def _mcp_base_path(self) -> str:
+        return "/api/mcp" if self._is_v2() else "/mcp"
 
     @property
     def base_url(self) -> str:
@@ -5579,7 +5754,8 @@ class OpenCodeServeManager:
         return f"http://127.0.0.1:{self._port}"
 
     async def prepare_prompt(
-        self, *, tool: str, executable: str, directory: Path | None = None,
+        self, *, tool: str, executable: str, opencode_version: str = OPENCODE_V1,
+        directory: Path | None = None,
         config_workspace: Path | None = None, config_content: str | None = None,
         env_overrides: dict[str, str] | None = None, serve_port_auto: bool = False,
         **_unused: Any,
@@ -5592,10 +5768,12 @@ class OpenCodeServeManager:
         if self._shutting_down:
             raise OpenCodeServeStartupError("OpenCode Serve manager is shutting down")
         normalized_env = _normalized_env_overrides(env_overrides)
+        normalized_version = normalize_opencode_version(opencode_version)
         key = OpenCodeServeKey(
             tool=tool, executable=executable, env_hash=_env_hash(normalized_env),
             config_hash=_config_hash(config_content), config_content=config_content or "",
             env_overrides=normalized_env, serve_port_auto=bool(serve_port_auto),
+            opencode_version=normalized_version,
         )
         key = self._current_provider_key(key)
         if (
@@ -5733,6 +5911,7 @@ class OpenCodeServeManager:
         tool: str,
         executable: str,
         directory: Path,
+        opencode_version: str = OPENCODE_V1,
         config_workspace: Path | None = None,
         config_content: str | None = None,
         env_overrides: dict[str, str] | None = None,
@@ -5744,6 +5923,7 @@ class OpenCodeServeManager:
         those tasks can still need replacement Sessions and formatters.
         """
         normalized_env = _normalized_env_overrides(env_overrides)
+        normalized_version = normalize_opencode_version(opencode_version)
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
@@ -5752,6 +5932,7 @@ class OpenCodeServeManager:
             config_content=config_content or "",
             env_overrides=normalized_env,
             serve_port_auto=bool(serve_port_auto),
+            opencode_version=normalized_version,
         )
         async with self._lock:
             await self._wait_until_idle_locked()
@@ -5982,8 +6163,9 @@ class OpenCodeServeManager:
         name = str(applied.get("name") or "").strip()
         if not name:
             return
+        mcp_base = self._mcp_base_path()
         response = await client.post(
-            f"/mcp/{quote(name, safe='')}/disconnect",
+            f"{mcp_base}/{quote(name, safe='')}/disconnect",
             params=_serve_context_params(directory),
             headers=_serve_context_headers(directory),
         )
@@ -5994,7 +6176,7 @@ class OpenCodeServeManager:
             if isinstance(config, dict):
                 disabled = {**config, "enabled": False}
                 response = await client.post(
-                    "/mcp",
+                    mcp_base,
                     params=_serve_context_params(directory),
                     headers=_serve_context_headers(directory),
                     json={"name": name, "config": disabled},
@@ -6045,7 +6227,8 @@ class OpenCodeServeManager:
                 (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
             )
             try:
-                async with httpx.AsyncClient(
+                mcp_base = self._mcp_base_path()
+                async with self._http_client(
                     base_url=self.base_url,
                     timeout=request_timeout,
                     trust_env=False,
@@ -6060,7 +6243,7 @@ class OpenCodeServeManager:
                                 await self._disconnect_managed_mcp(client, directory, applied)
                             raise RuntimeError(spec.get("error") or "Invalid managed MCP config")
                         response = await client.post(
-                            "/mcp",
+                            mcp_base,
                             params=_serve_context_params(directory),
                             headers=_serve_context_headers(directory),
                             json={"name": str(spec.get("name") or ""), "config": config},
@@ -6143,8 +6326,9 @@ class OpenCodeServeManager:
     ) -> None:
         source_names = self._source_graph_mcp_names(directory)
         protected_names = self._enabled_managed_mcp_names()
+        mcp_base = self._mcp_base_path()
         response = await client.get(
-            "/mcp",
+            mcp_base,
             params=_serve_context_params(directory),
             headers=_serve_context_headers(directory),
         )
@@ -6164,7 +6348,7 @@ class OpenCodeServeManager:
             if state != "connected":
                 continue
             disconnected = await client.post(
-                f"/mcp/{quote(str(name), safe='')}/disconnect",
+                f"{mcp_base}/{quote(str(name), safe='')}/disconnect",
                 params=_serve_context_params(directory),
                 headers=_serve_context_headers(directory),
             )
@@ -6178,7 +6362,7 @@ class OpenCodeServeManager:
     ) -> tuple[str, str, bool]:
         """Return one directory-scoped MCP's live state and registration status."""
         response = await client.get(
-            "/mcp",
+            self._mcp_base_path(),
             params=_serve_context_params(directory),
             headers=_serve_context_headers(directory),
         )
@@ -6207,9 +6391,10 @@ class OpenCodeServeManager:
     ) -> tuple[str, str, bool]:
         name = str(spec.get("name") or "")
         config = spec.get("config")
+        mcp_base = self._mcp_base_path()
         if registered:
             response = await client.post(
-                f"/mcp/{quote(name, safe='')}/connect",
+                f"{mcp_base}/{quote(name, safe='')}/connect",
                 params=_serve_context_params(directory),
                 headers=_serve_context_headers(directory),
                 timeout=request_timeout,
@@ -6223,7 +6408,7 @@ class OpenCodeServeManager:
                 )
 
         response = await client.post(
-            "/mcp",
+            mcp_base,
             params=_serve_context_params(directory),
             headers=_serve_context_headers(directory),
             json={"name": name, "config": config},
@@ -6725,7 +6910,7 @@ class OpenCodeServeManager:
                 if isinstance(config, dict):
                     try:
                         response = await client.post(
-                            "/mcp",
+                            self._mcp_base_path(),
                             params=_serve_context_params(directory),
                             headers=_serve_context_headers(directory),
                             json={
@@ -6783,7 +6968,7 @@ class OpenCodeServeManager:
             ) and bool(existing.get("name"))
             try:
                 if should_disconnect and isinstance(spec, dict):
-                    async with httpx.AsyncClient(
+                    async with self._http_client(
                         base_url=self.base_url,
                         timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                         trust_env=False,
@@ -6878,7 +7063,7 @@ class OpenCodeServeManager:
         ) -> None:
             try:
                 response = await client.get(
-                    "/mcp",
+                    self._mcp_base_path(),
                     params=_serve_context_params(directory),
                     headers=_serve_context_headers(directory),
                 )
@@ -6917,7 +7102,7 @@ class OpenCodeServeManager:
         directories = list(self._managed_mcp_directories.items())
         if not directories:
             return self.managed_mcp_runtime_status()
-        async with httpx.AsyncClient(
+        async with self._http_client(
             base_url=self.base_url,
             timeout=2.0,
             trust_env=False,
@@ -6933,6 +7118,7 @@ class OpenCodeServeManager:
         *,
         tool: str,
         executable: str,
+        opencode_version: str = OPENCODE_V1,
         directory: Path,
         config_workspace: Path | None = None,
         config_content: str | None = None,
@@ -7040,12 +7226,15 @@ class OpenCodeServeManager:
             raise error from None
 
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
+        normalized_version = normalize_opencode_version(opencode_version)
+        is_v2 = normalized_version == OPENCODE_V2
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
             serve_port_auto=bool(serve_port_auto),
+            opencode_version=normalized_version,
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -7156,7 +7345,7 @@ class OpenCodeServeManager:
                     f"url={self.base_url} pid={pid}"
                 )
             await deadline.wait(self.ensure_managed_mcp(directory), phase="managed_mcp")
-            client = httpx.AsyncClient(
+            client = self._http_client(
                 base_url=self.base_url,
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
@@ -7187,6 +7376,7 @@ class OpenCodeServeManager:
                     headers,
                     model,
                     deadline=usage_deadline,
+                    opencode_version=normalized_version,
                 )
                 if not token_baseline_complete:
                     # An incomplete continuation baseline cannot distinguish
@@ -7283,20 +7473,23 @@ class OpenCodeServeManager:
                             "KNOWLEDGE_BASE_MCP unavailable "
                             f"error={_one_line_preview(knowledge_mcp_lease.error)}",
                         )
+            session_base = api_path(normalized_version, "/session")
             if not active_session_id:
                 create_payload: dict[str, Any] = {
                     "title": str(session_title or "").strip() or "DeepHole 2.0 task",
                 }
+                if is_v2:
+                    create_payload["directory"] = str(directory)
                 if permissions is not None:
                     create_payload["permission"] = permissions
                 async def create_session() -> None:
                     nonlocal active_session_id
                     created = await client.post(
-                        "/session", params=params, headers=headers, json=create_payload,
+                        session_base, params=params, headers=headers, json=create_payload,
                     )
                     if not callbacks_open:
                         return
-                    self._raise_for_session_control_status(created, "POST /session")
+                    self._raise_for_session_control_status(created, f"POST {session_base}")
                     active_session_id = _session_id(created.json())
                     publish_session_id()
 
@@ -7328,6 +7521,7 @@ class OpenCodeServeManager:
                         params,
                         headers,
                         model,
+                        opencode_version=normalized_version,
                     ), phase="token_baseline")
                 )
             if on_line:
@@ -7351,12 +7545,17 @@ class OpenCodeServeManager:
                 baseline_params["limit"] = "2"
                 try:
                     baseline_response = await deadline.wait(client.get(
-                        f"/session/{active_session_id}/message",
+                        f"{session_base}/{active_session_id}/message",
                         params=baseline_params,
                         headers=headers,
                     ), phase="response_cleanup")
                     baseline_response.raise_for_status()
-                    baseline_messages = baseline_response.json()
+                    raw_baseline_messages = baseline_response.json()
+                    baseline_messages = (
+                        normalize_message_list(raw_baseline_messages, fallback_session_id=active_session_id)
+                        if is_v2
+                        else raw_baseline_messages
+                    )
                     if not isinstance(baseline_messages, list):
                         raise RuntimeError(
                             "OpenCode session history did not return a message list"
@@ -7574,9 +7773,9 @@ class OpenCodeServeManager:
             session_permissions = _session_tool_permissions(permissions, tool_ids, mcp_overrides)
             if session_mode == "continued" and permissions is None and session_permissions is not None:
                 existing = await deadline.wait(client.get(
-                    f"/session/{active_session_id}", params=params, headers=headers,
+                    f"{session_base}/{active_session_id}", params=params, headers=headers,
                 ), phase="session_permissions")
-                self._raise_for_session_control_status(existing, "GET /session/{session_id}")
+                self._raise_for_session_control_status(existing, f"GET {session_base}/{{session_id}}")
                 existing_rules = existing.json().get("permission", [])
                 if not isinstance(existing_rules, list) or any(
                     not isinstance(rule, dict) for rule in existing_rules
@@ -7587,12 +7786,15 @@ class OpenCodeServeManager:
                 session_mode == "continued" or session_permissions != permissions
             ):
                 updated = await deadline.wait(client.patch(
-                    f"/session/{active_session_id}",
+                    f"{session_base}/{active_session_id}",
                     params=params,
                     headers=headers,
                     json={"permission": session_permissions},
                 ), phase="session_permissions")
-                self._raise_for_session_control_status(updated, "PATCH /session/{session_id}")
+                if not (is_v2 and updated.status_code in {404, 405}):
+                    self._raise_for_session_control_status(
+                        updated, f"PATCH {session_base}/{{session_id}}"
+                    )
             hook_tools = {
                 tool_id: not disable_all_tools or tool_id == "StructuredOutput"
                 for tool_id in sorted(_MANAGED_NATIVE_TOOL_IDS)
@@ -7606,6 +7808,7 @@ class OpenCodeServeManager:
                 success_markers=required_bash_success_markers,
                 path_prepend=required_bash_path_prepend,
                 tool_rules=hook_tools,
+                permission_rules=(session_permissions or permissions) if is_v2 else None,
                 task_type=normalized_log_stage,
             )
             if model:
@@ -7620,15 +7823,35 @@ class OpenCodeServeManager:
                     if root_id == active_session_id:
                         child_state.start_progress()
             activity.start()
-            request = asyncio.create_task(
-                client.post(
-                    f"/session/{active_session_id}/message",
-                    params=params,
-                    headers=headers,
-                    json=payload,
-                    timeout=timeout + 30,
+            if is_v2:
+                request = asyncio.create_task(
+                    submit_and_resolve_v2_prompt(
+                        client,
+                        session_id=active_session_id,
+                        prompt=prompt,
+                        payload=payload,
+                        params=params,
+                        headers=headers,
+                        discovered_paths=self._discovered_v2_paths,
+                        baseline_message_id=response_baseline_message_id,
+                        event_state=event_state,
+                        is_terminal_fn=_assistant_message_is_terminal,
+                        response_id_fn=_response_message_id,
+                        assistant_error_fn=_assistant_message_error,
+                        cancel_event=cancel_event,
+                        request_timeout=timeout + 30,
+                    )
                 )
-            )
+            else:
+                request = asyncio.create_task(
+                    client.post(
+                        f"/session/{active_session_id}/message",
+                        params=params,
+                        headers=headers,
+                        json=payload,
+                        timeout=timeout + 30,
+                    )
+                )
             if event_state is not None:
                 snapshot_poll_task = asyncio.create_task(
                     self._poll_session_snapshots(
@@ -7727,6 +7950,7 @@ class OpenCodeServeManager:
                             headers=headers,
                             baseline_message_id=response_baseline_message_id,
                             cancel_event=cancel_event,
+                            opencode_version=normalized_version,
                         ), phase="response_recovery")
                     )
                 if recovered_response is None:
@@ -7772,6 +7996,7 @@ class OpenCodeServeManager:
                     baseline_message_id=response_baseline_message_id,
                     response_message_id=_response_message_id(response_data),
                     state=event_state,
+                    opencode_version=normalized_version,
                 ), phase="file_write_replay")
             assistant_error = _assistant_message_error(response_data)
             model_error = _provider_model_not_found_error(
@@ -8005,6 +8230,7 @@ class OpenCodeServeManager:
         *,
         tool: str,
         executable: str,
+        opencode_version: str = OPENCODE_V1,
         directory: Path,
         method: str,
         path: str,
@@ -8013,14 +8239,18 @@ class OpenCodeServeManager:
         env_overrides: dict[str, str] | None = None,
         serve_port_auto: bool = False,
         json_body: Any = None,
+        extra_params: dict[str, str] | None = None,
+        fallback_paths: tuple[str, ...] = (),
     ) -> Any:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
+        normalized_version = normalize_opencode_version(opencode_version)
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
             serve_port_auto=bool(serve_port_auto),
+            opencode_version=normalized_version,
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -8031,18 +8261,29 @@ class OpenCodeServeManager:
         await self._acquire_session(key, startup_cwd=config_workspace)
         try:
             await self.ensure_managed_mcp(directory)
-            async with httpx.AsyncClient(
+            is_v2 = self._is_v2(key.opencode_version)
+            resolved_path = api_path(key.opencode_version, path) if is_v2 else path
+            candidate_paths = (resolved_path, *fallback_paths) if is_v2 else (path,)
+            request_params = _serve_context_params(directory)
+            if extra_params:
+                request_params.update(extra_params)
+            async with self._http_client(
                 base_url=self.base_url,
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
             ) as client:
-                response = await client.request(
-                    method,
-                    path,
-                    params=_serve_context_params(directory),
-                    headers=_serve_context_headers(directory),
-                    json=json_body,
-                )
+                response: httpx.Response | None = None
+                for idx, candidate_path in enumerate(candidate_paths):
+                    response = await client.request(
+                        method,
+                        candidate_path,
+                        params=request_params,
+                        headers=_serve_context_headers(directory),
+                        json=json_body,
+                    )
+                    if response.status_code not in {404, 405} or idx == len(candidate_paths) - 1:
+                        break
+                assert response is not None
                 response.raise_for_status()
                 if not response.content:
                     return None
@@ -8063,15 +8304,35 @@ class OpenCodeServeManager:
             path=f"/session/{session_id}/message",
             **runtime,
         )
+        if self._is_v2(runtime.get("opencode_version")):
+            normalized = normalize_message_list(value, fallback_session_id=session_id)
+            return normalized if normalized is not None else []
         return value if isinstance(value, list) else []
 
     async def get_session_children(self, session_id: str, **runtime: Any) -> list[dict[str, Any]]:
-        value = await self._session_api_request(
-            method="GET",
-            path=f"/session/{session_id}/children",
-            **runtime,
-        )
-        return value if isinstance(value, list) else []
+        try:
+            value = await self._session_api_request(
+                method="GET",
+                path=f"/session/{session_id}/children",
+                **runtime,
+            )
+            return value if isinstance(value, list) else []
+        except httpx.HTTPStatusError as exc:
+            if not self._is_v2(runtime.get("opencode_version")) or exc.response.status_code not in {404, 405}:
+                raise
+            listed = await self._session_api_request(
+                method="GET",
+                path="/session",
+                extra_params={"parentID": session_id},
+                **runtime,
+            )
+            if not isinstance(listed, list):
+                return []
+            return [
+                item for item in listed
+                if isinstance(item, dict)
+                and str(item.get("parentID") or item.get("parentId") or "") == session_id
+            ]
 
     async def delete_session(self, session_id: str, **runtime: Any) -> Any:
         return await self._session_api_request(
@@ -8081,9 +8342,11 @@ class OpenCodeServeManager:
         )
 
     async def abort_session(self, session_id: str, **runtime: Any) -> Any:
+        is_v2 = self._is_v2(runtime.get("opencode_version"))
         return await self._session_api_request(
             method="POST",
-            path=f"/session/{session_id}/abort",
+            path=f"/api/session/{session_id}/interrupt" if is_v2 else f"/session/{session_id}/abort",
+            fallback_paths=(f"/api/session/{session_id}/abort", f"/session/{session_id}/abort") if is_v2 else (),
             **runtime,
         )
 
@@ -8092,12 +8355,15 @@ class OpenCodeServeManager:
         return os.path.normcase(os.path.normpath(str(directory)))
 
     def _ensure_event_channel_locked(self, directory: Path) -> _EventChannelRuntime:
+        is_v2 = self._is_v2()
+        global_path = "/api/global/event" if is_v2 else "/global/event"
+        legacy_path = "/api/event" if is_v2 else "/event"
         if not self._global_event_unsupported:
             runtime = self._global_event_channel
             if runtime is None or runtime.task is None or runtime.task.done():
                 runtime = _EventChannelRuntime(
                     key="global",
-                    path="/global/event",
+                    path=global_path,
                     params={},
                     headers={},
                 )
@@ -8112,7 +8378,7 @@ class OpenCodeServeManager:
         if runtime is None or runtime.task is None or runtime.task.done():
             runtime = _EventChannelRuntime(
                 key=f"legacy:{directory_key}",
-                path="/event",
+                path=legacy_path,
                 params=_serve_context_params(directory),
                 headers=_serve_context_headers(directory),
             )
@@ -8148,7 +8414,7 @@ class OpenCodeServeManager:
                 return
             if runtime.healthy:
                 return
-            if runtime.path != "/global/event" or not self._global_event_unsupported:
+            if runtime.path not in {"/global/event", "/api/global/event"} or not self._global_event_unsupported:
                 return
 
     async def _unregister_event_state(self, session_id: str) -> None:
@@ -8183,11 +8449,11 @@ class OpenCodeServeManager:
             return False
         if event_type in {"server.connected", "server.heartbeat"}:
             return True
-        if event_type in {"session.created", "session.updated"}:
+        if event_type in {"session.created", "session.updated", "session.forked"}:
             info = props.get("info")
             if isinstance(info, dict):
                 child_id = str(info.get("id") or "")
-                parent_id = str(info.get("parentID") or "")
+                parent_id = str(info.get("parentID") or info.get("parentId") or "")
                 root_id = self._event_child_states.get(parent_id, (parent_id, None))[0]
                 root = self._event_states.get(root_id)
                 if (
@@ -8214,12 +8480,49 @@ class OpenCodeServeManager:
             return True
         if directory_key and self._event_directories.get(root_id) != directory_key:
             return True
+        if self._is_v2() and event_type in {"permission.asked", "question.asked", "form.created"}:
+            target_dir_key = self._event_directories.get(root_id, "")
+            target_dir = Path(target_dir_key) if target_dir_key else None
+            reject_task = asyncio.create_task(self._auto_reject_interactive_v2(
+                event_type=event_type,
+                props=props,
+                session_id=session_id,
+                directory=target_dir,
+            ))
+            retire_task(reject_task)
         _handle_serve_event(payload, state)
         if event_type == "session.deleted" and session_id == root_id:
             for child_root_id, child_state in self._event_child_states.values():
                 if child_root_id == root_id:
                     child_state.close_progress()
         return True
+
+    async def _auto_reject_interactive_v2(
+        self,
+        *,
+        event_type: str,
+        props: dict[str, Any],
+        session_id: str,
+        directory: Path | None,
+    ) -> None:
+        if self._port is None:
+            return
+        try:
+            async with self._http_client(
+                base_url=self.base_url,
+                timeout=2.0,
+                trust_env=False,
+            ) as client:
+                await auto_reject_v2_interactive_event(
+                    client,
+                    event_type=event_type,
+                    props=props,
+                    session_id=session_id,
+                    params=_serve_context_params(directory),
+                    headers=_serve_context_headers(directory),
+                )
+        except Exception:
+            return
 
     def _emit_event_diagnostic(self, line: str) -> None:
         state = next(iter(self._event_states.values()), None)
@@ -8321,7 +8624,7 @@ class OpenCodeServeManager:
             "Cache-Control": "no-cache",
         })
         try:
-            async with httpx.AsyncClient(
+            async with self._http_client(
                 base_url=self.base_url,
                 timeout=None,
                 trust_env=False,
@@ -8436,15 +8739,25 @@ class OpenCodeServeManager:
             message_id: str = "", pending: set[tuple[str, str]] | None = None,
         ) -> None:
             try:
+                is_v2 = self._is_v2()
                 suffix = f"/{quote(message_id, safe='')}" if message_id else ""
-                response = await client.get(
+                poll_path = api_path(
+                    self._active_opencode_version(),
                     f"/session/{current_id}/message{suffix}",
+                )
+                response = await client.get(
+                    poll_path,
                     params=params if message_id else poll_params,
                     headers=headers,
                 )
                 response.raise_for_status()
-                data = response.json()
+                raw_data = response.json()
                 if message_id:
+                    data = (
+                        normalize_message_envelope(raw_data, fallback_session_id=current_id)
+                        if is_v2
+                        else raw_data
+                    )
                     info = data.get("info") if isinstance(data, dict) else None
                     if (
                         not isinstance(info, dict) or info.get("id") != message_id
@@ -8453,7 +8766,12 @@ class OpenCodeServeManager:
                         return
                     message = data
                 else:
-                    message = _latest_assistant_message(data, current_id)
+                    list_data = (
+                        normalize_message_list(raw_data, fallback_session_id=current_id)
+                        if is_v2
+                        else raw_data
+                    )
+                    message = _latest_assistant_message(list_data, current_id)
                 if message is not None and not current_state.progress_closed:
                     current_state.ingest_message_snapshot(message, reconcile_pending=pending)
             except asyncio.CancelledError:
@@ -8507,8 +8825,18 @@ class OpenCodeServeManager:
         on_line=None,
         tool: str = "opencode",
     ) -> list[str]:
+        candidate_paths = (
+            ("/api/tool/ids", "/api/experimental/tool/ids", "/experimental/tool/ids")
+            if self._is_v2()
+            else ("/experimental/tool/ids",)
+        )
+        response: httpx.Response | None = None
         try:
-            response = await client.get("/experimental/tool/ids", params=params, headers=headers)
+            for idx, path in enumerate(candidate_paths):
+                response = await client.get(path, params=params, headers=headers)
+                if response.status_code not in {404, 405} or idx == len(candidate_paths) - 1:
+                    break
+            assert response is not None
             response.raise_for_status()
         except Exception as exc:
             if on_line:
@@ -8531,6 +8859,7 @@ class OpenCodeServeManager:
         *,
         tool: str,
         executable: str,
+        opencode_version: str = OPENCODE_V1,
         directory: Path | None = None,
         config_workspace: Path | None = None,
         config_content: str | None = None,
@@ -8539,12 +8868,14 @@ class OpenCodeServeManager:
         refresh: bool = False,
     ) -> OpenCodeModelListResult:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
+        normalized_version = normalize_opencode_version(opencode_version)
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
             serve_port_auto=bool(serve_port_auto),
+            opencode_version=normalized_version,
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -8661,19 +8992,31 @@ class OpenCodeServeManager:
         config_elapsed = 0.0
         used_config_fallback = False
 
+        is_v2 = self._is_v2()
+        provider_paths = ("/api/provider", "/provider") if is_v2 else ("/provider",)
+        config_paths = (
+            ("/api/config/providers", "/api/config", "/config/providers")
+            if is_v2
+            else ("/config/providers",)
+        )
         logger.info(
             "OpenCode serve provider lookup start base_url=%s directory=%s",
             self.base_url,
             directory or "(none)",
         )
-        async with httpx.AsyncClient(
+        async with self._http_client(
             base_url=self.base_url,
             timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
             trust_env=False,
         ) as client:
             started_at = time.monotonic()
             try:
-                response = await client.get("/provider", params=params, headers=headers)
+                response: httpx.Response | None = None
+                for idx, provider_path in enumerate(provider_paths):
+                    response = await client.get(provider_path, params=params, headers=headers)
+                    if response.status_code not in {404, 405} or idx == len(provider_paths) - 1:
+                        break
+                assert response is not None
                 response.raise_for_status()
                 provider_data = response.json()
             except Exception as exc:
@@ -8681,11 +9024,14 @@ class OpenCodeServeManager:
             finally:
                 provider_elapsed = time.monotonic() - started_at
 
-            providers, provider_payload_valid = self._provider_entries(
-                provider_data,
-                "all",
-                "providers",
-            )
+            if is_v2:
+                providers, provider_payload_valid = extract_provider_list_v2(provider_data)
+            else:
+                providers, provider_payload_valid = self._provider_entries(
+                    provider_data,
+                    "all",
+                    "providers",
+                )
             connected = self._connected_provider_ids(provider_data)
             returned_provider_ids = {
                 self._provider_id(provider)
@@ -8705,18 +9051,33 @@ class OpenCodeServeManager:
                 used_config_fallback = True
                 started_at = time.monotonic()
                 try:
-                    config_response = await client.get(
-                        "/config/providers",
-                        params=params,
-                        headers=headers,
-                        timeout=_SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
-                    )
+                    config_response: httpx.Response | None = None
+                    for idx, config_path in enumerate(config_paths):
+                        config_response = await client.get(
+                            config_path,
+                            params=params,
+                            headers=headers,
+                            timeout=_SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
+                        )
+                        if config_response.status_code not in {404, 405} or idx == len(config_paths) - 1:
+                            break
+                    assert config_response is not None
                     config_response.raise_for_status()
                     config_data = config_response.json()
-                    config_providers, config_payload_valid = self._provider_entries(
-                        config_data,
-                        "providers",
-                    )
+                    if is_v2:
+                        if isinstance(config_data, dict) and isinstance(config_data.get("provider"), (dict, list)):
+                            config_providers, config_payload_valid = extract_provider_list_v2(
+                                {"providers": config_data["provider"]}
+                            )
+                        else:
+                            config_providers, config_payload_valid = extract_provider_list_v2(
+                                config_data
+                            )
+                    else:
+                        config_providers, config_payload_valid = self._provider_entries(
+                            config_data,
+                            "providers",
+                        )
                 except Exception as exc:
                     config_error = exc
                 finally:
@@ -8879,6 +9240,9 @@ class OpenCodeServeManager:
                     self._proc = None
                     self._key = None
                     self._port = None
+                    self._serve_auth = None
+                    self._serve_password = ""
+                    self._discovered_v2_paths = frozenset()
                     self._listener_pids.clear()
                     self._startup_cwd = None
 
@@ -8981,31 +9345,39 @@ class OpenCodeServeManager:
             request.result()
         return True
 
-    @staticmethod
-    async def _serve_health_ready(port: int) -> bool:
+    async def _serve_health_ready(self, port: int) -> bool:
         try:
-            async with httpx.AsyncClient(
+            async with self._http_client(
                 base_url=f"http://127.0.0.1:{int(port)}",
                 timeout=2.0,
                 trust_env=False,
             ) as client:
-                response = await client.get("/global/health")
-                return response.status_code < 500
+                for path in health_probe_paths(self._active_opencode_version()):
+                    response = await client.get(path)
+                    if response.status_code not in {404, 405}:
+                        return response.status_code < 500
+                return False
         except Exception:
             return False
 
     async def _probe_model_listing_health(self) -> _ServeHealthResult:
         """Require the documented healthy response before provider enumeration."""
-        url = f"{self.base_url}/global/health"
+        probe_paths = health_probe_paths(self._active_opencode_version())
+        url = f"{self.base_url}{probe_paths[0]}"
         started_at = time.monotonic()
         logger.info("OpenCode serve model preflight start endpoint=%s", url)
         try:
-            async with httpx.AsyncClient(
+            async with self._http_client(
                 base_url=self.base_url,
                 timeout=2.0,
                 trust_env=False,
             ) as client:
-                response = await client.get("/global/health")
+                response: httpx.Response | None = None
+                for idx, path in enumerate(probe_paths):
+                    response = await client.get(path)
+                    if response.status_code not in {404, 405} or idx == len(probe_paths) - 1:
+                        break
+                assert response is not None
         except Exception as exc:
             result = _ServeHealthResult(
                 healthy=False,
@@ -9013,39 +9385,13 @@ class OpenCodeServeManager:
             )
         else:
             status_code = int(getattr(response, "status_code", 0) or 0)
-            try:
-                payload = response.json()
-            except Exception as exc:
-                result = _ServeHealthResult(
-                    healthy=False,
-                    status_code=status_code,
-                    detail=f"响应不是有效 JSON：{type(exc).__name__}: {_one_line_preview(exc)}",
-                )
-            else:
-                healthy = (
-                    status_code == 200
-                    and isinstance(payload, dict)
-                    and payload.get("healthy") is True
-                )
-                version = (
-                    str(payload.get("version") or "").strip()
-                    if isinstance(payload, dict)
-                    else ""
-                )
-                if status_code != 200:
-                    detail = f"HTTP {status_code}"
-                elif not isinstance(payload, dict):
-                    detail = f"响应类型为 {type(payload).__name__}，预期为对象"
-                elif payload.get("healthy") is not True:
-                    detail = f"healthy={payload.get('healthy')!r}，预期为 true"
-                else:
-                    detail = ""
-                result = _ServeHealthResult(
-                    healthy=healthy,
-                    status_code=status_code,
-                    version=version,
-                    detail=detail,
-                )
+            healthy, version, detail = parse_health_response(response)
+            result = _ServeHealthResult(
+                healthy=healthy,
+                status_code=status_code,
+                version=version,
+                detail=detail,
+            )
 
         logger.info(
             "OpenCode serve model preflight result healthy=%s status=%s version=%s "
@@ -9173,6 +9519,8 @@ class OpenCodeServeManager:
                 port,
                 launcher_pid,
             )
+        if key.opencode_version == OPENCODE_V2 and self._serve_auth is None:
+            return False
         if not candidates or not await self._serve_health_ready(port):
             return False
 
@@ -9223,6 +9571,9 @@ class OpenCodeServeManager:
                 self._proc = None
                 self._key = None
                 self._port = None
+                self._serve_auth = None
+                self._serve_password = ""
+                self._discovered_v2_paths = frozenset()
                 self._listener_pids.clear()
                 self._startup_cwd = None
         if (
@@ -9277,6 +9628,7 @@ class OpenCodeServeManager:
             current is not None
             and current.tool == requested.tool
             and current.executable == requested.executable
+            and current.opencode_version == requested.opencode_version
             and current.env_hash == requested.env_hash
             and current.serve_port_auto == requested.serve_port_auto
         )
@@ -9341,7 +9693,14 @@ class OpenCodeServeManager:
             startup_cwd or "(bootstrap)",
         )
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
-        config_path = _write_serve_config_file(prepared_cwd, key.config_content)
+        if normalize_opencode_version(key.opencode_version) == OPENCODE_V2:
+            config_path = _write_serve_config_file(
+                prepared_cwd,
+                key.config_content,
+                opencode_version=key.opencode_version,
+            )
+        else:
+            config_path = _write_serve_config_file(prepared_cwd, key.config_content)
         logger.info(
             "OpenCode serve startup preparation step=publish_config status=complete "
             "config_file_path=%s elapsed_ms=%s",
@@ -9367,6 +9726,12 @@ class OpenCodeServeManager:
             "complete" if executable_version else "unavailable",
             executable_version or "(unknown)",
             round((time.monotonic() - version_started_at) * 1000),
+        )
+        verify_opencode_executable_version(
+            configured_version=key.opencode_version,
+            executable=executable,
+            version_output=version_output,
+            error_cls=OpenCodeServeStartupError,
         )
         attempted_ports: list[int] = []
         generic_retry_used = False
@@ -9536,8 +9901,28 @@ class OpenCodeServeManager:
         env["XDG_CONFIG_HOME"] = str(isolated_config_home)
         env["OPENCODE_CONFIG_DIR"] = str(prepared_cwd)
         env[_SERVE_PORT_ENV] = str(port)
-        env.pop("OPENCODE_SERVER_PASSWORD", None)
-        env.pop("OPENCODE_SERVER_USERNAME", None)
+        if normalize_opencode_version(key.opencode_version) == OPENCODE_V2:
+            isolated_runtime_root = prepared_cwd / ".opendeephole-xdg-runtime"
+            for subdir, env_name in (
+                ("data", "XDG_DATA_HOME"),
+                ("state", "XDG_STATE_HOME"),
+                ("cache", "XDG_CACHE_HOME"),
+            ):
+                target_dir = isolated_runtime_root / subdir
+                target_dir.mkdir(parents=True, exist_ok=True)
+                env[env_name] = str(target_dir)
+            serve_password = secrets.token_urlsafe(32)
+            env["OPENCODE_SERVER_USERNAME"] = "opencode"
+            env["OPENCODE_SERVER_PASSWORD"] = serve_password
+            self._serve_password = serve_password
+            self._serve_auth = httpx.BasicAuth("opencode", serve_password)
+            self._discovered_v2_paths = frozenset()
+        else:
+            env.pop("OPENCODE_SERVER_PASSWORD", None)
+            env.pop("OPENCODE_SERVER_USERNAME", None)
+            self._serve_password = ""
+            self._serve_auth = None
+            self._discovered_v2_paths = frozenset()
         cmd = _executable_argv(
             executable,
             "serve",
@@ -9757,35 +10142,36 @@ class OpenCodeServeManager:
                         startup_log_path,
                         config_content=config_content,
                     ))
+                probe_paths = health_probe_paths(self._active_opencode_version())
+                primary_health_path = probe_paths[0]
                 try:
-                    async with httpx.AsyncClient(
+                    async with self._http_client(
                         base_url=self.base_url,
                         timeout=2.0,
                         trust_env=False,
                     ) as client:
-                        response = await client.get("/global/health")
-                        last_health_detail = f"HTTP {response.status_code}"
-                        health_payload: object = None
-                        if response.status_code == 200:
-                            try:
-                                health_payload = response.json()
-                            except (TypeError, ValueError) as exc:
-                                last_health_detail = (
-                                    f"HTTP 200, invalid JSON: {_one_line_preview(exc)}"
+                        response: httpx.Response | None = None
+                        matched_health_path = primary_health_path
+                        for idx, health_path in enumerate(probe_paths):
+                            matched_health_path = health_path
+                            response = await client.get(health_path)
+                            if response.status_code not in {404, 405} or idx == len(probe_paths) - 1:
+                                break
+                        assert response is not None
+                        healthy_ok, health_version, parsed_detail = parse_health_response(response)
+                        last_health_detail = (
+                            f"HTTP {response.status_code}"
+                            if not parsed_detail
+                            else parsed_detail
+                        )
+                        if healthy_ok:
+                            if self._key is not None and health_version:
+                                verify_opencode_executable_version(
+                                    configured_version=self._key.opencode_version,
+                                    executable=self._key.executable,
+                                    version_output=health_version,
+                                    error_cls=OpenCodeServeStartupError,
                                 )
-                            else:
-                                if not (
-                                    isinstance(health_payload, dict)
-                                    and health_payload.get("healthy") is True
-                                ):
-                                    last_health_detail = (
-                                        "HTTP 200, healthy flag is not true"
-                                    )
-                        if (
-                            response.status_code == 200
-                            and isinstance(health_payload, dict)
-                            and health_payload.get("healthy") is True
-                        ):
                             proc = self._proc
                             launcher_pid = int(getattr(proc, "pid", 0) or 0)
                             ownership_mismatch = False
@@ -9830,14 +10216,19 @@ class OpenCodeServeManager:
                                         startup_log_path,
                                         config_content=config_content,
                                     ))
+                                if self._is_v2():
+                                    self._discovered_v2_paths = await discover_v2_openapi_paths(client)
                                 logger.info(
-                                    "OpenCode serve startup health ready endpoint=%s/global/health "
+                                    "OpenCode serve startup health ready endpoint=%s%s "
                                     "status=%s elapsed_ms=%s",
                                     self.base_url,
+                                    matched_health_path,
                                     response.status_code,
                                     round((time.monotonic() - started_at) * 1000),
                                 )
                                 return
+                except OpenCodeServeStartupError:
+                    raise
                 except Exception as exc:
                     last_health_detail = f"{type(exc).__name__}: {_one_line_preview(exc)}"
                     if self._proc is not None and self._proc.poll() is not None:
@@ -9858,9 +10249,10 @@ class OpenCodeServeManager:
                 now = time.monotonic()
                 if now >= next_progress_at:
                     logger.info(
-                        "OpenCode serve startup waiting endpoint=%s/global/health "
+                        "OpenCode serve startup waiting endpoint=%s%s "
                         "elapsed_s=%.1f pid=%s last_health=%s startup_log_path=%s",
                         self.base_url,
+                        primary_health_path,
                         now - started_at,
                         int(getattr(self._proc, "pid", 0) or 0),
                         last_health_detail,
@@ -9885,13 +10277,27 @@ class OpenCodeServeManager:
         params: dict[str, str],
         headers: dict[str, str],
     ) -> bool:
-        try:
-            response = await client.post(
+        abort_paths = (
+            (
+                f"/api/session/{session_id}/interrupt",
+                f"/api/session/{session_id}/abort",
                 f"/session/{session_id}/abort",
-                params=params,
-                headers=headers,
-                timeout=5.0,
             )
+            if self._is_v2()
+            else (f"/session/{session_id}/abort",)
+        )
+        try:
+            response: httpx.Response | None = None
+            for idx, abort_path in enumerate(abort_paths):
+                response = await client.post(
+                    abort_path,
+                    params=params,
+                    headers=headers,
+                    timeout=5.0,
+                )
+                if response.status_code not in {404, 405} or idx == len(abort_paths) - 1:
+                    break
+            assert response is not None
             response.raise_for_status()
             return True
         except Exception as exc:
@@ -9970,6 +10376,9 @@ class OpenCodeServeManager:
         startup_log_path = self._startup_log_path
         self._startup_log_path = None
         if proc is None:
+            self._serve_auth = None
+            self._serve_password = ""
+            self._discovered_v2_paths = frozenset()
             _remove_file(startup_log_path)
             return
         pid = int(getattr(proc, "pid", 0) or 0)
@@ -10026,6 +10435,9 @@ class OpenCodeServeManager:
         self._proc = None
         self._port = None
         self._key = None
+        self._serve_auth = None
+        self._serve_password = ""
+        self._discovered_v2_paths = frozenset()
         self._listener_pids.clear()
         self._startup_cwd = None
 

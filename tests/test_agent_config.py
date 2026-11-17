@@ -539,7 +539,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
             "tool": "opencode",
+            "opencode_version": "1",
             "executable": "nga",
+            "executable_v2": "opencode",
             "no_proxy": "10.0.0.0/8",
             "opencode_serve_port": None,
         })

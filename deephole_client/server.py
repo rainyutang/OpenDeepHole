@@ -1657,10 +1657,12 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             runtime_config.opencode,
             directory=Path.cwd(),
         )
+        runtime_version = str(getattr(runtime, "opencode_version", "1") or "1")
         print(with_local_timestamp(
             "RUNTIME "
             f"request_id={request_id or '(empty)'} "
-            f"tool={runtime.tool} executable={runtime.executable} "
+            f"tool={runtime.tool} opencode_version={runtime_version} "
+            f"executable={runtime.executable} "
             f"directory={runtime.directory} "
             f"config_workspace={runtime.config_workspace} "
             f"port_mode={'auto' if runtime.serve_port_auto else 'fixed'}",
@@ -1670,6 +1672,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         model_result = await get_serve_manager().list_models(
             tool=runtime.tool,
             executable=runtime.executable,
+            opencode_version=runtime_version,
             directory=runtime.directory,
             config_workspace=runtime.config_workspace,
             config_content=runtime.config_content,

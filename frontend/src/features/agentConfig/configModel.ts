@@ -20,7 +20,14 @@ export const policy = (
 export const defaultConfig = (): AgentRemoteConfig => ({
   schema_version: 11,
   llm_providers: {},
-  base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
+  base: {
+    tool: "opencode",
+    opencode_version: "1",
+    executable: "opencode",
+    executable_v2: "opencode",
+    no_proxy: "10.0.0.0/8",
+    opencode_serve_port: null,
+  },
   model_pool: { models: [] },
   threat_analysis: {
     enabled: true,
@@ -62,7 +69,28 @@ export function configuredWeekdays(window: AgentModelTimeWindow): number[] {
   return Array.isArray(window.weekdays) ? window.weekdays : allWeekdays;
 }
 
+export function normalizeAgentBaseConfig(config: AgentRemoteConfig): AgentRemoteConfig {
+  const opencodeVersion = config.base?.opencode_version === "2" ? "2" : "1";
+  const executable = typeof config.base?.executable === "string" ? config.base.executable : "opencode";
+  const executableV2 = typeof config.base?.executable_v2 === "string" ? config.base.executable_v2 : "opencode";
+  return {
+    ...config,
+    base: {
+      ...config.base,
+      opencode_version: opencodeVersion,
+      executable,
+      executable_v2: executableV2,
+    },
+  };
+}
+
 export function validateAgentConfig(config: AgentRemoteConfig): string {
+  const opencodeVersion = config.base?.opencode_version ?? "1";
+  if (opencodeVersion !== "1" && opencodeVersion !== "2") return "OpenCode 版本只能是 1.x 或 2.x";
+  const activeExecutable = opencodeVersion === "2"
+    ? (config.base?.executable_v2 ?? "opencode")
+    : (config.base?.executable ?? "");
+  if (!activeExecutable.trim()) return "工具可执行文件不能为空";
   const providerError = validateLlmProviders(config);
   if (providerError) return providerError;
   const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];

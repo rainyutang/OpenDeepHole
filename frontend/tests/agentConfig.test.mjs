@@ -10,7 +10,7 @@ const client = await server.ssrLoadModule("/src/api/client.ts");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
 const { default: AgentConfigPage } = await server.ssrLoadModule("/src/components/AgentConfigPage.tsx");
 const llmConfig = await server.ssrLoadModule("/src/llmApiConfig.ts");
-const { validateAgentConfig } = await server.ssrLoadModule("/src/features/agentConfig/configModel.ts");
+const { validateAgentConfig, normalizeAgentBaseConfig } = await server.ssrLoadModule("/src/features/agentConfig/configModel.ts");
 const originalAdapter = client.api.defaults.adapter;
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 globalThis.window = { localStorage, addEventListener() {}, removeEventListener() {}, setTimeout, clearTimeout };
@@ -497,5 +497,50 @@ test("model capacity follows edits, enabled rows, additions and deletions and sa
     }
   } finally {
     if (root) await act(async () => { root.unmount(); });
+  }
+});
+
+test("OpenCode version selector switches between independent 1.x and 2.x executable paths and validates active path", async () => {
+  const legacy = emptyConfig();
+  const normalized = normalizeAgentBaseConfig(legacy);
+  assert.equal(normalized.base.opencode_version, "1");
+  assert.equal(normalized.base.executable, "opencode");
+  assert.equal(normalized.base.executable_v2, "opencode");
+
+  const page = await mountPage({ config: legacy });
+  try {
+    const versionSelect = () => page.root.root.findByProps({ "aria-label": "OpenCode 版本" });
+    const executableInput = () => page.root.root.findByProps({ "aria-label": "工具可执行文件名或完整路径" });
+
+    assert.equal(versionSelect().props.value, "1");
+    assert.equal(executableInput().props.value, "opencode");
+
+    await act(async () => { executableInput().props.onChange({ target: { value: "/opt/opencode1/bin/opencode" } }); });
+    assert.equal(executableInput().props.value, "/opt/opencode1/bin/opencode");
+
+    await act(async () => { versionSelect().props.onChange({ target: { value: "2" } }); });
+    assert.equal(versionSelect().props.value, "2");
+    assert.equal(executableInput().props.value, "opencode");
+
+    await act(async () => { executableInput().props.onChange({ target: { value: "   " } }); });
+    await page.click("保存配置");
+    assert.equal(page.saved, null);
+    assert.match(text(page.root.toJSON()), /工具可执行文件不能为空/);
+
+    await act(async () => { executableInput().props.onChange({ target: { value: "/usr/local/bin/opencode2" } }); });
+    await act(async () => { versionSelect().props.onChange({ target: { value: "1" } }); });
+    assert.equal(executableInput().props.value, "/opt/opencode1/bin/opencode");
+
+    await act(async () => { versionSelect().props.onChange({ target: { value: "2" } }); });
+    assert.equal(executableInput().props.value, "/usr/local/bin/opencode2");
+
+    await page.click("保存配置");
+    assert.ok(page.saved);
+    assert.equal(page.saved.schema_version, 11);
+    assert.equal(page.saved.base.opencode_version, "2");
+    assert.equal(page.saved.base.executable, "/opt/opencode1/bin/opencode");
+    assert.equal(page.saved.base.executable_v2, "/usr/local/bin/opencode2");
+  } finally {
+    await page.dispose();
   }
 });

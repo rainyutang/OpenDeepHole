@@ -50,8 +50,18 @@ async def update(config: AgentConfig) -> None:
         return
     previous = _active
     changed_runtime = previous is not None and (
-        previous.opencode.executable, previous.opencode.serve_port, previous.no_proxy,
-    ) != (config.opencode.executable, config.opencode.serve_port, config.no_proxy)
+        getattr(previous.opencode, "opencode_version", "1"),
+        previous.opencode.executable,
+        getattr(previous.opencode, "executable_v2", "opencode"),
+        previous.opencode.serve_port,
+        previous.no_proxy,
+    ) != (
+        getattr(config.opencode, "opencode_version", "1"),
+        config.opencode.executable,
+        getattr(config.opencode, "executable_v2", "opencode"),
+        config.opencode.serve_port,
+        config.no_proxy,
+    )
     _active = copy.deepcopy(config)
     from .main import _refresh_live_runtime
     await _refresh_live_runtime(config, mark_dirty=changed_runtime)
@@ -76,10 +86,22 @@ async def _apply(candidate: AgentConfig, revision: str) -> None:
         if (
             previous is not None
             and get_config_reload_coordinator().status()["applied_revision"] == revision
-            and (previous.opencode.executable, previous.opencode.serve_port,
-                 previous.opencode.config_paths, previous.no_proxy)
-            == (candidate.opencode.executable, candidate.opencode.serve_port,
-                candidate.opencode.config_paths, candidate.no_proxy)
+            and (
+                getattr(previous.opencode, "opencode_version", "1"),
+                previous.opencode.executable,
+                getattr(previous.opencode, "executable_v2", "opencode"),
+                previous.opencode.serve_port,
+                previous.opencode.config_paths,
+                previous.no_proxy,
+            )
+            == (
+                getattr(candidate.opencode, "opencode_version", "1"),
+                candidate.opencode.executable,
+                getattr(candidate.opencode, "executable_v2", "opencode"),
+                candidate.opencode.serve_port,
+                candidate.opencode.config_paths,
+                candidate.no_proxy,
+            )
             and get_serve_manager().config_runtime_status()["runtime_state"] == "active"
         ):
             _active = copy.deepcopy(candidate)

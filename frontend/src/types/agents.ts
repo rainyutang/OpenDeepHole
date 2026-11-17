@@ -43,9 +43,13 @@ export interface AgentOpenCodeModelConfig {
   time_windows?: AgentModelTimeWindow[];
 }
 
+export type OpenCodeMajorVersion = "1" | "2";
+
 export interface AgentBaseConfig {
   tool: "opencode";
+  opencode_version?: OpenCodeMajorVersion;
   executable: string;
+  executable_v2?: string;
   no_proxy: string;
   opencode_serve_port: number | null;
 }

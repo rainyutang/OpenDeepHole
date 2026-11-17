@@ -47,6 +47,7 @@ class OpenCodeSessionRuntime:
     tool: str
     executable: str
     model: str = ""
+    opencode_version: str = "1"
     config_workspace: Path | None = None
     config_content: str | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
@@ -56,6 +57,7 @@ class OpenCodeSessionRuntime:
         return {
             "tool": self.tool,
             "executable": self.executable,
+            "opencode_version": self.opencode_version,
             "directory": self.directory,
             "config_workspace": self.config_workspace,
             "config_content": self.config_content,

@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from backend.config import get_config
 from backend.logger import get_logger
+from task_agent._opencode_v2 import normalize_opencode_version
 from task_agent.config_discovery import (
     config_home_candidates,
     deep_merge_opencode_config,
@@ -85,6 +86,7 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
         directory=Path(directory).resolve(),
         tool=tool,
         executable=executable,
+        opencode_version=str(effective.get("opencode_version") or "1"),
         model=model,
         config_workspace=workspace,
         config_content=config_content,
@@ -125,9 +127,18 @@ def _effective_model_config(cli_config, model_option) -> dict:
         )
 
     use_default_model = bool(_config_value(model_option, "use_default_model", False))
+    opencode_version = normalize_opencode_version(
+        _config_value(cli_config, "opencode_version", "1")
+    )
+    raw_executable = _config_value(cli_config, "executable", "opencode")
+    if opencode_version == "2":
+        raw_v2_executable = _config_value(cli_config, "executable_v2", None)
+        if raw_v2_executable not in (None, ""):
+            raw_executable = raw_v2_executable
     return {
         "tool": "opencode",
-        "executable": _config_value(cli_config, "executable", "opencode") or "opencode",
+        "opencode_version": opencode_version,
+        "executable": raw_executable or "opencode",
         "model": "" if use_default_model else choose("model", ""),
         "config_paths": _config_value(cli_config, "config_paths", []) or [],
         "proxy_url": str(_config_value(cli_config, "proxy_url", "") or ""),

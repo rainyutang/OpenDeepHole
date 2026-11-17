@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from ._opencode_v2 import normalize_opencode_version
 from .config_discovery import (
     deep_merge_opencode_config,
     merge_discovered_opencode_config,
@@ -61,6 +62,7 @@ class StandaloneCLIConfig:
     timeout: int
     max_retries: int
     models: tuple[StandaloneModelConfig, ...]
+    opencode_version: str = "1"
     model: str = ""
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
@@ -295,7 +297,9 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         serve,
         {
             "tool",
+            "opencode_version",
             "executable",
+            "executable_v2",
             "port",
             "timeout",
             "idle_timeout",
@@ -342,12 +346,21 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
             stacklevel=2,
         )
     tool = "opencode"
-    executable = str(
-        serve.get("executable")
-        or ("nga" if legacy_tool == "nga" else "opencode")
-    ).strip()
-    if not executable:
-        raise ValueError("serve.executable is required")
+    try:
+        opencode_version = normalize_opencode_version(serve.get("opencode_version"))
+    except ValueError as exc:
+        raise ValueError("serve.opencode_version must be '1' or '2'") from exc
+    if opencode_version == "2" and "executable_v2" in serve and serve.get("executable_v2") is not None:
+        executable = str(serve.get("executable_v2") or "").strip()
+        if not executable:
+            raise ValueError("serve.executable_v2 is required")
+    else:
+        executable = str(
+            serve.get("executable")
+            or ("nga" if legacy_tool == "nga" else "opencode")
+        ).strip()
+        if not executable:
+            raise ValueError("serve.executable is required")
     environment_raw = serve.get("environment") or {}
     environment_mapping = _mapping(environment_raw, "serve.environment")
     environment: dict[str, str] = {}
@@ -406,6 +419,7 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
     retry_timeout_default = inherited_retry_timeout(session_timeout)
     cli_config = StandaloneCLIConfig(
         tool=tool,
+        opencode_version=opencode_version,
         executable=executable,
         timeout=session_timeout,
         idle_timeout=_integer(
@@ -475,6 +489,7 @@ def _build_bindings(config: StandaloneOpenCodeConfig) -> OpenCodeHostBindings:
             directory=Path(directory).resolve(),
             tool=tool,
             executable=executable,
+            opencode_version=cli_config.opencode_version,
             model=model,
             config_workspace=config.workspace_dir,
             config_content=json.dumps(config.opencode_config, ensure_ascii=False),

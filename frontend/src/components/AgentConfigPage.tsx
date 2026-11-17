@@ -91,10 +91,40 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
               <h3 className="mb-4 text-sm font-semibold text-slate-200">基础参数</h3>
               <div className="grid gap-5 md:grid-cols-2">
                 <Field label="工具" hint="实现固定为 OpenCode"><select disabled className={`${input} cursor-not-allowed opacity-70`} value={config.base.tool}><option value="opencode">OpenCode</option></select></Field>
-                <Field label="工具可执行文件名或完整路径" hint="例如 opencode、nga、/opt/bin/nga 或 Windows 完整路径"><input
+                <Field label="OpenCode 版本" hint="切换 OpenCode 1.x 与 2.x 协议及对应启动路径"><select
+                  aria-label="OpenCode 版本"
                   className={input}
-                  value={config.base.executable}
-                  onChange={(e) => setCfg({ ...config, base: { ...config.base, executable: e.target.value } })} /></Field>
+                  value={config.base.opencode_version ?? "1"}
+                  onChange={(e) => setCfg({
+                    ...config,
+                    base: {
+                      ...config.base,
+                      opencode_version: e.target.value === "2" ? "2" : "1",
+                    },
+                  })}>
+                  <option value="1">OpenCode 1.x</option>
+                  <option value="2">OpenCode 2.x</option>
+                </select></Field>
+                <Field
+                  label="工具可执行文件名或完整路径"
+                  hint={
+                    (config.base.opencode_version ?? "1") === "2"
+                      ? "当前编辑 OpenCode 2.x 路径（如 opencode、/usr/local/bin/opencode2 或完整路径），与 1.x 路径独立保存"
+                      : "当前编辑 OpenCode 1.x 路径（如 opencode、nga、/opt/bin/nga 或完整路径），与 2.x 路径独立保存"
+                  }><input
+                  aria-label="工具可执行文件名或完整路径"
+                  className={input}
+                  value={
+                    (config.base.opencode_version ?? "1") === "2"
+                      ? (config.base.executable_v2 ?? "opencode")
+                      : config.base.executable
+                  }
+                  onChange={(e) => setCfg({
+                    ...config,
+                    base: (config.base.opencode_version ?? "1") === "2"
+                      ? { ...config.base, executable_v2: e.target.value }
+                      : { ...config.base, executable: e.target.value },
+                  })} /></Field>
                 <Field label="OpenCode Serve 端口" hint="留空时，本次客户端进程自动选择一个空闲端口"><input
                   className={input}
                   type="number"

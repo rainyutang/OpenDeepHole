@@ -1204,7 +1204,9 @@ class AgentOpenCodeModelConfig(BaseModel):
 
 class AgentOpenCodeConfig(BaseModel):
     tool: Literal["opencode"] = "opencode"
+    opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"
+    executable_v2: str = "opencode"
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -1217,12 +1219,28 @@ class AgentOpenCodeConfig(BaseModel):
     proxy_url: str = ""
     no_proxy: str = ""
 
+    @field_validator("opencode_version", mode="before")
+    @classmethod
+    def _normalize_opencode_version(cls, value: object) -> str:
+        from task_agent._opencode_v2 import normalize_opencode_version
+
+        return normalize_opencode_version(value)
+
 
 class AgentBaseConfig(BaseModel):
     tool: Literal["opencode"] = "opencode"
+    opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"
+    executable_v2: str = "opencode"
     no_proxy: str = "10.0.0.0/8"
     opencode_serve_port: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("opencode_version", mode="before")
+    @classmethod
+    def _normalize_opencode_version(cls, value: object) -> str:
+        from task_agent._opencode_v2 import normalize_opencode_version
+
+        return normalize_opencode_version(value)
 
 
 class AgentModelPoolConfig(BaseModel):
@@ -1728,7 +1746,9 @@ class AgentRemoteConfig(BaseModel):
             "schema_version": 2,
             "base": {
                 "tool": opencode.get("tool", "nga"),
+                "opencode_version": opencode.get("opencode_version", "1"),
                 "executable": opencode.get("executable", "nga"),
+                "executable_v2": opencode.get("executable_v2", "opencode"),
                 "no_proxy": legacy.get("no_proxy") or opencode.get("no_proxy") or "10.0.0.0/8",
                 "opencode_serve_port": None,
             },
@@ -1775,9 +1795,16 @@ class AgentRemoteConfig(BaseModel):
 
     @property
     def opencode(self) -> AgentOpenCodeConfig:
+        active_executable = (
+            self.base.executable_v2
+            if self.base.opencode_version == "2"
+            else self.base.executable
+        )
         return AgentOpenCodeConfig(
             tool=self.base.tool,
-            executable=self.base.executable,
+            opencode_version=self.base.opencode_version,
+            executable=active_executable,
+            executable_v2=self.base.executable_v2,
             timeout=self.vulnerability_mining.timeout_seconds,
             idle_timeout=self.vulnerability_mining.idle_timeout_seconds,
             json_correction_timeout_seconds=self.vulnerability_mining.json_correction_timeout_seconds,

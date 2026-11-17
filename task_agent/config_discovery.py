@@ -96,7 +96,7 @@ def opencode_executable_alias(value: object) -> str:
             if normalized.endswith(suffix):
                 normalized = normalized[: -len(suffix)]
                 break
-        if normalized in {"opencode", "nga"}:
+        if normalized in {"opencode", "opencode2", "nga"}:
             return normalized
     return ""
 

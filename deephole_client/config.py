@@ -13,6 +13,7 @@ from typing import Optional
 
 import yaml
 
+from task_agent._opencode_v2 import normalize_opencode_version
 from task_agent.timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_REVIEW_TIMEOUT_SECONDS,
@@ -82,7 +83,9 @@ class OpenCodeModelConfig:
 @dataclass
 class OpenCodeConfig:
     tool: str = "opencode"
-    executable: str = "opencode"  # OpenCode-compatible executable name or full path
+    opencode_version: str = "1"   # "1" for OpenCode 1.x, "2" for OpenCode 2.x
+    executable: str = "opencode"  # OpenCode 1.x executable name or full path
+    executable_v2: str = "opencode"  # OpenCode 2.x executable name or full path
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -94,6 +97,16 @@ class OpenCodeConfig:
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
     proxy_url: str = ""           # legacy compatibility; Serve ignores proxy URL injection
     no_proxy: str = ""            # optional no_proxy override for opencode/nga child processes
+
+
+def active_opencode_executable(config: object) -> str:
+    """Return the active OpenCode executable path for the selected major version."""
+    version = normalize_opencode_version(getattr(config, "opencode_version", "1"))
+    if version == "2":
+        v2_executable = str(getattr(config, "executable_v2", "") or "").strip()
+        if v2_executable:
+            return v2_executable
+    return str(getattr(config, "executable", "") or "opencode").strip() or "opencode"
 
 
 @dataclass
@@ -229,7 +242,12 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     if not executable:
         executable = "nga" if legacy_tool == "nga" else "opencode"
     config.tool = _CANONICAL_AI_TOOL
+    config.opencode_version = normalize_opencode_version(
+        getattr(config, "opencode_version", "1")
+    )
     config.executable = executable
+    executable_v2 = str(getattr(config, "executable_v2", "") or "").strip()
+    config.executable_v2 = executable_v2 or "opencode"
     normalized_models: list[OpenCodeModelConfig] = []
     for index, model_cfg in enumerate(config.models or []):
         if isinstance(model_cfg, dict):
@@ -713,8 +731,14 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             config.opencode.no_proxy = config.no_proxy
         if "tool" in base:
             config.opencode.tool = str(base.get("tool") or "")
+        if "opencode_version" in base:
+            config.opencode.opencode_version = normalize_opencode_version(
+                base.get("opencode_version")
+            )
         if "executable" in base:
             config.opencode.executable = str(base.get("executable") or "")
+        if "executable_v2" in base:
+            config.opencode.executable_v2 = str(base.get("executable_v2") or "")
         if "opencode_serve_port" in base:
             config.opencode.serve_port = base.get("opencode_serve_port")
         if isinstance(model_pool.get("models"), list):
@@ -748,6 +772,13 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     for f in dataclasses.fields(config.opencode):
         if f.name in section and section[f.name] is not None:
             setattr(config.opencode, f.name, section[f.name])
+    if (
+        isinstance(section, dict)
+        and "executable" in section
+        and "executable_v2" not in section
+        and normalize_opencode_version(section.get("opencode_version", config.opencode.opencode_version)) == "2"
+    ):
+        config.opencode.executable_v2 = str(section.get("executable") or "")
     normalize_cli_config(config.opencode)
     _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
     _apply_policy(config.false_positive, remote.get("false_positive"))
@@ -865,7 +896,9 @@ def remote_config_dict(config: AgentConfig) -> dict:
         "llm_providers": copy.deepcopy(config.llm_providers),
         "base": {
             "tool": "opencode",
+            "opencode_version": normalize_opencode_version(config.opencode.opencode_version),
             "executable": config.opencode.executable,
+            "executable_v2": config.opencode.executable_v2,
             "no_proxy": config.no_proxy,
             "opencode_serve_port": config.opencode.serve_port,
         },
@@ -973,6 +1006,12 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         oc_raw["tool"] = ""
     if "tool" in oc_raw and "executable" not in oc_raw:
         oc_raw["executable"] = ""
+    if (
+        "executable" in oc_raw
+        and "executable_v2" not in oc_raw
+        and normalize_opencode_version(oc_raw.get("opencode_version", "1")) == "2"
+    ):
+        oc_raw["executable_v2"] = oc_raw["executable"]
     fp_raw = raw.get("fp_review_cli", None)
     fp_cfg = None
     if isinstance(fp_raw, dict):

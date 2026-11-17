@@ -328,7 +328,14 @@ def _validate_managed_config(
         raise HTTPException(status_code=422, detail=str(exc)) from None
     if config.base.tool != "opencode":
         raise HTTPException(status_code=422, detail="基础配置中的工具只能是 opencode")
-    if not config.base.executable.strip():
+    if config.base.opencode_version not in {"1", "2"}:
+        raise HTTPException(status_code=422, detail="基础配置中的 OpenCode 版本只能是 1 或 2")
+    active_executable = (
+        config.base.executable_v2
+        if config.base.opencode_version == "2"
+        else config.base.executable
+    )
+    if not active_executable.strip():
         raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
     seen: set[str] = set()
     for index, model in enumerate(config.model_pool.models, start=1):

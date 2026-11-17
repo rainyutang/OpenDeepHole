@@ -10,9 +10,11 @@ checkers: []
 schema_version: 11
 llm_providers: {}
 base:
-  # OpenCode is the fixed implementation; executable may be opencode, nga, or a full path.
+  # OpenCode is the fixed implementation; opencode_version selects "1" (1.x) or "2" (2.x).
   tool: "opencode"
+  opencode_version: "1"
   executable: "opencode"
+  executable_v2: "opencode"
   # Comma-separated; appended independently to inherited NO_PROXY and no_proxy.
   no_proxy: "10.0.0.0/8"
   # null = choose one free local port once for this Agent process.

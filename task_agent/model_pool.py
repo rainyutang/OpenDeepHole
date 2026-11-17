@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
+from ._opencode_v2 import normalize_opencode_version
 from .token_usage import OpenCodeTokenUsage, merge_token_usages
 
 
@@ -101,6 +102,7 @@ class ModelOption:
     max_concurrency: int
     tool: str = ""
     executable: str = ""
+    opencode_version: str = "1"
     timeout: int | None = None
     idle_timeout: int | None = None
     max_retries: int | None = None
@@ -468,10 +470,12 @@ def _active_options(options: list[ModelOption], now: datetime | None = None) -> 
 
 def _model_health_identity(option: ModelOption) -> tuple[str, bool, str, str]:
     """Return the fields that identify the actual model execution target."""
+    version = normalize_opencode_version(getattr(option, "opencode_version", "1"))
+    tool_identity = option.tool if version == "1" else f"{option.tool}:{version}"
     return (
         option.model,
         option.use_default_model,
-        option.tool,
+        tool_identity,
         option.executable,
     )
 
@@ -661,9 +665,15 @@ def total_model_capacity(
 def model_options(cli_config: Any) -> list[ModelOption]:
     raw_models = _cfg_value(cli_config, "models", None) or []
     configured_tool = "opencode"
-    configured_executable = str(
-        _cfg_value(cli_config, "executable", "") or "opencode"
-    ).strip()
+    configured_version = normalize_opencode_version(
+        _cfg_value(cli_config, "opencode_version", "1")
+    )
+    raw_executable = _cfg_value(cli_config, "executable", "")
+    if configured_version == "2":
+        raw_v2_executable = _cfg_value(cli_config, "executable_v2", None)
+        if raw_v2_executable not in (None, ""):
+            raw_executable = raw_v2_executable
+    configured_executable = str(raw_executable or "opencode").strip()
     options: list[ModelOption] = []
     for index, raw in enumerate(raw_models):
         if raw is None:
@@ -693,6 +703,7 @@ def model_options(cli_config: Any) -> list[ModelOption]:
                 ),
                 tool=configured_tool,
                 executable=configured_executable,
+                opencode_version=configured_version,
                 timeout=(
                     _safe_int(_cfg_value(raw, "timeout", None), 0, 1)
                     if _cfg_value(raw, "timeout", None) not in (None, "")
