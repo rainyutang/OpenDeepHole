@@ -492,7 +492,7 @@ OpenCode 轻量威胁分析的宿主产物校验异步启动同一 Python 校验
 
 OpenCode 轻量分析的 `attack_tree_path` 现在指向攻击树目录：`index.json` 使用 `{"attack_trees":[{"tree_id":"T001","file":"attack-tree-001.json"}]}` 登记树，每个 `attack-tree-xxx.json` 直接保存一棵树对象。校验命令仍为 `--attack-trees <路径>`，直接传目录，无需额外清单参数或生成合并文件。校验器逐文件检查 JSON、单树 Schema 和跨产物关系，汇总缺失树、文件与树 ID、JSON 行列及字段错误，诊断按多行返回当前 Session；过多诊断会保留总数并说明未展示项数。上传的 `content` 保持现有树列表结构，并以 `files` 保存清单和树文件快照；续扫还原为目录，审计及多版本读取兼容目录和历史单文件。仅原位修改 Prompt 的输出说明及完成条件，不额外增加分批写入协议；Codex 的单文件输出保持原样。
 
-攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合 Schema，且 `file` 是扫描范围内真实文件的项目相对路径，允许 `[]` 表示未发现漏洞。独立 `validate_result.py` 同时实施 Schema 和路径检查。调用保持 `output_schema=None`，不校验聊天回复的 JSON Schema，仅按指定文件判定结果，不从最终回复补写或覆盖文件。原引擎与 `threat_pattern_iterative_audit` 都将校验命令列入 `required_bash_commands`，采用 `bound_python_script` 绑定命令，并要求成功标志 `ok`；模型必须执行该命令，宿主仍独立复验最终文件。未执行、执行失败或缺少成功标志会进入同 Session 纠正，不能通过聊天回复声称成功。自检成功后允许修改结果，最终文件仍必须通过宿主复验；这些文件供摘要校验、迭代和续扫使用，验收成功后继续保留。
+攻击模式审计 `threat_pattern_audit` 也使用宿主产物校验：每个任务必须生成 `mining_engines/threat_pattern_audit/task-results/threat-pattern-audit-<任务摘要>.json`（相对于普通扫描工作目录），文件必须符合 Schema，且 `file` 是扫描范围内真实文件的项目相对路径，允许 `[]` 表示未发现漏洞。独立 `validate_result.py` 同时实施 Schema 和路径检查。调用保持 `output_schema=None`，不校验聊天回复的 JSON Schema，仅按指定文件判定结果，不从最终回复补写或覆盖文件。原引擎与 `threat_pattern_iterative_audit` 的 Prompt 继续要求模型运行该校验命令，并通过 `allowed_bash_commands` 与 `bound_python_script` 放行自检，但不再通过 `required_bash_commands` 审计模型是否执行了命令；模型回复结束后直接由宿主独立校验最终文件，校验不通过再进入同 Session 纠正重试，不能通过聊天回复声称成功。这些文件供摘要校验、迭代和续扫使用，验收成功后继续保留。
 
 文件缺失、无法读取、JSON 损坏、Schema 不匹配或漏洞位置非法时，先向原 Session 回传诊断，要求重新分析并修改同一个结果文件，纠正一次仍失败则按 `vulnerability_mining.max_retries` 创建新 Session 重试；耗尽后队列记录 `post_session_validation_failed`，引擎报告失败。模型确认越界发现与扫描范围无关后可将文件改为 `[]`，程序不自动丢弃发现。异步校验最长 30 秒且受调用剩余时间约束，超时或取消时回收校验进程。全部校验通过后才写完成标记；续扫重新检查合法性，历史路径非法的缓存撤销标记并优先在原 Session 纠正，合法缓存及单纯上报失败仍可复用。该行为适用于所有调用该引擎的扫描，包括多版本基线审计；需更新并重启 Agent，无需数据库迁移，不追溯修改历史任务队列记录。
 
@@ -500,7 +500,7 @@ OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Tas
 
 fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
 
-Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；轻量级威胁分析外层仍只保留一次所选方法执行（可复用完整成功检查点）及失败后的一次 clean fallback，不额外叠加业务层循环。
+Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；轻量级威胁分析外层仍只保留一次所选方法执行（可复用完整成功检查点）及失败后的一次 clean fallback，不额外叠加业务层循环。当 OpenCode 终止本次 Session 并返回明确的模型无权限或白名单拒绝错误（如 `TM.00001005`）时，Task Agent 同样记录单行告警并对该模型开启 10 分钟权限熔断隔离（OpenCode 内部 `RETRY` 期间不提前介入），存在其他健康模型时自动跳过该无权限模型，全部候选模型均无权限时立即快速失败提示。
 
 重试耗尽或遇到不可重试错误后结束任务；主动取消直接传播：
 

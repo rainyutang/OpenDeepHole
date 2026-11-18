@@ -9873,3 +9873,277 @@ def test_shared_cleanup_releases_startup_lock_when_mcp_ignores_cancellation(monk
             gate.set()
             await task
     asyncio.run(run())
+
+
+def test_windows_shell_env_overwrites_mixed_case_path_without_duplicates(tmp_path: Path) -> None:
+    from task_agent.serve_client import (
+        OpenCodeModelAccessError,
+        _managed_file_write_plugin_path,
+        _provider_model_access_error,
+    )
+
+    assert OpenCodeModelAccessError is not None
+    assert _provider_model_access_error is not None
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    command = r'python "C:\work\validate_result.py" "C:\work\schema.json" "C:\work\result.json"'
+    host_python_dir = r"C:\Users\demo\AppData\Local\Programs\Python\Python312"
+    old_win_path = r"C:\Windows\System32;C:\Users\demo\AppData\Local\Microsoft\WindowsApps"
+    binding_path, _ = _write_command_binding(
+        runtime,
+        session_id="win-session",
+        required_commands=(command,),
+        path_prepend=(host_python_dir,),
+    )
+    payload = json.loads(binding_path.read_text(encoding="utf-8"))
+    payload["command_platform"] = "win32"
+    binding_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    v1_plugin = _managed_file_write_plugin_path(runtime, opencode_version="1")
+    v2_plugin = _managed_file_write_plugin_path(runtime, opencode_version="2")
+    script = r'''
+import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
+
+const [v1Path, v2Path, hostDir, oldPath] = process.argv.slice(1)
+const v1Mod = await import(pathToFileURL(v1Path).href)
+const v1Hooks = await v1Mod.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
+const envOutput = { env: { Path: oldPath, OTHER: "1" } }
+await v1Hooks["shell.env"]({ sessionID: "win-session" }, envOutput)
+const expected = `${hostDir};${oldPath}`
+assert.equal(envOutput.env.Path, expected)
+assert.equal(envOutput.env.PATH, expected)
+const mergedWithProcess = { Path: oldPath, ...envOutput.env }
+assert.equal(mergedWithProcess.Path, expected)
+assert.equal(mergedWithProcess.PATH, expected)
+
+const v2Mod = (await import(pathToFileURL(v2Path).href)).default
+let shellHook = null
+await v2Mod.setup({
+  directory: process.cwd(),
+  shell: { hook: async (_name, fn) => { shellHook = fn } },
+})
+const v2Event = { sessionID: "win-session", env: { Path: oldPath, OPENCODE_SERVER_PASSWORD: "secret" } }
+await shellHook(v2Event)
+assert.equal(v2Event.env.Path, expected)
+assert.equal(v2Event.env.PATH, expected)
+assert.equal("OPENCODE_SERVER_PASSWORD" in v2Event.env, false)
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(v1_plugin), str(v2_plugin), host_python_dir, old_win_path],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_provider_model_access_error_parses_whitelist_forbidden_and_redacts_secrets() -> None:
+    from task_agent.serve_client import OpenCodeModelAccessError, _provider_model_access_error
+
+    raw_error = {
+        "name": "APIError",
+        "data": {
+            "statusCode": 403,
+            "message": (
+                'Forbidden: {"text":"[DONE]","error":{"error_msg":"用户对该模型无权限，请联系管理员添加模型的白名单",'
+                '"error_code":"TM.00001005"},"error_code":"TM.00001005",'
+                '"error_msg":"用户对该模型无权限，请联系管理员添加模型的白名单 Authorization: Bearer secret-tok-123"}'
+            ),
+        },
+    }
+    parsed = _provider_model_access_error(
+        raw_error,
+        model="gateway/model-4",
+        config_content=json.dumps({"provider": {"gateway": {"options": {"apiKey": "cfg-secret-999"}}}}),
+    )
+    assert isinstance(parsed, OpenCodeModelAccessError)
+    assert parsed.model == "gateway/model-4"
+    assert parsed.error_code == "TM.00001005"
+    assert parsed.status_code == 403
+    assert "用户对该模型无权限，请联系管理员添加模型的白名单" in str(parsed)
+    assert "TM.00001005" in str(parsed)
+    assert "secret-tok-123" not in str(parsed)
+    assert "[DONE]" not in str(parsed)
+
+    # Generic WAF 403 or local tool permission must NOT be misclassified as model access denial.
+    assert _provider_model_access_error(
+        {"name": "APIError", "data": {"statusCode": 403, "message": "Forbidden: WAF blocked SQL payload"}},
+        model="gateway/model-4",
+    ) is None
+    assert _provider_model_access_error(
+        {"message": "Permission denied: Tool is not allowed for this OpenDeepHole task"},
+        model="gateway/model-4",
+    ) is None
+
+
+def test_run_prompt_only_raises_model_access_error_after_session_terminates_not_during_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent.serve_client import OpenCodeModelAccessError, _handle_serve_event
+
+    whitelist_err = {
+        "name": "APIError",
+        "data": {
+            "statusCode": 403,
+            "message": (
+                'Forbidden: {"error":{"error_msg":"用户对该模型无权限，请联系管理员添加模型的白名单",'
+                '"error_code":"TM.00001005"}}'
+            ),
+        },
+    }
+
+    async def run_case(*, succeed_after_retry: bool) -> None:
+        states = {}
+        failures: list[str] = []
+        lines: list[str] = []
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._unregister_event_state = AsyncMock()
+        manager._poll_session_snapshots = AsyncMock()
+
+        async def register(session_id, _directory, state):
+            states[session_id] = state
+
+        manager._register_event_state = register
+
+        class RetryThenFinishClient(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    return _FakeResponse({"id": "ses-retry-access"})
+                if path == "/session/ses-retry-access/message":
+                    state = states["ses-retry-access"]
+                    _handle_serve_event(
+                        {
+                            "type": "session.status",
+                            "properties": {
+                                "sessionID": "ses-retry-access",
+                                "status": {
+                                    "type": "retry",
+                                    "attempt": 1,
+                                    "message": "TM.00001005 用户对该模型无权限",
+                                },
+                            },
+                        },
+                        state,
+                    )
+                    # Nothing may report model failure while OpenCode is still in RETRY!
+                    assert failures == []
+                    _handle_serve_event(
+                        {"type": "session.idle", "properties": {"sessionID": "ses-retry-access"}},
+                        state,
+                    )
+                    if succeed_after_retry:
+                        return _FakeResponse({
+                            "info": {"id": "msg-ok", "role": "assistant"},
+                            "parts": [{"type": "text", "text": "recovered"}],
+                        })
+                    return _FakeResponse({
+                        "info": {"id": "msg-fail", "role": "assistant", "error": whitelist_err},
+                        "parts": [],
+                    })
+                return await super().post(path, **kwargs)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", RetryThenFinishClient)
+        if succeed_after_retry:
+            res = await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="hello",
+                model="gateway/model-4",
+                timeout=5,
+                return_details=True,
+                on_line=lines.append,
+                on_model_request_failure=failures.append,
+            )
+            assert res.text == "recovered"
+            assert failures == []
+            assert any("RETRY attempt=1" in line for line in lines)
+        else:
+            with pytest.raises(OpenCodeModelAccessError) as exc_info:
+                await manager.run_prompt(
+                    tool="opencode",
+                    executable="opencode",
+                    directory=tmp_path,
+                    prompt="hello",
+                    model="gateway/model-4",
+                    timeout=5,
+                    return_details=True,
+                    on_line=lines.append,
+                    on_model_request_failure=failures.append,
+                )
+            assert exc_info.value.error_code == "TM.00001005"
+            assert failures == ["access_denied"]
+            assert any("RETRY attempt=1" in line for line in lines)
+
+    asyncio.run(run_case(succeed_after_retry=True))
+    asyncio.run(run_case(succeed_after_retry=False))
+
+
+def test_cleanup_token_collection_reserve_prevents_false_serve_restart_and_logs_reason(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._register_event_state = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+
+        async def acquire(*_args, **_kwargs):
+            manager._active_sessions += 1
+            return "reused"
+
+        manager._acquire_session = acquire
+
+        class SlowAbortAndSlowTokenClient(_HangingMessageAsyncClient):
+            async def post(self, path, **kwargs):
+                if path.endswith("/abort"):
+                    await asyncio.sleep(0.16)
+                    return _FakeResponse({"aborted": True})
+                return await super().post(path, **kwargs)
+
+            async def get(self, path, **kwargs):
+                if path.endswith("/children"):
+                    await asyncio.sleep(0.2)
+                return await super().get(path, **kwargs)
+
+            async def __aexit__(self, *_args):
+                await asyncio.sleep(0.01)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", SlowAbortAndSlowTokenClient)
+        monkeypatch.setattr("task_agent.serve_client.CLEANUP_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr("task_agent.serve_client._SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS", 0.2)
+        SlowAbortAndSlowTokenClient.hang_messages = True
+
+        with pytest.raises(asyncio.TimeoutError):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="hang",
+                model="provider/model",
+                timeout=0.03,
+            )
+        # Abort consumed ~0.16s of 0.20s budget; reserve kept http_close from starving!
+        assert manager._restart_required is False
+
+        # When a real restart IS required, stop logs must include the concrete _restart_reason.
+        from types import SimpleNamespace
+
+        caplog.set_level("INFO")
+        manager._proc = SimpleNamespace(pid=44636, poll=lambda: None)
+        manager._key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager._mark_serve_restart_required("Session abort did not complete")
+        manager._start_locked = AsyncMock()
+        monkeypatch.setattr("task_agent.serve_client._stop_owned_serve_record", lambda *_a, **_kw: True)
+        await manager._ensure_started_locked(manager._key)
+        assert "reason=previous Serve request failure (Session abort did not complete)" in caplog.text
+
+    asyncio.run(run())

@@ -321,12 +321,17 @@ const stripInternalServeAuthEnv = (envObj) => {
 const applyPrependedPath = (envObj, binding) => {
   const env = stripInternalServeAuthEnv(envObj)
   if (!binding || !Array.isArray(binding.path_prepend) || !binding.path_prepend.length) return env
-  const current = pathText(env.PATH) || pathText(env.Path) || pathText(process.env.PATH)
-  const currentEntries = current ? current.split(path.delimiter) : []
+  const win = process.platform === "win32" || binding.command_platform === "win32"
+  const delim = win ? path.win32.delimiter : path.delimiter
+  const envPathEntry = Object.entries(env).find(([key, val]) => key.toLowerCase() === "path" && pathText(val))
+  const current = envPathEntry ? pathText(envPathEntry[1]) : (pathText(process.env.PATH) || pathText(process.env.Path))
+  const currentEntries = current ? current.split(delim) : []
   const prepended = binding.path_prepend.filter((value) => typeof value === "string" && value.trim())
-  const normalized = new Set(prepended.map((value) => process.platform === "win32" ? value.toLowerCase() : value))
-  const retained = currentEntries.filter((value) => !normalized.has(process.platform === "win32" ? value.toLowerCase() : value))
-  return { ...env, PATH: [...prepended, ...retained].join(path.delimiter) }
+  const normalized = new Set(prepended.map((value) => win ? value.toLowerCase() : value))
+  const retained = currentEntries.filter((value) => !normalized.has(win ? value.toLowerCase() : value))
+  const joined = [...prepended, ...retained].join(delim)
+  const cleaned = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== "path"))
+  return win ? { ...cleaned, Path: joined, PATH: joined } : { ...cleaned, PATH: joined }
 }
 
 const extractSessionID = (first, second) => pathText(first?.sessionID)

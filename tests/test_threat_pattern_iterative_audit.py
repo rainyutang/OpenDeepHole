@@ -81,9 +81,10 @@ def test_three_rounds_are_distinct_clue_guided_and_resume_without_model_calls(ha
     for index, call in enumerate(h.calls, 1):
         assert call["task_name"].endswith(f"-round-{index}")
         assert "session_id" not in call
-        assert call["required_bash_commands"] == call["allowed_bash_commands"]
-        assert call["required_bash_success_markers"] == {call["allowed_bash_commands"][0]: "ok"}
-        assert call["required_bash_retry_count"] == 1
+        assert len(call["allowed_bash_commands"]) == 1
+        assert "required_bash_commands" not in call
+        assert "required_bash_success_markers" not in call
+        assert "required_bash_retry_count" not in call
         assert call["output_schema"] is None
         assert call["prompt"].rstrip().endswith(call["allowed_bash_commands"][0])
         assert "已发现问题列表：" in call["prompt"]

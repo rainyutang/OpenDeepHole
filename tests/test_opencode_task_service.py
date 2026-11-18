@@ -3588,8 +3588,8 @@ def test_threat_pattern_audit_queue_outcome_requires_the_designated_file(
             session_id = kwargs["session_id"] or f"ses_artifact_{len(calls)}"
             if kwargs["session_id"] is None:
                 await kwargs["on_session_id"](session_id)
-            assert kwargs["required_bash_commands"] == kwargs["allowed_bash_commands"]
-            assert kwargs["required_bash_success_markers"] == ((kwargs["allowed_bash_commands"][0], "ok"),)
+            assert kwargs["required_bash_commands"] == ()
+            assert kwargs["required_bash_success_markers"] == ()
             assert kwargs["bash_command_match_mode"] == "bound_python_script"
             assert len(kwargs["allowed_bash_commands"]) == 1
             payload = writes[len(calls) - 1]
@@ -5087,5 +5087,100 @@ def test_public_task_uses_category_session_timeout(tmp_path, task_type, subtype,
         assert result.status == "success"
         assert manager.run_prompt.await_args.kwargs["timeout"] == pytest.approx(73 if custom else default, abs=0.1)
         assert manager.run_prompt.await_args.kwargs["idle_timeout"] == 1200
+
+    asyncio.run(run())
+
+
+def test_model_access_error_logs_warning_without_traceback_and_trips_circuit_on_release(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    from task_agent.model_pool import ModelAccessCircuitOpenError
+    from task_agent.serve_client import OpenCodeModelAccessError
+
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await _notify_model_request_failure(kwargs, "access_denied")
+                raise OpenCodeModelAccessError(
+                    model="gateway/model-4",
+                    error_code="TM.00001005",
+                    status_code=403,
+                    detail="用户对该模型无权限，请联系管理员添加模型的白名单",
+                )
+            callback = kwargs["on_session_id"]("ses_ok")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses_ok",
+                message_id="msg_ok",
+                lines=["done"],
+                text="done",
+                model="gateway/model-1",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "gateway/model-4", _source())
+        )
+        patches = _service_patches(manager)
+        caplog.set_level("WARNING")
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="retry model access",
+                    prompt="run",
+                    directory=tmp_path,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert calls == 2
+        assert "TM.00001005" in caplog.text
+        assert "Traceback" not in caplog.text
+        first_release = release_mock.await_args_list[0].kwargs
+        assert first_release["health_outcome"] == "access_denied"
+        assert "TM.00001005" in first_release["access_error_message"]
+        assert first_release["record_completion"] is False
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == {
+            ("provider/model-low", False, "opencode", "opencode"),
+        }
+
+        # When all models are blocked by ModelAccessCircuitOpenError, finish immediately without retrying.
+        service2 = OpenCodeTaskService()
+        patches2 = _service_patches(manager)
+        with (
+            patches2[0],
+            patch(
+                "task_agent.task_service.acquire_model_lease",
+                new=AsyncMock(side_effect=ModelAccessCircuitOpenError("模型无访问权限（TM.00001005）")),
+            ) as blocked_acquire,
+            patches2[2],
+            patches2[3],
+            patches2[4],
+            patches2[5],
+        ):
+            with _task_context(tmp_path):
+                blocked_res = await service2.run_task(OpenCodeTaskSpec(
+                    task_name="all blocked",
+                    prompt="run",
+                    directory=tmp_path,
+                    attempt=2,
+                ))
+        assert blocked_res.status == "failure"
+        assert "TM.00001005" in blocked_res.error
+        assert blocked_acquire.await_count == 1
 
     asyncio.run(run())

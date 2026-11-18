@@ -2338,3 +2338,108 @@ def test_failed_completion_sink_does_not_block_next_lease_or_duplicate_release(m
         assert await model_pool_module.drain_completed_task_reports(timeout=1)
         assert model_pool_snapshot("scan")["completed_task_count"] == 2
     asyncio.run(run())
+
+
+def test_access_denied_circuit_isolates_unauthorized_model_even_when_healthy_model_is_busy() -> None:
+    from task_agent.model_pool import ModelAccessCircuitOpenError
+
+    assert ModelAccessCircuitOpenError is not None
+
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {"id": "model-1", "model": "provider/model-1", "weight": 1, "max_concurrency": 2},
+            {"id": "model-4", "model": "provider/model-4", "weight": 10, "max_concurrency": 2},
+        ])
+        # First lease picks model-4 (higher weight) and fails with access_denied.
+        first = await acquire_model_lease(cfg, task_id="task-1")
+        assert first.option.id == "model-4"
+        await release_model_lease(
+            first,
+            outcome="failure",
+            health_outcome="access_denied",
+            access_error_message="模型无访问权限（provider/model-4，错误码 TM.00001005）",
+            record_completion=False,
+        )
+
+        # Hold 1/2 slot on model-1 so model-1 has running/weight > 0 while model-4 has running == 0.
+        busy_1 = await acquire_model_lease(cfg, task_id="task-busy-1")
+        assert busy_1.option.id == "model-1"
+
+        # A brand-new task MUST still pick model-1 (2/2) instead of getting sucked into model-4 (0/2)!
+        busy_2 = await acquire_model_lease(cfg, task_id="task-busy-2")
+        assert busy_2.option.id == "model-1"
+
+        # Even when model-1 is completely full (2/2), a queued task waits for model-1 rather than spilling to model-4!
+        queued_task = asyncio.create_task(acquire_model_lease(cfg, task_id="task-queued"))
+        await asyncio.sleep(0.03)
+        assert not queued_task.done()
+        await release_model_lease(busy_1, outcome="success")
+        granted = await asyncio.wait_for(queued_task, timeout=0.5)
+        assert granted.option.id == "model-1"
+        await release_model_lease(busy_2, outcome="success")
+        await release_model_lease(granted, outcome="success")
+
+        # Expire cooldown -> only ONE half-open probe may enter model-4; success closes circuit.
+        state = model_pool_module._model_health_by_id["model-4"]
+        state.access_open_until = model_pool_module.time.monotonic() - 0.01
+        probe = await acquire_model_lease(cfg, task_id="task-probe")
+        assert probe.option.id == "model-4"
+        assert probe.access_half_open_probe is True
+        peer = await acquire_model_lease(cfg, task_id="task-while-probing")
+        assert peer.option.id == "model-1"
+        await release_model_lease(probe, outcome="success", health_outcome="success")
+        await release_model_lease(peer, outcome="success", health_outcome="success")
+        assert state.access_open_until is None
+
+    asyncio.run(run())
+
+
+def test_access_denied_circuit_fails_fast_when_all_models_lack_permission_but_waits_for_quota_peer() -> None:
+    from task_agent.model_pool import ModelAccessCircuitOpenError
+
+    async def run() -> None:
+        single_cfg = SimpleNamespace(models=[
+            {"id": "model-4", "model": "provider/model-4", "max_concurrency": 1},
+        ])
+        lease = await acquire_model_lease(single_cfg, task_id="task-single")
+        await release_model_lease(
+            lease,
+            outcome="failure",
+            health_outcome="access_denied",
+            access_error_message="模型无访问权限（provider/model-4，错误码 TM.00001005）",
+        )
+        with pytest.raises(ModelAccessCircuitOpenError, match="TM.00001005"):
+            await asyncio.wait_for(
+                acquire_model_lease(single_cfg, stats_scope_id="scan-access", task_id="task-next"),
+                timeout=0.5,
+            )
+
+        # If another eligible model is merely in 429 quota cooldown, wait for quota rather than failing with access error.
+        mixed_cfg = SimpleNamespace(models=[
+            {"id": "model-1", "model": "provider/model-1", "max_concurrency": 1},
+            {"id": "model-4", "model": "provider/model-4", "max_concurrency": 1},
+        ])
+        q_lease = await acquire_model_lease(mixed_cfg, task_id="task-q")
+        assert q_lease.option.id == "model-1"
+        await release_model_lease(
+            q_lease,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=0.05,
+        )
+        model_pool_module._model_health_by_id["model-1"].quota_open_until = (
+            model_pool_module.time.monotonic() + 0.05
+        )
+        recovered = await asyncio.wait_for(
+            acquire_model_lease(
+                mixed_cfg,
+                task_id="task-wait-quota",
+                wait_when_unavailable=True,
+                quota_wait_budget=ModelQuotaWaitBudget(total_seconds=2.0),
+            ),
+            timeout=1.0,
+        )
+        assert recovered.option.id == "model-1"
+        await release_model_lease(recovered, outcome="success", health_outcome="success")
+
+    asyncio.run(run())

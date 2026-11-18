@@ -332,12 +332,17 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
     const binding = await resolveBinding(input?.sessionID)
     if (!binding || !Array.isArray(binding.path_prepend) || !binding.path_prepend.length) return
     const env = objectValue(output?.env)
-    const current = pathText(env.PATH) || pathText(env.Path) || pathText(process.env.PATH)
-    const currentEntries = current ? current.split(path.delimiter) : []
+    const win = process.platform === "win32" || binding.command_platform === "win32"
+    const delim = win ? path.win32.delimiter : path.delimiter
+    const envPathEntry = Object.entries(env).find(([key, val]) => key.toLowerCase() === "path" && pathText(val))
+    const current = envPathEntry ? pathText(envPathEntry[1]) : (pathText(process.env.PATH) || pathText(process.env.Path))
+    const currentEntries = current ? current.split(delim) : []
     const prepended = binding.path_prepend.filter((value) => typeof value === "string" && value.trim())
-    const normalized = new Set(prepended.map((value) => process.platform === "win32" ? value.toLowerCase() : value))
-    const retained = currentEntries.filter((value) => !normalized.has(process.platform === "win32" ? value.toLowerCase() : value))
-    output.env = { ...env, PATH: [...prepended, ...retained].join(path.delimiter) }
+    const normalized = new Set(prepended.map((value) => win ? value.toLowerCase() : value))
+    const retained = currentEntries.filter((value) => !normalized.has(win ? value.toLowerCase() : value))
+    const joined = [...prepended, ...retained].join(delim)
+    const cleaned = Object.fromEntries(Object.entries(env).filter(([key]) => key.toLowerCase() !== "path"))
+    output.env = win ? { ...cleaned, Path: joined, PATH: joined } : { ...cleaned, PATH: joined }
   },
   "tool.execute.before": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
@@ -734,6 +739,37 @@ class OpenCodeModelNotFoundError(RuntimeError):
         super().__init__(
             f"配置的模型不存在：{model or 'OpenCode 默认模型'}。"
             "请在 Agent 的“模型配置”中重新导入或选择有效模型，保存后重试。"
+        )
+
+
+class OpenCodeModelAccessError(RuntimeError):
+    """OpenCode terminated a Session turn due to Provider model access/whitelist denial."""
+
+    def __init__(
+        self,
+        *,
+        model: str = "",
+        error_code: str = "",
+        status_code: int | None = None,
+        detail: str = "",
+    ) -> None:
+        self.model = model
+        self.error_code = error_code
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        target = self.model or "OpenCode 默认模型"
+        meta: list[str] = [target]
+        if self.error_code:
+            meta.append(f"错误码 {self.error_code}")
+        elif self.status_code:
+            meta.append(f"HTTP {self.status_code}")
+        detail_note = f"：{self.detail}" if self.detail else ""
+        return (
+            f"模型无访问权限（{'，'.join(meta)}）{detail_note}。"
+            "请联系管理员开通该模型的白名单或访问权限，或在“模型配置”中停用、更换该模型。"
         )
 
 
@@ -1374,8 +1410,16 @@ def _validate_required_command_audit(
                 timed_out=timed_out,
             ))
         detail = ", ".join(
-            f"{command!r} (exit={failures.get(command, {}).get('exit_code')!r})"
-            for command in missing
+            (
+                f"(reason={failure.failure_kind}, exit={failure.exit_code!r}"
+                + (
+                    f", output={_one_line_preview(failure.output_tail.strip().splitlines()[-1], 120)!r}"
+                    if failure.output_tail.strip()
+                    else ""
+                )
+                + f") {failure.command!r}"
+            )
+            for failure in command_failures
         )
         raise OpenCodeTaskQualityError(
             "OpenCode required validation command did not complete successfully: "
@@ -4278,6 +4322,172 @@ def _provider_model_not_found_error(
     return reminder(model) if explicit_error else None
 
 
+_EXPLICIT_MODEL_ACCESS_CODES = frozenset({
+    "tm.00001005",
+    "model_access_denied",
+    "unauthorized_model",
+    "model_not_allowed",
+    "model_not_whitelisted",
+})
+
+_EXPLICIT_MODEL_ACCESS_PHRASES = (
+    "对该模型无权限",
+    "模型无权限",
+    "模型的白名单",
+    "模型白名单",
+    "无权限访问该模型",
+    "未开通该模型",
+    "does not have access to model",
+    "no access to model",
+    "not authorized to access model",
+    "not authorized to use model",
+    "permission denied for model",
+    "model access denied",
+    "model is not whitelisted",
+)
+
+_LOCAL_TOOL_PERMISSION_PHRASES = (
+    "opendeephole task",
+    "shell command is not bound",
+    "tool is not allowed",
+)
+
+
+def _redact_inline_credentials(text: str, config_content: str = "") -> str:
+    redacted = str(text or "")
+    redacted = re.sub(r"(?i)\bBearer\s+\S+", "Bearer ***", redacted)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "***", redacted)
+    return _redact_serve_startup_text(redacted, config_content)
+
+
+def _provider_model_access_error(
+    value: object, *, model: str = "", config_content: str = "",
+) -> OpenCodeModelAccessError | None:
+    """Extract an explicit Provider model-permission/whitelist error from a terminal error."""
+    if value is None:
+        return None
+    if _provider_quota_error(value) is not None:
+        return None
+    if _provider_model_not_found_error(value, model=model, config_content=config_content) is not None:
+        return None
+
+    queue: list[tuple[object, int]] = [(value, 0)]
+    seen: set[int] = set()
+    candidates: list[dict[str, object]] = []
+    free_texts: list[str] = []
+    for _ in range(64):
+        if not queue:
+            break
+        current, depth = queue.pop(0)
+        if depth > 7:
+            continue
+        if isinstance(current, (dict, list)):
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+        if isinstance(current, dict):
+            candidates.append(current)
+            for key in (
+                "error",
+                "data",
+                "cause",
+                "message",
+                "error_msg",
+                "details",
+                "value",
+                "responseBody",
+            ):
+                if key in current:
+                    queue.append((current[key], depth + 1))
+        elif isinstance(current, list):
+            queue.extend((item, depth + 1) for item in current[:20])
+        elif isinstance(current, str):
+            snippet = current[:20_000].strip()
+            if snippet:
+                free_texts.append(snippet)
+                queue.extend((item, depth + 1) for item in _embedded_json_objects(snippet))
+
+    combined_lower = "\n".join(free_texts).casefold()
+    if any(phrase in combined_lower for phrase in _LOCAL_TOOL_PERMISSION_PHRASES):
+        return None
+
+    matched_code = ""
+    matched_status: int | None = None
+    matched_detail = ""
+    is_access_denied = False
+
+    for candidate in candidates:
+        raw_status = (
+            candidate.get("statusCode")
+            if candidate.get("statusCode") is not None
+            else candidate.get("status")
+        )
+        if matched_status is None and isinstance(raw_status, int) and not isinstance(raw_status, bool):
+            matched_status = raw_status
+
+        raw_code = str(
+            candidate.get("error_code")
+            or candidate.get("code")
+            or ""
+        ).strip()
+        if raw_code and raw_code.casefold() in _EXPLICIT_MODEL_ACCESS_CODES:
+            is_access_denied = True
+            if not matched_code:
+                matched_code = raw_code
+
+        for msg_key in ("error_msg", "message"):
+            raw_msg = candidate.get(msg_key)
+            if not isinstance(raw_msg, str) or not raw_msg.strip():
+                continue
+            cleaned_msg = raw_msg.strip()
+            lowered = cleaned_msg.casefold()
+            if any(phrase in lowered for phrase in _LOCAL_TOOL_PERMISSION_PHRASES):
+                return None
+            if any(phrase in lowered for phrase in _EXPLICIT_MODEL_ACCESS_PHRASES):
+                is_access_denied = True
+                if not matched_code and raw_code:
+                    matched_code = raw_code
+                # Prefer a concise inner error_msg over an outer wrapper containing raw JSON.
+                if not matched_detail or ("{" in matched_detail and "{" not in cleaned_msg):
+                    matched_detail = cleaned_msg
+
+    if not is_access_denied:
+        for text in free_texts:
+            lowered = text.casefold()
+            if any(phrase in lowered for phrase in _EXPLICIT_MODEL_ACCESS_PHRASES):
+                is_access_denied = True
+                if not matched_detail and "{" not in text:
+                    matched_detail = text
+                break
+
+    if not is_access_denied:
+        return None
+
+    if not matched_detail:
+        for candidate in candidates:
+            err_msg = candidate.get("error_msg")
+            if isinstance(err_msg, str) and err_msg.strip():
+                matched_detail = err_msg.strip()
+                break
+
+    safe_model = _one_line_preview(
+        _redact_inline_credentials(model, config_content), 256,
+    )
+    safe_code = _one_line_preview(
+        _redact_inline_credentials(matched_code, config_content), 96,
+    )
+    safe_detail = _one_line_preview(
+        _redact_inline_credentials(matched_detail, config_content), 200,
+    ).rstrip("。. ")
+    return OpenCodeModelAccessError(
+        model=safe_model,
+        error_code=safe_code,
+        status_code=matched_status,
+        detail=safe_detail,
+    )
+
+
 def _assistant_message_error(value: object) -> object | None:
     """Return an OpenCode assistant error carried by a successful HTTP response."""
     if not isinstance(value, dict):
@@ -5952,6 +6162,7 @@ class OpenCodeServeManager:
             except BaseException:
                 self._dirty = True
                 self._restart_required = True
+                self._restart_reason = "Provider configuration health check failed"
                 self._invalidate_model_cache()
                 raise
             self._retired_provider_fingerprints.update(self._seen_provider_fingerprints)
@@ -8021,6 +8232,15 @@ class OpenCodeServeManager:
                 if quota_error is not None:
                     await deadline.wait(emit_model_request_failure("quota"), phase="response_cleanup")
                     raise quota_error
+                access_error = _provider_model_access_error(
+                    assistant_error, model=model, config_content=key.config_content,
+                )
+                if access_error is not None:
+                    await deadline.wait(
+                        emit_model_request_failure("access_denied"),
+                        phase="response_cleanup",
+                    )
+                    raise access_error
                 await deadline.wait(emit_model_request_failure(
                     "failure"
                     if _assistant_error_affects_model_health(assistant_error)
@@ -8186,8 +8406,17 @@ class OpenCodeServeManager:
                     if not ok or not reaped:
                         self._mark_serve_restart_required("Message request did not stop")
                 if active_session_id and capture_token_usage is not None:
-                    await cleanup(capture_token_usage(response_data), "token_collection",
-                                  _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS + 0.1)
+                    token_cleanup_reserve = min(2.0, CLEANUP_TIMEOUT_SECONDS * 0.25)
+                    token_cleanup_limit = min(
+                        _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS + 0.1,
+                        max(0.0, cleanup_expires - token_cleanup_reserve - time.monotonic()),
+                    )
+                    if token_cleanup_limit > 0:
+                        await cleanup(
+                            capture_token_usage(response_data),
+                            "token_collection",
+                            token_cleanup_limit,
+                        )
                 usage_open = False
                 for binding in (knowledge_binding_path, command_binding_path, command_audit_path):
                     if binding is not None:
@@ -9605,7 +9834,11 @@ class OpenCodeServeManager:
             and self._key.config_hash != key.config_hash
         )
         if self._restart_required:
-            restart_reason = "previous Serve request failure"
+            restart_reason = (
+                f"previous Serve request failure ({self._restart_reason})"
+                if self._restart_reason
+                else "previous Serve request failure"
+            )
         elif self._dirty or config_changed:
             restart_reason = "runtime config changed"
         elif self._proc is not None:
@@ -9990,6 +10223,7 @@ class OpenCodeServeManager:
         except BaseException as startup_error:
             self._ready_generation = None
             self._restart_required = True
+            self._restart_reason = "startup health failure"
             try:
                 await OperationDeadline(CLEANUP_TIMEOUT_SECONDS).wait(
                     self._stop_locked(reason="startup health failure cleanup"),
@@ -10433,11 +10667,13 @@ class OpenCodeServeManager:
                 )
         except BaseException:
             self._restart_required = True
+            self._restart_reason = "Serve stop failed"
             raise
         finally:
             _remove_file(startup_log_path)
         if not stopped:
             self._restart_required = True
+            self._restart_reason = "Serve process tree did not stop completely"
             raise RuntimeError(
                 "OpenCode Serve process tree did not stop completely; "
                 f"pid={pid} port={port or ''} ownership marker was retained"

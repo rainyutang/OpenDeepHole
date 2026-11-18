@@ -36,6 +36,7 @@ from .llm_json import (
     parse_llm_json_schema,
 )
 from .model_pool import (
+    ModelAccessCircuitOpenError,
     ModelLease,
     SuspendedModelLease,
     ModelQuotaCircuitOpenError,
@@ -55,6 +56,7 @@ from .output_format import format_task_output, task_output_stage
 from .serve_client import (
     OpenCodeCommandFailure,
     OpenCodeFileWrite,
+    OpenCodeModelAccessError,
     OpenCodeModelNotFoundError,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
@@ -1050,6 +1052,7 @@ class OpenCodeTaskService:
             retry_reason = ""
             health_outcome: str | None = None
             quota_retry_after_seconds: float | None = None
+            access_error_message: str | None = None
             avoid_model_on_retry = False
             model_request_failed = False
             model_request_failure = ""
@@ -1218,9 +1221,9 @@ class OpenCodeTaskService:
                 def record_model_request_failure(kind: str) -> None:
                     nonlocal model_request_failed, model_request_failure
                     normalized = str(kind or "").strip().lower()
-                    if normalized in {"failure", "timeout", "quota", "neutral"}:
+                    if normalized in {"failure", "timeout", "quota", "access_denied", "neutral"}:
                         model_request_failed = True
-                    if normalized in {"failure", "timeout", "quota"}:
+                    if normalized in {"failure", "timeout", "quota", "access_denied"}:
                         model_request_failure = normalized
 
                 async def record_token_usage(value: OpenCodeTokenUsage) -> None:
@@ -1517,6 +1520,10 @@ class OpenCodeTaskService:
                                                 if isinstance(retry_error, OpenCodeServeStartupError)
                                                 else "model_not_found"
                                                 if isinstance(retry_error, OpenCodeModelNotFoundError)
+                                                else "model_access_denied"
+                                                if isinstance(retry_error, OpenCodeModelAccessError)
+                                                else "quota"
+                                                if isinstance(retry_error, OpenCodeProviderQuotaError)
                                                 else "execution_error"
                                             ),
                                             failure_reason=(
@@ -1711,12 +1718,18 @@ class OpenCodeTaskService:
                     ),
                 )
                 return
-            except (NoAvailableModelError, ModelQuotaCircuitOpenError) as exc:
+            except (
+                NoAvailableModelError,
+                ModelQuotaCircuitOpenError,
+                ModelAccessCircuitOpenError,
+            ) as exc:
                 attempt_outcome = "failure"
                 attempt_event_outcome = "failure"
                 attempt_failure_kind = (
                     "no_available_model"
                     if isinstance(exc, NoAvailableModelError)
+                    else "model_access_denied"
+                    if isinstance(exc, ModelAccessCircuitOpenError)
                     else "quota"
                 )
                 attempt_failure_reason = str(exc)
@@ -1763,6 +1776,31 @@ class OpenCodeTaskService:
                         if exc.retry_after_seconds is not None
                         else "backoff"
                     ),
+                )
+            except OpenCodeModelAccessError as exc:
+                attempt_outcome = "failure"
+                attempt_event_outcome = "failure"
+                retry_reason = str(exc)
+                attempt_failure_kind = "model_access_denied"
+                attempt_failure_reason = retry_reason
+                avoid_model_on_retry = True
+                health_outcome = "access_denied"
+                access_error_message = retry_reason
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
+                last_source = source
+                logger.warning(
+                    "OpenCode task %s session attempt %d/%d hit Provider model access error "
+                    "model=%s code=%s: %s",
+                    record.task_id,
+                    session_attempt,
+                    total_session_attempts,
+                    exc.model or model or "<default>",
+                    exc.error_code or "unknown",
+                    retry_reason,
                 )
             except _InvalidStructuredOutput as exc:
                 retry_reason = str(exc)
@@ -1820,12 +1858,21 @@ class OpenCodeTaskService:
                     last_text = text
                 last_model = source.model or model or last_model
                 last_source = source
-                logger.exception(
-                    "OpenCode task %s session attempt %d/%d failed",
-                    record.task_id,
-                    session_attempt,
-                    total_session_attempts,
-                )
+                if isinstance(exc, OpenCodeModelNotFoundError):
+                    logger.warning(
+                        "OpenCode task %s session attempt %d/%d failed: %s",
+                        record.task_id,
+                        session_attempt,
+                        total_session_attempts,
+                        retry_reason,
+                    )
+                else:
+                    logger.exception(
+                        "OpenCode task %s session attempt %d/%d failed",
+                        record.task_id,
+                        session_attempt,
+                        total_session_attempts,
+                    )
             finally:
                 if (
                     not recovery_required
@@ -1889,6 +1936,7 @@ class OpenCodeTaskService:
                         outcome=attempt_outcome,
                         health_outcome=health_outcome,
                         quota_retry_after_seconds=quota_retry_after_seconds,
+                        access_error_message=access_error_message,
                         duration_seconds=attempt_duration if lease is not None else None,
                         record_completion=terminal_release,
                         context_updates=context_updates,
@@ -2142,6 +2190,7 @@ class OpenCodeTaskService:
         formatter_model = ""
         formatter_model_failure = ""
         formatter_quota_retry_after_seconds: float | None = None
+        formatter_access_error_message: str | None = None
         formatter_started_at = _execution_time(record)
         formatter_event_recorded = False
 
@@ -2220,7 +2269,7 @@ class OpenCodeTaskService:
             def record_formatter_failure(kind: str) -> None:
                 nonlocal formatter_model_failure
                 normalized = str(kind or "").strip().lower()
-                if normalized in {"failure", "timeout", "quota"}:
+                if normalized in {"failure", "timeout", "quota", "access_denied"}:
                     formatter_model_failure = normalized
 
             async def record_formatter_usage(value: OpenCodeTokenUsage) -> None:
@@ -2373,12 +2422,17 @@ class OpenCodeTaskService:
             if isinstance(exc, OpenCodeProviderQuotaError):
                 formatter_model_failure = "quota"
                 formatter_quota_retry_after_seconds = exc.retry_after_seconds
+            elif isinstance(exc, OpenCodeModelAccessError):
+                formatter_model_failure = "access_denied"
+                formatter_access_error_message = str(exc)
             if formatter_lease is not None:
                 formatter_failure_kind = (
                     "serve_startup"
                     if isinstance(exc, OpenCodeServeStartupError)
                     else "model_not_found"
                     if isinstance(exc, OpenCodeModelNotFoundError)
+                    else "model_access_denied"
+                    if isinstance(exc, (OpenCodeModelAccessError, ModelAccessCircuitOpenError))
                     else "timeout"
                     if isinstance(exc, asyncio.TimeoutError)
                     else "quota"
@@ -2398,6 +2452,7 @@ class OpenCodeTaskService:
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
                     health_outcome=formatter_model_failure or None,
                     quota_retry_after_seconds=formatter_quota_retry_after_seconds,
+                    access_error_message=formatter_access_error_message,
                     duration_seconds=max(0.0, _execution_time(record) - formatter_started_at),
                     record_completion=isinstance(exc, OpenCodeServeStartupError),
                     context_updates=_session_trace_updates(
@@ -2433,6 +2488,7 @@ class OpenCodeTaskService:
         correction_started_at = _execution_time(record)
         correction_model_failure = ""
         correction_quota_retry_after_seconds: float | None = None
+        correction_access_error_message: str | None = None
         correction_source = original_source
         correction_model = original_model
         correction_message_id = message_id
@@ -2564,7 +2620,7 @@ class OpenCodeTaskService:
             def record_correction_failure(kind: str) -> None:
                 nonlocal correction_model_failure
                 normalized = str(kind or "").strip().lower()
-                if normalized in {"failure", "timeout", "quota"}:
+                if normalized in {"failure", "timeout", "quota", "access_denied"}:
                     correction_model_failure = normalized
 
             async def record_correction_usage(value: OpenCodeTokenUsage) -> None:
@@ -2755,11 +2811,14 @@ class OpenCodeTaskService:
                 correction_lease = None
             raise
         except Exception as exc:
-            if isinstance(exc, OpenCodeServeStartupError):
+            if isinstance(exc, (OpenCodeServeStartupError, ModelAccessCircuitOpenError)):
                 has_fresh_retry = False
             if isinstance(exc, OpenCodeProviderQuotaError):
                 correction_model_failure = "quota"
                 correction_quota_retry_after_seconds = exc.retry_after_seconds
+            elif isinstance(exc, OpenCodeModelAccessError):
+                correction_model_failure = "access_denied"
+                correction_access_error_message = str(exc)
             correction_outcome = (
                 "timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"
             )
@@ -2769,6 +2828,8 @@ class OpenCodeTaskService:
                 if isinstance(exc, OpenCodeServeStartupError)
                 else "model_not_found"
                 if isinstance(exc, OpenCodeModelNotFoundError)
+                else "model_access_denied"
+                if isinstance(exc, (OpenCodeModelAccessError, ModelAccessCircuitOpenError))
                 else "timeout"
                 if isinstance(exc, asyncio.TimeoutError)
                 else "quota"
@@ -2807,6 +2868,7 @@ class OpenCodeTaskService:
                     outcome=correction_outcome,
                     health_outcome=correction_model_failure or None,
                     quota_retry_after_seconds=correction_quota_retry_after_seconds,
+                    access_error_message=correction_access_error_message,
                     duration_seconds=max(0.0, _execution_time(record) - correction_started_at),
                     record_completion=not has_fresh_retry,
                     context_updates={
