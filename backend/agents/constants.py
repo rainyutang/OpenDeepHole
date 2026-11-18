@@ -134,7 +134,10 @@ _AGENT_RUNTIME_DIRS = [
 ]
 
 
-_AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
+_AGENT_TOOL_DIRS = [
+    "ctags-p6.2.20260517.0-x64",
+    "ripgrep-x86_64-pc-windows-msvc",
+]
 
 
 _AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
@@ -178,17 +181,17 @@ Setup
 
 2. Install Python 3.10+ if not already installed
 
-3. Code-index tool:
+3. Code-index and search tools:
 
    Linux:
-     apt install universal-ctags
+     apt install universal-ctags ripgrep
 
    macOS:
-     brew install universal-ctags
+     brew install universal-ctags ripgrep
 
    Windows:
-     The Agent package includes Universal Ctags for Windows x64.
-     run_agent.bat uses the bundled ctags.exe automatically.
+     The Agent package includes Universal Ctags and ripgrep (rg.exe) for Windows x64.
+     run_agent.bat and the Agent startup automatically configure ctags.exe and rg.exe.
 
 4. Run the agent daemon:
 

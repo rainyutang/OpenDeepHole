@@ -59,7 +59,7 @@ python3 -m pip install -r requirements-agent.txt
 bash run_agent.sh
 ```
 
-Windows 使用 `run_agent.bat`。Linux/macOS 需自行安装 Universal Ctags，Windows 下载包携带 Ctags。完整准备步骤见[Agent 安装](docs/getting-started.md#安装-agent)。
+Windows 使用 `run_agent.bat`。Linux/macOS 需自行安装 Universal Ctags 与 ripgrep，Windows 下载包携带 Ctags 与 `rg.exe`。完整准备步骤见[Agent 安装](docs/getting-started.md#安装-agent)。
 
 Agent 上线后，在「客户端配置」设置 OpenCode 兼容程序，并添加、启用至少一个明确的 `provider/model`。新注册 Agent 的模型池为空，未配置模型时不能创建或续扫任务。
 

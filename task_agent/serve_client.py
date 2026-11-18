@@ -9901,8 +9901,10 @@ class OpenCodeServeManager:
         env["XDG_CONFIG_HOME"] = str(isolated_config_home)
         env["OPENCODE_CONFIG_DIR"] = str(prepared_cwd)
         env[_SERVE_PORT_ENV] = str(port)
+        isolated_data_home: Path | None = None
         if normalize_opencode_version(key.opencode_version) == OPENCODE_V2:
             isolated_runtime_root = prepared_cwd / ".opendeephole-xdg-runtime"
+            isolated_data_home = isolated_runtime_root / "data"
             for subdir, env_name in (
                 ("data", "XDG_DATA_HOME"),
                 ("state", "XDG_STATE_HOME"),
@@ -9923,6 +9925,15 @@ class OpenCodeServeManager:
             self._serve_password = ""
             self._serve_auth = None
             self._discovered_v2_paths = frozenset()
+        from .ripgrep_runtime import ensure_ripgrep_ready
+        ripgrep_result = await asyncio.to_thread(
+            ensure_ripgrep_ready,
+            env=env,
+            executable=executable,
+            isolated_data_home=isolated_data_home,
+        )
+        for warning in ripgrep_result.warnings:
+            logger.warning("OpenCode ripgrep preparation warning: %s", warning)
         cmd = _executable_argv(
             executable,
             "serve",

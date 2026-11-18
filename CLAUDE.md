@@ -96,8 +96,9 @@ and validation queues. See [framework_development.md](docs/framework_development
 
 - Keep source-index construction in `code_graph_build/`. Consumers use their own
   read-only index readers. Universal Ctags with JSON support is required;
-  Windows Agent bundles include Ctags. Incomplete-coverage indexes are usable for
-  the current run but rebuilt on the next use.
+  Windows Agent bundles include Ctags and ripgrep (`rg.exe`, provisioned on
+  startup into OpenCode's `bin` directory and `PATH`). Incomplete-coverage indexes
+  are usable for the current run but rebuilt on the next use.
 - Static analysis, candidate auditing and unified rules belong to
   `vulnerability_mining/engines/static_candidate/`.
 - Keep methods, schemas and Skills in their owning process/engine directories.

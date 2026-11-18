@@ -77,17 +77,17 @@ owner_token: "下载包自动填入的用户令牌"
 
 ### 索引与模型工具
 
-Linux/macOS 安装 Universal Ctags：
+Linux/macOS 安装 Universal Ctags 与 ripgrep（OpenCode 的 `grep`、`glob` 与 `skill` 加载依赖 `rg`）：
 
 ```bash
 # Debian / Ubuntu
-sudo apt install universal-ctags
+sudo apt install universal-ctags ripgrep
 
 # macOS
-brew install universal-ctags
+brew install universal-ctags ripgrep
 ```
 
-Windows 下载包包含 `ctags-p6.2.20260517.0-x64/ctags.exe`，启动脚本优先使用它。Git Bash/MSYS/Cygwin 下的 `run_agent.sh` 同样优先使用包内版本。启动脚本会检查 Ctags 版本与 JSON 输出能力，检查失败会退出。
+Windows 下载包（及在线运行时更新包）包含 `ctags-p6.2.20260517.0-x64/ctags.exe` 与 `ripgrep-x86_64-pc-windows-msvc/rg.exe`。启动脚本和客户端启动流程会自动将内置工具目录加入 `PATH`，并在缺少或损坏时将 `rg.exe` 自动复制到 OpenCode 数据目录（如 `%USERPROFILE%\.local\share\opencode\bin\rg.exe` 及 OpenCode 2.x 隔离目录）。Git Bash/MSYS/Cygwin 下的 `run_agent.sh` 同样优先使用包内版本。启动脚本会检查 Ctags 版本与 JSON 输出能力，检查失败会退出。
 
 在 Agent 上安装可用的 OpenCode 兼容程序。可执行文件可以是 `opencode`、`nga` 或完整路径；通过「客户端配置」的 `base.executable` 选择。模型地址和凭据可来自 Agent 本机 OpenCode 配置，也可在 Web 添加 LLM API 并下发至 Agent 私有配置；配置发现、合并和应用规则见[配置参考](configuration.md#opencode-运行配置)。
 

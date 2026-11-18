@@ -273,6 +273,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names,
         )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
+        self.assertIn("ripgrep-x86_64-pc-windows-msvc/rg.exe", names)
         self.assertFalse(any(name.startswith("checkers/") for name in names))
         self.assertNotIn("agent.yaml", names)
         self.assertNotIn("run_agent.sh", names)
@@ -348,6 +349,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
         )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
+        self.assertIn("ripgrep-x86_64-pc-windows-msvc/rg.exe", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.py", names)
         self.assertIn("task_agent/standalone.py", names)
@@ -378,6 +380,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("ctags-p6.2.20260517.0-x64", script_text)
         self.assertIn("ctags-p6.2.20260517.0-x64", batch_text)
+        self.assertIn("ripgrep-x86_64-pc-windows-msvc", script_text)
+        self.assertIn("ripgrep-x86_64-pc-windows-msvc", batch_text)
         for text in (script_text, batch_text):
             self.assertNotIn("winget", text)
             self.assertNotIn("pacman -S --needed", text)
@@ -463,8 +467,12 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "mcp_server",
             "backend",
         ]
-        self.assertEqual(updater.runtime_hash_scope()["version"], 4)
+        self.assertEqual(updater.runtime_hash_scope()["version"], 5)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
+        self.assertEqual(
+            updater.runtime_hash_scope()["tool_dirs"],
+            ["ctags-p6.2.20260517.0-x64", "ripgrep-x86_64-pc-windows-msvc"],
+        )
         self.assertEqual(backend_agents_artifacts._agent_runtime_hash_scope(), updater.runtime_hash_scope())
 
     def test_runtime_hash_includes_task_agent_changes(self) -> None:

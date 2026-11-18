@@ -16,6 +16,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 BUNDLED_CTAGS_DIR="$SCRIPT_DIR/ctags-p6.2.20260517.0-x64"
+BUNDLED_RIPGREP_DIR="$SCRIPT_DIR/ripgrep-x86_64-pc-windows-msvc"
 
 PYTHON_CMD=python3
 PYTHON_SCRIPTS="$("$PYTHON_CMD" -c 'import sysconfig; print(sysconfig.get_path("scripts") or "")' 2>/dev/null || true)"
@@ -28,6 +29,9 @@ add_bundled_ctags_path() {
         MINGW*|MSYS*|CYGWIN*)
             if [ -f "$BUNDLED_CTAGS_DIR/ctags.exe" ]; then
                 export PATH="$BUNDLED_CTAGS_DIR:$PATH"
+            fi
+            if [ -f "$BUNDLED_RIPGREP_DIR/rg.exe" ]; then
+                export PATH="$BUNDLED_RIPGREP_DIR:$PATH"
             fi
             ;;
     esac

@@ -15,6 +15,8 @@ REM Before first run: edit agent.yaml to set server_url and OpenCode model pool.
 cd /d "%~dp0"
 set "BUNDLED_CTAGS_DIR=%~dp0ctags-p6.2.20260517.0-x64"
 if exist "%BUNDLED_CTAGS_DIR%\ctags.exe" set "PATH=%BUNDLED_CTAGS_DIR%;%PATH%"
+set "BUNDLED_RIPGREP_DIR=%~dp0ripgrep-x86_64-pc-windows-msvc"
+if exist "%BUNDLED_RIPGREP_DIR%\rg.exe" set "PATH=%BUNDLED_RIPGREP_DIR%;%PATH%"
 
 set "PYTHON_CMD="
 

@@ -35,7 +35,7 @@ def _purge_expired_runtime_downloads() -> None:
 
 def _agent_runtime_hash_scope() -> dict:
     return {
-        "version": 4,
+        "version": 5,
         "dirs": list(constants._AGENT_RUNTIME_DIRS),
         "tool_dirs": list(constants._AGENT_TOOL_DIRS),
         "root_files": list(constants._AGENT_RUNTIME_ROOT_FILES),

@@ -915,9 +915,28 @@ async def _main() -> None:
     ), flush=True)
 
     # Load config
-    from deephole_client.config import apply_network_env, load_config
+    from deephole_client.config import (
+        active_opencode_executable,
+        apply_network_env,
+        load_config,
+    )
     config_path = Path(args.config) if args.config else None
     config = load_config(config_path)
+    from task_agent.ripgrep_runtime import ensure_ripgrep_ready
+    ripgrep_state = ensure_ripgrep_ready(
+        executable=active_opencode_executable(config.opencode),
+    )
+    if ripgrep_state.copied_targets:
+        print(with_local_timestamp(
+            f"PROVISIONED source={ripgrep_state.source} "
+            f"targets={','.join(ripgrep_state.copied_targets)}",
+            prefix="[ripgrep]",
+        ), flush=True)
+    for warning in ripgrep_state.warnings:
+        print(with_local_timestamp(
+            f"WARNING {warning}",
+            prefix="[ripgrep]",
+        ), flush=True)
     from deephole_client.opencode_integration import configure_opencode_component
     configure_opencode_component()
 
