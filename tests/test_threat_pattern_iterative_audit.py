@@ -380,6 +380,7 @@ def test_repeated_state_does_not_publish_duplicate_snapshots(harness):
 
 
 def test_iterative_audit_binds_threat_audit_timeout_and_refreshes_fresh_session_time(harness, monkeypatch):
+    from task_agent.host import OpenCodeInvocationMetadata
     from task_agent.task_service import get_opencode_execution_context
 
     h = harness
@@ -389,32 +390,27 @@ def test_iterative_audit_binds_threat_audit_timeout_and_refreshes_fresh_session_
         ctx = get_opencode_execution_context()
         observed_kinds.append(ctx.task_metadata.get("timeout_task_kind"))
         await values["lease_state_callback"]("running")
-        await ctx.on_invocation_metadata({
-            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
-            "attempt": 1, "started_at": "2026-11-17T01:00:00+00:00",
-        })
-        await ctx.on_session_id({
-            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
-            "attempt": 1, "started_at": "2026-11-17T01:00:00+00:00", "serve_session_id": "ses-attempt-1",
-        })
-        await ctx.on_invocation_metadata({
-            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
-            "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00",
-        })
-        await ctx.on_session_id({
-            "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
-            "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00", "serve_session_id": "ses-attempt-2",
-        })
+        attempt1 = OpenCodeInvocationMetadata(
+            backend="opencode", tool="opencode", model_id="m1", model="p/m1",
+            attempt=1, started_at="2026-11-17T01:00:00+00:00",
+        )
+        await ctx.on_invocation_metadata(attempt1)
+        attempt1.serve_session_id = "ses-attempt-1"
+        await ctx.on_session_id(attempt1)
+        attempt2 = OpenCodeInvocationMetadata(
+            backend="opencode", tool="opencode", model_id="m1", model="p/m1",
+            attempt=2, started_at="2026-11-17T04:00:00+00:00",
+        )
+        await ctx.on_invocation_metadata(attempt2)
+        attempt2.serve_session_id = "ses-attempt-2"
+        await ctx.on_session_id(attempt2)
         path = h.work / "task-results" / f"{values['task_name']}.json"
         path.write_text(json.dumps([finding(1, more=False, clues="")], ensure_ascii=False), encoding="utf-8")
         assert await values["post_session_validator"]() is None
         return OpenCodeResult(
             status="success", text="done", structured=None, model="p/m1",
             session_id="ses-attempt-2",
-            output_source={
-                "backend": "opencode", "tool": "opencode", "model_id": "m1", "model": "p/m1",
-                "attempt": 2, "started_at": "2026-11-17T04:00:00+00:00", "serve_session_id": "ses-attempt-2",
-            },
+            output_source=attempt2.model_dump(),
         )
 
     monkeypatch.setattr(engine, "run_opencode_task", invoke)
@@ -432,3 +428,34 @@ def test_iterative_audit_binds_threat_audit_timeout_and_refreshes_fresh_session_
         and item.started_at == "2026-11-17T04:00:00+00:00"
         for item in running_updates
     )
+
+
+def test_iterative_audit_preserves_invocation_metadata_when_failure_has_empty_output_source(harness, monkeypatch):
+    from task_agent.host import OpenCodeInvocationMetadata
+    from task_agent.task_service import get_opencode_execution_context
+
+    h = harness
+
+    async def invoke(**values):
+        ctx = get_opencode_execution_context()
+        await values["lease_state_callback"]("running")
+        metadata = OpenCodeInvocationMetadata(
+            backend="opencode", tool="opencode", model_id="m1", model="p/m1",
+            attempt=1, started_at="2026-11-18T02:00:00+00:00",
+        )
+        await ctx.on_invocation_metadata(metadata)
+        metadata.serve_session_id = "ses-failed-1"
+        await ctx.on_session_id(metadata)
+        return OpenCodeResult(
+            status="failure", text="model failed unexpectedly",
+            structured=None, model="p/m1", session_id="", output_source={},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    outcome = asyncio.run(engine.run(**h.kwargs))
+    assert outcome["status"] == "error"
+    failed_updates = [item for item in h.reporter.updates if item.status == "failed"]
+    assert len(failed_updates) == 1
+    assert failed_updates[0].output_source.serve_session_id == "ses-failed-1"
+    assert failed_updates[0].output_source.model == "p/m1"
+    assert failed_updates[0].started_at == "2026-11-18T02:00:00+00:00"

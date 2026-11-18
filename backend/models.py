@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from backend.call_chain import normalize_call_chain_markdown
 
+from task_agent.host import OpenCodeInvocationMetadata
 from task_agent.timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_REVIEW_TIMEOUT_SECONDS,
@@ -194,6 +196,15 @@ class OutputSource(BaseModel):
     attempt: int = 0
     started_at: str = ""
     serve_session_id: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_invocation_metadata(cls, value: Any) -> Any:
+        if isinstance(value, OpenCodeInvocationMetadata):
+            return value.model_dump()
+        if isinstance(value, Mapping) and not isinstance(value, dict):
+            return dict(value)
+        return value
 
 
 class VersionVulnerabilityLocation(BaseModel):

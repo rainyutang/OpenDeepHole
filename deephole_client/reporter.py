@@ -8,12 +8,13 @@ import json
 import logging
 import random
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from weakref import WeakValueDictionary
 
 import httpx
@@ -956,8 +957,13 @@ class Reporter:
             except asyncio.TimeoutError:
                 pass
 
-    def _with_agent_source(self, source: OutputSource | None) -> OutputSource:
-        next_source = source.model_copy() if source is not None else OutputSource()
+    def _with_agent_source(self, source: OutputSource | Mapping[str, Any] | Any | None) -> OutputSource:
+        if source is None:
+            next_source = OutputSource()
+        elif isinstance(source, OutputSource):
+            next_source = source.model_copy()
+        else:
+            next_source = OutputSource.model_validate(source)
         if self.agent_id and not next_source.agent_id:
             next_source.agent_id = self.agent_id
         if self.agent_name and not next_source.agent_name:
@@ -1533,7 +1539,12 @@ class Reporter:
         for report in reports:
             item = dict(report)
             raw_source = item.get("output_source")
-            source = raw_source if isinstance(raw_source, OutputSource) else OutputSource(**raw_source) if isinstance(raw_source, dict) else OutputSource()
+            if isinstance(raw_source, OutputSource):
+                source = raw_source
+            elif isinstance(raw_source, Mapping) or callable(getattr(raw_source, "model_dump", None)):
+                source = OutputSource.model_validate(raw_source)
+            else:
+                source = OutputSource()
             item["output_source"] = self._with_agent_source(source).model_dump()
             payload_reports.append(item)
         if self._outbox is not None:

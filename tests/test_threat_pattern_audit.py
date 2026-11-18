@@ -1435,3 +1435,44 @@ def shlex_command_fragment(executable: str) -> str:
     if any(char.isspace() for char in executable):
         return f"'{executable}'"
     return executable
+
+
+def test_pattern_audit_accepts_live_invocation_metadata_and_preserves_it_on_empty_failure_source(
+    tmp_path, monkeypatch,
+) -> None:
+    from task_agent.host import OpenCodeInvocationMetadata
+    from task_agent.task_service import get_opencode_execution_context
+
+    kwargs, _work, reporter, _report = _scoped_audit(tmp_path)
+
+    async def invoke(**values):
+        ctx = get_opencode_execution_context()
+        await values["lease_state_callback"]("running")
+        metadata = OpenCodeInvocationMetadata(
+            backend="opencode",
+            tool="opencode",
+            model_id="m1",
+            model="provider/m1",
+            attempt=1,
+            started_at="2026-11-18T03:00:00+00:00",
+        )
+        await ctx.on_invocation_metadata(metadata)
+        metadata.serve_session_id = "ses-pattern-1"
+        await ctx.on_session_id(metadata)
+        return OpenCodeResult(
+            status="failure",
+            text="session crashed",
+            session_id="",
+            structured=None,
+            model="provider/m1",
+            output_source={},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    outcome = asyncio.run(engine.run(**kwargs))
+    assert outcome["status"] == "error"
+    task = next(iter(reporter.tasks.values()))
+    assert task.status == "failed"
+    assert task.output_source.serve_session_id == "ses-pattern-1"
+    assert task.output_source.model == "provider/m1"
+    assert task.started_at == "2026-11-18T03:00:00+00:00"

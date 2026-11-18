@@ -364,3 +364,40 @@ def test_resume_terminal_reports_do_not_overtake_new_task_reports(tmp_path):
         finally:
             await reporter.close()
     asyncio.run(exercise())
+
+
+def test_output_source_and_tracker_accept_invocation_metadata_and_reject_invalid_objects():
+    from pydantic import ValidationError
+    from task_agent.host import OpenCodeInvocationMetadata
+
+    metadata = OpenCodeInvocationMetadata(
+        backend="opencode",
+        tool="opencode",
+        model_id="m-1",
+        model="provider/m-1",
+        attempt=1,
+        started_at="2026-11-18T01:23:45+00:00",
+        serve_session_id="",
+    )
+    validated = OutputSource.model_validate(metadata)
+    assert validated.model == "provider/m-1"
+    assert validated.attempt == 1
+    assert validated.serve_session_id == ""
+
+    with pytest.raises(ValidationError):
+        OutputSource.model_validate(object())
+
+    async def exercise():
+        reporter = RecordingReporter()
+        tracker = PatternTaskTracker("scan", reporter)
+        tracker.tasks["task"] = ThreatPatternAuditTask(task_id="task", status="running")
+        await tracker.invocation("task", metadata)
+        metadata.serve_session_id = "ses-live"
+        await tracker.invocation("task", metadata)
+        await tracker.state("task", "failed", reason="boom", source={})
+
+        assert tracker.tasks["task"].output_source.serve_session_id == "ses-live"
+        assert tracker.tasks["task"].output_source.model == "provider/m-1"
+        assert tracker.tasks["task"].started_at == "2026-11-18T01:23:45+00:00"
+
+    asyncio.run(exercise())
