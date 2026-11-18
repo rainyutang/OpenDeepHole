@@ -1,9 +1,90 @@
-import type { FpReviewResult, FpReviewStageConfig } from "../../types/fpReview";
+import type { FpReviewResult } from "../../types/fpReview";
 import type { OutputSource, Vulnerability } from "../../types/issues";
 import { compactVulnerabilityReport } from "../../vulnerabilityReport";
-import { severityLabel, vulnerabilityFunctionLabel, vulnerabilityTypeLabel } from "./model";
+import {
+  isFinalFpProblem,
+  severityLabel,
+  vulnerabilityFunctionLabel,
+  vulnerabilityTypeLabel,
+} from "./model";
 
-export function vulnerabilityReportContent(vuln: Vulnerability, locationOnly = false): string {
+const COMPACT_TYPE_RE = /^\*\*漏洞类型\*\*：(.+)$/m;
+const COMPACT_LOCATION_RE = /^\*\*漏洞位置\*\*：`([^`\n]+):([^`\n]+)`$/m;
+const COMPACT_FUNCTION_RE = /^\*\*漏洞函数\*\*：`([^`\n]+)`$/m;
+
+function hasSourceMetadata(source?: OutputSource | null): boolean {
+  return Boolean(
+    source && (
+      source.agent_name || source.agent_id || source.tool || source.backend
+      || source.model || source.model_id || source.use_default_model
+    ),
+  );
+}
+
+export function hasRegeneratedFpReport(
+  fpReviewResult?: FpReviewResult | null,
+): fpReviewResult is FpReviewResult {
+  return Boolean(fpReviewResult && isFinalFpProblem(fpReviewResult) && fpReviewResult.vulnerability_report?.trim());
+}
+
+export function parseCompactReportHeader(report: string): Partial<Pick<Vulnerability, "vuln_type" | "file" | "line" | "function">> {
+  const text = report.trim();
+  if (!text.startsWith("**漏洞类型**：")) return {};
+  const updates: Partial<Pick<Vulnerability, "vuln_type" | "file" | "line" | "function">> = {};
+  const typeMatch = COMPACT_TYPE_RE.exec(text);
+  const vulnType = typeMatch?.[1]?.trim();
+  if (vulnType && vulnType !== "未知类型") {
+    updates.vuln_type = vulnType;
+  }
+  const locationMatch = COMPACT_LOCATION_RE.exec(text);
+  if (locationMatch) {
+    const file = locationMatch[1]?.trim();
+    const rawLine = locationMatch[2]?.trim();
+    if (file && file !== "未知文件") updates.file = file;
+    if (rawLine && /^\d+$/.test(rawLine) && Number(rawLine) > 0) {
+      updates.line = Number(rawLine);
+    }
+  }
+  const fnMatch = COMPACT_FUNCTION_RE.exec(text);
+  const fnName = fnMatch?.[1]?.trim();
+  if (fnName && fnName !== "未知函数") {
+    updates.function = fnName;
+  }
+  return updates;
+}
+
+export function resolvedIssueDisplayVuln(
+  vuln: Vulnerability,
+  fpReviewResult?: FpReviewResult | null,
+): Vulnerability {
+  if (!hasRegeneratedFpReport(fpReviewResult)) return vuln;
+  const regenerated = fpReviewResult.vulnerability_report.trim();
+  const headerUpdates = parseCompactReportHeader(regenerated);
+  return {
+    ...vuln,
+    ...headerUpdates,
+    vulnerability_report: regenerated,
+  };
+}
+
+export function vulnerabilityReportSource(
+  vuln: Vulnerability,
+  fpReviewResult?: FpReviewResult | null,
+): OutputSource | undefined {
+  if (hasRegeneratedFpReport(fpReviewResult) && hasSourceMetadata(fpReviewResult.output_source)) {
+    return fpReviewResult.output_source;
+  }
+  return vuln.output_source;
+}
+
+export function vulnerabilityReportContent(
+  vuln: Vulnerability,
+  locationOnly = false,
+  fpReviewResult?: FpReviewResult | null,
+): string {
+  if (hasRegeneratedFpReport(fpReviewResult)) {
+    return `${fpReviewResult.vulnerability_report.trim()}\n`;
+  }
   const existing = vuln.vulnerability_report?.trim();
   if (existing) return existing;
   const compact = compactVulnerabilityReport(vuln);
@@ -54,38 +135,4 @@ export function vulnerabilityReportContent(vuln: Vulnerability, locationOnly = f
     lines.push("", "## 审计结论", "", "引擎未提供更多结构化信息。");
   }
   return `${lines.join("\n")}\n`;
-}
-
-export function finalFpReviewPresentation(
-  result: FpReviewResult,
-  stages: FpReviewStageConfig[],
-): { content: string; source?: OutputSource | null } {
-  const outputs = result.stage_outputs ?? {};
-  const sources = result.stage_output_sources ?? {};
-  const finalJudge = outputs.final_judge?.trim();
-  if (finalJudge) {
-    return {
-      content: finalJudge,
-      source: sources.final_judge ?? result.output_source,
-    };
-  }
-
-  const declaredKeys = stages.map((stage) => stage.key);
-  const orderedKeys = [
-    ...declaredKeys,
-    ...Object.keys(outputs).filter((key) => !declaredKeys.includes(key)),
-  ];
-  const finalStage = [...orderedKeys].reverse().find((key) => (
-    key !== "history_match" && Boolean(outputs[key]?.trim())
-  ));
-  if (finalStage) {
-    return {
-      content: outputs[finalStage].trim(),
-      source: sources[finalStage] ?? result.output_source,
-    };
-  }
-  return {
-    content: result.reason?.trim() || result.vulnerability_report?.trim() || "暂无最终裁定内容。",
-    source: result.output_source,
-  };
 }

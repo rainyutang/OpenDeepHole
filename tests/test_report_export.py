@@ -476,6 +476,44 @@ class ReportExportTests(unittest.TestCase):
         self.assertEqual(response.media_type, "text/csv")
         download.assert_awaited_once_with("scan-1", user)
 
+    def test_final_tp_regenerated_report_overrides_erroneous_mining_report_in_exports(self) -> None:
+        examples = Path(__file__).resolve().parents[1] / "docs" / "examples"
+        regenerated_md = (examples / "vulnerability-report.md").read_text(encoding="utf-8")
+        stale = _vulnerability("wrong_func", vuln_type="wrong_type")
+        stale.file = "src/wrong.c"
+        stale.line = 999
+        stale.description = "挖掘阶段错误描述"
+        stale.vulnerability_report = "**漏洞类型**：wrong_type\n\n**问题**：挖掘阶段错误描述\n"
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[stale],
+        )
+        fp_map = {
+            0: _fp_result(0, "tp", reason="最终裁决确认越界写").model_copy(
+                update={"vulnerability_report": regenerated_md},
+            ),
+        }
+
+        _, rows = self._rows(self._download(scan, fp_map))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["文件"], "src/proto/parser.c")
+        self.assertEqual(rows[0]["行号"], "44")
+        self.assertEqual(rows[0]["函数"], "CopyPayload")
+        self.assertEqual(rows[0]["问题类型"], "缓冲区越界写")
+        self.assertIn("CopyPayload()", rows[0]["问题描述"])
+        self.assertEqual(rows[0]["ZIP中的问题报告"], "vuln-0-src_proto_parser.c_44.md")
+
+        single_response = self._download_single(scan, 0, fp_map)
+        single_md = single_response.body.decode("utf-8")
+        self.assertIn('filename="vuln-0-src_proto_parser.c_44.md"', single_response.headers["Content-Disposition"])
+        self.assertTrue(single_md.startswith(regenerated_md.strip()))
+        self.assertNotIn("挖掘阶段错误描述", single_md)
+        self.assertIn("**验证入口函数**：HandlePacket", single_md)
+
 
 if __name__ == "__main__":
     unittest.main()

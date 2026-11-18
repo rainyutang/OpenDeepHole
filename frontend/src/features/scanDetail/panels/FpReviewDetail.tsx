@@ -1,3 +1,4 @@
+import VulnerabilityMarkdownReport from "../../../components/VulnerabilityMarkdownReport";
 import { getFpReviewStageDisplays, isEffectiveFpReviewResult } from "../../../fpReview";
 import type { FpReviewJob, FpReviewStageConfig } from "../../../types/fpReview";
 import type { Vulnerability } from "../../../types/issues";
@@ -96,7 +97,11 @@ export function FpReviewDetail({
                       {section.label && (
                         <h5 className="mb-1 text-xs font-semibold text-slate-400">{section.label}</h5>
                       )}
-                      <MarkdownContent content={section.markdown} />
+                      {stage.key === "final_judge" && section.markdown.trim().startsWith("**漏洞类型**：") ? (
+                        <VulnerabilityMarkdownReport content={section.markdown} />
+                      ) : (
+                        <MarkdownContent content={section.markdown} />
+                      )}
                     </div>
                   ))}
                 </div>

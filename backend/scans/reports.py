@@ -13,6 +13,7 @@ from backend.scans.reporting import (
     _exportable_problem_groups,
     _problem_report_filename,
     _report_vulnerability_groups,
+    _resolved_report_vulnerability,
     _safe_filename_part,
     _vuln_report_markdown,
     _vulnerability_at_index,
@@ -45,7 +46,7 @@ async def download_report(
         validation_map,
     )
     for group in report_groups:
-        v = group.vulnerability
+        v = _resolved_report_vulnerability(group.vulnerability, group.fp_result)
         writer.writerow([
             v.file,
             v.line,
@@ -87,17 +88,19 @@ async def download_vulnerability_report(
         ),
         None,
     )
+    resolved_fp_result = group.fp_result if group is not None else fp_map.get(idx)
+    resolved_vuln = _resolved_report_vulnerability(vuln, resolved_fp_result)
     markdown = _vuln_report_markdown(
         idx,
         vuln,
-        group.fp_result if group is not None else fp_map.get(idx),
+        resolved_fp_result,
         group.validation if group is not None else validation_map.get(idx),
         _fp_review_stage_titles(scan_id),
     )
     fname = (
         f"vuln-{idx}-"
-        f"{_safe_filename_part(vuln.file or 'unknown')}_"
-        f"{vuln.line if vuln.line > 0 else 'unknown'}.md"
+        f"{_safe_filename_part(resolved_vuln.file or 'unknown')}_"
+        f"{resolved_vuln.line if resolved_vuln.line > 0 else 'unknown'}.md"
     )
     return DownloadArtifact(
         content=markdown,
@@ -138,7 +141,7 @@ async def download_report_zip(
             fp_review_stage_titles = _fp_review_stage_titles(scan_id)
             for group in problems:
                 i = group.index
-                v = group.vulnerability
+                v = _resolved_report_vulnerability(group.vulnerability, group.fp_result)
                 entry = _problem_report_filename(group)
                 index_lines.append(
                     f"- [{v.engine_label} · "

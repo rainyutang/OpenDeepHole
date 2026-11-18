@@ -3,15 +3,14 @@ import VulnerabilityMarkdownReport from "../../components/VulnerabilityMarkdownR
 import type { IssueDetailProps } from "./types";
 import { MATCH_TYPE_LABELS, SEVERITY_STYLES } from "./model";
 import { MarkdownReport, OutputSourceLine } from "./presentation";
-import type { finalFpReviewPresentation } from "./reportModel";
 import { vulnerabilityReportContent } from "./reportModel";
 
 type ReportSectionProps = Pick<IssueDetailProps,
   "vuln" | "fpReviewResult" | "fpReviewStages" | "fpReviewRunning" | "finalTpOnly" | "events" | "index"
-> & { finalFpPresentation: ReturnType<typeof finalFpReviewPresentation> | null };
+>;
 
 export function IssueReportSections({
-  vuln, fpReviewResult, fpReviewStages, fpReviewRunning, finalTpOnly, events, index, finalFpPresentation,
+  vuln, fpReviewResult, fpReviewStages, fpReviewRunning, finalTpOnly, events, index,
 }: ReportSectionProps) {
   const [showDialogue, setShowDialogue] = useState(false);
   const [showFpReason, setShowFpReason] = useState(false);
@@ -31,7 +30,7 @@ export function IssueReportSections({
     : readyStageKeys[0] ?? activeFpStage;
   const activeStageOutput = fpStageOutputs[effectiveFpStage] ?? "";
   const activeStageOutputSource = fpStageOutputSources[effectiveFpStage];
-  const vulnerabilityReport = vulnerabilityReportContent(vuln, finalTpOnly);
+  const vulnerabilityReport = vulnerabilityReportContent(vuln, finalTpOnly, fpReviewResult);
 
   const dialogueEvents = events.filter(
     (e) => e.phase === "opencode_output" && e.candidate_index === index,
@@ -54,17 +53,9 @@ export function IssueReportSections({
         </section>
       )}
 
-      {fpReviewResult && (
-        finalTpOnly && finalFpPresentation ? (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">AI 去误报复核</h4>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-              <MarkdownReport content={finalFpPresentation.content} />
-            </div>
-          </section>
-        ) : (
-          <section>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
+      {!finalTpOnly && fpReviewResult && (
+        <section>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
             <h4
               className={`text-xs font-semibold uppercase ${
                 !hasFpFinalResult
@@ -148,8 +139,7 @@ export function IssueReportSections({
               {fpReviewResult.reason}
             </pre>
           )}
-          </section>
-        )
+        </section>
       )}
 
       {dialogueEvents.length > 0 && (

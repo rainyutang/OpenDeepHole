@@ -55,16 +55,12 @@ Markdown fallback。
 Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、校验与失败纠正。
 每个阶段的业务 Prompt 都必须在 JSON Schema 之后以“请使用中文输出”结尾。
 
-内置 `adversarial` 依次使用 `/prove-bug`、`/prove-fp` 和 `/final-judge`；正方判定误报时仍
-直接早退，否则最终裁决只接收原始、正方和反方三份 Markdown 报告。内置 `fp_check` 的所有阶段
-使用 `/fp-check`，每个后续阶段按执行顺序接收已经完成的阶段报告。
+内置 `adversarial` 依次使用 `/prove-bug`、`/prove-fp` 和 `/final-judge`：
+- `prove_bug` 与 `prove_fp` 聚焦源码论据与“影响是否属于非预期安全后果 vs 预期设计”核查，只返回 `verdict`、`reason` 与 Markdown 论据 `evidence`；正方判定误报时直接早退，否则最终裁决接收原始报告与正反方论据。
+- `final_judge` 使用首层二元裁决 Schema，`verdict` 只接受字符串 `true_positive` 或 `false_positive`。判定为 `true_positive` 时必须在首层完整输出与漏洞挖掘阶段一致的报告字段（`severity`、`vuln_type`、`file`、`line`、`function`、`description`、`call_chain`、`vulnerable_code`、`remediation`），由统一引擎报告构造器生成最终问题报告并覆盖挖掘阶段旧报告；真实代码缺陷已确认但外部触发证据不足时，按规则输出 `true_positive` 和 `medium`。判定为 `false_positive` 时输出 `verdict` 与误报说明 `description`。
+- 最终裁决返回 `uncertain` 或缺少必填报告字段会进入 Task Agent 既有结构化输出纠正流程，重试耗尽后按失败处理。升级前未形成有效结论的项目可通过“启动复核”补跑，已有有效结果保持原样。
 
-`final_judge` 使用独立的二元裁决 Schema，`verdict` 只接受字符串 `true_positive` 或
-`false_positive`；正方、反方中间阶段仍可返回 `uncertain`。最终裁决 Prompt、Skill 和实际
-传给 Task Agent 的 Schema 使用相同的合法取值，报告结论必须与 `verdict` 一致。真实代码
-缺陷已经确认、仅外部触发证据不足时，按现有规则输出 `true_positive` 和 `medium`。
-最终裁决返回 `uncertain` 或其他非法值会进入 Task Agent 既有结构化输出纠正流程，重试
-耗尽后按失败处理。升级前未形成有效结论的项目可通过“启动复核”补跑，已有有效结果保持原样。
+内置 `fp_check` 的所有阶段使用 `/fp-check`，每个后续阶段按执行顺序接收已经完成的阶段报告。
 
 ## 清单
 

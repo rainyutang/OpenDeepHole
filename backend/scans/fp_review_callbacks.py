@@ -108,8 +108,8 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         )
         logger.info("FP review %s resumed from Agent result", body.review_id)
     now = datetime.now(timezone.utc).isoformat()
-    # 去误报定级简化为二元：tp 且外部可触发（或命中历史/校验匹配）为 high，其余一律 low。
-    severity = "high" if (body.verdict == "tp" and body.severity == "high") else "low"
+    # 去误报定级简化为二元：tp 且外部可触发（critical/high，或命中历史/校验匹配）为 high，其余一律 low。
+    severity = "high" if (body.verdict == "tp" and body.severity in {"critical", "high"}) else "low"
     result = FpReviewResult(
         vuln_index=body.vuln_index,
         verdict=body.verdict,

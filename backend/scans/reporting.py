@@ -127,6 +127,71 @@ def _exportable_problem_groups(
     ]
 
 
+_COMPACT_TYPE_RE = re.compile(r"^\*\*漏洞类型\*\*：(.+)$", re.MULTILINE)
+_COMPACT_LOCATION_RE = re.compile(r"^\*\*漏洞位置\*\*：`([^`\n]+):([^`\n]+)`$", re.MULTILINE)
+_COMPACT_FUNCTION_RE = re.compile(r"^\*\*漏洞函数\*\*：`([^`\n]+)`$", re.MULTILINE)
+_COMPACT_PROBLEM_RE = re.compile(
+    r"^\*\*问题\*\*：([\s\S]*?)(?=\n\n\*\*(?:调用链|证据|修复建议)\*\*|\n\n## |\Z)",
+    re.MULTILINE,
+)
+_COMPACT_CALL_CHAIN_RE = re.compile(
+    r"^\*\*调用链\*\*\n\n([\s\S]*?)(?=\n\n\*\*(?:证据|修复建议)\*\*|\n\n## |\Z)",
+    re.MULTILINE,
+)
+
+
+def _parse_compact_report_fields(report: str) -> dict[str, object]:
+    """Extract structured header fields when a report uses the compact mining format."""
+    text = str(report or "").strip()
+    if not text.startswith("**漏洞类型**："):
+        return {}
+    updates: dict[str, object] = {}
+    type_match = _COMPACT_TYPE_RE.search(text)
+    if type_match:
+        vuln_type = type_match.group(1).strip()
+        if vuln_type and vuln_type != "未知类型":
+            updates["vuln_type"] = vuln_type
+    location_match = _COMPACT_LOCATION_RE.search(text)
+    if location_match:
+        file_path = location_match.group(1).strip()
+        line_raw = location_match.group(2).strip()
+        if file_path and file_path != "未知文件":
+            updates["file"] = file_path
+        if line_raw.isdigit() and int(line_raw) > 0:
+            updates["line"] = int(line_raw)
+    function_match = _COMPACT_FUNCTION_RE.search(text)
+    if function_match:
+        function = function_match.group(1).strip()
+        if function and function != "未知函数":
+            updates["function"] = function
+    problem_match = _COMPACT_PROBLEM_RE.search(text)
+    if problem_match and problem_match.group(1).strip():
+        updates["description"] = problem_match.group(1).strip()
+    chain_match = _COMPACT_CALL_CHAIN_RE.search(text)
+    if chain_match and chain_match.group(1).strip():
+        updates["call_chain"] = chain_match.group(1).strip()
+    return updates
+
+
+def _resolved_report_vulnerability(
+    vuln: Vulnerability,
+    fp_result: FpReviewResult | None,
+) -> Vulnerability:
+    """Project final-judge regenerated report fields without mutating stored mining records."""
+    if (
+        fp_result is None
+        or not is_effective_fp_review_result(fp_result)
+        or fp_result.verdict != "tp"
+    ):
+        return vuln
+    regenerated = str(fp_result.vulnerability_report or "").strip()
+    if not regenerated:
+        return vuln
+    updates = _parse_compact_report_fields(regenerated)
+    updates["vulnerability_report"] = regenerated
+    return vuln.model_copy(update=updates)
+
+
 def _safe_filename_part(text: str) -> str:
     """Sanitize a string for safe use inside a download filename / zip entry."""
     cleaned = re.sub(r"[^\w.-]+", "_", text.strip())
@@ -134,7 +199,7 @@ def _safe_filename_part(text: str) -> str:
 
 
 def _problem_report_filename(group: _ReportVulnerabilityGroup) -> str:
-    vulnerability = group.vulnerability
+    vulnerability = _resolved_report_vulnerability(group.vulnerability, group.fp_result)
     export_file = vulnerability.file or "unknown"
     export_line = vulnerability.line if vulnerability.line > 0 else "unknown"
     return (
@@ -287,18 +352,19 @@ def _vuln_report_markdown(
     }
     from deephole_client.vulnerability_mining.engine_report import build_engine_vulnerability_report
 
-    vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
+    resolved_vuln = _resolved_report_vulnerability(vuln, fp_result)
+    vulnerability_report = str(getattr(resolved_vuln, "vulnerability_report", "") or "").strip()
     if not vulnerability_report:
         vulnerability_report = build_engine_vulnerability_report(
-            vuln.model_dump(mode="json")
+            resolved_vuln.model_dump(mode="json")
         ).strip()
     lines: list[str] = [vulnerability_report, ""]
 
     platform_details = [
         f"- **结果索引**：{idx}",
-        f"- **漏洞挖掘引擎**：{vuln.engine_label} ({vuln.engine_id})",
+        f"- **漏洞挖掘引擎**：{resolved_vuln.engine_label} ({resolved_vuln.engine_id})",
     ]
-    validation_entry = call_chain_entry_function(getattr(vuln, "call_chain", ""))
+    validation_entry = call_chain_entry_function(getattr(resolved_vuln, "call_chain", ""))
     if validation_entry:
         platform_details.append(f"- **验证入口函数**：{validation_entry}")
     if getattr(vuln, "variant_of", ""):

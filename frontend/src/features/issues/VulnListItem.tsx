@@ -16,6 +16,7 @@ import {
   vulnerabilityTypeLabel,
 } from "./model";
 import { FpStatusBadge } from "./presentation";
+import { resolvedIssueDisplayVuln } from "./reportModel";
 
 export function VulnListItem({
   vuln,
@@ -52,8 +53,9 @@ export function VulnListItem({
         : "hover:bg-slate-800/60"
   }`;
   if (finalTpOnly) {
-    const displayedType = displayedVulnerabilityTypeLabel(vuln, staticRuleTypeLabels);
-    const rawType = vulnerabilityTypeLabel(vuln);
+    const displayVuln = resolvedIssueDisplayVuln(vuln, fpResult);
+    const displayedType = displayedVulnerabilityTypeLabel(displayVuln, staticRuleTypeLabels);
+    const rawType = vulnerabilityTypeLabel(displayVuln);
     return (
       <li>
         <button type="button" ref={focusRef} aria-current={active ? "true" : undefined} onClick={onClick} className={itemClassName}>
@@ -68,11 +70,11 @@ export function VulnListItem({
               人工：{feedback?.label ?? "未标记"}
             </span>
           </div>
-          <div className="mt-1.5 truncate font-mono text-xs text-slate-200" title={vulnerabilityLocation(vuln)}>
-            {vulnerabilityLocation(vuln, true)}
+          <div className="mt-1.5 truncate font-mono text-xs text-slate-200" title={vulnerabilityLocation(displayVuln)}>
+            {vulnerabilityLocation(displayVuln, true)}
           </div>
-          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vulnerabilityFunctionLabel(vuln)}>
-            {vulnerabilityFunctionLabel(vuln)}
+          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vulnerabilityFunctionLabel(displayVuln)}>
+            {vulnerabilityFunctionLabel(displayVuln)}
           </div>
         </button>
       </li>

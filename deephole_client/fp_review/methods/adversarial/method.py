@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import inspect
 import json
 from pathlib import Path
@@ -13,6 +14,14 @@ from deephole_client.fp_review.prompts import (
     build_skill_prompt,
     original_vulnerability_report,
     stage_markdown_report,
+)
+from deephole_client.vulnerability_mining.engine_report import (
+    build_engine_vulnerability_report,
+)
+from deephole_client.vulnerability_mining.report_schema import (
+    AUDIT_JSON_REPAIR_OUTPUT_PROMPT,
+    REPORT_PROPERTIES,
+    REPORT_REQUIRED_FIELDS,
 )
 from task_agent import run_opencode_task
 
@@ -53,23 +62,19 @@ _STAGE_SKILLS = {
 }
 _STAGE_TASKS = {
     "prove_bug": (
-        "请使用中文针对下面的原始漏洞报告进行漏洞成立论证。必须读取项目中的真实代码，"
-        "验证外部输入源、调用链、变量可控性、现有校验、危险操作和实际影响；"
-        "不得修改任何项目文件。最终只返回本 Skill 约定的 JSON。"
+        "请使用中文针对下面的原始漏洞报告进行漏洞成立论证。必须读取项目中的真实代码进行核实，"
+        "不得修改任何项目文件。最终只返回符合输出 JSON Schema 的 JSON 对象。"
     ),
     "prove_fp": (
-        "请使用中文针对下面的原始漏洞报告进行误报论证。必须独立读取项目中的真实代码，"
-        "重点寻找不可达、不可控、校验充分、容量与索引绑定、危险操作实际安全或错误路径"
-        "提前终止等反证；不得修改任何项目文件。最终只返回本 Skill 约定的 JSON。"
+        "请使用中文针对下面的原始漏洞报告进行误报论证。必须独立读取项目中的真实代码寻找反证，"
+        "不得修改任何项目文件。最终只返回符合输出 JSON Schema 的 JSON 对象。"
     ),
     "final_judge": (
-        "请使用中文结合下面三份报告完成最终裁决。必须重新核对项目中的真实代码，"
-        "分别判断正方和反方证据是否成立，不得按两边结论投票，也不得修改任何项目文件。"
-        "最终 verdict 必须且只能为 true_positive 或 false_positive，不允许 uncertain 或其他值。"
-        "reason、stage_markdown 中的最终结论必须与 verdict 一致。"
-        "已经确认真实代码缺陷，但外部触发证据不足时，应判定为 true_positive，"
-        "并按 Skill 的规则说明严重性和证据限制。"
-        "最终只返回本 Skill 约定的 JSON。"
+        "请使用中文结合下面三份报告完成最终裁决。必须重新核对项目中的真实代码判断正反方证据是否成立，"
+        "不得按两边结论投票，也不得修改任何项目文件。最终 verdict 只能为 true_positive 或 "
+        "false_positive；判定为 true_positive 时按本 Skill 的标准与格式基于真实源码填写完整报告字段，"
+        "判定为 false_positive 时在 description 中写明具体误报依据。"
+        "最终只返回符合输出 JSON Schema 的 JSON 对象。"
     ),
 }
 _STAGE_SCHEMA: dict[str, Any] = {
@@ -79,30 +84,61 @@ _STAGE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["true_positive", "false_positive", "uncertain"],
         },
-        "reason": {"type": "string"},
-        "evidence": {"type": "array", "items": {"type": "string"}},
-        "revised_severity": {"type": "string"},
-        "vulnerability_report": {"type": "string"},
-        "stage_markdown": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1},
     },
     "required": [
         "verdict",
         "reason",
         "evidence",
-        "revised_severity",
-        "vulnerability_report",
-        "stage_markdown",
     ],
+    "additionalProperties": False,
+}
+_FINAL_JUDGE_REPORT_PROPERTIES: dict[str, Any] = {
+    **deepcopy(REPORT_PROPERTIES),
+    "description": {
+        "type": "string",
+        "minLength": 1,
+        "description": (
+            "true_positive 时简述漏洞成因、触发条件及影响；"
+            "false_positive 时指出有效校验、不可满足约束或预期设计依据所在函数与行号，说明为什么问题不成立。"
+        ),
+    },
 }
 _FINAL_JUDGE_SCHEMA: dict[str, Any] = {
-    **_STAGE_SCHEMA,
+    "type": "object",
     "properties": {
-        **_STAGE_SCHEMA["properties"],
         "verdict": {
             "type": "string",
             "enum": ["true_positive", "false_positive"],
         },
+        **_FINAL_JUDGE_REPORT_PROPERTIES,
     },
+    "required": [
+        "verdict",
+        "description",
+    ],
+    "oneOf": [
+        {
+            "properties": {
+                "verdict": {"const": "true_positive"},
+            },
+            "required": [
+                "verdict",
+                *REPORT_REQUIRED_FIELDS,
+            ],
+        },
+        {
+            "properties": {
+                "verdict": {"const": "false_positive"},
+            },
+            "required": [
+                "verdict",
+                "description",
+            ],
+        },
+    ],
+    "additionalProperties": False,
 }
 
 
@@ -131,13 +167,48 @@ def _normalize_vulnerability(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def _stage_payload(result: Any) -> dict[str, Any]:
+def _format_debate_stage_markdown(reason: str, evidence: str) -> str:
+    if reason and evidence and evidence != reason:
+        return f"**结论**：{reason}\n\n{evidence}"
+    return evidence or reason
+
+
+def _build_final_vulnerability_report(
+    raw: dict[str, Any],
+    vulnerability: dict[str, Any],
+) -> str:
+    report_record = {
+        **raw,
+        "confirmed": True,
+        "vulnerability_report": "",
+    }
+    report = build_engine_vulnerability_report(report_record).strip()
+    version_locations = [
+        item
+        for item in (vulnerability.get("version_locations") or [])
+        if isinstance(item, dict)
+    ]
+    if version_locations:
+        version_lines = "\n".join(
+            f"- {item.get('version_name', '')}：{item.get('file', '')}:{item.get('line', '')} ({item.get('function', '')})"
+            for item in version_locations
+        ).strip()
+        if version_lines:
+            report = f"{report}\n\n## 受影响版本\n\n{version_lines}"
+    return report
+
+
+def _stage_payload(
+    stage: str,
+    result: Any,
+    vulnerability: dict[str, Any],
+) -> dict[str, Any]:
     if result.status != "success" or not isinstance(result.structured, dict):
         return {
             "status": result.status,
             "verdict": "uncertain",
             "reason": str(result.text or "Stage returned no structured result"),
-            "evidence": [],
+            "evidence": "",
             "revised_severity": "",
             "vulnerability_report": "",
             "stage_markdown": str(result.text or ""),
@@ -146,23 +217,62 @@ def _stage_payload(result: Any) -> dict[str, Any]:
             "output_source": dict(result.output_source or {}),
         }
     raw = result.structured
+    if stage == "final_judge":
+        verdict = str(raw.get("verdict") or "uncertain")
+        if verdict not in {"true_positive", "false_positive"}:
+            verdict = "uncertain"
+        description = str(raw.get("description") or "").strip()
+        if verdict == "true_positive":
+            regenerated = _build_final_vulnerability_report(raw, vulnerability)
+            return {
+                "status": "success",
+                "verdict": verdict,
+                "reason": description,
+                "evidence": "",
+                "revised_severity": str(
+                    raw.get("severity")
+                    or vulnerability.get("severity")
+                    or "high"
+                ),
+                "vulnerability_report": regenerated,
+                "stage_markdown": regenerated,
+                "match_type": "",
+                "match_reference": "",
+                "output_source": dict(result.output_source or {}),
+                "report": {
+                    key: raw.get(key)
+                    for key in REPORT_REQUIRED_FIELDS
+                    if key in raw
+                },
+            }
+        return {
+            "status": "success",
+            "verdict": verdict,
+            "reason": description,
+            "evidence": "",
+            "revised_severity": "low" if verdict == "false_positive" else "",
+            "vulnerability_report": "",
+            "stage_markdown": description,
+            "match_type": "",
+            "match_reference": "",
+            "output_source": dict(result.output_source or {}),
+        }
+
     verdict = str(raw.get("verdict") or "uncertain")
     if verdict not in {"true_positive", "false_positive", "uncertain"}:
         verdict = "uncertain"
+    reason = str(raw.get("reason") or "").strip()
+    evidence = str(raw.get("evidence") or "").strip()
     return {
         "status": "success",
         "verdict": verdict,
-        "reason": str(raw.get("reason") or ""),
-        "evidence": [
-            str(item)
-            for item in raw.get("evidence") or []
-            if str(item).strip()
-        ],
-        "revised_severity": str(raw.get("revised_severity") or ""),
-        "vulnerability_report": str(raw.get("vulnerability_report") or ""),
-        "stage_markdown": str(raw.get("stage_markdown") or ""),
-        "match_type": str(raw.get("match_type") or ""),
-        "match_reference": str(raw.get("match_reference") or ""),
+        "reason": reason,
+        "evidence": evidence,
+        "revised_severity": "low" if verdict == "false_positive" else "",
+        "vulnerability_report": "",
+        "stage_markdown": _format_debate_stage_markdown(reason, evidence),
+        "match_type": "",
+        "match_reference": "",
         "output_source": dict(result.output_source or {}),
     }
 
@@ -251,8 +361,14 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             vuln_index=item_index,
             stage=stage,
         )
+        is_final_judge = stage == "final_judge"
         output_schema = (
-            _FINAL_JUDGE_SCHEMA if stage == "final_judge" else _STAGE_SCHEMA
+            _FINAL_JUDGE_SCHEMA if is_final_judge else _STAGE_SCHEMA
+        )
+        repair_prompt = (
+            AUDIT_JSON_REPAIR_OUTPUT_PROMPT
+            if is_final_judge
+            else FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT
         )
         prompt = build_skill_prompt(
             skill_name=_STAGE_SKILLS[stage],
@@ -272,14 +388,14 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             prompt=prompt,
             required_capability=capability,
             output_schema=output_schema,
-            json_repair_output_prompt=FP_REVIEW_JSON_REPAIR_OUTPUT_PROMPT,
+            json_repair_output_prompt=repair_prompt,
             invalid_json_retry_count=retry_count,
             config_path=kwargs.get("task_agent_config"),
             readable_paths=kwargs.get("review_notes_dir"),
             output=None,
             cancel_event=cancel_event,
         )
-        payload = _stage_payload(result)
+        payload = _stage_payload(stage, result, vulnerability)
         _write_stage_artifact(
             work_dir / "artifacts",
             stage,
@@ -399,13 +515,11 @@ async def run(**kwargs: Any) -> dict[str, Any]:
         "reason": reason,
         "revised_severity": str(
             (final or {}).get("revised_severity")
-            or vulnerability.get("severity")
+            or ("low" if verdict == "false_positive" else vulnerability.get("severity"))
             or ""
         ),
         "vulnerability_report": str(
-            (final or {}).get("vulnerability_report")
-            or (report_markdown if verdict == "true_positive" else "")
-            or ""
+            (final or {}).get("vulnerability_report") or ""
         ),
         "match_reference": "",
         "match_type": "",

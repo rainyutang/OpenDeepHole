@@ -190,8 +190,8 @@ for (const publicAccess of [false, true]) {
     assert.equal(calls.filter((c) => /\/(events|event-history|candidates|threat-audit-tasks)$/.test(c.url)).length, 3);
     const typeFilter = root.root.findAllByType("select").find((node) => text(node.parent).startsWith("类型"));
     await act(async () => typeFilter.props.onChange({ target: { value: "last_only" } }));
-    assert.match(text(root.toJSON()), /完整报告 104/);
-    assert.match(text(root.toJSON()), /有效结论 104/);
+    assert.match(text(root.toJSON()), /复核报告 104/);
+    assert.doesNotMatch(text(root.toJSON()), /完整报告 104|有效结论 104|AI 去误报复核/);
     assert.match(text(root.toJSON()), /已完成验证 \(1\)/);
     const requestCount = calls.length;
     await openIssues(root);

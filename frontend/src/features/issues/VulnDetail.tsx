@@ -16,7 +16,7 @@ import {
   vulnerabilityTypeLabel,
 } from "./model";
 import { FpStatusBadge, OutputSourceLine, hasOutputSource } from "./presentation";
-import { finalFpReviewPresentation } from "./reportModel";
+import { resolvedIssueDisplayVuln, vulnerabilityReportSource } from "./reportModel";
 import { useIssueFeedback } from "./useIssueFeedback";
 import { useIssueReportDownload } from "./useIssueReportDownload";
 
@@ -45,9 +45,8 @@ export function VulnDetail({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const feedback = useIssueFeedback({ scanId, index, vuln, onVulnMarked, onFeedbackCreated, onFeedbackRemoved });
   const { exporting, handleExportMarkdown } = useIssueReportDownload(scanId, index);
-  const finalFpPresentation = finalTpOnly && fpReviewResult
-    ? finalFpReviewPresentation(fpReviewResult, fpReviewStages)
-    : null;
+  const displayVuln = finalTpOnly ? resolvedIssueDisplayVuln(vuln, fpReviewResult) : vuln;
+  const reportSource = finalTpOnly ? vulnerabilityReportSource(vuln, fpReviewResult) : vuln.output_source;
 
   const aiVerdict = getVerdict(vuln);
   const isProblem = aiVerdict === "confirmed";
@@ -56,8 +55,8 @@ export function VulnDetail({
       {/* Header */}
       <div className="mb-3 border-b border-slate-800 pb-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="min-w-0 break-all font-mono text-sm text-slate-200" title={vulnerabilityLocation(vuln)}>
-            {vulnerabilityLocation(vuln)}
+          <span className="min-w-0 break-all font-mono text-sm text-slate-200" title={vulnerabilityLocation(displayVuln)}>
+            {vulnerabilityLocation(displayVuln)}
           </span>
           {!finalTpOnly && (
             <>
@@ -140,7 +139,7 @@ export function VulnDetail({
           </div>
         </div>
         <div className="mt-1.5 break-all font-mono text-xs text-slate-500">
-          {vulnerabilityFunctionLabel(vuln)}
+          {vulnerabilityFunctionLabel(displayVuln)}
         </div>
         {!finalTpOnly && (
           <div className="mt-1.5 text-xs text-slate-500">
@@ -172,13 +171,9 @@ export function VulnDetail({
               </button>
             )}
           </div>
-          {hasOutputSource(vuln.output_source) && <div className="break-all">
+          {hasOutputSource(reportSource) && <div className="break-all">
             <span className="text-xs text-slate-500">漏洞报告</span>
-            <OutputSourceLine source={vuln.output_source} />
-          </div>}
-          {hasOutputSource(finalFpPresentation?.source) && <div className="break-all">
-            <span className="text-xs text-slate-500">AI 去误报复核</span>
-            <OutputSourceLine source={finalFpPresentation?.source} />
+            <OutputSourceLine source={reportSource} />
           </div>}
         </div>
       )}
@@ -187,8 +182,7 @@ export function VulnDetail({
 
       {/* Content sections */}
       <IssueReportSections vuln={vuln} fpReviewResult={fpReviewResult} fpReviewStages={fpReviewStages}
-        fpReviewRunning={fpReviewRunning} finalTpOnly={finalTpOnly} events={events} index={index}
-        finalFpPresentation={finalFpPresentation} />
+        fpReviewRunning={fpReviewRunning} finalTpOnly={finalTpOnly} events={events} index={index} />
     </div>
   );
 }
