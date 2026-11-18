@@ -36,7 +36,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_three_rounds_are_lifetime_budget_and_manual_does_not_reset(automatic_scan, monkeypatch):
+def test_manual_resume_resets_exhausted_three_round_budget(automatic_scan, monkeypatch):
     store = automatic_scan
     rounds = []
 
@@ -60,11 +60,18 @@ def test_three_rounds_are_lifetime_budget_and_manual_does_not_reset(automatic_sc
         token = await auto_resume.acquire_resume_dispatch(
             "scan", automatic=False, expected_revision=0, server_url="http://server",
         )
+        assert store.get_scan_auto_resume("scan")["auto_resume_count"] == 0
         await auto_resume.finish_resume_dispatch("scan", token)
     run(manual())
-    run(auto_resume.process_auto_resume("scan"))
-    assert store.get_scan_auto_resume("scan")["auto_resume_count"] == 3
-    assert len(rounds) == 3
+    assert store.get_scan_auto_resume("scan")["auto_resume_count"] == 0
+    assert store.get_scan_auto_resume("scan")["auto_resume_state"] == "running"
+
+    for _ in range(5):
+        run(auto_resume.process_auto_resume("scan"))
+    assert len(set(rounds)) == 6
+    record = store.get_scan_auto_resume("scan")
+    assert record["auto_resume_count"] == 3
+    assert record["auto_resume_state"] == "exhausted"
 
 
 @pytest.mark.parametrize("status", [ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING])

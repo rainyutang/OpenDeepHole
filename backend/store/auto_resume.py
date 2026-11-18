@@ -131,7 +131,7 @@ class ScanAutoResumeMixin:
 
     def reserve_scan_resume(self, scan_id: str, *, expected_revision: int, automatic: bool,
                             server_url: str = '', expected_fp_revisions=None, lease_seconds: float = 120) -> str | None:
-        """Reserve once, counting automatic rounds only after all preflight checks."""
+        """Reserve once, charging automatic rounds or resetting budget on manual resume."""
         now = time.time()
         with self._lock:
             self._locked_scan(scan_id, include_pool=False)
@@ -167,9 +167,10 @@ class ScanAutoResumeMixin:
                 "source_fp_json = excluded.source_fp_json, lease_until = excluded.lease_until, dispatch_started = 0",
                 (scan_id, server_url, round_id, int(automatic), expected_revision, json.dumps(fp, sort_keys=True), now + lease_seconds),
             )
+            next_count = int(row['auto_resume_count']) + int(not recover) if automatic else 0
             self._conn.execute(
-                "UPDATE scans SET auto_resume_count = auto_resume_count + ?, auto_resume_state = ?, auto_resume_reason = '' WHERE scan_id = ?",
-                (int(automatic and not recover), 'running' if automatic else 'idle', scan_id),
+                "UPDATE scans SET auto_resume_count = ?, auto_resume_state = ?, auto_resume_reason = '' WHERE scan_id = ?",
+                (next_count, 'running' if automatic else 'idle', scan_id),
             )
             self._conn.commit()
             return round_id

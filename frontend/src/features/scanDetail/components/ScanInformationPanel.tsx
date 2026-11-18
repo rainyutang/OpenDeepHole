@@ -161,7 +161,7 @@ export function ScanInformationPanel({
                 label="自动续扫"
                 enabled={scan.auto_resume_enabled === true}
                 detail={scan.auto_resume_enabled
-                  ? `${autoResumeLabel(scan)}。${scan.auto_resume_reason || "扫描结束后自动继续未完成和失败任务，最多追加 3 轮。"}`
+                  ? `${autoResumeLabel(scan)}。${scan.auto_resume_reason || "扫描结束后自动继续未完成和失败任务，最多连续自动续扫 3 轮；手动续扫后重置次数。"}`
                   : "本次扫描未启用"}
               />
               <ScanInformationToggle

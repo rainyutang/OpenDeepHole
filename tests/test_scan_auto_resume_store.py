@@ -50,7 +50,7 @@ def expire(store, scan_id):
         store._conn.commit()
 
 
-def test_only_one_concurrent_reservation_and_lifetime_budget(execution):
+def test_only_one_concurrent_reservation_and_manual_resets_budget(execution):
     store, peer, scan_id = execution
     barrier = threading.Barrier(2)
     def claim(connection):
@@ -71,9 +71,16 @@ def test_only_one_concurrent_reservation_and_lifetime_budget(execution):
     assert store.load_scan(scan_id)[0].auto_resume_state == 'exhausted'
     manual = peer.reserve_scan_resume(scan_id, expected_revision=0, automatic=False)
     assert manual
-    assert store.get_scan_meta(scan_id).auto_resume_count == 3
+    assert store.get_scan_meta(scan_id).auto_resume_count == 0
+    assert store.load_scan(scan_id)[0].auto_resume_state == 'idle'
     assert store.finish_scan_resume_reservation(scan_id, manual)
-    assert reserve(store, scan_id) is None
+    for count in (1, 2, 3):
+        token = reserve(store, scan_id)
+        assert token
+        assert peer.get_scan_auto_resume(scan_id)['auto_resume_count'] == count
+        assert store.finish_scan_resume_reservation(scan_id, token)
+    assert reserve(peer, scan_id) is None
+    assert store.load_scan(scan_id)[0].auto_resume_state == 'exhausted'
 
 
 def test_untouched_expired_reservation_recovers_same_round(execution):
@@ -107,9 +114,14 @@ def test_global_stop_fences_reserved_dispatch_and_manual_rearms(execution):
     assert reserve(store, scan_id) is None
     manual = store.reserve_scan_resume(scan_id, expected_revision=0, automatic=False)
     assert manual
-    assert peer.get_scan_auto_resume(scan_id)['auto_resume_count'] == 1
+    assert peer.get_scan_auto_resume(scan_id)['auto_resume_count'] == 0
     assert store.finish_scan_resume_reservation(scan_id, manual, state='pending')
-    assert reserve(peer, scan_id)
+    for count in (1, 2, 3):
+        resumed = reserve(peer, scan_id)
+        assert resumed
+        assert store.get_scan_auto_resume(scan_id)['auto_resume_count'] == count
+        assert peer.finish_scan_resume_reservation(scan_id, resumed)
+    assert reserve(store, scan_id) is None
 
 
 def test_fp_snapshot_and_core_activity_prevent_stale_claim(execution):
@@ -250,13 +262,13 @@ def test_finish_lease_serializes_callbacks_and_all_resume_claims(execution):
     assert peer.release_scan_finish(scan_id, current)
 
 
-def test_manual_resume_takes_over_expired_unsent_round_without_budget_reset(execution):
+def test_manual_resume_takes_over_expired_unsent_round_and_resets_budget(execution):
     store, peer, scan_id = execution
     old = reserve(store, scan_id)
     expire(store, scan_id)
     manual = peer.reserve_scan_resume(scan_id, expected_revision=0, automatic=False)
     assert manual and manual != old
-    assert peer.get_scan_auto_resume(scan_id)['auto_resume_count'] == 1
+    assert peer.get_scan_auto_resume(scan_id)['auto_resume_count'] == 0
     assert not store.mark_scan_resume_dispatch_started(scan_id, old)
 
 

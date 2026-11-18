@@ -11,8 +11,8 @@ import pytest
 
 from backend.application import ApplicationError, BackendRuntime, use_runtime
 from backend.models import (
-    AgentFpReviewFinish, AgentScanFinish, FpReviewJob, FpReviewStatus, ScanMeta, ScanStatus, User,
-    Vulnerability,
+    AgentFpReviewFinish, AgentScanFinish, FpReviewJob, FpReviewStatus, ScanItemStatus, ScanMeta,
+    ScanStatus, User, Vulnerability,
 )
 from backend.scans import auto_resume, continuation, fp_review, fp_review_callbacks, resume_execution
 from backend.scans.fp_review_policy import _automatic_fp_review_resume_state, _ensure_fp_review_job_for_scan
@@ -427,3 +427,113 @@ def test_fast_core_finish_is_not_published_as_pending_after_dispatch():
     assert payload["status"] == "complete"
     assert payload["progress"] == 1
     assert payload["processed_candidates"] == 1
+    assert payload["auto_resume_count"] == 0
+
+
+@pytest.mark.parametrize("fp_only", [False, True])
+def test_manual_resume_after_exhausted_resets_count_and_allows_three_more_auto_rounds(tmp_path, monkeypatch, fp_only):
+    store = SqliteScanStore(tmp_path / "manual-reset.db")
+    scan = (
+        scan_with_finding().model_copy(update={"auto_resume_enabled": True})
+        if fp_only else ScanStatus(
+            scan_id="scan", status="error", auto_fp_review=False, auto_resume_enabled=True,
+            progress=0.0, total_candidates=1, processed_candidates=0,
+            static_analysis_done=True, vulnerabilities=[],
+        )
+    )
+    meta = ScanMeta(
+        created_at="now", scan_items=[], user_id="owner", agent_id="agent", agent_name="agent",
+        project_path="/repo", auto_resume_enabled=True, auto_fp_review=fp_only,
+    )
+    store.save_scan(scan, meta)
+    if fp_only:
+        store.add_vulnerability("scan", scan.vulnerabilities[0])
+        store.create_fp_review_job("review", "scan", 1, "now")
+        store.update_fp_review_job("review", status="error")
+    store.schedule_scan_auto_resume("scan", "http://server")
+    for _ in range(3):
+        token = store.reserve_scan_resume("scan", expected_revision=0, automatic=True, server_url="http://server")
+        assert token
+        assert store.finish_scan_resume_reservation("scan", token)
+    assert store.reserve_scan_resume("scan", expected_revision=0, automatic=True, server_url="http://server") is None
+    assert store.set_scan_auto_resume_state("scan", "exhausted", "已达自动续扫上限，可手动续扫")
+    assert store.get_scan_auto_resume("scan")["auto_resume_count"] == 3
+    assert store.get_scan_auto_resume("scan")["auto_resume_state"] == "exhausted"
+
+    published = []
+    runtime = BackendRuntime(
+        store=store, store_runner=direct_store,
+        publisher=lambda _sid, event, data: published.append((event, data)),
+    )
+    if fp_only:
+        monkeypatch.setattr(fp_review, "preflight_fp_review", AsyncMock(side_effect=ApplicationError(400, "Agent 不在线")))
+    else:
+        monkeypatch.setattr(continuation, "_prepare_resume_agent", AsyncMock(side_effect=ApplicationError(400, "Agent 不在线")))
+    with use_runtime(runtime):
+        with pytest.raises(ApplicationError, match="Agent 不在线"):
+            asyncio.run(continuation.resume_scan(
+                "scan", "http://server", User(user_id="owner", username="owner", role="user"),
+            ))
+    assert store.get_scan_auto_resume("scan")["auto_resume_count"] == 3
+    assert store.get_scan_auto_resume("scan")["auto_resume_state"] == "exhausted"
+
+    if fp_only:
+        monkeypatch.setattr(fp_review, "preflight_fp_review", AsyncMock())
+
+        async def start_fp(*_args, **_kwargs):
+            store.update_fp_review_job("review", status="running")
+            return {"items_dispatched": True}
+
+        monkeypatch.setattr(continuation, "_start_fp_review", start_fp)
+    else:
+        monkeypatch.setattr(continuation, "_prepare_resume_agent", AsyncMock(return_value=SimpleNamespace(
+            agent_id="agent",
+            agent=SimpleNamespace(
+                name="agent", agent_session_id="session", protocol_version=1,
+                supports_resume_manifest_pull=False,
+            ),
+        )))
+        monkeypatch.setattr(continuation, "_resume_payload", AsyncMock(return_value={
+            "type": "resume", "agent_runtime_update": None,
+        }))
+        monkeypatch.setattr("backend.agents.gateway.send_agent_command", AsyncMock(return_value=True))
+
+    try:
+        with use_runtime(runtime):
+            response = asyncio.run(continuation.resume_scan(
+                "scan", "http://server", User(user_id="owner", username="owner", role="user"),
+            ))
+        assert response.scan_id == "scan"
+        record = store.get_scan_auto_resume("scan")
+        assert record["auto_resume_count"] == 0
+        assert record["auto_resume_state"] == "running"
+        assert record["auto_resume_reason"] == ""
+        if not fp_only:
+            assert runtime.scans.running_scans["scan"].auto_resume_count == 0
+            assert runtime.scans.running_scans["scan"].auto_resume_state == "running"
+            assert runtime.scans.running_scans["scan"].auto_resume_reason == ""
+        status_events = [data for event, data in published if event == "scan_status" and "auto_resume_count" in data]
+        assert status_events
+        assert all(data["auto_resume_count"] == 0 for data in status_events)
+        assert status_events[-1]["auto_resume_state"] == "running"
+        assert status_events[-1]["auto_resume_reason"] == ""
+
+        if fp_only:
+            store.update_fp_review_job("review", status="error")
+            expected_rev = 0
+        else:
+            expected_rev = store.get_scan_meta("scan").execution_revision
+            store.update_scan_progress("scan", status=ScanItemStatus.ERROR)
+        for count in (1, 2, 3):
+            token = store.reserve_scan_resume(
+                "scan", expected_revision=expected_rev, automatic=True, server_url="http://server",
+            )
+            assert token
+            assert store.get_scan_auto_resume("scan")["auto_resume_count"] == count
+            assert store.finish_scan_resume_reservation("scan", token)
+        assert store.reserve_scan_resume(
+            "scan", expected_revision=expected_rev, automatic=True, server_url="http://server",
+        ) is None
+        assert store.get_scan_auto_resume("scan")["auto_resume_state"] == "exhausted"
+    finally:
+        store.close()

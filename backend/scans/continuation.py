@@ -295,6 +295,10 @@ async def _finish_resume(
     current, current_meta = persisted
     if current_meta.execution_revision != execution_revision or current.status == ScanItemStatus.CANCELLED:
         raise ApplicationError(409, "续扫已被停止或执行轮次已变化")
+    scan.auto_resume_enabled = current.auto_resume_enabled
+    scan.auto_resume_count = current.auto_resume_count
+    scan.auto_resume_state = current.auto_resume_state
+    scan.auto_resume_reason = current.auto_resume_reason
     if resume_round is not None:
         from backend.scans.auto_resume import verify_resume_dispatch
         await verify_resume_dispatch(scan_id, resume_round)
@@ -305,6 +309,10 @@ async def _finish_resume(
         "total_candidates": current.total_candidates,
         "processed_candidates": current.processed_candidates,
         "error_message": current.error_message or "",
+        "auto_resume_enabled": current.auto_resume_enabled,
+        "auto_resume_count": current.auto_resume_count,
+        "auto_resume_state": current.auto_resume_state,
+        "auto_resume_reason": current.auto_resume_reason,
         "opencode_pool": (
             current.opencode_pool.model_dump(mode="json")
             if current.opencode_pool is not None
@@ -448,6 +456,13 @@ async def _continue_scan(
             scan_id, automatic=automatic, expected_revision=meta.execution_revision,
             server_url=server_url, expected_fp_revisions=expected_fp_revisions,
         )
+        if hasattr(store, "get_scan_auto_resume"):
+            refreshed_auto = await run_store_call(store, "get_scan_auto_resume", scan_id)
+            if refreshed_auto is not None:
+                scan.auto_resume_enabled = bool(refreshed_auto["auto_resume_enabled"])
+                scan.auto_resume_count = int(refreshed_auto["auto_resume_count"])
+                scan.auto_resume_state = str(refreshed_auto["auto_resume_state"])
+                scan.auto_resume_reason = str(refreshed_auto["auto_resume_reason"])
     try:
         revision, command = await claim_and_prepare_resume(
             scan_id, scan, meta, selected, plan, checkpoint, payload, server_url,

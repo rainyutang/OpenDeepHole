@@ -91,7 +91,15 @@ function installApi(initial = overview()) {
       state.overviewRequestCount += 1;
       data = state.intercept ? await state.intercept() : structuredClone(state.overview);
     }
-    else if (config.url.endsWith("/resume")) { state.overview = overview(80, 2); data = { scan_id: "s" }; }
+    else if (config.url.endsWith("/resume")) {
+      state.overview = {
+        ...overview(80, 2),
+        ...(state.overview.auto_resume_enabled
+          ? { auto_resume_enabled: true, auto_resume_count: 0, auto_resume_state: "running", auto_resume_reason: "" }
+          : {}),
+      };
+      data = { scan_id: "s" };
+    }
     else if (config.url.endsWith("/index-status")) data = structuredClone(state.indexStatus);
     else if (config.url.endsWith("/git_history")) data = [];
     else if (/\/(events|event-history|candidates|vulnerabilities|threat-audit-tasks|threat-pattern-audit-tasks|validations|results|tasks)$/.test(config.url)) {
@@ -677,7 +685,7 @@ for (const autoState of ["pending", "waiting", "running"]) {
   });
 }
 
-test("automatic resume SSE updates show exhausted count and restore manual resume", async () => {
+test("automatic resume SSE updates show exhausted count and manual resume refreshes 3-round budget", async () => {
   const state = installApi({ ...overview(), auto_resume_enabled: true, auto_resume_count: 2, auto_resume_state: "waiting" });
   const root = await mount();
   state.overview = { ...state.overview, auto_resume_count: 3, auto_resume_state: "exhausted", auto_resume_reason: "仍有失败任务，可手动续扫" };
@@ -686,4 +694,22 @@ test("automatic resume SSE updates show exhausted count and restore manual resum
   assert.match(text(root.toJSON()), /自动续扫已达上限（3\/3）/);
   assert.equal(root.root.findAllByType("button").map(text).includes("续扫"), true);
   assert.equal(root.root.findAllByType("button").map(text).includes("停止扫描"), false);
+
+  const resume = root.root.findAllByType("button").find((node) => text(node) === "续扫");
+  assert.ok(resume);
+  await act(async () => resume.props.onClick());
+  assert.doesNotMatch(text(root.toJSON()), /自动续扫已达上限|仍有失败任务，可手动续扫/);
+  assert.match(text(root.toJSON()), /自动续扫 0\/3/);
+
+  state.overview = {
+    ...overview(100, 1), execution_revision: 2, auto_resume_enabled: true,
+    auto_resume_count: 1, auto_resume_state: "waiting", auto_resume_reason: "等待客户端上线",
+  };
+  await notify(["scan_status", {
+    status: "complete", execution_revision: 2, auto_resume_enabled: true,
+    auto_resume_count: 1, auto_resume_state: "waiting", auto_resume_reason: "等待客户端上线",
+  }]);
+  assert.match(text(root.toJSON()), /等待自动续扫（1\/3）/);
+  assert.equal(root.root.findAllByType("button").map(text).includes("续扫"), false);
+  assert.equal(root.root.findAllByType("button").map(text).includes("停止扫描"), true);
 });

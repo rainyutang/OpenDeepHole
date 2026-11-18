@@ -271,7 +271,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
             className={`cursor-pointer rounded-lg border p-3 ${fpReviewMethod === method.method_id ? "border-amber-500 bg-amber-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={fpReviewMethod === method.method_id} onChange={() => setFpReviewMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div></Card>
         </>}
 
-        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动续扫</h2><p className="mt-1 text-xs text-slate-500">扫描结束后自动继续未完成和失败任务，最多追加 3 轮。停止扫描后暂停自动续扫。</p></div><Toggle checked={autoResumeEnabled} onChange={() => setAutoResumeEnabled((value) => !value)} label="自动续扫" /></div></Card>
+        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动续扫</h2><p className="mt-1 text-xs text-slate-500">扫描结束后自动继续未完成和失败任务，最多连续自动续扫 3 轮；手动续扫后重置次数。停止扫描后暂停自动续扫。</p></div><Toggle checked={autoResumeEnabled} onChange={() => setAutoResumeEnabled((value) => !value)} label="自动续扫" /></div></Card>
 
         <ReviewNotesSelector
           enabled={reviewNotesEnabled}
