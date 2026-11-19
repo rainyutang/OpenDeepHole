@@ -713,3 +713,60 @@ test("automatic resume SSE updates show exhausted count and manual resume refres
   assert.equal(root.root.findAllByType("button").map(text).includes("续扫"), false);
   assert.equal(root.root.findAllByType("button").map(text).includes("停止扫描"), true);
 });
+
+test("home process flow diagram vertically centers capabilities and stage modules", async () => {
+  installApi({ ...overview(), code_graph_mcp_enabled: true, knowledge_base_enabled: false });
+  const root = await mount();
+  const baseSection = root.root.findByProps({ "aria-label": "基础能力" });
+  const codeGraphCard = baseSection.findAllByType("button").find((node) => text(node).startsWith("代码图谱"));
+  const knowledgeCard = baseSection.findAllByType("div").find((node) =>
+    typeof node.props.className === "string"
+    && node.props.className.includes("min-h-[5.5rem]")
+    && text(node).startsWith("知识库"));
+  assert.ok(codeGraphCard);
+  assert.ok(knowledgeCard);
+  for (const card of [codeGraphCard, knowledgeCard]) {
+    assert.match(card.props.className, /\bflex\b/);
+    assert.match(card.props.className, /\bflex-col\b/);
+    assert.match(card.props.className, /\bjustify-center\b/);
+    const headerRow = card.findAll((node) => node !== card && node.type === "div")[0];
+    assert.ok(headerRow);
+    assert.match(headerRow.props.className, /\bitems-center\b/);
+    assert.match(headerRow.props.className, /\bjustify-between\b/);
+  }
+
+  const miningSection = root.root.findByProps({ "aria-label": "多引擎问题识别" });
+  const miningGrid = miningSection.findAllByType("div").find((node) =>
+    typeof node.props.className === "string" && node.props.className.includes("grid"));
+  assert.ok(miningGrid);
+  assert.match(miningGrid.props.className, /\bcontent-center\b/);
+  assert.doesNotMatch(miningGrid.props.className, /\bcontent-start\b/);
+  const engineButtons = miningSection.findAllByType("button");
+  assert.ok(engineButtons.length >= 1);
+  for (const button of engineButtons) {
+    assert.match(button.props.className, /\bflex\b/);
+    assert.match(button.props.className, /\bflex-col\b/);
+    assert.match(button.props.className, /\bjustify-center\b/);
+    const titleRow = button.findAll((node) => node !== button && node.type === "div")[0];
+    assert.ok(titleRow);
+    assert.match(titleRow.props.className, /\bitems-center\b/);
+  }
+
+  const threatSection = root.root.findByProps({ "aria-label": "威胁分析" });
+  const threatSummary = threatSection.findByProps({ role: "status" });
+  assert.match(threatSummary.props.className, /\bflex\b/);
+  assert.match(threatSummary.props.className, /\bjustify-center\b/);
+  const threatSummaryRow = threatSummary.findAll((node) => node !== threatSummary && node.type === "div")[0];
+  assert.ok(threatSummaryRow);
+  assert.match(threatSummaryRow.props.className, /\bitems-center\b/);
+
+  const execSection = root.root.findByProps({ "aria-label": "渗透执行" });
+  for (const stageTitle of ["程序分析", "问题复核", "验证利用"]) {
+    const stageButton = execSection.findAllByType("button").find((node) => text(node).startsWith(stageTitle));
+    assert.ok(stageButton, `missing ${stageTitle}`);
+    const body = stageButton.findAllByType("div")[0];
+    assert.match(body.props.className, /\bmt-2\b/);
+    assert.match(body.props.className, /\bflex-1\b/);
+    assert.match(body.props.className, /\bjustify-center\b/);
+  }
+});

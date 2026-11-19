@@ -92,7 +92,7 @@ export function ProcessFlowNav({
 
                   <section className="flex min-h-0 flex-col rounded-lg border border-cyan-500/25 bg-slate-950/45 p-2.5" aria-label="多引擎问题识别">
                     <h3 className="text-center text-sm font-semibold text-slate-100">多引擎问题识别</h3>
-                    <div className="mt-2 grid flex-1 content-start gap-2">
+                    <div className="mt-2 grid flex-1 content-center gap-2">
                       {allMiningEntries.map(({ engine, node, selected }) => (
                         <button
                           key={engine.engine_id}
@@ -100,14 +100,14 @@ export function ProcessFlowNav({
                           disabled={!selected}
                           onClick={() => onNodeClick(node.id)}
                           aria-current={node.active ? "page" : undefined}
-                          className={`rounded-lg border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 disabled:cursor-not-allowed ${selected
+                          className={`flex flex-col justify-center rounded-lg border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 disabled:cursor-not-allowed ${selected
                               ? node.active
                                 ? "border-cyan-300/70 bg-cyan-400/20 shadow-sm"
                                 : "border-cyan-400/35 bg-cyan-400/10 hover:border-cyan-300/60 hover:bg-cyan-400/15"
                               : "border-slate-800 bg-slate-950/60 opacity-45"
                             }`}
                         >
-                          <div className="flex items-start justify-between gap-2">
+                          <div className="flex w-full items-center justify-between gap-2">
                             <span className={`min-w-0 break-words text-xs font-medium ${selected ? "text-slate-100" : "text-slate-500"}`}>
                               {node.label}
                             </span>
@@ -179,8 +179,8 @@ function FlowStatusSummary({
   showDetail?: boolean;
 }) {
   return (
-    <div className="mt-2 rounded-lg border border-slate-700 bg-slate-950/45 px-3 py-2.5" role="status">
-      <div className="flex items-start justify-between gap-2">
+    <div className="mt-2 flex flex-col justify-center rounded-lg border border-slate-700 bg-slate-950/45 px-3 py-2.5" role="status">
+      <div className="flex w-full items-center justify-between gap-2">
         <span className="min-w-0 break-words text-sm font-medium text-slate-100">{node.label}</span>
         <StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} />
       </div>
@@ -213,7 +213,7 @@ function ProcessStageButton({
         }`}
     >
       <h3 className="text-center text-sm font-semibold text-slate-100">{title}</h3>
-      <div className="mt-4 flex flex-1 flex-col justify-center">
+      <div className="mt-2 flex flex-1 flex-col justify-center">
         {contentLabel && <div className="mb-2 text-xs font-medium text-slate-300">{contentLabel}</div>}
         <div><StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} /></div>
         <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-400">{node.detail}</div>
@@ -234,14 +234,12 @@ function CapabilityStatusCard({
   onClick?: (node: FlowNodeId) => void;
 }) {
   const content = (
-    <>
-      <div className="flex items-start justify-between gap-3">
-        <span className="text-sm font-semibold text-slate-100">{label}</span>
-        <StatusPill label={enabled ? "已启用" : "未启用"} tone={enabled ? "green" : "slate"} />
-      </div>
-    </>
+    <div className="flex w-full items-center justify-between gap-3">
+      <span className="text-sm font-semibold text-slate-100">{label}</span>
+      <StatusPill label={enabled ? "已启用" : "未启用"} tone={enabled ? "green" : "slate"} />
+    </div>
   );
-  const className = `min-h-[5.5rem] rounded-lg border p-3 text-left ${enabled ? "border-blue-400/35 bg-blue-400/10" : "border-slate-700 bg-slate-950/45"
+  const className = `flex min-h-[5.5rem] w-full flex-col justify-center rounded-lg border p-3 text-left ${enabled ? "border-blue-400/35 bg-blue-400/10" : "border-slate-700 bg-slate-950/45"
     }`;
   if (node && onClick) {
     return (
