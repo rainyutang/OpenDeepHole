@@ -176,8 +176,11 @@ async def get_agent_opencode_pool(
                 model.health_penalty_level = live.health_penalty_level
                 model.last_health_failure_at = live.last_health_failure_at
                 model.last_health_failure_kind = live.last_health_failure_kind
+                model.circuit_state = live.circuit_state
+                model.cooldown_remaining_seconds = live.cooldown_remaining_seconds
                 model.max_concurrency = live.max_concurrency
                 model.running = live.running
+                model.global_running = live.global_running
                 model.queued = live.queued
                 model.available = live.available
                 model.enabled = live.enabled
@@ -192,12 +195,15 @@ async def get_agent_opencode_pool(
                 model.enabled = False
                 model.available = False
                 model.running = 0
+                model.global_running = 0
                 model.queued = 0
                 model.active_tasks = []
                 model.effective_weight = model.weight
                 model.health_penalty_level = 0
                 model.last_health_failure_at = ""
                 model.last_health_failure_kind = ""
+                model.circuit_state = "closed"
+                model.cooldown_remaining_seconds = 0
         known_ids = {model.id for model in result.models}
         for model in latest.models:
             if model.id not in known_ids:
@@ -213,6 +219,9 @@ async def get_agent_opencode_pool(
     if not online:
         for model in result.models:
             model.available = False
+            model.global_running = 0
+            model.circuit_state = "closed"
+            model.cooldown_remaining_seconds = 0
     return result
 
 

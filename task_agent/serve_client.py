@@ -7675,6 +7675,7 @@ class OpenCodeServeManager:
         on_response_model=None,
         on_token_usage=None,
         on_file_write=None,
+        on_model_progress=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
         serve_port_auto: bool = False,
@@ -7720,6 +7721,7 @@ class OpenCodeServeManager:
         on_session_id = guarded(on_session_id)
         on_response_model = guarded(on_response_model)
         on_file_write = guarded(on_file_write)
+        on_model_progress = guarded(on_model_progress)
         on_line = guarded(on_line)
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
@@ -8182,7 +8184,19 @@ class OpenCodeServeManager:
                 except Exception:
                     retry_mode = None
                 return mark_same_session_retry(exc, retry_mode)
-            if idle_timeout or on_line is not None or on_file_write is not None:
+            if (
+                idle_timeout
+                or on_line is not None
+                or on_file_write is not None
+                or on_model_progress is not None
+            ):
+                def record_progress() -> None:
+                    activity.touch()
+                    if on_model_progress is not None:
+                        outcome = on_model_progress()
+                        if hasattr(outcome, "__await__"):
+                            retire_task(asyncio.ensure_future(outcome))
+
                 event_state = _ServeEventState(
                     tool,
                     active_session_id,
@@ -8191,7 +8205,7 @@ class OpenCodeServeManager:
                     ignored_file_message_ids=ignored_file_message_ids,
                     log_stage=normalized_log_stage,
                     source_mcp_name=selected_source_mcp or "",
-                    on_progress=activity.touch,
+                    on_progress=record_progress,
                     on_tool_input=activity.set_tool_input_pending,
                     model=model,
                     config_content=key.config_content,

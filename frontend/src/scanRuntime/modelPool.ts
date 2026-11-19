@@ -50,12 +50,17 @@ export function normalizePoolModel(value: Record<string, unknown>): OpenCodePool
     health_penalty_level: finiteNumber(value.health_penalty_level),
     last_health_failure_at: text(value.last_health_failure_at),
     last_health_failure_kind: text(value.last_health_failure_kind),
+    circuit_state: text(value.circuit_state) || "closed",
+    cooldown_remaining_seconds: finiteNumber(value.cooldown_remaining_seconds),
     max_concurrency: finiteNumber(value.max_concurrency),
     enabled: value.enabled === true,
     available: value.available === true,
     time_windows: windows,
     queued: finiteNumber(value.queued),
     running: finiteNumber(value.running),
+    global_running: value.global_running == null
+      ? finiteNumber(value.running)
+      : Math.max(finiteNumber(value.running), finiteNumber(value.global_running)),
     total: finiteNumber(value.total),
     success: finiteNumber(value.success),
     failure: finiteNumber(value.failure),

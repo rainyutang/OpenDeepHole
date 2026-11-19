@@ -1,4 +1,4 @@
-import type { OpenCodePoolStatus } from "../../types/modelPool";
+import type { OpenCodePoolModelStats, OpenCodePoolStatus } from "../../types/modelPool";
 import { formatDateTime, formatDuration, scanQueueTaskTypeLabel } from "./presentation";
 
 export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; }) {
@@ -55,15 +55,22 @@ export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; 
         <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
           <div className="mb-2 text-xs font-semibold text-slate-400">全局排队任务</div>
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {queuedTasks.map((task, index) => (
-              <div
-                key={String(task.request_id || index)}
-                className="truncate rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100"
-                title={modelTaskLabel(task)}
-              >
-                {modelTaskLabel(task)}
-              </div>
-            ))}
+            {queuedTasks.map((task, index) => {
+              const label = modelTaskLabel(task);
+              const detail = queueReasonText(task);
+              return (
+                <div
+                  key={String(task.request_id || index)}
+                  className="rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100"
+                  title={detail ? `${label} — ${detail}` : label}
+                >
+                  <div className="truncate">{label}</div>
+                  {detail && (
+                    <div className="mt-0.5 truncate text-[11px] text-amber-300/80">{detail}</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -120,8 +127,8 @@ export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; 
                   </td>
                   <td className={tdCls}>{capabilityLabel(model.capability)}</td>
                   <td className={tdCls}>
-                    <span className={model.enabled && model.available ? "text-green-300" : "text-slate-500"}>
-                      {model.enabled ? (model.available ? "可用" : "时间窗外") : "禁用"}
+                    <span className={availabilityClass(model)}>
+                      {availabilityLabel(model)}
                     </span>
                   </td>
                   <td className={tdCls}>
@@ -140,11 +147,18 @@ export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; 
                         className="mt-1 text-[11px] text-slate-600"
                         title={formatDateTime(model.last_health_failure_at)}
                       >
-                        最近失败：{model.last_health_failure_kind === "timeout" ? "超时" : "请求失败"}
+                        最近失败：{healthFailureKindLabel(model.last_health_failure_kind)}
                       </div>
                     )}
                   </td>
-                  <td className={tdCls}>{model.running}/{model.max_concurrency}</td>
+                  <td className={tdCls}>
+                    <div>{model.running}/{model.max_concurrency}</div>
+                    {(model.global_running ?? model.running) > model.running && (
+                      <div className="mt-1 text-[11px] text-amber-300" title="同一客户端上其他扫描或后台任务占用的并发额度">
+                        全局 {model.global_running}/{model.max_concurrency}
+                      </div>
+                    )}
+                  </td>
                   <td className={tdCls}>{model.total}</td>
                   <td className={`${tdCls} text-green-300`}>{model.success}</td>
                   <td className={`${tdCls} text-red-300`}>{model.failure}</td>
@@ -205,6 +219,51 @@ function capabilityLabel(value: string): string {
   if (value === "medium") return "中";
   if (value === "low") return "低";
   return value || "-";
+}
+
+function availabilityLabel(model: OpenCodePoolModelStats): string {
+  if (!model.enabled) return "禁用";
+  if (!model.available) return "时间窗外";
+  const cooldown = (model.cooldown_remaining_seconds ?? 0) > 0
+    ? ` (${formatDuration(model.cooldown_remaining_seconds ?? 0)})`
+    : "";
+  if (model.circuit_state === "access_open") return `权限隔离中${cooldown}`;
+  if (model.circuit_state === "quota_open") return `配额冷却中${cooldown}`;
+  if (model.circuit_state === "access_half_open" || model.circuit_state === "quota_half_open") {
+    return "恢复探测中 (限 1 并发)";
+  }
+  return "可用";
+}
+
+function availabilityClass(model: OpenCodePoolModelStats): string {
+  if (!model.enabled || !model.available) return "text-slate-500";
+  if (model.circuit_state === "access_open") return "text-red-300";
+  if (
+    model.circuit_state === "quota_open"
+    || model.circuit_state === "quota_half_open"
+    || model.circuit_state === "access_half_open"
+  ) {
+    return "text-amber-300";
+  }
+  return "text-green-300";
+}
+
+function healthFailureKindLabel(kind: string): string {
+  if (kind === "timeout") return "超时";
+  if (kind === "quota") return "配额限流";
+  if (kind === "access_denied") return "权限拒绝";
+  return "请求失败";
+}
+
+function queueReasonText(task: Record<string, unknown> | undefined): string {
+  if (!task) return "";
+  if (typeof task.blocked_reason === "string" && task.blocked_reason.trim()) {
+    return task.blocked_reason.trim();
+  }
+  if (typeof task.waiting_hint === "string" && task.waiting_hint.trim()) {
+    return task.waiting_hint.trim();
+  }
+  return "";
 }
 
 export function vulnerabilitySeverityLabel(value: string): string {

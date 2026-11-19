@@ -812,6 +812,12 @@ async def _run_fp_review_worker(review_id: str) -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
         in_flight.clear()
 
+    from task_agent.model_pool import (
+        constrained_waiter_allowance,
+        wait_for_model_pool_update,
+    )
+
+    last_pool_marker = ""
     try:
         while True:
             queue = _fp_review_queues.get(review_id)
@@ -841,11 +847,22 @@ async def _run_fp_review_worker(review_id: str) -> None:
                     concurrency = loaded.manifest.max_concurrency
                     if concurrency == 0:
                         try:
-                            concurrency = max(
+                            base_concurrency = max(
                                 1, int(getattr(first.config, "opencode_concurrency", 1) or 1),
                             )
                         except (TypeError, ValueError):
-                            concurrency = 1
+                            base_concurrency = 1
+                        cli_cfg = (
+                            getattr(first.config, "fp_review_cli", None)
+                            or getattr(first.config, "opencode", None)
+                            or first.config
+                        )
+                        extra_allowance = constrained_waiter_allowance(
+                            cli_cfg,
+                            scope_id=first.scan_id,
+                            required_capability="high",
+                        )
+                        concurrency = base_concurrency + min(base_concurrency, extra_allowance)
 
                 launched: list[_FpReviewQueueItem] = []
                 while queue and len(in_flight) < concurrency:
@@ -875,6 +892,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
                 continue
 
             queue_wakeup: asyncio.Task | None = None
+            pool_wakeup: asyncio.Task | None = None
             wait_set: set[asyncio.Task] = set(in_flight)
             queue_event = _fp_review_queue_events.setdefault(
                 review_id,
@@ -890,16 +908,33 @@ async def _run_fp_review_worker(review_id: str) -> None:
                 queue_event.clear()
                 queue_wakeup = asyncio.create_task(queue_event.wait())
                 wait_set.add(queue_wakeup)
-            done, _ = await asyncio.wait(
-                wait_set,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if queue_wakeup is not None:
-                if queue_wakeup in done:
-                    done.remove(queue_wakeup)
-                else:
-                    queue_wakeup.cancel()
-                    await asyncio.gather(queue_wakeup, return_exceptions=True)
+                pool_wakeup = asyncio.create_task(
+                    wait_for_model_pool_update(
+                        scan_id,
+                        last_updated_at=last_pool_marker,
+                        timeout=1.0,
+                    )
+                )
+                wait_set.add(pool_wakeup)
+            done: set[asyncio.Task] = set()
+            try:
+                done, _ = await asyncio.wait(
+                    wait_set,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for helper in (queue_wakeup, pool_wakeup):
+                    if helper is not None and not helper.done():
+                        helper.cancel()
+                        await asyncio.gather(helper, return_exceptions=True)
+            if queue_wakeup is not None and queue_wakeup in done:
+                done.remove(queue_wakeup)
+            if pool_wakeup is not None and pool_wakeup in done:
+                done.remove(pool_wakeup)
+                try:
+                    last_pool_marker = pool_wakeup.result()
+                except BaseException:
+                    pass
 
             completed = sorted(
                 (task for task in done if task in in_flight),

@@ -5408,3 +5408,119 @@ def test_provider_busy_error_retries_in_same_session_and_switches_model(tmp_path
 
     asyncio.run(run_clean_turn_case())
     asyncio.run(run_progress_and_fallback_case())
+
+
+def test_half_open_probe_unlocks_peer_slots_on_first_progress_and_stays_closed_after_quality_retry(
+    tmp_path: Path,
+) -> None:
+    import task_agent.model_pool as pool
+
+    async def run() -> None:
+        pool._running_by_model.clear()
+        pool._global_running = 0
+        pool._stats_by_scope.clear()
+        pool._global_stats_by_model.clear()
+        pool._options_by_id.clear()
+        pool._model_health_by_id.clear()
+        pool._active_tasks.clear()
+        pool._pending_requests.clear()
+
+        cli_cfg = SimpleNamespace(models=[
+            {"id": "m-probe", "model": "provider/m-probe", "capability": "high", "max_concurrency": 2},
+        ])
+        seed = await pool.acquire_model_lease(cli_cfg, stats_scope_id="scan-probe", task_id="seed")
+        await pool.release_model_lease(
+            seed,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=5.0,
+        )
+        pool._model_health_by_id["m-probe"].quota_open_until = pool.time.monotonic() - 0.01
+
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/m-probe", _source())
+        )
+        peer_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        attempts = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            sid = kwargs["session_id"] or f"ses_probe_{attempts}"
+            cb = kwargs["on_session_id"](sid)
+            if hasattr(cb, "__await__"):
+                await cb
+            if attempts == 1:
+                assert "on_model_progress" in kwargs
+                progress_cb = kwargs["on_model_progress"]()
+                if hasattr(progress_cb, "__await__"):
+                    await progress_cb
+                await asyncio.wait_for(peer_started.wait(), timeout=1.0)
+                await release_probe.wait()
+                return OpenCodePromptResult(
+                    session_id=sid,
+                    message_id="msg_1",
+                    lines=["bad artifact"],
+                    text="bad artifact",
+                    model="provider/m-probe",
+                )
+            peer_started.set()
+            release_probe.set()
+            return OpenCodePromptResult(
+                session_id=sid,
+                message_id=f"msg_{attempts}",
+                lines=['{"answer": 42}'],
+                text='{"answer": 42}',
+                model="provider/m-probe",
+            )
+
+        val_calls = 0
+
+        def post_validator() -> str | None:
+            nonlocal val_calls
+            val_calls += 1
+            return "need fix" if val_calls == 1 else None
+
+        runtime_cfg = SimpleNamespace(
+            opencode=SimpleNamespace(timeout=30, max_retries=1, models=cli_cfg.models),
+            fp_review_cli=None,
+            opencode_concurrency=2,
+        )
+        bindings = SimpleNamespace(
+            get_workspace=lambda: tmp_path.resolve(),
+            disabled_source_mcp_tools=lambda _directory: (),
+            writable_roots=lambda: (),
+            readable_roots=lambda: (),
+        )
+        with (
+            patch("task_agent.task_service.get_config", return_value=runtime_cfg),
+            patch("task_agent.task_service.get_host_bindings", return_value=bindings),
+            patch("task_agent.task_service.get_serve_manager", return_value=SimpleNamespace(run_prompt=run_prompt)),
+            patch("task_agent.task_service._task_cli_config", return_value=runtime_cfg.opencode),
+        ):
+            with _task_context(tmp_path, scan_id="scan-probe"):
+                t1 = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="probe-task",
+                    prompt="audit 1",
+                    directory=tmp_path,
+                    post_session_validator=post_validator,
+                    post_session_validation_retry_count=1,
+                    attempt=0,
+                )))
+                await asyncio.sleep(0.02)
+                t2 = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="peer-task",
+                    prompt="audit 2",
+                    directory=tmp_path,
+                    attempt=0,
+                )))
+                r1, r2 = await asyncio.wait_for(asyncio.gather(t1, t2), timeout=2.0)
+
+        assert r1.status == "success"
+        assert r2.status == "success"
+        snap = {m["id"]: m for m in pool.model_pool_snapshot("scan-probe")["models"]}
+        assert snap["m-probe"]["circuit_state"] == "closed"
+
+    asyncio.run(run())

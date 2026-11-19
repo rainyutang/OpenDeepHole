@@ -2443,3 +2443,101 @@ def test_access_denied_circuit_fails_fast_when_all_models_lack_permission_but_wa
         await release_model_lease(recovered, outcome="success", health_outcome="success")
 
     asyncio.run(run())
+
+
+def test_half_open_probe_closes_on_healthy_confirmation_and_snapshot_exposes_circuit_and_global_running() -> None:
+    from task_agent.model_pool import (
+        confirm_model_lease_provider_healthy,
+        constrained_waiter_allowance,
+    )
+
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {"id": "model-a", "model": "provider/model-a", "capability": "high", "max_concurrency": 3},
+            {"id": "model-b", "model": "provider/model-b", "capability": "high", "max_concurrency": 1},
+        ])
+        initial = await acquire_model_lease(cfg, stats_scope_id="scan-1", task_id="init-quota")
+        assert initial.option.id == "model-a"
+        await release_model_lease(
+            initial,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=12.0,
+        )
+        cooling_snap = {m["id"]: m for m in model_pool_snapshot("scan-1")["models"]}
+        assert cooling_snap["model-a"]["circuit_state"] == "quota_open"
+        assert cooling_snap["model-a"]["cooldown_remaining_seconds"] >= 1
+
+        busy_b = await acquire_model_lease(cfg, stats_scope_id="scan-2", task_id="other-scan-b")
+        assert busy_b.option.id == "model-b"
+
+        # Expire cooldown into half-open state: only 1 probe allowed initially on model-a.
+        model_pool_module._model_health_by_id["model-a"].quota_open_until = (
+            model_pool_module.time.monotonic() - 0.01
+        )
+        probe = await acquire_model_lease(cfg, stats_scope_id="scan-1", task_id="probe-1")
+        assert probe.option.id == "model-a" and probe.quota_half_open_probe is True
+
+        waiting_peer = asyncio.create_task(
+            acquire_model_lease(cfg, stats_scope_id="scan-1", task_id="peer-2")
+        )
+        await asyncio.sleep(0.03)
+        assert not waiting_peer.done()
+
+        half_open_snap = model_pool_snapshot("scan-1")
+        models_by_id = {m["id"]: m for m in half_open_snap["models"]}
+        assert models_by_id["model-a"]["circuit_state"] == "quota_half_open"
+        assert models_by_id["model-b"]["running"] == 0
+        assert models_by_id["model-b"]["global_running"] == 1
+        assert "共享占用" in half_open_snap["queued_tasks"][0].get("waiting_hint", "")
+
+        # First healthy Provider response closes the half-open circuit before the long probe session ends.
+        assert await confirm_model_lease_provider_healthy(probe) is True
+        peer_lease = await asyncio.wait_for(waiting_peer, timeout=1.0)
+        third_lease = await asyncio.wait_for(
+            acquire_model_lease(cfg, stats_scope_id="scan-1", task_id="peer-3"),
+            timeout=1.0,
+        )
+        try:
+            assert peer_lease.option.id == "model-a"
+            assert third_lease.option.id == "model-a"
+            closed_snap = {m["id"]: m for m in model_pool_snapshot("scan-1")["models"]}
+            assert closed_snap["model-a"]["circuit_state"] == "closed"
+            assert closed_snap["model-a"]["running"] == 3
+        finally:
+            await release_model_lease(third_lease, outcome="success", health_outcome="success")
+            await release_model_lease(peer_lease, outcome="success", health_outcome="success")
+            # Even if probe later releases with health_outcome=None (e.g. post-session validation retry),
+            # the circuit stays closed.
+            await release_model_lease(probe, outcome="failure", health_outcome=None)
+
+        assert {m["id"]: m for m in model_pool_snapshot("scan-1")["models"]}["model-a"]["circuit_state"] == "closed"
+
+        # Verify constrained_waiter_allowance when a retry avoids idle model-a while model-b is full.
+        avoid_waiter = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                stats_scope_id="scan-1",
+                task_id="retry-avoid-a",
+                avoid_model_ids={"model-a"},
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not avoid_waiter.done()
+        assert constrained_waiter_allowance(cfg, scope_id="scan-1", required_capability="high") == 1
+        queued_snap = model_pool_snapshot("scan-1")["queued_tasks"]
+        assert "未尝试模型" in queued_snap[0].get("waiting_hint", "")
+
+        # If model-a is in quota cooldown instead of healthy, allowance must drop to 0.
+        model_pool_module._model_health_by_id["model-a"].quota_open_until = (
+            model_pool_module.time.monotonic() + 30.0
+        )
+        assert constrained_waiter_allowance(cfg, scope_id="scan-1", required_capability="high") == 0
+        model_pool_module._model_health_by_id["model-a"].quota_open_until = None
+
+        await release_model_lease(busy_b, outcome="success", health_outcome="success")
+        retry_granted = await asyncio.wait_for(avoid_waiter, timeout=1.0)
+        assert retry_granted.option.id == "model-b"
+        await release_model_lease(retry_granted, outcome="success", health_outcome="success")
+
+    asyncio.run(run())

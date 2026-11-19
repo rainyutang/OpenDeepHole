@@ -694,6 +694,207 @@ def _apply_model_health_outcome_locked(
     return changed_probe
 
 
+def _close_provider_circuits_locked(lease: ModelLease) -> bool:
+    state = _model_health_by_id.get(lease.option.id)
+    if (
+        state is None
+        or state.identity != lease.health_identity
+        or state.generation != lease.health_generation
+    ):
+        state = next(
+            (
+                candidate
+                for candidate in _model_health_by_id.values()
+                if candidate.identity == lease.health_identity
+                and candidate.generation == lease.health_generation
+            ),
+            None,
+        )
+        if state is None:
+            return False
+    changed = False
+    if (
+        state.quota_open_until is not None
+        or state.quota_failure_count
+        or state.quota_half_open_probe_in_flight
+    ):
+        if state.quota_open_until is not None or state.quota_failure_count:
+            logger.info(
+                "Closed model Provider quota circuit after healthy response "
+                "model_id=%s model=%s",
+                lease.option.id,
+                lease.option.model or "<cli-default>",
+            )
+        state.quota_failure_count = 0
+        state.quota_open_until = None
+        state.quota_half_open_probe_in_flight = False
+        changed = True
+    if (
+        state.access_open_until is not None
+        or state.access_error_message
+        or state.access_half_open_probe_in_flight
+    ):
+        if state.access_open_until is not None or state.access_error_message:
+            logger.info(
+                "Closed model Provider access-denied circuit after healthy response "
+                "model_id=%s model=%s",
+                lease.option.id,
+                lease.option.model or "<cli-default>",
+            )
+        state.access_open_until = None
+        state.access_error_message = ""
+        state.access_half_open_probe_in_flight = False
+        changed = True
+    return changed
+
+
+async def confirm_model_lease_provider_healthy(lease: ModelLease | None) -> bool:
+    """Close half-open quota/access circuits once an active lease proves Provider health."""
+    if lease is None:
+        return False
+    global _global_updated_at
+    async with _condition:
+        active = _active_tasks.get(lease.task_id)
+        if not _lease_matches_active(lease, active):
+            return False
+        if not _close_provider_circuits_locked(lease):
+            return False
+        now_iso = _now_iso()
+        _global_updated_at = now_iso
+        if lease.stats_scope_id:
+            _scope_updated_at[lease.stats_scope_id] = now_iso
+        _notify_pool_changed_locked()
+        return True
+
+
+def _readonly_health_state(option: ModelOption) -> _ModelHealthState | None:
+    identity = _model_health_identity(option)
+    state = _model_health_by_id.get(option.id)
+    if state is not None and state.identity == identity:
+        return state
+    return next(
+        (
+            candidate
+            for model_id, candidate in _model_health_by_id.items()
+            if model_id != option.id and candidate.identity == identity
+        ),
+        None,
+    )
+
+
+def constrained_waiter_allowance(
+    cli_config: Any,
+    *,
+    scope_id: str = "",
+    required_capability: str = "any",
+) -> int:
+    """Return extra workers needed so constrained retries/formatters do not starve healthy models."""
+    active_cli_config = cli_config() if callable(cli_config) else cli_config
+    if not _configured_model_pool_enabled(active_cli_config):
+        return 0
+    from .config_reload import get_config_reload_coordinator
+
+    if not get_config_reload_coordinator().admission(""):
+        return 0
+    required = normalize_requirement(required_capability)
+    all_options = model_options(active_cli_config)
+    if not all_options:
+        return 0
+    active_options = _active_options(all_options)
+    eligible = _eligible_options(active_options, required_capability=required)
+    if not eligible:
+        return 0
+    now = time.monotonic()
+    circuit_available: list[ModelOption] = []
+    for option in eligible:
+        state = _readonly_health_state(option)
+        quota_ok = (
+            state is None
+            or state.quota_open_until is None
+            or (now >= state.quota_open_until and not state.quota_half_open_probe_in_flight)
+        )
+        access_ok = (
+            state is None
+            or state.access_open_until is None
+            or (now >= state.access_open_until and not state.access_half_open_probe_in_flight)
+        )
+        if quota_ok and access_ok:
+            circuit_available.append(option)
+    if not circuit_available:
+        return 0
+
+    def effective_cap(option: ModelOption) -> int:
+        state = _readonly_health_state(option)
+        if state is not None and (
+            state.quota_open_until is not None or state.access_open_until is not None
+        ):
+            return 1
+        return option.max_concurrency
+
+    healthy_capacity = sum(effective_cap(option) for option in circuit_available)
+    base_capacity = configured_model_capacity(active_cli_config)
+    bypassed_ids: set[str] = set()
+    constrained_count = 0
+
+    for request in _pending_requests:
+        if scope_id and request.stats_scope_id != scope_id:
+            continue
+        if request.cancel_event is not None and request.cancel_event.is_set():
+            continue
+        if request.resume_lease is not None:
+            target = request.resume_lease.option
+            target_busy = (
+                not request.resume_ready
+                or _running_by_model.get(target.id, 0) >= target.max_concurrency
+            )
+            excluded = [opt.id for opt in circuit_available if opt.id != target.id]
+            if target_busy and excluded:
+                constrained_count += 1
+                bypassed_ids.update(excluded)
+            continue
+        if request.avoid_model_ids or request.avoid_model_identities:
+            untried = [
+                opt
+                for opt in circuit_available
+                if opt.id not in request.avoid_model_ids
+                and _model_health_identity(opt) not in request.avoid_model_identities
+            ]
+            excluded = [
+                opt.id
+                for opt in circuit_available
+                if opt.id in request.avoid_model_ids
+                or _model_health_identity(opt) in request.avoid_model_identities
+            ]
+            if (
+                untried
+                and excluded
+                and all(_running_by_model.get(opt.id, 0) >= effective_cap(opt) for opt in untried)
+            ):
+                constrained_count += 1
+                bypassed_ids.update(excluded)
+
+    for task in _active_tasks.values():
+        if scope_id and task.get("scope_id") != scope_id:
+            continue
+        ctx = task.get("context")
+        if not isinstance(ctx, dict) or ctx.get("task_phase") != "json_format":
+            continue
+        model_id = str(task.get("model_id") or "")
+        opt = _options_by_id.get(model_id)
+        if opt is not None and not capability_satisfies(opt.capability, required):
+            constrained_count += 1
+            bypassed_ids.update(item.id for item in circuit_available)
+
+    if constrained_count <= 0 or not bypassed_ids:
+        return 0
+    bypassed_capacity = sum(
+        effective_cap(opt) for opt in circuit_available if opt.id in bypassed_ids
+    )
+    effective_non_consuming = min(constrained_count, bypassed_capacity)
+    desired_total = healthy_capacity + effective_non_consuming
+    return max(0, min(base_capacity, desired_total - base_capacity))
+
+
 def total_model_capacity(
     cli_config: Any,
     *,
@@ -2020,6 +2221,14 @@ async def record_model_token_usage(
         active = _active_tasks.get(lease.task_id)
         if not _lease_matches_active(lease, active):
             return
+        delta = merge_token_usages((usage,))
+        if delta is not None and (
+            delta.counters.total_tokens > 0
+            or delta.counters.input_tokens > 0
+            or delta.counters.output_tokens > 0
+            or delta.counters.reasoning_tokens > 0
+        ):
+            _close_provider_circuits_locked(lease)
         _global_token_usage = merge_token_usages((_global_token_usage, usage))
         if lease.stats_scope_id:
             scoped_usage = merge_token_usages(
@@ -2080,6 +2289,25 @@ def _format_time_windows(windows: tuple[ModelTimeWindow, ...]) -> list[dict[str,
     ]
 
 
+def _model_circuit_snapshot_locked(health: _ModelHealthState | None) -> tuple[str, int]:
+    if health is None:
+        return "closed", 0
+    now = time.monotonic()
+    if health.access_open_until is not None:
+        if now < health.access_open_until:
+            return "access_open", max(1, int(round(health.access_open_until - now)))
+        return "access_half_open", 0
+    if health.access_half_open_probe_in_flight:
+        return "access_half_open", 0
+    if health.quota_open_until is not None:
+        if now < health.quota_open_until:
+            return "quota_open", max(1, int(round(health.quota_open_until - now)))
+        return "quota_half_open", 0
+    if health.quota_half_open_probe_in_flight:
+        return "quota_half_open", 0
+    return "closed", 0
+
+
 def _stats_item_snapshot(
     item: ModelRuntimeStats,
     *,
@@ -2093,11 +2321,14 @@ def _stats_item_snapshot(
         health_penalty_level = health.penalty_level
         last_health_failure_at = health.last_health_failure_at
         last_health_failure_kind = health.last_health_failure_kind
+        circuit_state, cooldown_remaining_seconds = _model_circuit_snapshot_locked(health)
     else:
         effective_weight = item.weight
         health_penalty_level = 0
         last_health_failure_at = ""
         last_health_failure_kind = ""
+        circuit_state, cooldown_remaining_seconds = "closed", 0
+    global_running = max(item.running, _running_by_model.get(item.id, 0))
     active_tasks = []
     for task in _active_tasks.values():
         if task.get("model_id") == item.id and (not scope_id or task.get("scope_id") == scope_id):
@@ -2119,12 +2350,15 @@ def _stats_item_snapshot(
         "health_penalty_level": health_penalty_level,
         "last_health_failure_at": last_health_failure_at,
         "last_health_failure_kind": last_health_failure_kind,
+        "circuit_state": circuit_state,
+        "cooldown_remaining_seconds": cooldown_remaining_seconds,
         "max_concurrency": item.max_concurrency,
         "enabled": option is not None,
         "available": _option_available_now(option) if option is not None else False,
         "time_windows": _format_time_windows(option.time_windows) if option is not None else [],
         "queued": item.queued,
         "running": item.running,
+        "global_running": global_running,
         "total": item.total,
         "success": item.success,
         "failure": item.failure,
@@ -2143,6 +2377,7 @@ def _pending_request_matches_scope(request: _PendingLeaseRequest, scope_id: str)
 
 
 def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
+    waiting_hint = ""
     if request.resume_lease is not None:
         if not request.resume_ready or (
             request.admission_allowed is not None and not request.admission_allowed()
@@ -2171,6 +2406,11 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
                 f"没有满足 {request.required_capability} 能力要求且当前可用的模型；"
                 "等待模型配置或时间窗口变化。"
             )
+        elif not any(_access_circuit_available_locked(option) for option in eligible):
+            blocked_reason = (
+                "所有满足能力要求的模型都处于访问权限熔断隔离期；"
+                "等待模型恢复或更换有效模型。"
+            )
         elif not any(_quota_circuit_available_locked(option) for option in eligible):
             blocked_reason = (
                 "所有满足能力要求的模型都处于 Provider 配额冷却或半开探测中；"
@@ -2178,7 +2418,44 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
             )
         else:
             blocked_reason = ""
-    return {
+            now = time.monotonic()
+            circuit_available = [
+                option
+                for option in eligible
+                if _quota_circuit_available_locked(option, now=now)
+                and _access_circuit_available_locked(option, now=now)
+            ]
+            if request.avoid_model_ids or request.avoid_model_identities:
+                untried = [
+                    option
+                    for option in circuit_available
+                    if option.id not in request.avoid_model_ids
+                    and _model_health_identity(option) not in request.avoid_model_identities
+                ]
+                free_avoided = [
+                    option
+                    for option in circuit_available
+                    if (
+                        option.id in request.avoid_model_ids
+                        or _model_health_identity(option) in request.avoid_model_identities
+                    )
+                    and _running_by_model.get(option.id, 0) < option.max_concurrency
+                ]
+                if untried and free_avoided:
+                    waiting_hint = "前序尝试未通过，正在等待其他未尝试模型释放并发额度。"
+            if not waiting_hint and request.stats_scope_id:
+                scope_stats = _stats_by_scope.get(request.stats_scope_id, {})
+                other_running = sum(
+                    max(
+                        0,
+                        _running_by_model.get(option.id, 0)
+                        - (scope_stats[option.id].running if option.id in scope_stats else 0),
+                    )
+                    for option in eligible
+                )
+                if other_running > 0:
+                    waiting_hint = "等待模型释放并发额度（其他扫描或后台任务共享占用中）。"
+    snapshot = {
         "request_id": request.request_id,
         "task_id": request.request_id,
         "scope_id": request.stats_scope_id,
@@ -2190,6 +2467,9 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
         "blocked_reason": blocked_reason,
         **dict(request.task_context or {}),
     }
+    if waiting_hint:
+        snapshot["waiting_hint"] = waiting_hint
+    return snapshot
 
 
 def _planned_task_snapshot(planned: _PlannedTask) -> dict[str, Any]:
@@ -2334,6 +2614,6 @@ async def notify_model_pool_config_changed() -> None:
     async with _condition:
         now = _now_iso()
         _global_updated_at = now
-        for scope_id in list(_stats_by_scope):
+        for scope_id in set(_stats_by_scope) | set(_scope_updated_at):
             _scope_updated_at[scope_id] = now
         _notify_pool_changed_locked()

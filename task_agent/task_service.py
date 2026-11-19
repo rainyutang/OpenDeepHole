@@ -43,6 +43,7 @@ from .model_pool import (
     ModelQuotaWaitBudget,
     NoAvailableModelError,
     acquire_model_lease,
+    confirm_model_lease_provider_healthy,
     discard_suspended_model_lease,
     normalize_priority,
     normalize_requirement,
@@ -1001,11 +1002,37 @@ class OpenCodeTaskService:
                             session_id=session_id,
                         )
                 permit = prepared
-            return await _run_prompt_with_deadline(
+            probe_confirmed = False
+
+            def confirm_probe() -> Awaitable[bool] | None:
+                nonlocal probe_confirmed
+                if probe_confirmed:
+                    return None
+                current = get_lease()
+                if current is None or not (
+                    current.quota_half_open_probe or current.access_half_open_probe
+                ):
+                    return None
+                probe_confirmed = True
+                return confirm_model_lease_provider_healthy(current)
+
+            current_lease = get_lease()
+            progress_kwargs = (
+                {"on_model_progress": confirm_probe}
+                if current_lease is not None
+                and (current_lease.quota_half_open_probe or current_lease.access_half_open_probe)
+                else {}
+            )
+            result = await _run_prompt_with_deadline(
                 deadline, **runtime.kwargs(),
                 **({"serve_permit": permit} if permit is not None else {}),
+                **progress_kwargs,
                 **kwargs,
             )
+            confirmation = confirm_probe()
+            if confirmation is not None:
+                await confirmation
+            return result
         finally:
             if permit is not None:
                 await permit.release_if_unclaimed()
@@ -3442,6 +3469,7 @@ async def _run_prompt_with_deadline(
     for name in (
         "on_line", "on_session_id", "on_model_request_failure",
         "on_response_model", "on_token_usage", "on_file_write",
+        "on_model_progress",
     ):
         if name in kwargs:
             kwargs[name] = guard(kwargs[name], session_callback=name == "on_session_id")

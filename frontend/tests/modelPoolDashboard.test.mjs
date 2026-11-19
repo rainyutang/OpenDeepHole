@@ -120,3 +120,71 @@ test("planned tasks are hidden from model pool dashboard while queued and runnin
     root.unmount();
   }
 });
+
+test("model pool dashboard surfaces circuit cooldown, half-open probe, cross-scan global running and queue waiting hints", () => {
+  const value = pool({
+    global_running: 1,
+    global_queued: 1,
+    queued_tasks: [
+      {
+        request_id: "queued-avoid",
+        task_type: "vulnerability_mining",
+        file: "src/retry.c",
+        line: 19,
+        waiting_hint: "前序尝试未通过，正在等待其他未尝试模型释放并发额度。",
+      },
+    ],
+    models: [
+      {
+        id: "m-quota",
+        model: "p/quota",
+        enabled: true,
+        available: true,
+        circuit_state: "quota_open",
+        cooldown_remaining_seconds: 45,
+        last_health_failure_at: "2026-11-19T02:00:00Z",
+        last_health_failure_kind: "quota",
+        running: 0,
+        global_running: 0,
+        max_concurrency: 4,
+      },
+      {
+        id: "m-probe",
+        model: "p/probe",
+        enabled: true,
+        available: true,
+        circuit_state: "quota_half_open",
+        running: 1,
+        global_running: 3,
+        max_concurrency: 4,
+      },
+      {
+        id: "m-access",
+        model: "p/access",
+        enabled: true,
+        available: true,
+        circuit_state: "access_open",
+        cooldown_remaining_seconds: 120,
+        last_health_failure_at: "2026-11-19T02:01:00Z",
+        last_health_failure_kind: "access_denied",
+        running: 0,
+        global_running: 0,
+        max_concurrency: 2,
+      },
+    ],
+  });
+  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: value }));
+  try {
+    const rendered = text(root.toJSON());
+    assert.match(rendered, /前序尝试未通过，正在等待其他未尝试模型释放并发额度。/);
+    const rows = root.root.findAllByType("tr").slice(1);
+    assert.match(text(rows[0].findAllByType("td")[2]), /配额冷却中/);
+    assert.match(text(rows[0].findAllByType("td")[3]), /配额限流/);
+    assert.equal(text(rows[1].findAllByType("td")[2]), "恢复探测中 (限 1 并发)");
+    assert.match(text(rows[1].findAllByType("td")[4]), /1\/4全局 3\/4/);
+    assert.match(text(rows[2].findAllByType("td")[2]), /权限隔离中/);
+    assert.match(text(rows[2].findAllByType("td")[3]), /权限拒绝/);
+  } finally {
+    root.unmount();
+  }
+});

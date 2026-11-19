@@ -1479,3 +1479,62 @@ def test_pattern_audit_accepts_live_invocation_metadata_and_preserves_it_on_empt
     assert task.output_source.serve_session_id == "ses-pattern-1"
     assert task.output_source.model == "provider/m1"
     assert task.started_at == "2026-11-18T03:00:00+00:00"
+
+
+def test_dynamic_workers_refill_during_post_lease_dedup_and_extra_allowance() -> None:
+    async def run() -> None:
+        queue: asyncio.Queue[int] = asyncio.Queue()
+        for idx in range(3):
+            queue.put_nowait(idx)
+
+        post_lease_entered = asyncio.Event()
+        second_started = asyncio.Event()
+        release_first = asyncio.Event()
+        third_started = asyncio.Event()
+        extra_allowance = 0
+
+        async def run_item(item: int) -> None:
+            if item == 0:
+                with engine._mark_worker_post_lease():
+                    post_lease_entered.set()
+                    await asyncio.wait_for(second_started.wait(), timeout=1.0)
+                    await release_first.wait()
+                return
+            if item == 1:
+                second_started.set()
+                await asyncio.wait_for(third_started.wait(), timeout=1.0)
+                return
+            if item == 2:
+                third_started.set()
+                release_first.set()
+
+        from task_agent.model_pool import (
+            clear_planned_tasks,
+            notify_model_pool_config_changed,
+            register_planned_task,
+        )
+        await register_planned_task("scan-dynamic", {"task_type": "vulnerability_mining"})
+        try:
+            runner = asyncio.create_task(
+                engine._run_dynamic_workers(
+                    queue,
+                    run_item,
+                    lambda: 1,
+                    scope_id="scan-dynamic",
+                    get_extra_allowance=lambda: extra_allowance,
+                )
+            )
+            # Item 0 enters post-lease dedup/reporting -> item 1 immediately refills the model slot!
+            await asyncio.wait_for(post_lease_entered.wait(), timeout=1.0)
+            await asyncio.wait_for(second_started.wait(), timeout=1.0)
+            assert not third_started.is_set()
+
+            # Simulate constrained retry waiter allowance -> item 2 starts while item 0 & 1 are still active!
+            extra_allowance = 1
+            await notify_model_pool_config_changed()
+            await asyncio.wait_for(runner, timeout=2.0)
+            assert third_started.is_set()
+        finally:
+            await clear_planned_tasks("scan-dynamic")
+
+    asyncio.run(run())

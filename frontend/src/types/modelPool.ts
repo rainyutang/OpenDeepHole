@@ -4,6 +4,14 @@ export interface AgentModelTimeWindow {
   end: string;
 }
 
+export type ModelCircuitState =
+  | "closed"
+  | "quota_open"
+  | "quota_half_open"
+  | "access_open"
+  | "access_half_open"
+  | string;
+
 export interface OpenCodePoolModelStats {
   id: string;
   model: string;
@@ -14,12 +22,15 @@ export interface OpenCodePoolModelStats {
   health_penalty_level: number;
   last_health_failure_at: string;
   last_health_failure_kind: string;
+  circuit_state?: ModelCircuitState;
+  cooldown_remaining_seconds?: number;
   max_concurrency: number;
   enabled: boolean;
   available: boolean;
   time_windows: AgentModelTimeWindow[];
   queued: number;
   running: number;
+  global_running?: number;
   total: number;
   success: number;
   failure: number;

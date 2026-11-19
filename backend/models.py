@@ -790,12 +790,15 @@ class OpenCodePoolModelStats(BaseModel):
     health_penalty_level: int = 0
     last_health_failure_at: str = ""
     last_health_failure_kind: str = ""
+    circuit_state: str = "closed"
+    cooldown_remaining_seconds: int = 0
     max_concurrency: int = 1
     enabled: bool = True
     available: bool = True
     time_windows: list[dict[str, object]] = []
     queued: int = 0
     running: int = 0
+    global_running: int = 0
     total: int = 0
     success: int = 0
     failure: int = 0
@@ -811,8 +814,14 @@ class OpenCodePoolModelStats(BaseModel):
     @classmethod
     def default_effective_weight_to_configured_weight(cls, value):
         """Keep snapshots from older Agents compatible with health-aware UIs."""
-        if isinstance(value, dict) and value.get("effective_weight") is None:
-            value = {**value, "effective_weight": value.get("weight", 1.0)}
+        if isinstance(value, dict):
+            updates: dict[str, object] = {}
+            if value.get("effective_weight") is None:
+                updates["effective_weight"] = value.get("weight", 1.0)
+            if value.get("global_running") is None:
+                updates["global_running"] = value.get("running", 0)
+            if updates:
+                value = {**value, **updates}
         return value
 
 
