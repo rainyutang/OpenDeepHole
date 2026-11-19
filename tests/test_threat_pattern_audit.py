@@ -106,7 +106,7 @@ def _artifacts(
 
 
 @pytest.fixture(params=[
-    "lightweight", "legacy", "primary_precedence", "multiple_ids",
+    "compact", "lightweight", "legacy", "primary_precedence", "multiple_ids",
     "fallback_after_empty", "fallback_after_corrupt", "fallback_after_missing",
     "unknown_pattern", "id_mismatch", "name_mismatch", "empty_description",
     "invalid_description", "missing_catalogs", "unreadable_catalog",
@@ -118,9 +118,12 @@ def catalog_description_case(request, tmp_path, monkeypatch) -> tuple[dict, str]
     source = references / (
         "deephole_threat_analysis/skills/attack-trees/attack-tree-by-asset/references/attack_mode.json"
         if case == "legacy"
+        else "deephole_compact_threat_analysis/skills/attack-trees/deephole-compact-attack-tree-by-asset/references/attack_mode.json"
+        if case == "compact"
         else "codex_goal_threat_analysis/references/attack_mode.json"
     )
-    mode = json.loads(source.read_text(encoding="utf-8"))[0]
+    modes = json.loads(source.read_text(encoding="utf-8"))
+    mode = modes[-1] if case == "compact" else modes[0]
     expected_description = mode["攻击模式描述"]
     pattern = {
         "pattern_id": "、".join(mode["攻击模式编号"]),
@@ -129,7 +132,7 @@ def catalog_description_case(request, tmp_path, monkeypatch) -> tuple[dict, str]
             "pattern_description", "攻击模式描述", "description", "association_description",
         )},
     }
-    if case in {"lightweight", "legacy"}:
+    if case in {"compact", "lightweight", "legacy"}:
         return pattern, expected_description
 
     primary = tmp_path / "primary-attack-mode.json"

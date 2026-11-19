@@ -53,8 +53,8 @@ def _allowed_patterns() -> dict[str, str]:
         if not pattern_id or not isinstance(name, str) or not name.strip() or pattern_id in allowed:
             raise ValueError(f"{CATALOG_PATH}: invalid or duplicate catalog entry at [{index}]")
         allowed[pattern_id] = name.strip()
-    if len(allowed) != 51:
-        raise ValueError(f"{CATALOG_PATH}: expected 51 attack patterns, got {len(allowed)}")
+    if len(allowed) != 57:
+        raise ValueError(f"{CATALOG_PATH}: expected 57 attack patterns, got {len(allowed)}")
     return allowed
 
 
@@ -84,7 +84,7 @@ def validate_patterns(data: Mapping[str, Any]) -> None:
             if expected is None or name != expected:
                 hint = f"; expected pattern_name={expected!r}" if expected is not None else ""
                 raise ValueError(
-                    f"{location}: pattern must exactly match the 51-pattern attack_mode.json: "
+                    f"{location}: pattern must exactly match the 57-pattern attack_mode.json: "
                     f"pattern_id={pattern_id!r}, pattern_name={name!r}{hint}"
                 )
             if pattern_id in seen:
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"INVALID: {exc}", file=sys.stderr)
         return 1
-    print("VALID: compact attack-tree file passed schema and 51-pattern checks")
+    print("VALID: compact attack-tree file passed schema and 57-pattern checks")
     return 0
 
 

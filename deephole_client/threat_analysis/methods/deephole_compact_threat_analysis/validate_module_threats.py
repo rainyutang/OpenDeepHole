@@ -31,11 +31,29 @@ ARTIFACT_VALIDATION_TIMEOUT_SECONDS = 60.0
 _VALIDATION_STOP_TIMEOUT_SECONDS = 2.0
 
 
+def _allowed_module_patterns() -> dict[str, str]:
+    catalog = read_json(CATALOG_PATH)
+    allowed = _allowed_patterns()
+    if not isinstance(catalog, list) or len(catalog) != len(allowed):
+        raise ValueError(f"{CATALOG_PATH}: module-threat catalog must match {len(allowed)}-pattern catalog")
+    for index, mode in enumerate(catalog):
+        raw_ids = mode.get("攻击模式编号") if isinstance(mode, dict) else None
+        pattern_id = (
+            "、".join(str(value).strip() for value in raw_ids if str(value).strip())
+            if isinstance(raw_ids, list)
+            else str(raw_ids or "").strip()
+        )
+        name = mode.get("攻击模式名称") if isinstance(mode, dict) else None
+        if allowed.get(pattern_id) != (name.strip() if isinstance(name, str) else None):
+            raise ValueError(f"{CATALOG_PATH}: catalog mismatch at [{index}]")
+    return allowed
+
+
 def validate_module_threat_patterns(patterns: Any, path_prefix: str = "$") -> list[dict[str, Any]]:
     if not isinstance(patterns, list):
         raise ValueError(f"{path_prefix}: expected a JSON array")
     validate_json_schema(patterns, MODULE_THREAT_LIST_SCHEMA)
-    allowed = _allowed_patterns()
+    allowed = _allowed_module_patterns()
     seen: set[str] = set()
     for index, item in enumerate(patterns):
         location = f"{path_prefix}[{index}]"
@@ -48,7 +66,7 @@ def validate_module_threat_patterns(patterns: Any, path_prefix: str = "$") -> li
         if expected is None or name != expected:
             hint = f"; expected pattern_name={expected!r}" if expected is not None else ""
             raise ValueError(
-                f"{location}: pattern must exactly match the 51-pattern attack_mode.json: "
+                f"{location}: pattern must exactly match the 57-pattern attack_mode.json: "
                 f"pattern_id={pattern_id!r}, pattern_name={name!r}{hint}"
             )
         if pattern_id in seen:
@@ -99,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"INVALID: {exc}", file=sys.stderr)
         return 1
-    print("VALID: compact module attack-threats file passed schema and 51-pattern checks")
+    print("VALID: compact module attack-threats file passed schema and 57-pattern checks")
     return 0
 
 

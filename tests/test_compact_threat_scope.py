@@ -155,7 +155,7 @@ def test_pipeline_publishes_only_intersections_and_preserves_raw_merge(source, t
     assert {module["代码目录"] for module in _read(adapted["high_risk_modules_path"])} == {"source/src/a.c"}
     targets = _build_targets(artifact, _read(adapted["high_risk_modules_path"]), fallback_code_path=source,
                             scan_scope=resolve_scan_scope(source.parent, code_scan_paths=selected))
-    assert len(targets) == 30
+    assert len(targets) == 34
     assert {tuple(target["code_paths"]) for target in targets} == {(str(selected[0]),)}
 
 
@@ -175,7 +175,7 @@ def test_no_external_entry_produces_empty_trees_without_reviving_excluded_module
     if internal:
         record, = artifact["unassigned_module_pattern_baselines"]
         assert record["module_name"] == "内部模块"
-        assert len(record["attack_patterns"]) == 15
+        assert len(record["attack_patterns"]) == 17
     else:
         assert artifact == {"attack_trees": []}
         assert _read(result["high_risk_modules_path"]) == []

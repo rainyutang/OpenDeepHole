@@ -9,8 +9,8 @@
 
 `deephole_compact_threat_analysis`，界面名称“DeepHole精简威胁分析”，完整复制 DeepHole
 多阶段方法，保留四类价值资产与五类高风险模块的并行识别、合并和逐资产攻击树分析。
-攻击树阶段将原方法的 1,355 项攻击模式替换为现有轻量级库的 51 项：C/C++ 11 项、协议 14 项、
-密码学 11 项、系统边界 15 项。完整复制
+攻击树阶段将原方法的 1,355 项攻击模式替换为现有轻量级库的 57 项：C/C++ 13 项、协议 14 项、
+密码学 11 项、系统边界 19 项。完整复制
 `methods/codex_goal_threat_analysis/references/attack_mode.json` 到新方法攻击树 Skill 的
 `references/attack_mode.json`，作为独立随包资源，保留编号、名称、描述和顺序。
 按每条攻击路径分析全部实际适用模式，数量要求与轻量级方法一致：有足够适用模式时至少输出 10 个，
@@ -36,9 +36,9 @@
 当 `generate_attack_tree=False` 时，方法跳过价值资产识别（`value-assets.json` 写入 `[]`）与攻击树构建，
 对每个裁剪后的高风险模块独立创建 1 个 `module_attack_threats` 任务（使用 `deephole-compact-module-attack-threats` Skill，不合并多模块、不做 LLM 二次 merge）。
 提示词严格限定仅检查该高风险模块自身 `代码目录` 内的代码，禁止探索其它源码、禁止过度探索或挖掘具体漏洞，
-直接从私有 51 项模式库输出简洁列表 `[{ "pattern_id", "pattern_name", "description" }]`，经 `validate_module_threats.py --output <文件>` 校验后，
+直接从私有 57 项模式库输出简洁列表 `[{ "pattern_id", "pattern_name", "description" }]`，经 `validate_module_threats.py --output <文件>` 校验后，
 由 Python 汇总写入 `attack_trees.json`（`analysis_mode: "module_threats_only"`、`attack_trees: []`、`module_threats: [...]`），
-并继续按去重规则补齐下述 15 项固定审计模式。该模式可驱动 `threat_pattern_audit` 与 `threat_pattern_iterative_audit`，
+并继续按去重规则补齐下述 17 项固定审计模式。该模式可驱动 `threat_pattern_audit` 与 `threat_pattern_iterative_audit`，
 威胁分析页默认仍展示高风险模块并提供简洁的“模块攻击威胁”双列表格页签，首页覆盖图同样完整展示高风险模块与攻击模式关联；
 依赖攻击树叶子节点的旧版 `threat_audit` 引擎与 `generate_attack_tree=False` 互斥。
 
@@ -51,7 +51,7 @@
 精简方法的逐资产攻击树任务由模型直接写入指定 raw JSON 文件，宿主保存本次动态 Schema，
 并通过方法目录中的 `validate_attack_tree.py --output <文件> --schema <Schema文件>` 校验实际产物。
 校验保留既有结构及 `module_id` 约束，严格要求每个 `pattern_id` 与 `pattern_name` 配对匹配私有
-51 项模式库，同时拒绝同一路径内重复模式；空 `attack_patterns` 仍合法。首次生成及现有节点纠正
+57 项模式库，同时拒绝同一路径内重复模式；空 `attack_patterns` 仍合法。首次生成及现有节点纠正
 均修改同一文件，宿主不再从最终聊天回复或结构化回复补写、覆盖攻击树文件。
 
 执行方式与 OpenCode 轻量级一致：模型可以运行 runtime 提供的精确命令辅助自检，是否执行
@@ -70,7 +70,7 @@
 攻击树缓存失效，前序合法产物仍可复用。没有外部暴露高风险模块时不强制生成攻击树，
 保留范围内内部模块及其固定审计记录。其他威胁分析方法保持原有处理。
 
-精简方法在 AI 分析完成、攻击树合并后，由程序为每个范围内高风险模块补齐以下 15 项固定审计模式：
+精简方法在 AI 分析完成、攻击树合并后，由程序为每个范围内高风险模块补齐以下 17 项固定审计模式：
 
 | 编号 | 模式 |
 | --- | --- |
@@ -85,6 +85,8 @@
 | ODH-NATIVE-09 | 字符串终止与长度单位混淆 |
 | ODH-NATIVE-10 | 竞态条件与检查使用时差 |
 | ODH-NATIVE-11 | 空指针无效指针或失效句柄解引用 |
+| ODH-NATIVE-12 | 内存与系统句柄遗漏释放 |
+| ODH-NATIVE-13 | 除零模零与非法位运算 |
 | ODH-SYS-08 | 日志错误与崩溃产物泄露敏感信息 |
 | ODH-SYS-09 | 不受控资源消耗与复杂度攻击 |
 | ODH-SYS-12 | 外部输入触发致命错误与进程终止 |
@@ -99,7 +101,7 @@
 
 攻击模式引擎和覆盖图读取同一份补充记录，按模块与模式合并去重。固定模式表示必须检查的范围，
 并不表示该模块已存在漏洞；模式不适用或无法确认真实漏洞时，审计正常返回 `[]`。
-这会增加缺失组合的审计任务数，最多为每模块 15 个；AI 已选的其他模式仍参与审计。
+这会增加缺失组合的审计任务数，最多为每模块 17 个；AI 已选的其他模式仍参与审计。
 任务 ID 和成功结果复用规则保持不变，重复处理不会累积补充项。已有扫描不迁移、不安排补审；
 旧产物缺少新字段时继续按原逻辑读取。其他方法不补充这些固定审计模式。
 上线需更新后端、前端和 Agent 运行包并重启 Agent，无需数据库迁移。

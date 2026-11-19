@@ -32,7 +32,7 @@ def source(tmp_path, *, name="demo", body="v1", owner="checker:demo"):
 def test_complete_builtin_catalog_and_idempotent_initialization(tmp_path):
     sources = builtin_skill_sources()
     names = {s.name for s in sources}
-    assert len(names) == len(sources) == 34
+    assert len(names) == len(sources) == 35
     assert {
         "fp-check", "prove-bug", "prove-fp", "final-judge", "npd", "oob-audit",
         "resleak", "value-asset-map", "high-risk-module-map", "high-risk-module-merge",
@@ -40,6 +40,7 @@ def test_complete_builtin_catalog_and_idempotent_initialization(tmp_path):
         "command-injection-audit",
         "deephole-compact-value-asset-map", "deephole-compact-high-risk-module-map",
         "deephole-compact-high-risk-module-merge", "deephole-compact-attack-tree-by-asset",
+        "deephole-compact-module-attack-threats",
     } <= names
     workspace = tmp_path / "Agent With Spaces"
     assert install_skills(workspace, sources, bundled=True)
@@ -61,7 +62,8 @@ def test_compact_method_installs_private_catalog_without_replacing_original(tmp_
     sources = builtin_skill_sources()
     original = [source for source in sources if source.owner == original_owner]
     compact = [source for source in sources if source.owner == compact_owner]
-    assert len(original) == len(compact) == 4
+    assert len(original) == 4
+    assert len(compact) == 5
     workspace = tmp_path / "Agent Workspace"
     assert install_skills(workspace, original, bundled=True)
     root = workspace / ".opencode/skills"
@@ -78,8 +80,10 @@ def test_compact_method_installs_private_catalog_without_replacing_original(tmp_
     reference = "references/attack_mode.json"
     full = json.loads((root / "attack-tree-by-asset" / reference).read_text(encoding="utf-8"))
     reduced = json.loads((root / "deephole-compact-attack-tree-by-asset" / reference).read_text(encoding="utf-8"))
+    module_threats = json.loads((root / "deephole-compact-module-attack-threats" / reference).read_text(encoding="utf-8"))
     assert len(full) == 1355
-    assert len(reduced) == 51
+    assert len(reduced) == 57
+    assert module_threats == reduced
     assert not install_skills(workspace, original + compact, bundled=True)
 
 

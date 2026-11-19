@@ -40,7 +40,7 @@ def validation_case(tmp_path):
     _load_implementation()
 
 
-def test_all_51_patterns_validate_without_rewriting_file(validation_case):
+def test_all_57_patterns_validate_without_rewriting_file(validation_case):
     case = validation_case
     before = case.output.read_bytes()
     assert case.validator.validate_file(case.output, case.schema) == case.data

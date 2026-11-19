@@ -212,7 +212,7 @@ sandbox_permissions = ["disk-full-read-access"]
 | `opencode_coverage_guided_lightweight_threat_analysis` | OpenCode 轻量初轮后，按完整文件清单最多定向补查两次 |
 | `codex_goal_threat_analysis` | Codex SDK，通过 `codex app-server --listen stdio://` 使用全局默认模型 |
 | `deephole_threat_analysis` | DeepHole 原生威胁分析方法 |
-| `deephole_compact_threat_analysis` | DeepHole 多阶段流程，使用 51 项精简模式库，并补齐每模块缺失的 15 项固定审计模式 |
+| `deephole_compact_threat_analysis` | DeepHole 多阶段流程，使用 57 项精简模式库，并补齐每模块缺失的 17 项固定审计模式 |
 
 OpenCode 轻量初轮由宿主在回复结束后校验实际产物；模型可执行绑定命令自检，但执行命令不是完成审计条件。校验失败先回传原 Session 修正，再沿用阶段重试。Codex Goal 则要求在 Goal 内执行校验命令并通过。轻量级方法初轮失败、Codex 不可用或产物无效时，外层编排在未取消的前提下自动且仅一次以干净模式回退到 `deephole_threat_analysis`；覆盖率引导方法的补查失败保留最近有效结果。用户主动取消不触发回退，显式选择原生或精简 DeepHole 方法时直接执行所选方法。
 

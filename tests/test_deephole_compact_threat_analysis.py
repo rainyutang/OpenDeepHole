@@ -78,7 +78,7 @@ def test_compact_method_preserves_original_implementation_and_prompts():
         assert compact_content == original.read_bytes(), relative
 
 
-def test_compact_catalog_is_an_exact_copy_of_the_51_mode_library():
+def test_compact_catalog_is_an_exact_copy_of_the_57_mode_library():
     lightweight = (
         THREAT_ANALYSIS_METHODS_DIR
         / "codex_goal_threat_analysis/references/attack_mode.json"
@@ -89,20 +89,20 @@ def test_compact_catalog_is_an_exact_copy_of_the_51_mode_library():
     )
     assert COMPACT_CATALOG.read_bytes() == lightweight.read_bytes()
     modes = json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))
-    assert len(modes) == 51
-    assert len({tuple(mode["攻击模式编号"]) for mode in modes}) == 51
+    assert len(modes) == 57
+    assert len({tuple(mode["攻击模式编号"]) for mode in modes}) == 57
     assert Counter(mode["攻击模式编号"][0].rsplit("-", 1)[0] for mode in modes) == {
-        "ODH-NATIVE": 11,
+        "ODH-NATIVE": 13,
         "ODH-PROTO": 14,
         "ODH-CRYPTO": 11,
-        "ODH-SYS": 15,
+        "ODH-SYS": 19,
     }
     assert len(json.loads(original.read_text(encoding="utf-8"))) == 1355
 
 
 def test_attack_prompt_uses_private_catalog_with_lightweight_pattern_count():
     prompt = (ATTACK_SKILL / "SKILL.md").read_text(encoding="utf-8")
-    assert "51 项" in prompt
+    assert "57 项" in prompt
     assert "唯一攻击模式来源" in prompt
     assert "针对每条攻击路径分析全部实际适用的攻击模式" in prompt
     assert "有足够适用模式时至少输出 10 个" in prompt
@@ -215,7 +215,7 @@ def _attack_tree(task_id, asset, module, module_id, patterns):
     }
 
 
-@pytest.mark.parametrize("pattern_count", [0, 1, 3, 16, 51])
+@pytest.mark.parametrize("pattern_count", [0, 1, 3, 18, 57])
 def test_native_pipeline_artifacts_and_resume_preserve_actual_pattern_count(
     tmp_path, compact_native, monkeypatch, pattern_count,
 ):
@@ -387,7 +387,7 @@ def test_baselines_cover_internal_and_unassigned_modules_without_creating_paths(
     unassigned_record = result.pop("unassigned_module_pattern_baselines")[0]
     assert unassigned_record["module_name"] == unassigned["模块名称"]
     assert unassigned_record["node_id"] is None
-    assert all(len(item["attack_patterns"]) == 15 for item in records + [unassigned_record])
+    assert all(len(item["attack_patterns"]) == 17 for item in records + [unassigned_record])
     assert result == output
 
 
@@ -399,7 +399,7 @@ def test_baselines_handle_empty_trees_and_are_idempotent(compact_native):
     assert result["attack_trees"] == []
     record = result["unassigned_module_pattern_baselines"][0]
     assert record["node_id"] is None
-    assert len(record["attack_patterns"]) == 15
+    assert len(record["attack_patterns"]) == 17
     assert baseline.add_module_pattern_baselines(result, [_module()]) == result
     assigned = baseline.add_module_pattern_baselines(_completed_tree(compact_native), [_module()])
     assert baseline.add_module_pattern_baselines(assigned, [_module()]) == assigned
@@ -410,7 +410,7 @@ def test_baselines_use_private_catalog_and_leave_fully_covered_module_unchanged(
     catalog = {"、".join(mode["攻击模式编号"]): mode for mode in json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))}
     result = baseline.add_module_pattern_baselines({"attack_trees": []}, [_module()])
     patterns = result["unassigned_module_pattern_baselines"][0]["attack_patterns"]
-    assert [item["pattern_id"] for item in patterns] == [*(f"ODH-NATIVE-{i:02d}" for i in range(1, 12)), "ODH-SYS-08", "ODH-SYS-09", "ODH-SYS-12", "ODH-SYS-13"]
+    assert [item["pattern_id"] for item in patterns] == [*(f"ODH-NATIVE-{i:02d}" for i in range(1, 14)), "ODH-SYS-08", "ODH-SYS-09", "ODH-SYS-12", "ODH-SYS-13"]
     for pattern in patterns:
         mode = catalog[pattern["pattern_id"]]
         assert pattern["pattern_name"] == mode["攻击模式名称"]
@@ -472,17 +472,17 @@ def test_pipeline_without_assets_still_produces_unassigned_baselines(tmp_path, c
     assert result["result"] is True, result
     artifact = json.loads(Path(result["attack_tree_path"]).read_text(encoding="utf-8"))
     assert artifact["attack_trees"] == []
-    assert len(artifact["unassigned_module_pattern_baselines"][0]["attack_patterns"]) == 15
+    assert len(artifact["unassigned_module_pattern_baselines"][0]["attack_patterns"]) == 17
 
 
-def test_module_threat_skill_and_catalog_match_private_51_modes():
+def test_module_threat_skill_and_catalog_match_private_57_modes():
     skill_dir = COMPACT_ROOT / "skills/module-threats/deephole-compact-module-attack-threats"
     catalog = skill_dir / "references/attack_mode.json"
     prompt = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert catalog.read_bytes() == COMPACT_CATALOG.read_bytes()
     assert "禁止探索其它源码" in prompt
     assert "禁止过度探索与问题挖掘" in prompt
-    assert "51 项" in prompt
+    assert "57 项" in prompt
     assert "pattern_id" in prompt and "pattern_name" in prompt and "description" in prompt
 
 
@@ -712,14 +712,14 @@ def test_pipeline_without_attack_tree_analyzes_one_module_per_task_and_supports_
         {"module_name": mod_b["模块名称"], "attack_patterns": []},
     ]
     baselines = {item["module_name"]: item["attack_patterns"] for item in envelope["unassigned_module_pattern_baselines"]}
-    # mod_a already had ODH-NATIVE-01 from AI, so only 14 fixed baselines are supplemented; mod_b gets all 15.
-    assert len(baselines[mod_a["模块名称"]]) == 14
+    # mod_a already had ODH-NATIVE-01 from AI, so only 16 fixed baselines are supplemented; mod_b gets all 17.
+    assert len(baselines[mod_a["模块名称"]]) == 16
     assert "ODH-NATIVE-01" not in {p["pattern_id"] for p in baselines[mod_a["模块名称"]]}
-    assert len(baselines[mod_b["模块名称"]]) == 15
+    assert len(baselines[mod_b["模块名称"]]) == 17
 
     # Downstream audit engines and threat coverage consume both module_threats and baselines.
     audit_targets = _build_targets(envelope, [mod_a, mod_b], fallback_code_path=code_root)
-    assert len(audit_targets) == 16 + 15
+    assert len(audit_targets) == 18 + 17
     inv = {
         "schema_version": 1,
         "snapshot_id": "s1",
@@ -742,7 +742,7 @@ def test_pipeline_without_attack_tree_analyzes_one_module_per_task_and_supports_
     coverage = build_threat_coverage(inv, bundle)
     assert coverage["analysis_ready"] is True
     assert [m["name"] for m in coverage["modules"]] == [mod_a["模块名称"], mod_b["模块名称"]]
-    assert len(coverage["targets"]) == 16 + 15
+    assert len(coverage["targets"]) == 18 + 17
     proto_target = next(t for t in coverage["targets"] if t["pattern_id"] == "ODH-PROTO-01")
     assert proto_target["sources"] == [{
         "source_kind": "module_threat",
@@ -763,7 +763,7 @@ def test_pipeline_without_attack_tree_analyzes_one_module_per_task_and_supports_
     ) == result
 
 
-def test_validate_module_threats_enforces_schema_and_51_pattern_catalog(tmp_path, compact_native):
+def test_validate_module_threats_enforces_schema_and_57_pattern_catalog(tmp_path, compact_native):
     validator = importlib.import_module(compact_native.__name__ + ".validate_module_threats")
     tree_validator = importlib.import_module(compact_native.__name__ + ".validate_attack_tree")
     modes = json.loads(COMPACT_CATALOG.read_text(encoding="utf-8"))

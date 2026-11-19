@@ -215,6 +215,8 @@ def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
     pattern_ids = [mode["攻击模式编号"][0] for mode in attack_modes]
     assert len(pattern_ids) == len(set(pattern_ids))
     assert {
+        "ODH-NATIVE-12",
+        "ODH-NATIVE-13",
         "ODH-PROTO-12",
         "ODH-PROTO-13",
         "ODH-PROTO-14",
@@ -224,6 +226,10 @@ def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
         "ODH-SYS-13",
         "ODH-SYS-14",
         "ODH-SYS-15",
+        "ODH-SYS-16",
+        "ODH-SYS-17",
+        "ODH-SYS-18",
+        "ODH-SYS-19",
     }.issubset(pattern_ids)
     assert "ODH-PROTO-03" not in pattern_ids
     assert {pattern_id.split("-")[1] for pattern_id in pattern_ids} == {

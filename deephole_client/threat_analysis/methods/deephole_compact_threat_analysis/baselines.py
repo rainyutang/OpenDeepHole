@@ -14,7 +14,7 @@ from threat_analysis_harness.validate_attack_tree import validate_patterns
 
 
 BASELINE_PATTERN_IDS = (
-    *(f"ODH-NATIVE-{index:02d}" for index in range(1, 12)),
+    *(f"ODH-NATIVE-{index:02d}" for index in range(1, 14)),
     "ODH-SYS-08", "ODH-SYS-09", "ODH-SYS-12", "ODH-SYS-13",
 )
 _CATALOG = (
