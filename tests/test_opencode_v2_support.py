@@ -911,3 +911,408 @@ def test_end_to_end_opencode_v2_serve_models_prompt_continuation_and_interrupt(
     assert "interrupt" in kinds
     perm_replies = [e for e in events if e["kind"] == "permission_reply"]
     assert perm_replies and perm_replies[0]["body"]["effect"] == "deny"
+
+
+def _create_mock_opencode_v232_binary(tmp_path: Path, state_file: Path) -> Path:
+    """Create a mock OpenCode 2.3.2 server matching real v2.3 Effect HttpApi + SPA HTML fallback."""
+    server_script = tmp_path / "mock_opencode_v232_server.py"
+    server_script.write_text(
+        textwrap.dedent(
+            """\
+            from __future__ import annotations
+            import asyncio
+            import base64
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            from urllib.parse import urlsplit
+
+            STATE_FILE = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+
+            def record(event: dict) -> None:
+                if STATE_FILE is None:
+                    return
+                with STATE_FILE.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(event, ensure_ascii=False) + "\\n")
+
+            if "--version" in sys.argv:
+                print("opencode v2.3.2")
+                raise SystemExit(0)
+
+            idx = sys.argv.index("--port")
+            PORT = int(sys.argv[idx + 1])
+            USERNAME = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+            PASSWORD = os.environ.get("OPENCODE_SERVER_PASSWORD", "")
+            EXPECTED_AUTH = "Basic " + base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+
+            sessions: dict[str, dict] = {}
+            messages: dict[str, list[dict]] = {}
+            sse_queues: list[asyncio.Queue] = []
+            seq = 0
+
+            def broadcast(event: dict) -> None:
+                for q in list(sse_queues):
+                    q.put_nowait(event)
+
+            async def send_json(writer: asyncio.StreamWriter, status: int, payload: object) -> None:
+                reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"}.get(status, "OK")
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                headers = (
+                    f"HTTP/1.1 {status} {reason}\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n\\r\\n"
+                ).encode("ascii")
+                writer.write(headers + body)
+                await writer.drain()
+                writer.close()
+
+            async def send_spa_html(writer: asyncio.StreamWriter) -> None:
+                body = b"<!doctype html><html><body>OpenCode Web Shell</body></html>"
+                headers = (
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/html; charset=utf-8\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n\\r\\n"
+                ).encode("ascii")
+                writer.write(headers + body)
+                await writer.drain()
+                writer.close()
+
+            async def run_v232_turn(session_id: str, prompt_text: str) -> None:
+                global seq
+                await asyncio.sleep(0.04)
+                broadcast({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "busy"}}})
+                seq += 1
+                reply = json.dumps({"verdict": "ok-v232", "echo": prompt_text[-18:]}, ensure_ascii=False)
+                # Intentionally omit `time.completed` and `info.finish` to mirror v2.3 rows
+                messages.setdefault(session_id, []).append({
+                    "id": f"msg-232-{seq}",
+                    "sessionID": session_id,
+                    "role": "assistant",
+                    "time": {"created": 100},
+                    "parts": [{"id": f"prt-{seq}", "type": "text", "text": reply}],
+                })
+                sessions[session_id]["status"] = {"type": "idle"}
+                broadcast({"type": "session.status", "properties": {"sessionID": session_id, "status": {"type": "idle"}}})
+
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                global seq
+                try:
+                    req_line = await reader.readline()
+                    if not req_line:
+                        writer.close()
+                        return
+                    method, raw_target, _ = req_line.decode("latin1").strip().split(" ", 2)
+                    headers: dict[str, str] = {}
+                    while True:
+                        line = await reader.readline()
+                        if line in (b"\\r\\n", b"\\n", b""):
+                            break
+                        k, v = line.decode("latin1").split(":", 1)
+                        headers[k.strip().lower()] = v.strip()
+                    length = int(headers.get("content-length", "0") or 0)
+                    raw_body = await reader.readexactly(length) if length > 0 else b""
+                    path = urlsplit(raw_target).path
+
+                    if headers.get("authorization") != EXPECTED_AUTH:
+                        await send_json(writer, 401, {"error": "Unauthorized"})
+                        return
+
+                    record({"kind": "request", "method": method, "path": path})
+
+                    # Real OpenCode v2.3.2 health/discovery endpoint: ServerInfo without `healthy: true`
+                    if method == "GET" and path == "/api/info":
+                        await send_json(writer, 200, {
+                            "version": "2.3.2",
+                            "pid": os.getpid(),
+                            "urls": [f"http://127.0.0.1:{PORT}"],
+                            "paths": {"tmp": "/tmp/opencode"},
+                        })
+                        return
+
+                    # Real OpenCode v2.3.2 OpenAPI spec at `/doc` with strict Effect Schema definitions
+                    if method == "GET" and path == "/doc":
+                        await send_json(writer, 200, {
+                            "openapi": "3.1.0",
+                            "paths": {
+                                "/api/info": {"get": {}},
+                                "/api/model": {"get": {}},
+                                "/api/provider": {"get": {}},
+                                "/api/config": {"get": {}},
+                                "/api/event": {"get": {}},
+                                "/api/session": {
+                                    "get": {},
+                                    "post": {
+                                        "requestBody": {
+                                            "content": {
+                                                "application/json": {
+                                                    "schema": {"$ref": "#/components/schemas/SessionCreateInput"}
+                                                }
+                                            }
+                                        }
+                                    },
+                                },
+                                "/api/session/{id}/message": {"get": {}},
+                                "/api/session/{id}/prompt": {
+                                    "post": {
+                                        "requestBody": {
+                                            "content": {
+                                                "application/json": {
+                                                    "schema": {"$ref": "#/components/schemas/SessionPromptInput"}
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                "/api/session/{id}/interrupt": {"post": {}},
+                            },
+                            "components": {
+                                "schemas": {
+                                    "SessionCreateInput": {
+                                        "type": "object",
+                                        "properties": {
+                                            "title": {"type": "string"},
+                                            "location": {
+                                                "type": "object",
+                                                "properties": {"directory": {"type": "string"}},
+                                            },
+                                        },
+                                        "additionalProperties": False,
+                                    },
+                                    "SessionPromptInput": {
+                                        "type": "object",
+                                        "properties": {
+                                            "parts": {"type": "array", "items": {"type": "object"}},
+                                            "agent": {"type": "string"},
+                                            "model": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "providerID": {"type": "string"},
+                                                    "modelID": {"type": "string"},
+                                                },
+                                            },
+                                        },
+                                        "additionalProperties": False,
+                                    },
+                                }
+                            },
+                        })
+                        return
+
+                    # Real v2.3 `/api/provider` returns provider ID strings; `/api/model` returns catalog
+                    if method == "GET" and path == "/api/provider":
+                        await send_json(writer, 200, ["opencode", "openai-compatible"])
+                        return
+
+                    if method == "GET" and path == "/api/model":
+                        await send_json(writer, 200, [
+                            {
+                                "id": "Qwen3-Coder",
+                                "modelID": "Qwen3-Coder",
+                                "providerID": "openai-compatible",
+                                "name": "Qwen3 Coder",
+                                "enabled": True,
+                                "status": "active",
+                                "limit": {"context": 200000, "output": 32000},
+                            },
+                            {
+                                "id": "unconfigured-claude",
+                                "modelID": "claude-4",
+                                "providerID": "anthropic",
+                                "name": "Unconfigured Claude",
+                                "enabled": False,
+                                "status": "disabled",
+                                "limit": {"context": 200000, "output": 16000},
+                            },
+                        ])
+                        return
+
+                    if method == "GET" and path == "/api/config":
+                        await send_json(writer, 200, {"provider": {}})
+                        return
+
+                    if method == "GET" and path == "/api/event":
+                        q: asyncio.Queue = asyncio.Queue()
+                        sse_queues.append(q)
+                        writer.write(
+                            b"HTTP/1.1 200 OK\\r\\n"
+                            b"Content-Type: text/event-stream\\r\\n"
+                            b"Cache-Control: no-cache\\r\\n"
+                            b"Connection: keep-alive\\r\\n\\r\\n"
+                        )
+                        writer.write(b'data: {"type":"server.connected","properties":{}}\\n\\n')
+                        await writer.drain()
+                        try:
+                            while True:
+                                evt = await q.get()
+                                writer.write(f"data: {json.dumps(evt, ensure_ascii=False)}\\n\\n".encode("utf-8"))
+                                await writer.drain()
+                        except Exception:
+                            pass
+                        finally:
+                            if q in sse_queues:
+                                sse_queues.remove(q)
+                            writer.close()
+                        return
+
+                    if path == "/api/session" and method == "POST":
+                        body = json.loads(raw_body.decode("utf-8") or "{}")
+                        extra = set(body) - {"title", "location"}
+                        if extra:
+                            record({"kind": "schema_rejected", "path": path, "extra": sorted(extra)})
+                            await send_json(writer, 400, {"error": f"Unexpected properties: {sorted(extra)}"})
+                            return
+                        seq += 1
+                        sid = f"v232-sess-{seq}"
+                        sessions[sid] = {"id": sid, "title": body.get("title", ""), "status": {"type": "idle"}}
+                        messages[sid] = []
+                        await send_json(writer, 201, sessions[sid])
+                        return
+
+                    if path == "/api/session" and method == "GET":
+                        await send_json(writer, 200, [])
+                        return
+
+                    parts = [p for p in path.split("/") if p]
+                    if len(parts) >= 3 and parts[0] == "api" and parts[1] == "session":
+                        sid = parts[2]
+                        if len(parts) == 3 and method == "GET":
+                            await send_json(writer, 200, sessions[sid])
+                            return
+                        if len(parts) == 4 and parts[3] == "prompt" and method == "POST":
+                            body = json.loads(raw_body.decode("utf-8") or "{}")
+                            extra = set(body) - {"parts", "agent", "model"}
+                            if extra or not isinstance(body.get("parts"), list):
+                                record({"kind": "schema_rejected", "path": path, "extra": sorted(extra)})
+                                await send_json(writer, 400, {"error": f"Invalid prompt schema: {sorted(extra)}"})
+                                return
+                            prompt_text = "".join(str(p.get("text") or "") for p in body["parts"] if isinstance(p, dict))
+                            sessions[sid]["status"] = {"type": "busy"}
+                            asyncio.create_task(run_v232_turn(sid, prompt_text))
+                            await send_json(writer, 202, {"accepted": True})
+                            return
+                        if len(parts) == 4 and parts[3] == "message" and method == "GET":
+                            await send_json(writer, 200, {"data": messages.get(sid, [])})
+                            return
+
+                    # Unmatched GET routes (including `/api/health`, `/global/health`, `/api/global/event`,
+                    # `/api/tool/ids`, `/api/config/providers`) return HTTP 200 SPA HTML in OpenCode 2.3.2!
+                    if method == "GET":
+                        record({"kind": "spa_html_fallback", "path": path})
+                        await send_spa_html(writer)
+                        return
+
+                    await send_json(writer, 404, {"error": f"unhandled {method} {path}"})
+                except Exception as exc:
+                    record({"kind": "server_error", "error": repr(exc)})
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+
+            async def main() -> None:
+                server = await asyncio.start_server(handle, "127.0.0.1", PORT)
+                async with server:
+                    await server.serve_forever()
+
+            asyncio.run(main())
+            """
+        ),
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "opencode232-mock"
+    wrapper.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(server_script))} {shlex.quote(str(state_file))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return wrapper
+
+
+def test_opencode_v232_api_info_html_fallback_model_catalog_and_strict_schema(
+    tmp_path: Path,
+) -> None:
+    """Regression test for OpenCode 2.3.2 `/api/info` health check, HTML fallback routes, and Effect Schema."""
+    state_file = tmp_path / "v232_events.jsonl"
+    v232_bin = _create_mock_opencode_v232_binary(tmp_path, state_file)
+    project_dir = tmp_path / "project232"
+    project_dir.mkdir()
+    standalone_yaml = tmp_path / "task-agent-v232.yaml"
+    standalone_yaml.write_text(
+        textwrap.dedent(
+            f"""\
+            schema_version: 2
+            context:
+              project_dir: {project_dir}
+              work_dir: {tmp_path / 'work232'}
+              workspace_dir: {tmp_path / 'workspace232'}
+            serve:
+              tool: opencode
+              opencode_version: "2"
+              executable: /nonexistent/opencode-v1
+              executable_v2: {v232_bin}
+              timeout: 30
+              idle_timeout: 15
+            model_pool:
+              models:
+                - id: openai-compatible/Qwen3-Coder
+                  model: openai-compatible/Qwen3-Coder
+                  capability: high
+                  enabled: true
+            """
+        ),
+        encoding="utf-8",
+    )
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string"},
+            "echo": {"type": "string"},
+        },
+        "required": ["verdict", "echo"],
+        "additionalProperties": False,
+    }
+
+    async def scenario() -> None:
+        from task_agent.serve_client import get_serve_manager
+
+        await shutdown_opencode()
+        try:
+            manager = get_serve_manager()
+            reloaded = await manager.reload_runtime(
+                tool="opencode",
+                executable=str(v232_bin),
+                opencode_version="2",
+                directory=project_dir,
+                config_workspace=tmp_path / "workspace232",
+                config_content="{}",
+                serve_port_auto=True,
+            )
+            assert [m.id for m in reloaded.models] == ["openai-compatible/Qwen3-Coder"]
+
+            res = await run_opencode_task(
+                task_name="v232-threat-check",
+                task_type="threat_analysis",
+                prompt="verify v232 prompt",
+                required_capability="high",
+                output_schema=output_schema,
+                config_path=standalone_yaml,
+            )
+            assert res.status == "success"
+            assert res.structured == {"verdict": "ok-v232", "echo": "verify v232 prompt"}
+        finally:
+            await shutdown_opencode()
+
+    asyncio.run(scenario())
+
+    events = [
+        json.loads(line)
+        for line in state_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rejected = [e for e in events if e.get("kind") == "schema_rejected"]
+    assert rejected == [], f"Unexpected Effect Schema rejections: {rejected}"
+    info_calls = [e for e in events if e.get("kind") == "request" and e.get("path") == "/api/info"]
+    assert len(info_calls) >= 2

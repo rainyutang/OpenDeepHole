@@ -8,6 +8,8 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -669,12 +671,55 @@ def api_path(opencode_version: str, v1_path: str, v2_path: str | None = None) ->
 
 def health_probe_paths(opencode_version: str) -> tuple[str, ...]:
     if normalize_opencode_version(opencode_version) == OPENCODE_V2:
-        return ("/api/health", "/global/health")
+        return ("/api/info", "/api/health", "/global/health")
     return ("/global/health",)
 
 
-def parse_health_response(response: httpx.Response) -> tuple[bool, str, str]:
-    """Validate an OpenCode health HTTP response, rejecting HTML fallbacks.
+def is_html_fallback_response(response: object) -> bool:
+    """Return True when `opencode serve` fell through to its SPA HTML shell."""
+    headers = getattr(response, "headers", None)
+    content_type = ""
+    if hasattr(headers, "get"):
+        content_type = str(headers.get("content-type", "") or "").lower()
+    return "text/html" in content_type
+
+
+def is_route_miss_response(response: object) -> bool:
+    """Return True when an HTTP response indicates an unmatched API route.
+
+    OpenCode 2.x `serve` mounts a web UI catch-all that returns HTTP 200 with
+    `text/html` on unknown GET paths instead of HTTP 404.
+    """
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {404, 405}:
+        return True
+    return is_html_fallback_response(response)
+
+
+def _is_valid_v2_server_info(payload: dict[str, Any], version: str) -> bool:
+    """Check whether a JSON object matches OpenCode 2.x `ServerInfo` (`/api/info`)."""
+    if version:
+        return True
+    pid = payload.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        return True
+    if isinstance(payload.get("urls"), list):
+        return True
+    if isinstance(payload.get("paths"), dict):
+        return True
+    return False
+
+
+def parse_health_response(
+    response: httpx.Response,
+    *,
+    opencode_version: str = OPENCODE_V1,
+) -> tuple[bool, str, str]:
+    """Validate an OpenCode health/info HTTP response, rejecting HTML fallbacks.
+
+    Supports both:
+    - `{healthy: true, version?: "..."}` (`/global/health`, `/api/health`)
+    - OpenCode 2.x `ServerInfo` `{version: "2.x.y", pid: ..., ...}` (`GET /api/info`)
 
     Returns (healthy, version, diagnostic_detail).
     """
@@ -693,48 +738,258 @@ def parse_health_response(response: httpx.Response) -> tuple[bool, str, str]:
     version = str(payload.get("version") or "").strip()
     if payload.get("healthy") is True:
         return True, version, ""
+    if "healthy" in payload:
+        return False, version, f"healthy={payload.get('healthy')!r}，预期为 true"
+    if (
+        normalize_opencode_version(opencode_version) == OPENCODE_V2
+        and _is_valid_v2_server_info(payload, version)
+    ):
+        return True, version, ""
     return False, version, f"healthy={payload.get('healthy')!r}，预期为 true"
 
 
-async def discover_v2_openapi_paths(client: httpx.AsyncClient) -> frozenset[str]:
-    """Fetch `/doc` or `/api/doc` once to discover supported OpenAPI route templates."""
-    for doc_path in ("/api/doc", "/doc"):
+_PATH_PARAM_RE = re.compile(r"(?:\{[^/{}]+\}|:[A-Za-z0-9_]+)")
+
+
+def _canonical_route_pattern(template: str) -> str:
+    return _PATH_PARAM_RE.sub("{*}", str(template or "").strip())
+
+
+def _fill_route_param(template: str, value: str) -> str:
+    return _PATH_PARAM_RE.sub(value, template, count=1)
+
+
+@dataclass(frozen=True)
+class V2OpenApiSpec:
+    """Parsed OpenAPI 3.x document from `/doc` or `/api/doc` on OpenCode 2.x."""
+
+    paths: frozenset[str] = field(default_factory=frozenset)
+    raw_spec: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+    def match_route(self, method: str | None, *templates: str) -> str | None:
+        raw_paths = self.raw_spec.get("paths") if isinstance(self.raw_spec, dict) else None
+        if not self.paths:
+            return None
+        wanted_method = str(method or "").strip().lower()
+        canonical_map: dict[str, list[str]] = {}
+        for existing in self.paths:
+            canonical_map.setdefault(_canonical_route_pattern(existing), []).append(existing)
+
+        for template in templates:
+            candidates = (
+                [template]
+                if template in self.paths
+                else canonical_map.get(_canonical_route_pattern(template), [])
+            )
+            for matched in candidates:
+                if not wanted_method or not isinstance(raw_paths, dict):
+                    return matched
+                item = raw_paths.get(matched)
+                # Empty `{}` path objects (used in lightweight test specs) match any method;
+                # populated OpenAPI path items must expose the requested HTTP verb.
+                if not isinstance(item, dict) or not item or wanted_method in item:
+                    return matched
+        return None
+
+    def request_schema(self, method: str, *templates: str) -> dict[str, Any] | None:
+        raw_paths = self.raw_spec.get("paths") if isinstance(self.raw_spec, dict) else None
+        if not isinstance(raw_paths, dict):
+            return None
+        matched = self.match_route(method, *templates)
+        if not matched:
+            return None
+        item = raw_paths.get(matched)
+        if not isinstance(item, dict):
+            return None
+        op = item.get(method.lower())
+        if not isinstance(op, dict):
+            return None
+        req_body = self._deref(op.get("requestBody"))
+        if not isinstance(req_body, dict):
+            return None
+        content = req_body.get("content")
+        if not isinstance(content, dict):
+            return None
+        for media_type in ("application/json", "*/*"):
+            media = content.get(media_type)
+            if isinstance(media, dict) and isinstance(media.get("schema"), dict):
+                return self._deref(media["schema"])
+        for media in content.values():
+            if isinstance(media, dict) and isinstance(media.get("schema"), dict):
+                return self._deref(media["schema"])
+        return None
+
+    def _deref(self, node: Any, depth: int = 0) -> Any:
+        if depth > 12 or not isinstance(node, dict):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            target: Any = self.raw_spec
+            for part in ref[2:].split("/"):
+                key = part.replace("~1", "/").replace("~0", "~")
+                if isinstance(target, dict) and key in target:
+                    target = target[key]
+                else:
+                    return node
+            return self._deref(target, depth + 1)
+        return node
+
+    def object_properties(self, schema: Any, depth: int = 0) -> dict[str, Any] | None:
+        if depth > 8:
+            return None
+        resolved = self._deref(schema, depth)
+        if not isinstance(resolved, dict):
+            return None
+        props = resolved.get("properties")
+        if isinstance(props, dict):
+            return {str(k): self._deref(v, depth + 1) for k, v in props.items()}
+        merged: dict[str, Any] = {}
+        found = False
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            variants = resolved.get(keyword)
+            if isinstance(variants, list):
+                for variant in variants:
+                    sub = self.object_properties(variant, depth + 1)
+                    if sub is not None:
+                        found = True
+                        merged.update(sub)
+        return merged if found else None
+
+    def schema_accepts_type(self, schema: Any, expected_type: str, depth: int = 0) -> bool:
+        if depth > 8:
+            return False
+        resolved = self._deref(schema, depth)
+        if not isinstance(resolved, dict):
+            return False
+        raw_type = resolved.get("type")
+        if raw_type == expected_type:
+            return True
+        if isinstance(raw_type, list) and expected_type in raw_type:
+            return True
+        if expected_type == "object" and isinstance(resolved.get("properties"), dict):
+            return True
+        if expected_type == "array" and isinstance(resolved.get("items"), dict):
+            return True
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            variants = resolved.get(keyword)
+            if isinstance(variants, list) and any(
+                self.schema_accepts_type(v, expected_type, depth + 1) for v in variants
+            ):
+                return True
+        return False
+
+
+async def discover_v2_openapi_spec(client: httpx.AsyncClient) -> V2OpenApiSpec:
+    """Fetch `/doc` or `/api/doc` once to discover OpenCode 2.x routes and schemas."""
+    for doc_path in ("/doc", "/api/doc"):
         try:
             response = await client.get(doc_path, timeout=2.0)
-            if response.status_code != 200:
-                continue
-            content_type = str(response.headers.get("content-type", "") or "").lower()
-            if "text/html" in content_type:
+            if response.status_code != 200 or is_html_fallback_response(response):
                 continue
             spec = response.json()
             paths = spec.get("paths") if isinstance(spec, dict) else None
             if isinstance(paths, dict) and paths:
-                return frozenset(str(key) for key in paths)
+                return V2OpenApiSpec(
+                    paths=frozenset(str(key) for key in paths),
+                    raw_spec=spec,
+                )
         except Exception:
             continue
-    return frozenset()
+    return V2OpenApiSpec()
+
+
+async def discover_v2_openapi_paths(client: httpx.AsyncClient) -> frozenset[str]:
+    """Fetch `/doc` or `/api/doc` once to discover supported OpenAPI route templates."""
+    return (await discover_v2_openapi_spec(client)).paths
 
 
 def v2_route_supported(discovered_paths: frozenset[str], *templates: str) -> str | None:
     """Return the first template present in discovered OpenAPI paths, if any."""
     if not discovered_paths:
         return None
+    canonical_map: dict[str, str] = {}
+    for existing in discovered_paths:
+        canonical_map.setdefault(_canonical_route_pattern(existing), existing)
     for template in templates:
         if template in discovered_paths:
             return template
+        matched = canonical_map.get(_canonical_route_pattern(template))
+        if matched is not None:
+            return matched
     return None
 
 
+def extract_model_list_v2(data: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Parse OpenCode 2.x `GET /api/model` catalog payloads into normalized model dicts."""
+    items: Any = data
+    if isinstance(data, dict):
+        for key in ("models", "items", "data", "all"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+    if not isinstance(items, list):
+        return [], False
+    if items and not any(isinstance(item, dict) for item in items):
+        return [], False
+
+    parsed_all: list[tuple[dict[str, Any], bool]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        provider_id = str(
+            raw.get("providerID")
+            or raw.get("provider_id")
+            or raw.get("provider")
+            or ""
+        ).strip()
+        local_id = str(raw.get("id") or raw.get("modelID") or raw.get("model_id") or "").strip()
+        if not provider_id and "/" in local_id:
+            provider_id, local_id = local_id.split("/", 1)
+            provider_id = provider_id.strip()
+            local_id = local_id.strip()
+        elif provider_id and local_id.startswith(f"{provider_id}/"):
+            local_id = local_id[len(provider_id) + 1:].strip()
+        if not provider_id or not local_id:
+            continue
+        status_text = str(raw.get("status") or "").strip().lower()
+        explicitly_disabled = raw.get("enabled") is False or status_text in {"disabled", "inactive"}
+        limit = raw.get("limit") if isinstance(raw.get("limit"), dict) else {}
+        normalized_entry = {
+            "id": f"{provider_id}/{local_id}",
+            "provider_id": provider_id,
+            "model_id": local_id,
+            "name": str(raw.get("name") or raw.get("label") or ""),
+            "limit": limit,
+        }
+        parsed_all.append((normalized_entry, not explicitly_disabled))
+
+    enabled_entries = [entry for entry, is_enabled in parsed_all if is_enabled]
+    if enabled_entries:
+        return enabled_entries, True
+    return [entry for entry, _ in parsed_all], True
+
+
 def extract_provider_list_v2(data: Any) -> tuple[list[dict[str, Any]], bool]:
-    """Parse provider payloads across OpenCode 1.x and 2.x shapes."""
+    """Parse provider payloads across OpenCode 1.x and 2.x shapes.
+
+    Note: OpenCode 2.3 `GET /api/provider` may return an array of provider ID
+    strings (`["opencode", "openai"]`) without embedded model definitions; in
+    that case `valid=False` so callers continue to `/api/model` or `/api/config`.
+    """
     if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)], True
+        dicts = [item for item in data if isinstance(item, dict)]
+        if data and not dicts:
+            return [], False
+        return dicts, True
     if not isinstance(data, dict):
         return [], False
-    for key in ("all", "providers", "items", "data"):
+    for key in ("all", "providers", "provider", "items", "data"):
         raw = data.get(key)
         if isinstance(raw, list):
-            return [item for item in raw if isinstance(item, dict)], True
+            dicts = [item for item in raw if isinstance(item, dict)]
+            if raw and not dicts:
+                continue
+            return dicts, True
         if isinstance(raw, dict):
             entries: list[dict[str, Any]] = []
             for provider_id, value in raw.items():
@@ -770,7 +1025,7 @@ def normalize_message_envelope(raw: Any, fallback_session_id: str = "") -> dict[
 
 
 def normalize_message_list(raw: Any, fallback_session_id: str = "") -> list[dict[str, Any]] | None:
-    """Normalize a `/message` response (list or `{messages: [...]}`) into `{info, parts}` items."""
+    """Normalize a `/message` response (list or `{messages|data: [...]}`) into `{info, parts}` items."""
     items: Any = raw
     if isinstance(raw, dict):
         for key in ("messages", "items", "data"):
@@ -809,17 +1064,17 @@ async def auto_reject_v2_interactive_event(
     quoted_sid = quote(session_id, safe="")
     quoted_rid = quote(request_id, safe="")
     candidates: list[tuple[str, dict[str, Any]]] = []
-    if event_type == "permission.asked":
+    if event_type in {"permission.asked", "permission.ask"}:
         candidates.extend([
             (f"/api/session/{quoted_sid}/permission/{quoted_rid}/reply", {"reply": "reject", "effect": "deny", "action": "deny"}),
             (f"/api/permission/{quoted_rid}/reply", {"reply": "reject", "effect": "deny"}),
         ])
-    elif event_type == "question.asked":
+    elif event_type in {"question.asked", "question.ask"}:
         candidates.extend([
             (f"/api/question/{quoted_rid}/reject", {}),
             (f"/api/session/{quoted_sid}/question/{quoted_rid}/reject", {}),
         ])
-    elif event_type == "form.created":
+    elif event_type in {"form.created", "session.form.created"}:
         candidates.extend([
             (f"/api/session/{quoted_sid}/form/{quoted_rid}/cancel", {}),
             (f"/api/form/{quoted_rid}/cancel", {}),
@@ -827,10 +1082,234 @@ async def auto_reject_v2_interactive_event(
     for path, body in candidates:
         try:
             resp = await client.post(path, params=params, headers=headers, json=body, timeout=2.0)
-            if resp.status_code < 400:
+            if resp.status_code < 400 and not is_html_fallback_response(resp):
                 return
         except Exception:
             continue
+
+
+def _format_v2_model_value(
+    model_spec: Any,
+    model_schema: Any,
+    openapi_spec: V2OpenApiSpec | None,
+) -> Any:
+    if not isinstance(model_spec, dict):
+        return model_spec
+    provider_id = str(model_spec.get("providerID") or "").strip()
+    model_id = str(model_spec.get("modelID") or model_spec.get("id") or "").strip()
+    if openapi_spec is not None and model_schema is not None:
+        if openapi_spec.schema_accepts_type(model_schema, "string") and not openapi_spec.schema_accepts_type(model_schema, "object"):
+            return f"{provider_id}/{model_id}" if provider_id else model_id
+        props = openapi_spec.object_properties(model_schema)
+        if props is not None:
+            if "id" in props and "modelID" not in props:
+                return {"providerID": provider_id, "id": model_id}
+            if "modelID" in props:
+                return {"providerID": provider_id, "modelID": model_id}
+    return {"providerID": provider_id, "modelID": model_id}
+
+
+def build_v2_session_create_bodies(
+    *,
+    title: str,
+    directory: Path | str | None,
+    permissions: Any = None,
+    model_spec: dict[str, str] | None = None,
+    openapi_spec: V2OpenApiSpec | None = None,
+) -> list[dict[str, Any]]:
+    """Build ordered `POST /api/session` candidate bodies respecting Effect Schema validation."""
+    clean_title = str(title or "").strip() or "DeepHole 2.0 task"
+    dir_str = str(directory) if directory is not None else ""
+    schema = openapi_spec.request_schema("post", "/api/session") if openapi_spec is not None else None
+    props = openapi_spec.object_properties(schema) if (openapi_spec is not None and schema is not None) else None
+
+    candidates: list[dict[str, Any]] = []
+    if props is not None:
+        guided: dict[str, Any] = {}
+        if "title" in props or not props:
+            guided["title"] = clean_title
+        if dir_str:
+            if "location" in props:
+                guided["location"] = {"directory": dir_str}
+            elif "directory" in props:
+                guided["directory"] = dir_str
+        if permissions is not None and "permission" in props:
+            guided["permission"] = permissions
+        if isinstance(model_spec, dict) and "model" in props:
+            guided["model"] = _format_v2_model_value(model_spec, props.get("model"), openapi_spec)
+        candidates.append(guided)
+    else:
+        # Without an OpenAPI request schema, prefer strict V2-safe payloads before legacy fields.
+        if dir_str and permissions is None:
+            candidates.append({"title": clean_title})
+        else:
+            legacy_like: dict[str, Any] = {"title": clean_title}
+            if dir_str:
+                legacy_like["directory"] = dir_str
+            if permissions is not None:
+                legacy_like["permission"] = permissions
+            candidates.append(legacy_like)
+        if dir_str:
+            candidates.append({"title": clean_title, "location": {"directory": dir_str}})
+
+    minimal = {"title": clean_title}
+    if minimal not in candidates:
+        candidates.append(minimal)
+    return candidates
+
+
+async def create_v2_session(
+    client: httpx.AsyncClient,
+    *,
+    session_base: str,
+    title: str,
+    directory: Path | str | None,
+    permissions: Any,
+    model_spec: dict[str, str] | None,
+    params: dict[str, str],
+    headers: dict[str, str],
+    openapi_spec: V2OpenApiSpec | None = None,
+) -> httpx.Response:
+    """Create a V2 session, retrying with stricter minimal bodies if Effect Schema returns 400/422."""
+    bodies = build_v2_session_create_bodies(
+        title=title,
+        directory=directory,
+        permissions=permissions,
+        model_spec=model_spec,
+        openapi_spec=openapi_spec,
+    )
+    response: httpx.Response | None = None
+    for idx, body in enumerate(bodies):
+        response = await client.post(
+            session_base,
+            params=params,
+            headers=headers,
+            json=body,
+        )
+        if response.status_code not in {400, 422} or idx == len(bodies) - 1:
+            break
+    assert response is not None
+    return response
+
+
+def _build_v2_prompt_bodies_for_route(
+    *,
+    route_template: str,
+    prompt: str,
+    payload: dict[str, Any],
+    openapi_spec: V2OpenApiSpec | None,
+) -> list[dict[str, Any]]:
+    """Build ordered JSON bodies for a V2 prompt/message endpoint."""
+    system_text = str(payload.get("system") or "").strip()
+    effective_prompt = f"{system_text}\n\n{prompt}" if system_text else prompt
+    effective_parts = [{"type": "text", "text": effective_prompt}]
+    raw_parts = payload.get("parts") if isinstance(payload.get("parts"), list) else [{"type": "text", "text": prompt}]
+
+    schema = (
+        openapi_spec.request_schema("post", route_template)
+        if openapi_spec is not None
+        else None
+    )
+    props = (
+        openapi_spec.object_properties(schema)
+        if (openapi_spec is not None and schema is not None)
+        else None
+    )
+
+    bodies: list[dict[str, Any]] = []
+    if props is not None:
+        guided: dict[str, Any] = {}
+        has_system_prop = "system" in props
+        chosen_text = prompt if has_system_prop else effective_prompt
+        chosen_parts = raw_parts if has_system_prop else effective_parts
+        if has_system_prop and system_text:
+            guided["system"] = system_text
+        if "agent" in props and payload.get("agent"):
+            guided["agent"] = payload["agent"]
+        if "model" in props and payload.get("model") is not None:
+            guided["model"] = _format_v2_model_value(payload["model"], props.get("model"), openapi_spec)
+        if "format" in props and payload.get("format") is not None:
+            guided["format"] = payload["format"]
+
+        if "parts" in props:
+            guided["parts"] = chosen_parts
+        elif "prompt" in props:
+            prompt_schema = props.get("prompt")
+            if openapi_spec is not None and openapi_spec.schema_accepts_type(prompt_schema, "array"):
+                guided["prompt"] = chosen_parts
+            elif (
+                openapi_spec is not None
+                and openapi_spec.schema_accepts_type(prompt_schema, "object")
+                and not openapi_spec.schema_accepts_type(prompt_schema, "string")
+            ):
+                guided["prompt"] = {"parts": chosen_parts}
+            else:
+                guided["prompt"] = chosen_text
+        elif "text" in props:
+            guided["text"] = chosen_text
+        else:
+            guided["parts"] = chosen_parts
+        bodies.append(guided)
+
+    is_prompt_endpoint = route_template.endswith("/prompt") or route_template.endswith("/prompt_async")
+    if is_prompt_endpoint:
+        # When no OpenAPI request schema is exposed (e.g. lightweight mock servers),
+        # keep `{**payload, "prompt": prompt}` first, then fall back to strict Effect
+        # Schema variants on HTTP 400/422.
+        if props is None:
+            bodies.append({**payload, "prompt": prompt})
+        strict_parts: dict[str, Any] = {"parts": effective_parts}
+        if payload.get("agent"):
+            strict_parts["agent"] = payload["agent"]
+        if isinstance(payload.get("model"), dict):
+            strict_parts["model"] = payload["model"]
+        if payload.get("format") is not None:
+            strict_parts["format"] = payload["format"]
+        for candidate in (
+            strict_parts,
+            {"parts": effective_parts},
+            {"prompt": effective_parts},
+            {"text": effective_prompt},
+            {"prompt": effective_prompt},
+        ):
+            if candidate not in bodies:
+                bodies.append(candidate)
+    else:
+        if payload not in bodies:
+            bodies.append(payload)
+        minimal_parts = {"parts": effective_parts}
+        if minimal_parts not in bodies:
+            bodies.append(minimal_parts)
+    return bodies
+
+
+def _step_finish_reason(message: dict[str, Any]) -> str:
+    info = message.get("info")
+    if isinstance(info, dict):
+        finish = str(info.get("finish") or "").strip().lower()
+        if finish:
+            return finish
+    parts = message.get("parts")
+    if isinstance(parts, list):
+        for part in reversed(parts):
+            if isinstance(part, dict) and part.get("type") == "step-finish":
+                reason = str(part.get("reason") or part.get("finish") or "stop").strip().lower()
+                return reason or "stop"
+    return ""
+
+
+def _has_active_tool_parts(message: dict[str, Any]) -> bool:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return False
+    for part in parts:
+        if not isinstance(part, dict) or part.get("type") != "tool":
+            continue
+        state = part.get("state")
+        status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
+        if status in {"pending", "running"}:
+            return True
+    return False
 
 
 async def submit_and_resolve_v2_prompt(
@@ -842,6 +1321,7 @@ async def submit_and_resolve_v2_prompt(
     params: dict[str, str],
     headers: dict[str, str],
     discovered_paths: frozenset[str],
+    openapi_spec: V2OpenApiSpec | None = None,
     baseline_message_id: str,
     event_state: Any,
     is_terminal_fn: Callable[[dict[str, Any]], bool],
@@ -858,70 +1338,86 @@ async def submit_and_resolve_v2_prompt(
     - Asynchronous `/api/session/{id}/prompt` returning an immediate queue envelope while the
       assistant turn executes in the background and emits SSE events + `/message` records.
     """
+    spec = openapi_spec if openapi_spec is not None else V2OpenApiSpec(paths=discovered_paths)
     quoted_sid = quote(session_id, safe="")
-    has_sync_message = v2_route_supported(
-        discovered_paths,
+    sync_message_template = spec.match_route(
+        "post",
         "/api/session/{sessionID}/message",
         "/api/session/:sessionID/message",
     )
-    has_async_prompt = v2_route_supported(
-        discovered_paths,
+    async_prompt_template = spec.match_route(
+        "post",
         "/api/session/{sessionID}/prompt",
         "/api/session/:sessionID/prompt",
+        "/api/session/{sessionID}/prompt_async",
+        "/api/session/:sessionID/prompt_async",
+    )
+    model_route_template = spec.match_route(
+        "post",
+        "/api/session/{sessionID}/model",
+        "/api/session/:sessionID/model",
     )
     model_spec = payload.get("model")
-    if (
-        isinstance(model_spec, dict)
-        and v2_route_supported(
-            discovered_paths,
-            "/api/session/{sessionID}/model",
-            "/api/session/:sessionID/model",
+    if isinstance(model_spec, dict) and model_route_template is not None:
+        model_schema = spec.request_schema("post", model_route_template)
+        formatted_model = _format_v2_model_value(model_spec, model_schema, spec)
+        model_body = (
+            formatted_model
+            if isinstance(formatted_model, dict)
+            else {"model": formatted_model}
         )
-    ):
         try:
             await client.post(
-                f"/api/session/{quoted_sid}/model",
+                _fill_route_param(model_route_template, quoted_sid),
                 params=params,
                 headers=headers,
-                json=model_spec,
+                json=model_body,
                 timeout=10.0,
             )
         except Exception:
             pass
 
-    prompt_body = {
-        **payload,
-        "prompt": prompt,
-    }
-    if has_async_prompt and not has_sync_message:
-        candidate_routes = [
-            (f"/api/session/{quoted_sid}/prompt", prompt_body),
-            (f"/api/session/{quoted_sid}/message", payload),
+    if async_prompt_template and not sync_message_template:
+        route_templates = [
+            async_prompt_template,
+            "/api/session/{sessionID}/message",
         ]
-    elif has_sync_message and not has_async_prompt:
-        candidate_routes = [
-            (f"/api/session/{quoted_sid}/message", payload),
-            (f"/api/session/{quoted_sid}/prompt", prompt_body),
+    elif sync_message_template and not async_prompt_template:
+        route_templates = [
+            sync_message_template,
+            "/api/session/{sessionID}/prompt",
         ]
     else:
-        candidate_routes = [
-            (f"/api/session/{quoted_sid}/prompt", prompt_body),
-            (f"/api/session/{quoted_sid}/message", payload),
-            (f"/session/{quoted_sid}/message", payload),
+        route_templates = [
+            async_prompt_template or "/api/session/{sessionID}/prompt",
+            sync_message_template or "/api/session/{sessionID}/message",
+            "/session/{sessionID}/message",
         ]
 
     response: httpx.Response | None = None
     used_path = ""
-    for route_path, body in candidate_routes:
+    for route_idx, route_template in enumerate(route_templates):
+        route_path = _fill_route_param(route_template, quoted_sid)
         used_path = route_path
-        response = await client.post(
-            route_path,
-            params=params,
-            headers=headers,
-            json=body,
-            timeout=request_timeout,
+        bodies = _build_v2_prompt_bodies_for_route(
+            route_template=route_template,
+            prompt=prompt,
+            payload=payload,
+            openapi_spec=spec if spec.raw_spec else None,
         )
-        if response.status_code not in {404, 405}:
+        for body_idx, body in enumerate(bodies):
+            response = await client.post(
+                route_path,
+                params=params,
+                headers=headers,
+                json=body,
+                timeout=request_timeout,
+            )
+            if response.status_code in {400, 422} and body_idx < len(bodies) - 1:
+                continue
+            break
+        assert response is not None
+        if not is_route_miss_response(response) or route_idx == len(route_templates) - 1:
             break
 
     assert response is not None
@@ -930,7 +1426,7 @@ async def submit_and_resolve_v2_prompt(
 
     # Check if the response itself is already a completed assistant message envelope.
     parsed: Any = None
-    if response.content and response.content.strip():
+    if response.content and response.content.strip() and not is_html_fallback_response(response):
         try:
             parsed = response.json()
         except ValueError:
@@ -952,8 +1448,8 @@ async def submit_and_resolve_v2_prompt(
 
     # Asynchronous V2 prompt mode: wait for session completion via optional `/wait`,
     # SSE `session_terminal`, and `/api/session/{id}/message` history reconciliation.
-    wait_route = v2_route_supported(
-        discovered_paths,
+    wait_route = spec.match_route(
+        "post",
         "/api/session/{sessionID}/wait",
         "/api/session/:sessionID/wait",
         "/api/experimental/session/{sessionID}/wait",
@@ -961,9 +1457,7 @@ async def submit_and_resolve_v2_prompt(
     )
     wait_task: asyncio.Task | None = None
     if wait_route is not None:
-        resolved_wait_path = (
-            wait_route.replace("{sessionID}", quoted_sid).replace(":sessionID", quoted_sid)
-        )
+        resolved_wait_path = _fill_route_param(wait_route, quoted_sid)
         wait_task = asyncio.create_task(
             client.post(
                 resolved_wait_path,
@@ -976,6 +1470,7 @@ async def submit_and_resolve_v2_prompt(
 
     history_paths = [
         f"/api/session/{quoted_sid}/message",
+        f"/api/session/{quoted_sid}/messages",
         f"/session/{quoted_sid}/message",
     ]
     session_paths = [
@@ -984,7 +1479,7 @@ async def submit_and_resolve_v2_prompt(
     ]
     poll_params = {**params, "limit": "200"}
     saw_busy_or_new_message = False
-    idle_Observed_at: float | None = None
+    idle_observed_at: float | None = None
 
     try:
         while True:
@@ -997,7 +1492,7 @@ async def submit_and_resolve_v2_prompt(
             if wait_task is not None and wait_task.done():
                 try:
                     wait_resp = wait_task.result()
-                    if wait_resp.status_code < 400:
+                    if wait_resp.status_code < 400 and not is_html_fallback_response(wait_resp):
                         terminal_event_seen = True
                 except Exception:
                     pass
@@ -1007,12 +1502,13 @@ async def submit_and_resolve_v2_prompt(
             for hist_path in history_paths:
                 try:
                     hist_resp = await client.get(hist_path, params=poll_params, headers=headers, timeout=10.0)
-                    if hist_resp.status_code in {404, 405}:
+                    if is_route_miss_response(hist_resp):
                         continue
                     hist_resp.raise_for_status()
                     messages = normalize_message_list(hist_resp.json(), fallback_session_id=session_id)
-                    history_paths = [hist_path]
-                    break
+                    if messages is not None:
+                        history_paths = [hist_path]
+                        break
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -1049,61 +1545,65 @@ async def submit_and_resolve_v2_prompt(
                             request=response.request,
                         )
 
-                all_terminal = all(is_terminal_fn(msg) for msg in new_assistants)
-                if all_terminal:
-                    session_busy = False
-                    if not terminal_event_seen:
-                        for sess_path in session_paths:
-                            try:
-                                sess_resp = await client.get(
-                                    sess_path, params=params, headers=headers, timeout=5.0,
-                                )
-                                if sess_resp.status_code in {404, 405}:
-                                    continue
-                                if sess_resp.status_code == 200:
-                                    sess_data = sess_resp.json()
-                                    status_val = (
-                                        sess_data.get("status")
-                                        if isinstance(sess_data, dict)
-                                        else None
-                                    )
-                                    status_type = (
-                                        str(status_val.get("type") or "")
-                                        if isinstance(status_val, dict)
-                                        else str(status_val or "")
-                                    ).lower()
-                                    if status_type in {"busy", "running", "retry"}:
-                                        session_busy = True
-                                    elif status_type in {"idle", "error", "completed"}:
-                                        terminal_event_seen = True
-                                    session_paths = [sess_path]
-                                break
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception:
-                                continue
-
-                    # Multi-step tool turns in v2 emit multiple assistant messages: only settle
-                    # once session is idle/terminal OR no tool-call-only step is still running.
-                    last_assistant = new_assistants[-1]
-                    last_finish = str(
-                        (last_assistant.get("info") or {}).get("finish") or ""
-                    ).strip().lower()
-                    tool_step_continuing = last_finish in {"tool-calls", "tool_calls", "tool_use"}
-                    if terminal_event_seen or (not session_busy and not tool_step_continuing):
-                        if terminal_event_seen or idle_Observed_at is not None:
-                            final_envelope = _merge_multistep_text_if_needed(new_assistants)
-                            return httpx.Response(
-                                status_code=200,
-                                headers={"content-type": "application/json"},
-                                content=json.dumps(final_envelope, ensure_ascii=False).encode("utf-8"),
-                                request=response.request,
+                session_busy = False
+                if not terminal_event_seen:
+                    for sess_path in session_paths:
+                        try:
+                            sess_resp = await client.get(
+                                sess_path, params=params, headers=headers, timeout=5.0,
                             )
-                        idle_Observed_at = time.monotonic()
-                    else:
-                        idle_Observed_at = None
+                            if is_route_miss_response(sess_resp):
+                                continue
+                            if sess_resp.status_code == 200:
+                                sess_data = sess_resp.json()
+                                status_val = (
+                                    sess_data.get("status")
+                                    if isinstance(sess_data, dict)
+                                    else None
+                                )
+                                status_type = (
+                                    str(status_val.get("type") or "")
+                                    if isinstance(status_val, dict)
+                                    else str(status_val or "")
+                                ).lower()
+                                if status_type in {"busy", "running", "retry"}:
+                                    session_busy = True
+                                elif status_type in {"idle", "error", "completed"}:
+                                    terminal_event_seen = True
+                                session_paths = [sess_path]
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            continue
+
+                all_terminal = all(
+                    is_terminal_fn(msg) or bool(_step_finish_reason(msg))
+                    for msg in new_assistants
+                )
+                last_assistant = new_assistants[-1]
+                last_finish = _step_finish_reason(last_assistant)
+                tool_step_continuing = (
+                    last_finish in {"tool-calls", "tool_calls", "tool_use"}
+                    or _has_active_tool_parts(last_assistant)
+                )
+                # In OpenCode 2.3, assistant rows may omit `time.completed` / `info.finish`
+                # even after the session transitions back to `idle`. Treat `terminal_event_seen`
+                # with no active tool calls as settled.
+                if (all_terminal or terminal_event_seen) and (
+                    terminal_event_seen or (not session_busy and not tool_step_continuing)
+                ) and not (tool_step_continuing and not terminal_event_seen):
+                    if terminal_event_seen or idle_observed_at is not None:
+                        final_envelope = _merge_multistep_text_if_needed(new_assistants)
+                        return httpx.Response(
+                            status_code=200,
+                            headers={"content-type": "application/json"},
+                            content=json.dumps(final_envelope, ensure_ascii=False).encode("utf-8"),
+                            request=response.request,
+                        )
+                    idle_observed_at = time.monotonic()
                 else:
-                    idle_Observed_at = None
+                    idle_observed_at = None
             elif terminal_event_seen and saw_busy_or_new_message:
                 break
 
