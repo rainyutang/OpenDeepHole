@@ -5184,3 +5184,227 @@ def test_model_access_error_logs_warning_without_traceback_and_trips_circuit_on_
         assert blocked_acquire.await_count == 1
 
     asyncio.run(run())
+
+
+def test_provider_busy_error_retries_in_same_session_and_switches_model(tmp_path: Path) -> None:
+    from task_agent.serve_client import (
+        SAME_SESSION_RETRY_CLEAN_REVERTED,
+        SAME_SESSION_RETRY_CONTINUATION,
+        OpenCodeFileWrite,
+        mark_same_session_retry,
+    )
+    from task_agent.task_service import _SAME_SESSION_PROVIDER_RETRY_PROMPT
+
+    async def run_clean_turn_case() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None, str]] = []
+        output: list[str] = []
+
+        async def acquire(*_args, **kwargs):
+            model_name = "provider/model-b" if kwargs.get("avoid_model_identities") else "provider/model-a"
+            lease = _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
+            option = dataclasses.replace(lease.option, id=model_name, model=model_name)
+            return dataclasses.replace(
+                lease,
+                option=option,
+                health_identity=(model_name, False, "opencode", "opencode"),
+            )
+
+        async def runtime_for_task(_record, lease, *, session_attempt):
+            src = OutputSource(backend="opencode", tool="opencode", model_id=lease.option.id, model=lease.option.model)
+            return _runtime(tmp_path), lease.option.model, src
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or "ses_same_clean"
+            calls.append((kwargs["prompt"], kwargs["session_id"], kwargs["model"]))
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            if len(calls) == 1:
+                await _notify_model_request_failure(kwargs, "failure")
+                raise mark_same_session_retry(
+                    RuntimeError("APIError: 服务器繁忙，请稍后再试"),
+                    SAME_SESSION_RETRY_CLEAN_REVERTED,
+                )
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_ok",
+                lines=['{"answer": 42}'],
+                text='{"answer": 42}',
+                model=kwargs["model"],
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            acquire_mock.side_effect = acquire
+            with _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+            ):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="same-session clean retry",
+                    prompt="original audit prompt",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_same_clean"
+        assert result.structured == {"answer": 42}
+        assert result.model == "provider/model-b"
+        assert calls == [
+            ("original audit prompt", None, "provider/model-a"),
+            ("original audit prompt", "ses_same_clean", "provider/model-b"),
+        ]
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == {
+            ("provider/model-a", False, "opencode", "opencode"),
+        }
+        second_ctx = acquire_mock.await_args_list[1].kwargs["task_context"]
+        assert second_ctx["retry_mode"] == "same_session"
+        assert second_ctx["serve_session_id"] == "ses_same_clean"
+        assert any(
+            "RETRY 1/1 reason=APIError: 服务器繁忙，请稍后再试 next_session=same" in line
+            for line in output
+        )
+        final_events = release_mock.await_args_list[-1].kwargs["context_updates"]["session_events"]
+        assert [ev["session_id"] for ev in final_events] == ["ses_same_clean", "ses_same_clean"]
+        assert final_events[0]["failure_kind"] == "provider_error"
+        assert final_events[1]["retry_mode"] == "same_session"
+        assert final_events[1]["outcome"] == "success"
+
+    async def run_progress_and_fallback_case() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None, str]] = []
+        output: list[str] = []
+        written_json_path = tmp_path / "work" / "draft_result.json"
+        written_json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        async def acquire(*_args, **kwargs):
+            idx = len(calls)
+            model_name = ["provider/model-a", "provider/model-b", "provider/model-c"][min(idx, 2)]
+            lease = _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
+            option = dataclasses.replace(lease.option, id=model_name, model=model_name)
+            return dataclasses.replace(
+                lease,
+                option=option,
+                health_identity=(model_name, False, "opencode", "opencode"),
+            )
+
+        async def runtime_for_task(_record, lease, *, session_attempt):
+            src = OutputSource(backend="opencode", tool="opencode", model_id=lease.option.id, model=lease.option.model)
+            return _runtime(tmp_path), lease.option.model, src
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or f"ses_{len(calls) + 1}"
+            calls.append((kwargs["prompt"], kwargs["session_id"], kwargs["model"]))
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            if len(calls) == 1:
+                written_json_path.write_text('{"answer": 99}', encoding="utf-8")
+                kwargs["on_file_write"](
+                    OpenCodeFileWrite(call_id="call-write-1", path=str(written_json_path), created=True)
+                )
+                await _notify_model_request_failure(kwargs, "failure")
+                raise mark_same_session_retry(
+                    RuntimeError("APIError: 服务器繁忙，请稍后再试"),
+                    SAME_SESSION_RETRY_CONTINUATION,
+                )
+            if len(calls) == 2:
+                # Model B continues in same session and confirms existing artifact in text.
+                return OpenCodePromptResult(
+                    session_id=session_id,
+                    message_id="msg_continued",
+                    lines=["已完成剩余确认，结果文件已就绪。"],
+                    text="已完成剩余确认，结果文件已就绪。",
+                    model=kwargs["model"],
+                )
+            raise AssertionError("Unexpected third call")
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
+        patches = _service_patches(manager)
+        with patches[0], patches[1] as acquire_mock, patches[2], patches[3], patches[4], patches[5]:
+            acquire_mock.side_effect = acquire
+            with _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+            ):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="same-session continuation",
+                    prompt="long initial prompt",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    attempt=2,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_1"
+        assert result.structured == {"answer": 99}
+        assert calls == [
+            ("long initial prompt", None, "provider/model-a"),
+            (_SAME_SESSION_PROVIDER_RETRY_PROMPT, "ses_1", "provider/model-b"),
+        ]
+
+        # Now verify fallback: Attempt 1 (APIError -> same session) followed by Attempt 2 (Timeout -> fresh session).
+        service2 = OpenCodeTaskService()
+        fallback_calls: list[tuple[str, str | None]] = []
+
+        async def run_fallback_prompt(**kwargs):
+            session_id = kwargs["session_id"] or f"ses_fb_{len(fallback_calls) + 1}"
+            fallback_calls.append((kwargs["prompt"], kwargs["session_id"]))
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            if len(fallback_calls) == 1:
+                await _notify_model_request_failure(kwargs, "failure")
+                raise mark_same_session_retry(
+                    RuntimeError("APIError: 服务器繁忙，请稍后再试"),
+                    SAME_SESSION_RETRY_CONTINUATION,
+                )
+            if len(fallback_calls) == 2:
+                await _notify_model_request_failure(kwargs, "timeout")
+                raise asyncio.TimeoutError("OpenCode call timed out during message")
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_fresh_ok",
+                lines=["fresh done"],
+                text="fresh done",
+                model="provider/model-low",
+            )
+
+        service2._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches2 = _service_patches(SimpleNamespace(run_prompt=run_fallback_prompt))
+        with patches2[0], patches2[1], patches2[2], patches2[3], patches2[4], patches2[5]:
+            with _task_context(tmp_path):
+                res2 = await service2.run_task(OpenCodeTaskSpec(
+                    task_name="fallback to fresh",
+                    prompt="original prompt",
+                    directory=tmp_path,
+                    attempt=2,
+                ))
+
+        assert res2.status == "success"
+        assert res2.session_id == "ses_fb_3"
+        assert fallback_calls == [
+            ("original prompt", None),
+            (_SAME_SESSION_PROVIDER_RETRY_PROMPT, "ses_fb_1"),
+            ("original prompt", None),
+        ]
+
+    asyncio.run(run_clean_turn_case())
+    asyncio.run(run_progress_and_fallback_case())

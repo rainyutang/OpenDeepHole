@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { getScanPatternTaskDetail, getScanTaskDetail, getScanTasksPage } from "../../api/client";
 import { compareTaskHistory } from "../../taskOrder";
+import { scanQueueFreshSessionRetryLabel } from "../scanDetail/model/taskQueue";
 import type { ThreatAuditTask, ThreatPatternAuditTask } from "../../types";
 
 export interface IterativeAuditDetailCache {
@@ -153,7 +154,11 @@ export function IterativeAuditTaskDetail({
   const sessionAttempt = Math.max(1, Number(record?.session_attempt) || Number(selected.output_source?.attempt) || 1);
   const sessionAttempts = Math.max(0, Number(record?.session_attempts) || 0);
   const retryBadge = sessionAttempt > 1
-    ? (sessionAttempts > 1 ? `Fresh Session 第 ${sessionAttempt}/${sessionAttempts} 次` : `Fresh Session 第 ${sessionAttempt} 次`)
+    ? scanQueueFreshSessionRetryLabel({
+        ...(record ?? {}),
+        session_attempt: sessionAttempt,
+        session_attempts: sessionAttempts,
+      })
     : "";
   const effectiveStartedAt = (runtime?.status === "running" && stringValue(record?.started_at)) || selected.started_at;
   const model = runtime?.modelId || stringValue(record?.model) || stringValue(record?.model_id)

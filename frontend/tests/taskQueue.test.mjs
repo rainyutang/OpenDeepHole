@@ -8,6 +8,11 @@ const { act, create } = TestRenderer;
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { ScanTaskQueuePanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
+const {
+  scanQueueFreshSessionRetryLabel,
+  scanQueueSessionEventLabel,
+  scanQueueTaskSessionEvents,
+} = await server.ssrLoadModule("/src/features/scanDetail/model/taskQueue.ts");
 const { compareTaskHistory } = await server.ssrLoadModule("/src/taskOrder.ts");
 const originalAdapter = client.api.defaults.adapter;
 const roots = [];
@@ -982,4 +987,53 @@ test("task queue displays start/end columns, Fresh Session retry badge, refreshe
   await settleHistory();
   assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t2Start));
   assert.equal(text(rows(root)[0].findAllByType("td")[4]), formatDateTime(t2End));
+});
+
+test("same-session model-switch retries display distinct labels from Fresh Session retries", () => {
+  assert.equal(
+    scanQueueFreshSessionRetryLabel({
+      session_attempt: 2,
+      session_attempts: 3,
+      retry_mode: "same_session",
+    }),
+    "同 Session 换模第 2/3 次",
+  );
+  assert.equal(
+    scanQueueFreshSessionRetryLabel({
+      session_attempt: 2,
+      session_attempts: 3,
+    }),
+    "Fresh Session 第 2/3 次",
+  );
+  const events = scanQueueTaskSessionEvents(
+    {
+      serve_session_id: "ses_shared",
+      session_attempt: 2,
+      retry_mode: "same_session",
+      session_events: [
+        {
+          sequence: 1,
+          phase: "business",
+          session_id: "ses_shared",
+          session_attempt: 1,
+          outcome: "failure",
+          failure_kind: "provider_error",
+          failure_reason: "APIError: 服务器繁忙，请稍后再试",
+        },
+        {
+          sequence: 2,
+          phase: "business",
+          session_id: "ses_shared",
+          session_attempt: 2,
+          retry_mode: "same_session",
+          outcome: "success",
+        },
+      ],
+    },
+    "success",
+    "model-b",
+    "2026-11-19T02:00:00Z",
+  );
+  assert.equal(scanQueueSessionEventLabel(events[0]), "业务 Session #1");
+  assert.equal(scanQueueSessionEventLabel(events[1]), "同 Session 换模重试 #2");
 });

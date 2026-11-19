@@ -62,6 +62,7 @@ export interface OpenCodeSessionEvent {
   phase: "business" | "json_format" | "json_retry" | "validation_retry";
   session_id: string;
   session_attempt: number;
+  retry_mode?: "same_session" | "fresh_session";
   retry_ordinal?: number;
   retry_total?: number;
   outcome: "success" | "failure" | "timeout" | "cancelled" | "invalid_output";

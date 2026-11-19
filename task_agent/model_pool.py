@@ -1149,12 +1149,13 @@ def _fail_pending_request_locked(
             if task_phase == "json_correction"
             else "business"
         )
-        session_events.append({
+        retry_mode = str(context.get("retry_mode") or "").strip()
+        event_payload: dict[str, Any] = {
             "sequence": len(session_events) + 1,
             "phase": phase,
             "session_id": (
                 str(context.get("serve_session_id") or "").strip()
-                if phase == "json_retry"
+                if phase == "json_retry" or retry_mode == "same_session"
                 else ""
             ),
             "session_attempt": max(1, int(context.get("session_attempt") or 1)),
@@ -1164,7 +1165,10 @@ def _fail_pending_request_locked(
             "started_at": request.queued_at_iso,
             "finished_at": finished_at,
             "duration_seconds": duration_seconds,
-        })
+        }
+        if retry_mode:
+            event_payload["retry_mode"] = retry_mode
+        session_events.append(event_payload)
         context["session_events"] = session_events
         context["failure_kind"] = failure_kind
         context["failure_reason"] = failure_reason

@@ -54,6 +54,8 @@ from .model_pool import (
 )
 from .output_format import format_task_output, task_output_stage
 from .serve_client import (
+    SAME_SESSION_RETRY_CLEAN_REVERTED,
+    SAME_SESSION_RETRY_CONTINUATION,
     OpenCodeCommandFailure,
     OpenCodeFileWrite,
     OpenCodeModelAccessError,
@@ -64,6 +66,7 @@ from .serve_client import (
     OpenCodeServePreparation,
     OpenCodeTaskQualityError,
     get_serve_manager,
+    same_session_retry_mode,
 )
 from .token_usage import OpenCodeTokenUsage, attribute_token_usage, merge_token_usages
 from .token_categories import token_category
@@ -436,6 +439,8 @@ class _StructuredRecoveryOutcome:
     duration_seconds: float = 0.0
     avoid_model_identities: frozenset[tuple[str, bool, str, str]] = frozenset()
     response_file: _WrittenFileSnapshot | None = None
+    same_session_retry_mode: str | None = None
+    retry_prompt: str = ""
 
 
 @dataclass(frozen=True)
@@ -1024,7 +1029,11 @@ class OpenCodeTaskService:
         total_session_attempts = fresh_retry_count + 1
         accumulated_duration = 0.0
         first_session_id = str(spec.session_id or "")
+        retained_session_id = first_session_id
         final_session_id = first_session_id
+        next_prompt = spec.prompt
+        same_session_retry_active = False
+        session_writes: dict[tuple[str, str], OpenCodeFileWrite] = {}
         last_message_id = ""
         last_text = ""
         last_model = ""
@@ -1042,7 +1051,16 @@ class OpenCodeTaskService:
             attempt_started = 0.0
             attempt_outcome = "failure"
             terminal_release = True
-            session_id = first_session_id if session_attempt == 1 else ""
+            session_id = retained_session_id
+            current_prompt = next_prompt
+            attempt_retry_mode = (
+                "same_session"
+                if session_attempt > 1 and same_session_retry_active
+                else ""
+            )
+            last_sent_prompt = current_prompt
+            in_followup_correction = False
+            pending_same_session_retry_mode: str | None = None
             message_id = ""
             text = ""
             structured: Any = None
@@ -1074,6 +1092,8 @@ class OpenCodeTaskService:
                     session_attempt=session_attempt,
                     total_session_attempts=total_session_attempts,
                     session_events=session_events,
+                    retry_mode=attempt_retry_mode,
+                    retained_session_id=session_id if attempt_retry_mode == "same_session" else "",
                 )
                 lease = await acquire_model_lease(
                     cli_config_source,
@@ -1275,6 +1295,16 @@ class OpenCodeTaskService:
                                     created=previous.created or value.created,
                                 )
                             message_writes[key] = value
+                            prior_session_write = session_writes.pop(key, None)
+                            session_writes[key] = (
+                                OpenCodeFileWrite(
+                                    call_id=value.call_id,
+                                    path=value.path,
+                                    created=prior_session_write.created or value.created,
+                                )
+                                if prior_session_write is not None
+                                else value
+                            )
                             response_files.record(value)
 
                         def cleanup_message_writes() -> None:
@@ -1380,7 +1410,8 @@ class OpenCodeTaskService:
                             message_started = _execution_time(record)
                             message_started_at = _now_iso()
                             try:
-                                details = await invoke_message(spec.prompt)
+                                last_sent_prompt = current_prompt
+                                details = await invoke_message(current_prompt)
                             except OpenCodeTaskQualityError as quality_error:
                                 failure_result = quality_error.prompt_result
                                 if failure_result is not None:
@@ -1419,6 +1450,7 @@ class OpenCodeTaskService:
                                         0.0,
                                         _execution_time(record) - message_started,
                                     ),
+                                    retry_mode=attempt_retry_mode,
                                 )
                                 current_error = quality_error
                                 for retry_ordinal in range(
@@ -1443,6 +1475,8 @@ class OpenCodeTaskService:
                                         validation_commands=spec.allowed_bash_commands,
                                         validation_success_markers=spec.required_bash_success_markers,
                                     )
+                                    last_sent_prompt = correction_prompt
+                                    in_followup_correction = True
                                     try:
                                         details = await invoke_message(correction_prompt)
                                     except OpenCodeTaskQualityError as retry_error:
@@ -1524,6 +1558,8 @@ class OpenCodeTaskService:
                                                 if isinstance(retry_error, OpenCodeModelAccessError)
                                                 else "quota"
                                                 if isinstance(retry_error, OpenCodeProviderQuotaError)
+                                                else "provider_error"
+                                                if model_request_failed
                                                 else "execution_error"
                                             ),
                                             failure_reason=(
@@ -1571,7 +1607,7 @@ class OpenCodeTaskService:
                             snapshots: tuple[_WrittenFileSnapshot, ...] = ()
                             if spec.output_schema is not None:
                                 snapshots = _read_written_file_snapshots(
-                                    message_writes.values(),
+                                    (*session_writes.values(), *message_writes.values()),
                                     project_dir=_required_project_dir(context),
                                     trusted_roots=tuple(dict.fromkeys((
                                         _required_project_dir(context),
@@ -1758,6 +1794,7 @@ class OpenCodeTaskService:
                 avoid_model_on_retry = True
                 health_outcome = "quota"
                 quota_retry_after_seconds = exc.retry_after_seconds
+                pending_same_session_retry_mode = same_session_retry_mode(exc)
                 if message_id:
                     last_message_id = message_id
                 if text:
@@ -1786,6 +1823,7 @@ class OpenCodeTaskService:
                 avoid_model_on_retry = True
                 health_outcome = "access_denied"
                 access_error_message = retry_reason
+                pending_same_session_retry_mode = same_session_retry_mode(exc)
                 if message_id:
                     last_message_id = message_id
                 if text:
@@ -1836,6 +1874,7 @@ class OpenCodeTaskService:
             except Exception as exc:
                 retry_reason = str(exc) or type(exc).__name__
                 attempt_event_outcome = "failure"
+                pending_same_session_retry_mode = same_session_retry_mode(exc)
                 attempt_failure_kind = (
                     "model_not_found"
                     if isinstance(exc, OpenCodeModelNotFoundError)
@@ -1895,6 +1934,7 @@ class OpenCodeTaskService:
                         failure_reason=attempt_failure_reason,
                         started_at=lease.started_at_iso,
                         duration_seconds=attempt_duration,
+                        retry_mode=attempt_retry_mode,
                     )
                 # A fresh-session retry is one logical task. Release its model
                 # slot now, but append terminal history/outcome only once.
@@ -2036,17 +2076,44 @@ class OpenCodeTaskService:
                 )
                 attempt_failure_reason = recovery.error
                 avoid_model_identities.update(recovery.avoid_model_identities)
+                pending_same_session_retry_mode = recovery.same_session_retry_mode
+                if recovery.retry_prompt:
+                    last_sent_prompt = recovery.retry_prompt
+                    in_followup_correction = True
 
             if (
                 retry_reason
                 and fresh_retry_allowed
                 and session_attempt < total_session_attempts
             ):
+                use_same_session = bool(
+                    pending_same_session_retry_mode in {
+                        SAME_SESSION_RETRY_CLEAN_REVERTED,
+                        SAME_SESSION_RETRY_CONTINUATION,
+                    }
+                    and session_id
+                )
+                if use_same_session:
+                    retained_session_id = session_id
+                    same_session_retry_active = True
+                    if pending_same_session_retry_mode == SAME_SESSION_RETRY_CLEAN_REVERTED:
+                        next_prompt = last_sent_prompt
+                    else:
+                        next_prompt = _same_session_provider_retry_prompt(
+                            last_sent_prompt if in_followup_correction else ""
+                        )
+                    next_session_label = "same"
+                else:
+                    retained_session_id = ""
+                    same_session_retry_active = False
+                    next_prompt = spec.prompt
+                    session_writes.clear()
+                    next_session_label = "new"
                 record.status = "queued"
                 self._emit_task_progress(
                     record,
                     f"RETRY {session_attempt}/{fresh_retry_count} "
-                    f"reason={retry_reason} next_session=new",
+                    f"reason={retry_reason} next_session={next_session_label}",
                     session_id=final_session_id or session_id,
                     category="session",
                 )
@@ -2497,6 +2564,7 @@ class OpenCodeTaskService:
         correction_failure_kind = ""
         correction_failure_reason = ""
         correction_outcome = "failure"
+        correction_same_session_mode: str | None = None
         correction_identity: tuple[str, bool, str, str] = ()
         correction_lock: asyncio.Lock | None = None
         correction_lock_acquired = False
@@ -2813,6 +2881,7 @@ class OpenCodeTaskService:
         except Exception as exc:
             if isinstance(exc, (OpenCodeServeStartupError, ModelAccessCircuitOpenError)):
                 has_fresh_retry = False
+            correction_same_session_mode = same_session_retry_mode(exc)
             if isinstance(exc, OpenCodeProviderQuotaError):
                 correction_model_failure = "quota"
                 correction_quota_retry_after_seconds = exc.retry_after_seconds
@@ -2907,6 +2976,8 @@ class OpenCodeTaskService:
             failure_kind=correction_failure_kind or "schema_mismatch",
             duration_seconds=max(0.0, _execution_time(record) - started_at),
             avoid_model_identities=frozenset(avoid_identities),
+            same_session_retry_mode=correction_same_session_mode,
+            retry_prompt=correction_prompt if correction_same_session_mode else "",
         )
 
     def _finish_record(
@@ -3198,6 +3269,8 @@ def _model_pool_task_context(
     session_attempt: int,
     total_session_attempts: int,
     session_events: list[dict[str, Any]] | None = None,
+    retry_mode: str = "",
+    retained_session_id: str = "",
 ) -> dict[str, Any]:
     spec = record.spec
     prompt = spec.prompt
@@ -3215,6 +3288,10 @@ def _model_pool_task_context(
         "retry_ordinal": session_attempt - 1,
         "session_attempts": total_session_attempts,
     }
+    if retry_mode:
+        context["retry_mode"] = retry_mode
+    if retained_session_id:
+        context["serve_session_id"] = retained_session_id
     if record.queued_at:
         context["queued_at"] = record.queued_at
     if session_events:
@@ -3255,6 +3332,7 @@ def _append_session_event(
     retry_total: int | None = None,
     started_at: str = "",
     duration_seconds: float | None = None,
+    retry_mode: str = "",
 ) -> None:
     event: dict[str, Any] = {
         "sequence": len(events) + 1,
@@ -3265,6 +3343,8 @@ def _append_session_event(
         "started_at": started_at,
         "finished_at": _now_iso(),
     }
+    if retry_mode:
+        event["retry_mode"] = str(retry_mode)
     if model_id:
         event["model_id"] = str(model_id)
     if model:
@@ -3280,6 +3360,21 @@ def _append_session_event(
     if duration_seconds is not None:
         event["duration_seconds"] = max(0.0, float(duration_seconds))
     events.append(event)
+
+
+_SAME_SESSION_PROVIDER_RETRY_PROMPT = (
+    "上一次模型请求因上游服务异常中断。"
+    "请基于当前会话中已有的任务指令、代码上下文和已完成的工具调用结果，"
+    "直接从中断处继续完成剩余工作，不要重复已完成的步骤，"
+    "并严格按照最初任务要求的输出格式或目标产物路径输出最终结果。"
+)
+
+
+def _same_session_provider_retry_prompt(followup_instruction: str = "") -> str:
+    extra = str(followup_instruction or "").strip()
+    if not extra or extra == _SAME_SESSION_PROVIDER_RETRY_PROMPT:
+        return _SAME_SESSION_PROVIDER_RETRY_PROMPT
+    return f"{_SAME_SESSION_PROVIDER_RETRY_PROMPT}\n\n补充完成要求：\n{extra}"
 
 
 def _session_trace_updates(

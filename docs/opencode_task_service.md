@@ -498,7 +498,7 @@ OpenCode 轻量分析的 `attack_tree_path` 现在指向攻击树目录：`index
 
 OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Task Agent 会查询同一 Session 的消息历史，只接受相对于发送前基线新增且已经完成的 assistant 消息，并将其送回正常的错误、模型、Token、文本和文件写入处理链；恢复成功时控制台输出 `RESPONSE_RECOVERED reason=empty_body|invalid_json source=session_messages`。续写 Session 无法取得发送前基线时不会用历史消息兜底，避免把上一轮结果误认为本轮成功。若没有可确认的新消息，则错误只包含状态码、Content-Type、响应字节数和恢复失败类别，不包含响应正文或模型文本，并作为健康中性失败进入 fresh Session 换模重试，不降低模型权重。
 
-fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
+fresh Session 与同 Session 换模重试都会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。当已创建或续写的 Session 因上游 Provider 错误（如 `APIError`、`ProviderAuthError`、模型配额 `*.429`、模型无权限、模型不存在）结束当轮请求并收敛回 `idle` 时，Task Agent 保留该 `session_id` 直接换模重试（`next_session=same`）：若当轮尚无已完成的 assistant 步骤则先删除当轮失败消息并重发原 Prompt；若已完成部分工具调用步骤则保留全部已完成上下文并发送简短续跑提示词。`ContextOverflowError`、请求超时、连接中断及 JSON/产物校验耗尽仍创建 fresh Session（`next_session=new`），且 JSON 校验失败和纠错耗尽本身不触发健康降权。
 
 Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；轻量级威胁分析外层仍只保留一次所选方法执行（可复用完整成功检查点）及失败后的一次 clean fallback，不额外叠加业务层循环。当 OpenCode 终止本次 Session 并返回明确的模型无权限或白名单拒绝错误（如 `TM.00001005`）时，Task Agent 同样记录单行告警并对该模型开启 10 分钟权限熔断隔离（OpenCode 内部 `RETRY` 期间不提前介入），存在其他健康模型时自动跳过该无权限模型，全部候选模型均无权限时立即快速失败提示。
 

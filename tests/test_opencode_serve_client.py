@@ -10147,3 +10147,139 @@ def test_cleanup_token_collection_reserve_prevents_false_serve_restart_and_logs_
         assert "reason=previous Serve request failure (Session abort did not complete)" in caplog.text
 
     asyncio.run(run())
+
+
+def test_provider_busy_api_error_reconciles_turn_for_same_session_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent.serve_client import (
+        SAME_SESSION_RETRY_CLEAN_REVERTED,
+        SAME_SESSION_RETRY_CONTINUATION,
+        same_session_retry_mode,
+    )
+
+    busy_error = {
+        "name": "APIError",
+        "data": {
+            "statusCode": 503,
+            "isRetryable": True,
+            "message": "服务器繁忙，请稍后再试",
+        },
+    }
+    overflow_error = {
+        "name": "ContextOverflowError",
+        "data": {"message": "Input exceeds context window of this model"},
+    }
+
+    async def run_scenario(*, with_progress: bool, error_payload: dict) -> tuple[BaseException, list[str]]:
+        deleted_paths: list[str] = []
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._register_event_state = AsyncMock()
+        manager._unregister_event_state = AsyncMock()
+        manager._poll_session_snapshots = AsyncMock()
+
+        class ReconcileClient(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    return _FakeResponse({"id": "ses-busy-1"})
+                if path == "/session/ses-busy-1/message":
+                    return _FakeResponse({
+                        "info": {"id": "msg-err", "sessionID": "ses-busy-1", "role": "assistant", "error": error_payload},
+                        "parts": [],
+                    })
+                return await super().post(path, **kwargs)
+
+            async def get(self, path, **kwargs):
+                if path == "/session/ses-busy-1/message":
+                    if with_progress:
+                        return _FakeResponse([
+                            {
+                                "info": {"id": "msg-user-1", "sessionID": "ses-busy-1", "role": "user"},
+                                "parts": [{"type": "text", "text": "analyze target"}],
+                            },
+                            {
+                                "info": {
+                                    "id": "msg-step-1",
+                                    "sessionID": "ses-busy-1",
+                                    "role": "assistant",
+                                    "finish": "tool-calls",
+                                },
+                                "parts": [{
+                                    "type": "tool",
+                                    "tool": "read",
+                                    "callID": "call-1",
+                                    "state": {"status": "completed", "input": {"filePath": "a.c"}, "output": "int x;"},
+                                }],
+                            },
+                            {
+                                "info": {
+                                    "id": "msg-err",
+                                    "sessionID": "ses-busy-1",
+                                    "role": "assistant",
+                                    "error": error_payload,
+                                },
+                                "parts": [],
+                            },
+                        ])
+                    return _FakeResponse([
+                        {
+                            "info": {"id": "msg-user-1", "sessionID": "ses-busy-1", "role": "user"},
+                            "parts": [{"type": "text", "text": "analyze target"}],
+                        },
+                        {
+                            "info": {
+                                "id": "msg-err",
+                                "sessionID": "ses-busy-1",
+                                "role": "assistant",
+                                "error": error_payload,
+                            },
+                            "parts": [],
+                        },
+                    ])
+                return await super().get(path, **kwargs)
+
+            async def delete(self, path, **kwargs):
+                deleted_paths.append(path)
+                return _FakeResponse(True)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", ReconcileClient)
+        with pytest.raises(RuntimeError) as exc_info:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="analyze target",
+                model="gateway/model-busy",
+                timeout=5,
+                return_details=True,
+            )
+        return exc_info.value, deleted_paths
+
+    # Step 1 immediate APIError: clean up both assistant error row and user prompt row.
+    exc_no_progress, deleted_no_progress = asyncio.run(
+        run_scenario(with_progress=False, error_payload=busy_error)
+    )
+    assert "APIError: 服务器繁忙，请稍后再试" in str(exc_no_progress)
+    assert same_session_retry_mode(exc_no_progress) == SAME_SESSION_RETRY_CLEAN_REVERTED
+    assert deleted_no_progress == [
+        "/session/ses-busy-1/message/msg-err",
+        "/session/ses-busy-1/message/msg-user-1",
+    ]
+
+    # Mid-session APIError after completed tool step: preserve user + completed step, delete trailing error row.
+    exc_with_progress, deleted_with_progress = asyncio.run(
+        run_scenario(with_progress=True, error_payload=busy_error)
+    )
+    assert same_session_retry_mode(exc_with_progress) == SAME_SESSION_RETRY_CONTINUATION
+    assert deleted_with_progress == ["/session/ses-busy-1/message/msg-err"]
+
+    # ContextOverflowError must NOT mark same-session retry.
+    exc_overflow, deleted_overflow = asyncio.run(
+        run_scenario(with_progress=True, error_payload=overflow_error)
+    )
+    assert same_session_retry_mode(exc_overflow) is None
+    assert deleted_overflow == []

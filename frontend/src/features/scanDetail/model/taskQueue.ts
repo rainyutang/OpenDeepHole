@@ -125,6 +125,7 @@ export function scanQueueTaskSessionEvents(
   fallbackTimestamp: string,
 ): ScanQueueSessionEvent[] {
   const rawEvents = Array.isArray(task.session_events) ? task.session_events : [];
+  const seenBusinessSessions = new Map<string, number>();
   const events = rawEvents.flatMap((value, index): ScanQueueSessionEvent[] => {
     if (typeof value !== "object" || value == null || Array.isArray(value)) return [];
     const event = value as Record<string, unknown>;
@@ -137,11 +138,26 @@ export function scanQueueTaskSessionEvents(
       ? outcomeValue as ScanQueueSessionEvent["outcome"]
       : "unknown";
     const duration = Number(event.duration_seconds);
+    const sessionId = String(event.session_id || "").trim();
+    const sessionAttempt = Math.max(1, Number(event.session_attempt) || 1);
+    const explicitMode = String(event.retry_mode || "").trim();
+    const priorAttemptForSession = sessionId ? seenBusinessSessions.get(sessionId) : undefined;
+    if (phase === "business" && sessionId && priorAttemptForSession === undefined) {
+      seenBusinessSessions.set(sessionId, sessionAttempt);
+    }
+    const retryMode: ScanQueueSessionEvent["retryMode"] = explicitMode === "same_session"
+      ? "same_session"
+      : explicitMode === "fresh_session"
+        ? "fresh_session"
+        : phase === "business" && sessionAttempt > 1 && priorAttemptForSession !== undefined && priorAttemptForSession < sessionAttempt
+          ? "same_session"
+          : undefined;
     return [{
       sequence: Number.isFinite(Number(event.sequence)) ? Number(event.sequence) : index + 1,
       phase,
-      sessionId: String(event.session_id || "").trim(),
-      sessionAttempt: Math.max(1, Number(event.session_attempt) || 1),
+      sessionId,
+      sessionAttempt,
+      ...(retryMode ? { retryMode } : {}),
       retryOrdinal: Math.max(0, Number(event.retry_ordinal) || 0),
       retryTotal: Math.max(0, Number(event.retry_total) || 0),
       outcome,
@@ -170,11 +186,19 @@ export function scanQueueTaskSessionEvents(
     && sessionId
     && !events.some((event) => event.sessionId === sessionId && event.phase === activePhase && event.outcome === "running")
   ) {
+    const runningAttempt = Math.max(1, Number(task.session_attempt) || 1);
+    const runningRetryMode: ScanQueueSessionEvent["retryMode"] = activePhase === "business" && runningAttempt > 1 && (
+      String(task.retry_mode || "").trim() === "same_session"
+      || events.some((event) => event.phase === "business" && event.sessionId === sessionId && event.sessionAttempt < runningAttempt)
+    )
+      ? "same_session"
+      : undefined;
     events.push({
       sequence: events.length + 1,
       phase: activePhase,
       sessionId,
-      sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
+      sessionAttempt: runningAttempt,
+      ...(runningRetryMode ? { retryMode: runningRetryMode } : {}),
       retryOrdinal: 0,
       retryTotal: 0,
       outcome: "running",
@@ -190,11 +214,16 @@ export function scanQueueTaskSessionEvents(
   const fallbackSessionId = scanQueueTaskSessionId(task);
   if (events.length === 0 && fallbackSessionId) {
     const duration = Number(task.duration_seconds);
+    const fallbackAttempt = Math.max(1, Number(task.session_attempt) || 1);
+    const fallbackRetryMode: ScanQueueSessionEvent["retryMode"] = fallbackAttempt > 1 && String(task.retry_mode || "").trim() === "same_session"
+      ? "same_session"
+      : undefined;
     events.push({
       sequence: 1,
       phase: "business",
       sessionId: fallbackSessionId,
-      sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
+      sessionAttempt: fallbackAttempt,
+      ...(fallbackRetryMode ? { retryMode: fallbackRetryMode } : {}),
       retryOrdinal: 0,
       retryTotal: 0,
       outcome: taskStatus,
@@ -210,10 +239,39 @@ export function scanQueueTaskSessionEvents(
   return events;
 }
 
+function isSameSessionTaskRetry(task: Record<string, unknown>, attempt: number): boolean {
+  if (attempt <= 1) return false;
+  const explicitMode = String(task.retry_mode || "").trim();
+  if (explicitMode === "same_session") return true;
+  if (explicitMode === "fresh_session") return false;
+  const rawEvents = Array.isArray(task.session_events) ? task.session_events : [];
+  const priorSessions = new Set<string>();
+  let matchedSameSession = false;
+  for (const raw of rawEvents) {
+    if (typeof raw !== "object" || raw == null || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    if (String(item.phase || "business") !== "business") continue;
+    const itemAttempt = Math.max(1, Number(item.session_attempt) || 1);
+    const itemSessionId = String(item.session_id || "").trim();
+    const itemRetryMode = String(item.retry_mode || "").trim();
+    if (itemAttempt === attempt) {
+      if (itemRetryMode === "same_session") return true;
+      if (itemRetryMode === "fresh_session") return false;
+      if (itemSessionId && priorSessions.has(itemSessionId)) matchedSameSession = true;
+    } else if (itemAttempt < attempt && itemSessionId) {
+      priorSessions.add(itemSessionId);
+    }
+  }
+  return matchedSameSession;
+}
+
 export function scanQueueFreshSessionRetryLabel(task: Record<string, unknown>): string {
   const attempt = Math.max(1, Number(task.session_attempt) || 1);
   if (attempt <= 1) return "";
   const total = Math.max(attempt, Number(task.session_attempts) || 0);
+  if (isSameSessionTaskRetry(task, attempt)) {
+    return total > 1 ? `同 Session 换模第 ${attempt}/${total} 次` : `同 Session 换模第 ${attempt} 次`;
+  }
   return total > 1 ? `Fresh Session 第 ${attempt}/${total} 次` : `Fresh Session 第 ${attempt} 次`;
 }
 
@@ -226,6 +284,9 @@ export function scanQueueSessionEventLabel(event: ScanQueueSessionEvent): string
   if (event.phase === "json_retry") {
     const total = event.retryTotal > 0 ? `/${event.retryTotal}` : "";
     return `同 Session JSON 重试 ${event.retryOrdinal || 1}${total}`;
+  }
+  if (event.sessionAttempt > 1 && event.retryMode === "same_session") {
+    return `同 Session 换模重试 #${event.sessionAttempt}`;
   }
   return event.sessionAttempt > 1
     ? `Fresh Session 重试 #${event.sessionAttempt}`

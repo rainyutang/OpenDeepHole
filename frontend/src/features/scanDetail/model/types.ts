@@ -35,6 +35,7 @@ export interface ScanQueueSessionEvent {
   phase: "business" | "json_format" | "json_retry" | "validation_retry";
   sessionId: string;
   sessionAttempt: number;
+  retryMode?: "same_session" | "fresh_session";
   retryOrdinal: number;
   retryTotal: number;
   outcome: ScanQueueTaskStatus | "invalid_output";

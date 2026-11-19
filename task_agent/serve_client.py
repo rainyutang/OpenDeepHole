@@ -779,6 +779,29 @@ class OpenCodeModelAccessError(RuntimeError):
         )
 
 
+SAME_SESSION_RETRY_CLEAN_REVERTED = "clean_turn_reverted"
+SAME_SESSION_RETRY_CONTINUATION = "needs_continuation_prompt"
+_SAME_SESSION_RETRY_MODES = frozenset({
+    SAME_SESSION_RETRY_CLEAN_REVERTED,
+    SAME_SESSION_RETRY_CONTINUATION,
+})
+
+
+def mark_same_session_retry(exc: BaseException, mode: str | None) -> BaseException:
+    """Annotate a settled Provider error with its same-session recovery mode."""
+    if mode in _SAME_SESSION_RETRY_MODES:
+        setattr(exc, "same_session_retry_mode", mode)
+    return exc
+
+
+def same_session_retry_mode(exc: BaseException | None) -> str | None:
+    """Return the validated same-session recovery mode attached to *exc*, if any."""
+    if exc is None:
+        return None
+    mode = getattr(exc, "same_session_retry_mode", None)
+    return mode if mode in _SAME_SESSION_RETRY_MODES else None
+
+
 @dataclass(frozen=True)
 class OpenCodeFileWrite:
     """One file successfully written by a completed OpenCode tool call."""
@@ -4524,6 +4547,42 @@ def _assistant_error_affects_model_health(value: object) -> bool:
     }
 
 
+_CONTEXT_OVERFLOW_ERROR_PHRASES = (
+    "context_length_exceeded",
+    "maximum context length",
+    "exceeds context window",
+    "input exceeds context",
+    "prompt is too long",
+)
+
+
+def _assistant_error_supports_same_session_retry(value: object) -> bool:
+    """Return True when a settled assistant error can safely retry on the same Session."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        name = str(value.get("name") or "").strip()
+        if name in {
+            "ContextOverflowError",
+            "MessageAbortedError",
+            "MessageOutputLengthError",
+            "StructuredOutputError",
+            "ContentFilterError",
+        }:
+            return False
+        data = value.get("data")
+        if isinstance(data, dict):
+            if data.get("statusCode") == 413:
+                return False
+            raw_body = str(data.get("responseBody") or "").casefold()
+            if any(phrase in raw_body for phrase in _CONTEXT_OVERFLOW_ERROR_PHRASES):
+                return False
+    summary = (_error_summary(value) or "").casefold()
+    if any(phrase in summary for phrase in _CONTEXT_OVERFLOW_ERROR_PHRASES):
+        return False
+    return True
+
+
 def _tool_source(tool_name: object) -> str:
     normalized = str(tool_name or "").lower().replace("_", "-")
     if (
@@ -5785,6 +5844,202 @@ async def _replay_current_prompt_file_writes(
                 )
             return
         await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
+
+
+def _assistant_step_has_reusable_progress(message: object) -> bool:
+    """Return True if an assistant message completed without error and holds context."""
+    if not isinstance(message, dict):
+        return False
+    info = message.get("info")
+    if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+        return False
+    if _assistant_message_error(message) is not None:
+        return False
+    if str(info.get("finish") or "").strip():
+        return True
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return False
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("type") or "")
+        if part_type in {"text", "reasoning"} and str(part.get("text") or "").strip():
+            return True
+        if part_type == "tool":
+            state = part.get("state")
+            if isinstance(state, dict) and str(state.get("status") or "") == "completed":
+                return True
+    return False
+
+
+async def _delete_session_message_best_effort(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    message_id: str,
+    params: dict[str, str],
+    headers: dict[str, str],
+    opencode_version: str = OPENCODE_V1,
+    deadline: OperationDeadline,
+) -> bool:
+    if not session_id or not message_id:
+        return True
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
+    quoted_sid = quote(session_id, safe="")
+    quoted_mid = quote(message_id, safe="")
+    candidate_paths = (
+        [
+            f"/api/session/{quoted_sid}/message/{quoted_mid}",
+            f"/session/{quoted_sid}/message/{quoted_mid}",
+        ]
+        if is_v2
+        else [api_path(opencode_version, f"/session/{quoted_sid}/message/{quoted_mid}")]
+    )
+    for path in candidate_paths:
+        try:
+            resp = await deadline.wait(
+                client.delete(path, params=params, headers=headers),
+                phase="failed_turn_cleanup",
+            )
+            if is_v2 and is_route_miss_response(resp):
+                continue
+            if 200 <= resp.status_code < 300 and not (is_v2 and is_html_fallback_response(resp)):
+                return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+    return False
+
+
+async def _reconcile_failed_turn_for_same_session_retry(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    session_mode: str,
+    pre_prompt_last_message_id: str,
+    pre_prompt_baseline_known: bool,
+    params: dict[str, str],
+    headers: dict[str, str],
+    opencode_version: str = OPENCODE_V1,
+    timeout_seconds: float = 5.0,
+) -> str | None:
+    """Inspect and clean up a settled failed prompt turn for same-session model retry."""
+    if not session_id or not pre_prompt_baseline_known or timeout_seconds <= 0:
+        return None
+    is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
+    budget = OperationDeadline(min(5.0, max(0.1, timeout_seconds)))
+    quoted_sid = quote(session_id, safe="")
+    history_paths = (
+        [
+            f"/api/session/{quoted_sid}/message",
+            f"/api/session/{quoted_sid}/messages",
+            f"/session/{quoted_sid}/message",
+        ]
+        if is_v2
+        else [api_path(opencode_version, f"/session/{quoted_sid}/message")]
+    )
+    poll_params = {**params, "limit": "200"}
+    messages: list[dict[str, Any]] | None = None
+    for hist_path in history_paths:
+        try:
+            resp = await budget.wait(
+                client.get(hist_path, params=poll_params, headers=headers),
+                phase="failed_turn_reconcile",
+            )
+            if is_v2 and is_route_miss_response(resp):
+                continue
+            resp.raise_for_status()
+            raw = resp.json()
+            normalized = (
+                normalize_message_list(raw, fallback_session_id=session_id)
+                if is_v2
+                else raw
+            )
+            if isinstance(normalized, list):
+                messages = [
+                    item for item in normalized
+                    if isinstance(item, dict)
+                    and (
+                        not str((item.get("info") or {}).get("sessionID") or "")
+                        or str((item.get("info") or {}).get("sessionID") or "") == session_id
+                    )
+                ]
+                break
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+
+    if messages is None:
+        return None
+
+    baseline_overflowed = False
+    if pre_prompt_last_message_id:
+        baseline_index = next(
+            (
+                idx
+                for idx, item in enumerate(messages)
+                if _response_message_id(item) == pre_prompt_last_message_id
+            ),
+            None,
+        )
+        if baseline_index is not None:
+            turn_messages = messages[baseline_index + 1:]
+        else:
+            # More than 200 messages were added during this single turn.
+            turn_messages = messages
+            baseline_overflowed = True
+    else:
+        turn_messages = list(messages)
+
+    turn_has_progress = baseline_overflowed or any(
+        _assistant_step_has_reusable_progress(item) for item in turn_messages
+    )
+    if not turn_has_progress:
+        all_deleted = True
+        for item in reversed(turn_messages):
+            msg_id = _response_message_id(item)
+            if not msg_id:
+                continue
+            deleted = await _delete_session_message_best_effort(
+                client,
+                session_id=session_id,
+                message_id=msg_id,
+                params=params,
+                headers=headers,
+                opencode_version=opencode_version,
+                deadline=budget,
+            )
+            if not deleted:
+                all_deleted = False
+        if all_deleted:
+            return SAME_SESSION_RETRY_CLEAN_REVERTED
+        if session_mode == "continued":
+            return SAME_SESSION_RETRY_CONTINUATION
+        return None
+
+    # Keep all completed assistant/tool steps; best-effort remove trailing errored
+    # assistant rows (OpenCode's toModelMessages also skips APIError rows).
+    for item in reversed(turn_messages):
+        info = item.get("info")
+        if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+            break
+        if _assistant_message_error(item) is None:
+            break
+        msg_id = _response_message_id(item)
+        if msg_id:
+            await _delete_session_message_best_effort(
+                client,
+                session_id=session_id,
+                message_id=msg_id,
+                params=params,
+                headers=headers,
+                opencode_version=opencode_version,
+                deadline=budget,
+            )
+    return SAME_SESSION_RETRY_CONTINUATION
 
 
 def _next_event_reconnect_delay(current: float) -> float:
@@ -7842,6 +8097,8 @@ class OpenCodeServeManager:
             ignored_file_message_ids: tuple[str, ...] = ()
             response_baseline_known = session_mode != "continued"
             response_baseline_message_id = ""
+            pre_prompt_baseline_known = session_mode != "continued"
+            pre_prompt_last_message_id = ""
             if session_mode == "continued":
                 baseline_params = dict(params)
                 baseline_params["limit"] = "2"
@@ -7870,6 +8127,12 @@ class OpenCodeServeManager:
                         baseline_message
                     )
                     response_baseline_known = True
+                    pre_prompt_last_message_id = (
+                        _response_message_id(baseline_messages[-1])
+                        if baseline_messages
+                        else ""
+                    )
+                    pre_prompt_baseline_known = True
                 except Exception:
                     if on_file_write is not None:
                         raise
@@ -7882,6 +8145,43 @@ class OpenCodeServeManager:
                     ignored_file_message_ids = (
                         response_baseline_message_id,
                     )
+
+            async def prepare_same_session_retry_error(
+                exc: BaseException,
+                *,
+                allow_same_session: bool = True,
+            ) -> BaseException:
+                if not allow_same_session or not active_session_id or self._restart_required:
+                    return exc
+                if response_data is not None and capture_token_usage is not None:
+                    with contextlib.suppress(Exception):
+                        await capture_token_usage(
+                            response_data,
+                            timeout_seconds=min(
+                                _SERVE_TOKEN_COLLECTION_TIMEOUT_SECONDS,
+                                max(0.0, deadline.remaining()),
+                            ),
+                        )
+                remaining = deadline.remaining()
+                if remaining <= 0:
+                    return exc
+                try:
+                    retry_mode = await _reconcile_failed_turn_for_same_session_retry(
+                        client,
+                        session_id=active_session_id,
+                        session_mode=session_mode,
+                        pre_prompt_last_message_id=pre_prompt_last_message_id,
+                        pre_prompt_baseline_known=pre_prompt_baseline_known,
+                        params=params,
+                        headers=headers,
+                        opencode_version=normalized_version,
+                        timeout_seconds=min(5.0, remaining),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    retry_mode = None
+                return mark_same_session_retry(exc, retry_mode)
             if idle_timeout or on_line is not None or on_file_write is not None:
                 event_state = _ServeEventState(
                     tool,
@@ -8209,6 +8509,7 @@ class OpenCodeServeManager:
                             break  # Preserve the HTTP failure when the diagnostic budget expires.
                     model_error = event_state.model_not_found_error
                 if model_error is not None:
+                    await prepare_same_session_retry_error(model_error)
                     raise_model_not_found(model_error)
                 raise
             except BaseException:
@@ -8307,6 +8608,7 @@ class OpenCodeServeManager:
             ) or (event_state.model_not_found_error if event_state is not None else None)
             if model_error is not None:
                 await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
+                await prepare_same_session_retry_error(model_error)
                 raise_model_not_found(model_error)
             if assistant_error is not None:
                 error_name = (
@@ -8323,7 +8625,7 @@ class OpenCodeServeManager:
                 quota_error = _provider_quota_error(assistant_error)
                 if quota_error is not None:
                     await deadline.wait(emit_model_request_failure("quota"), phase="response_cleanup")
-                    raise quota_error
+                    raise await prepare_same_session_retry_error(quota_error)
                 access_error = _provider_model_access_error(
                     assistant_error, model=model, config_content=key.config_content,
                 )
@@ -8332,15 +8634,19 @@ class OpenCodeServeManager:
                         emit_model_request_failure("access_denied"),
                         phase="response_cleanup",
                     )
-                    raise access_error
+                    raise await prepare_same_session_retry_error(access_error)
                 await deadline.wait(emit_model_request_failure(
                     "failure"
                     if _assistant_error_affects_model_health(assistant_error)
                     else "neutral"
                 ), phase="response_cleanup")
-                raise RuntimeError(
+                provider_runtime_error = RuntimeError(
                     _error_summary(assistant_error)
                     or "OpenCode model request failed"
+                )
+                raise await prepare_same_session_retry_error(
+                    provider_runtime_error,
+                    allow_same_session=_assistant_error_supports_same_session_retry(assistant_error),
                 )
             # Token telemetry cannot turn a completed response into a business
             # timeout. Use only the remaining call budget and keep partial usage.
