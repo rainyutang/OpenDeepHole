@@ -1350,11 +1350,15 @@ def extract_config_providers_v2(config_data: Any) -> tuple[list[dict[str, Any]],
     return extract_provider_list_v2(config_data)
 
 
-async def discover_v2_openapi_spec(client: httpx.AsyncClient) -> V2OpenApiSpec:
+async def discover_v2_openapi_spec(
+    client: httpx.AsyncClient,
+    *,
+    timeout: float = 10.0,
+) -> V2OpenApiSpec:
     """Fetch `/openapi.json`, `/api/openapi.json`, `/doc`, or `/api/doc` once to discover OpenCode 2.x routes."""
     for doc_path in ("/openapi.json", "/api/openapi.json", "/doc", "/api/doc"):
         try:
-            response = await client.get(doc_path, timeout=2.0)
+            response = await client.get(doc_path, timeout=timeout)
             if response.status_code != 200 or is_html_fallback_response(response):
                 continue
             spec = response.json()
@@ -1513,6 +1517,8 @@ def _normalize_v2_content_parts(content: Any, *, message_id: str = "") -> list[d
                 "status": status,
                 "input": raw_state.get("input") if isinstance(raw_state.get("input"), dict) else {},
             }
+            if raw_status == "streaming":
+                norm_state["streaming"] = True
             if isinstance(raw_state.get("metadata"), dict):
                 norm_state["metadata"] = dict(raw_state["metadata"])
             if isinstance(raw_state.get("output"), str):
@@ -1848,6 +1854,12 @@ def build_v2_session_create_bodies(
             v23_like: dict[str, Any] = {"title": clean_title, "location": {"directory": dir_str}}
             if permissions is not None:
                 v23_like["permissions"] = translate_v1_permissions_to_v2(permissions, directory=directory)
+            if isinstance(model_spec, dict):
+                provider_id = str(model_spec.get("providerID") or "").strip()
+                model_id = str(model_spec.get("modelID") or model_spec.get("id") or "").strip()
+                if provider_id and model_id:
+                    v23_with_model = {**v23_like, "model": {"providerID": provider_id, "id": model_id}}
+                    candidates.append(v23_with_model)
             candidates.append(v23_like)
             if permissions is not None:
                 candidates.append({"title": clean_title, "location": {"directory": dir_str}})
@@ -2102,8 +2114,15 @@ async def submit_and_resolve_v2_prompt(
         "/api/session/:sessionID/model",
     )
     model_spec = payload.get("model")
-    if isinstance(model_spec, dict) and model_route_template is not None:
-        model_schema = spec.request_schema("post", model_route_template)
+    effective_model_route = model_route_template or (
+        "/api/session/{sessionID}/model" if not spec.paths else None
+    )
+    if isinstance(model_spec, dict) and effective_model_route is not None:
+        model_schema = (
+            spec.request_schema("post", model_route_template)
+            if model_route_template is not None
+            else None
+        )
         outer_props = (
             spec.object_properties(model_schema)
             if model_schema is not None
@@ -2113,16 +2132,20 @@ async def submit_and_resolve_v2_prompt(
             model_body: dict[str, Any] = {
                 "model": _format_v2_model_value(model_spec, outer_props.get("model"), spec)
             }
-        else:
+        elif model_schema is not None:
             formatted_model = _format_v2_model_value(model_spec, model_schema, spec)
             model_body = (
                 formatted_model
                 if isinstance(formatted_model, dict)
                 else {"model": formatted_model}
             )
+        else:
+            provider_id = str(model_spec.get("providerID") or "").strip()
+            model_id = str(model_spec.get("modelID") or model_spec.get("id") or "").strip()
+            model_body = {"model": {"providerID": provider_id, "id": model_id}}
         try:
             await client.post(
-                _fill_route_param(model_route_template, quoted_sid),
+                _fill_route_param(effective_model_route, quoted_sid),
                 params=params,
                 headers=headers,
                 json=model_body,

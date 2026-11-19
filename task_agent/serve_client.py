@@ -5067,6 +5067,11 @@ def _tool_call_details(tool_name: object, input_value: object) -> str:
         add("path", "path")
     elif normalized == "list":
         add("path", "path")
+    elif normalized == "subagent":
+        add("agent", "agent")
+        add("description", "description")
+    elif normalized == "execute":
+        add_chars("code_chars", "code")
 
     return " ".join(details)
 
@@ -5286,6 +5291,7 @@ class _ServeEventState:
         self.progress_started_at_ms: float | None = None
         self.progress_closed = False
         self.ignored_progress_message_ids = set(ignored_file_message_ids)
+        self.active_step_message_ids: set[str] = set()
         self.progress_message_ids: set[str] = set()
         self.tool_progress: dict[str, str] = {}
         self.pending_tool_inputs: set[tuple[str, str]] = set()
@@ -5328,7 +5334,10 @@ class _ServeEventState:
         # evidence of progress in the new conversation.
         self.finish_tool_inputs()
         self.progress_closed = False
-        self.ignored_progress_message_ids.update(self.message_roles)
+        self.active_step_message_ids.clear()
+        self.ignored_progress_message_ids.update(
+            message_id for message_id in self.message_roles if message_id
+        )
         self.progress_started_at_ms = int(time.time() * 1000)
         self.model_not_found_error = None
         self.last_session_error = None
@@ -5442,12 +5451,14 @@ class _ServeEventState:
             self.message_roles[message_id] = role
         created = (info.get("time") or {}).get("created") if isinstance(info.get("time"), dict) else None
         if (
-            self.progress_started_at_ms is not None
+            message_id
+            and message_id not in self.active_step_message_ids
+            and self.progress_started_at_ms is not None
             and isinstance(created, (int, float))
             and created < self.progress_started_at_ms
         ):
             self.ignored_progress_message_ids.add(message_id)
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             self.finish_tool_inputs(message_id=message_id)
             return
         if role == "user":
@@ -5498,7 +5509,7 @@ class _ServeEventState:
         if kind not in {"text", "reasoning"}:
             return
         message_id = self.part_message_ids.get(part_id, "")
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             return
         role = self.message_roles.get(message_id, "") if message_id else "assistant"
         if role == "user":
@@ -5531,7 +5542,7 @@ class _ServeEventState:
             return
         part_id = str(part.get("id") or "")
         message_id = str(part.get("messageID") or "")
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             return
         if part_id:
             self.part_types[part_id] = kind
@@ -5562,7 +5573,7 @@ class _ServeEventState:
             if part_id:
                 self.part_types[part_id] = kind
         message_id = str(props.get("messageID") or self.part_message_ids.get(part_id, ""))
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             return
         if part_id and message_id:
             self.part_message_ids[part_id] = message_id
@@ -5661,7 +5672,7 @@ class _ServeEventState:
             return
         self.record_message(info)
         message_id = str(info.get("id") or "")
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             return
         parts = message.get("parts")
         if not isinstance(parts, list):
@@ -5791,7 +5802,7 @@ class _ServeEventState:
 
     def handle_tool_part(self, part: dict[str, Any]) -> None:
         message_id = str(part.get("messageID") or "")
-        if message_id in self.ignored_progress_message_ids:
+        if message_id and message_id in self.ignored_progress_message_ids:
             return
         state = part.get("state")
         if not isinstance(state, dict):
@@ -5815,13 +5826,31 @@ class _ServeEventState:
             if self.tool_progress.get(call) != signature:
                 self.tool_progress[call] = signature
                 self.note_progress()
+        input_value = state.get("input") or {}
+        tool_name = part.get("tool")
         common = {
             "call_id": part.get("callID"),
-            "tool_name": part.get("tool"),
-            "input_value": state.get("input") or {},
+            "tool_name": tool_name,
+            "input_value": input_value,
             "part_id": part.get("id"),
         }
-        if status in {"pending", "running"}:
+        if status == "pending":
+            # In OpenCode 2.3.x, polled snapshots of a still-streaming tool call
+            # carry empty `{}` input. Wait for `session.tool.called` / `running`
+            # so tool details and skill names are not suppressed by an early line.
+            if state.get("streaming") is True or (
+                _is_skill_tool(tool_name)
+                and (not isinstance(input_value, dict) or not input_value)
+            ):
+                if call and tool_name:
+                    _, prev_input = self.tool_call_metadata.get(call, ("", {}))
+                    self.tool_call_metadata[call] = (
+                        str(tool_name),
+                        input_value if input_value else prev_input,
+                    )
+                return
+            self.emit_tool_call(**common)
+        elif status == "running":
             self.emit_tool_call(**common)
         elif status == "completed":
             message_id = str(part.get("messageID") or "")
@@ -5926,7 +5955,7 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     if state.mark_event_seen(event):
         return
     event_message_id = str(props.get("messageID") or props.get("assistantMessageID") or "")
-    if event_message_id in state.ignored_progress_message_ids:
+    if event_message_id and event_message_id in state.ignored_progress_message_ids:
         return
 
     if event_type == "message.updated":
@@ -5949,6 +5978,9 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.note_progress()
         if event_message_id:
             state.message_roles[event_message_id] = "assistant"
+            if state.progress_started_at_ms is not None and not state.progress_closed:
+                state.active_step_message_ids.add(event_message_id)
+                state.ignored_progress_message_ids.discard(event_message_id)
     elif event_type in {"session.step.first-token", "session.step.streamed", "session.step.ended"}:
         state.note_progress()
         if event_type == "session.step.ended" and event_message_id:
@@ -5957,6 +5989,12 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     elif event_type == "session.step.failed":
         if props.get("error") is not None:
             state.emit_session_error(normalize_v2_error(props.get("error")))
+    elif event_type == "session.skill.activated":
+        state.note_progress()
+        skill_label = _one_line_preview(
+            props.get("name") or props.get("id") or "unknown"
+        )
+        state.emit("skill", f"name={skill_label}")
     elif event_type in {"session.next.text.started", "session.text.started"}:
         state.note_progress()
     elif event_type in {"session.next.text.delta", "session.text.delta"}:
@@ -5982,6 +6020,9 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         "session.tool.input.delta",
     }:
         state.note_progress()
+        if event_message_id and state.progress_started_at_ms is not None and not state.progress_closed:
+            state.active_step_message_ids.add(event_message_id)
+            state.ignored_progress_message_ids.discard(event_message_id)
         call_id = str(props.get("callID") or props.get("id") or "")
         message_id = event_message_id or "v2"
         started_tool_name = str(props.get("tool") or props.get("name") or "").strip()
@@ -5996,21 +6037,34 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
     }:
         call_id = str(props.get("callID") or props.get("id") or "")
         state.finish_tool_inputs(call_id=call_id)
+        recorded_name, recorded_input = state.tool_call_metadata.get(call_id, ("", {}))
+        parsed_input = props.get("input") or props.get("args")
+        if not parsed_input and isinstance(props.get("text"), str) and props["text"].strip():
+            with contextlib.suppress(Exception):
+                candidate = json.loads(props["text"])
+                if isinstance(candidate, dict):
+                    parsed_input = candidate
+        if call_id and parsed_input:
+            state.tool_call_metadata[call_id] = (
+                str(props.get("tool") or props.get("name") or recorded_name or ""),
+                parsed_input,
+            )
         if props.get("tool") or props.get("name"):
             state.emit_tool_call(
                 call_id=call_id or props.get("callID"),
                 tool_name=props.get("tool") or props.get("name"),
-                input_value=props.get("input") or props.get("args") or {},
+                input_value=parsed_input or recorded_input or {},
             )
     elif event_type in {"session.next.tool.called", "session.tool.called", "session.tool.started"}:
         call_id = str(props.get("callID") or props.get("id") or "")
         state.finish_tool_inputs(call_id=call_id)
-        recorded_name, _ = state.tool_call_metadata.get(call_id, ("", {}))
+        recorded_name, recorded_input = state.tool_call_metadata.get(call_id, ("", {}))
         resolved_tool_name = props.get("tool") or props.get("name") or recorded_name
+        resolved_input = props.get("input") or props.get("args") or recorded_input or {}
         state.emit_tool_call(
             call_id=call_id or props.get("callID"),
             tool_name=resolved_tool_name,
-            input_value=props.get("input") or props.get("args") or {},
+            input_value=resolved_input,
         )
     elif event_type == "session.tool.progress":
         state.note_progress()
@@ -6713,6 +6767,7 @@ class OpenCodeServeManager:
         self._event_lock = asyncio.Lock()
         self._event_states: dict[str, _ServeEventState] = {}
         self._event_directories: dict[str, str] = {}
+        self._event_directory_paths: dict[str, Path] = {}
         self._event_child_states: dict[str, tuple[str, _ServeEventState]] = {}
         self._global_event_channel: _EventChannelRuntime | None = None
         self._legacy_event_channels: dict[str, _EventChannelRuntime] = {}
@@ -6781,6 +6836,30 @@ class OpenCodeServeManager:
         if self._serve_auth is not None and "auth" not in kwargs:
             kwargs["auth"] = self._serve_auth
         return httpx.AsyncClient(**kwargs)
+
+    async def _ensure_v2_openapi_discovered(
+        self,
+        client: httpx.AsyncClient | None = None,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        if not self._is_v2() or self._discovered_v2_paths or self._port is None:
+            return
+        try:
+            if client is not None:
+                spec = await discover_v2_openapi_spec(client, timeout=timeout)
+            else:
+                async with self._http_client(
+                    base_url=self.base_url,
+                    timeout=timeout,
+                    trust_env=False,
+                ) as discovery_client:
+                    spec = await discover_v2_openapi_spec(discovery_client, timeout=timeout)
+        except Exception:
+            return
+        if spec.paths:
+            self._v2_openapi = spec
+            self._discovered_v2_paths = spec.paths
 
     def _mcp_base_path(self) -> str:
         return "/api/mcp" if self._is_v2() else "/mcp"
@@ -8647,6 +8726,11 @@ class OpenCodeServeManager:
                             "KNOWLEDGE_BASE_MCP unavailable "
                             f"error={_one_line_preview(knowledge_mcp_lease.error)}",
                         )
+            if is_v2 and not self._discovered_v2_paths:
+                await deadline.wait(
+                    self._ensure_v2_openapi_discovered(client),
+                    phase="openapi_discovery",
+                )
             session_base = api_path(normalized_version, "/session")
             if not active_session_id:
                 session_title_text = str(session_title or "").strip() or "DeepHole 2.0 task"
@@ -9802,6 +9886,7 @@ class OpenCodeServeManager:
         async with self._event_lock:
             self._event_states[session_id] = state
             self._event_directories[session_id] = directory_key
+            self._event_directory_paths[directory_key] = directory
 
         deadline = asyncio.get_running_loop().time() + _SERVE_EVENT_CONNECT_TIMEOUT_SECONDS
         while True:
@@ -9897,7 +9982,10 @@ class OpenCodeServeManager:
             "session.form.created",
         }:
             target_dir_key = self._event_directories.get(root_id, "")
-            target_dir = Path(target_dir_key) if target_dir_key else None
+            target_dir = (
+                self._event_directory_paths.get(target_dir_key)
+                or (Path(target_dir_key) if target_dir_key else None)
+            )
             reject_task = asyncio.create_task(self._auto_reject_interactive_v2(
                 event_type=event_type,
                 props=props,
@@ -10010,7 +10098,6 @@ class OpenCodeServeManager:
 
     async def _mark_global_event_unsupported(self, runtime: _EventChannelRuntime) -> None:
         runtime.healthy = False
-        runtime.ready.set()
         async with self._event_lock:
             self._global_event_unsupported = True
             self._degraded_event_channels.discard(runtime.key)
@@ -10019,10 +10106,11 @@ class OpenCodeServeManager:
                 for directory_key in self._event_directories.values()
             }
             for directory_key in directories:
-                directory = Path(directory_key)
+                directory = self._event_directory_paths.get(directory_key) or Path(directory_key)
                 legacy = self._ensure_event_channel_locked(directory)
                 if self._event_failure_started_at:
                     self._degraded_event_channels.add(legacy.key)
+            runtime.ready.set()
 
     async def _run_event_channel(
         self,
@@ -10159,7 +10247,7 @@ class OpenCodeServeManager:
         state: _ServeEventState,
     ) -> None:
         poll_params = dict(params)
-        poll_params["limit"] = "2"
+        poll_params["limit"] = "20" if self._is_v2() else "2"
 
         async def poll_message(
             current_id: str, current_state: _ServeEventState,
@@ -11018,6 +11106,8 @@ class OpenCodeServeManager:
             launcher_pid=launcher_pid,
             listener_pids=self._listener_pids,
         )
+        if self._is_v2():
+            await self._ensure_v2_openapi_discovered()
         logger.info(
             "OpenCode serve launcher pid %s exited; adopted healthy owned listener pid %s "
             "on 127.0.0.1:%s",
@@ -11633,6 +11723,7 @@ class OpenCodeServeManager:
                 forward_startup_output()
                 if self._proc is not None and self._proc.poll() is not None:
                     if await self._try_adopt_owned_listener_locked():
+                        await self._ensure_v2_openapi_discovered()
                         return
                     cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
                     raise RuntimeError(_with_serve_startup_log(
@@ -11706,6 +11797,7 @@ class OpenCodeServeManager:
                             else:
                                 if self._proc is not None and self._proc.poll() is not None:
                                     if await self._try_adopt_owned_listener_locked():
+                                        await self._ensure_v2_openapi_discovered()
                                         return
                                     cwd_note = (
                                         f" startup_cwd={self._startup_cwd}"
@@ -11719,8 +11811,7 @@ class OpenCodeServeManager:
                                         config_content=config_content,
                                     ))
                                 if self._is_v2():
-                                    self._v2_openapi = await discover_v2_openapi_spec(client)
-                                    self._discovered_v2_paths = self._v2_openapi.paths
+                                    await self._ensure_v2_openapi_discovered()
                                 logger.info(
                                     "OpenCode serve startup health ready endpoint=%s%s "
                                     "status=%s elapsed_ms=%s",
@@ -11736,6 +11827,7 @@ class OpenCodeServeManager:
                     last_health_detail = f"{type(exc).__name__}: {_one_line_preview(exc)}"
                     if self._proc is not None and self._proc.poll() is not None:
                         if await self._try_adopt_owned_listener_locked():
+                            await self._ensure_v2_openapi_discovered()
                             return
                         cwd_note = (
                             f" startup_cwd={self._startup_cwd}"
@@ -11832,6 +11924,7 @@ class OpenCodeServeManager:
                 state.close_progress()
             self._event_states.clear()
             self._event_directories.clear()
+            self._event_directory_paths.clear()
             self._event_child_states.clear()
             self._degraded_event_channels.clear()
             self._event_failure_started_at = 0.0

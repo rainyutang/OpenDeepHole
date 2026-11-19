@@ -1833,3 +1833,290 @@ def test_real_opencode_v232_binary_integration(tmp_path: Path) -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_v232_sse_tool_and_skill_streaming_clock_skew_and_details() -> None:
+    """Verify V2.3.2 streaming snapshots, clock-skew protection, skill events, and tool details."""
+    from task_agent._opencode_v2 import normalize_message_envelope
+    from task_agent.serve_client import _ServeEventState, _handle_serve_event
+
+    output: list[str] = []
+    state = _ServeEventState("opencode", "ses_v2_obs", output.append, log_stage="vulnerability_mining")
+    state.start_progress()
+
+    # 1. Active V2 step must not be poisoned by Windows coarse timer skew (created < progress_started_at_ms).
+    _handle_serve_event(
+        {
+            "id": "evt_step_1",
+            "type": "session.step.started",
+            "data": {"sessionID": "ses_v2_obs", "assistantMessageID": "msg_skew"},
+        },
+        state,
+    )
+    _handle_serve_event(
+        {
+            "id": "evt_in_start_1",
+            "type": "session.tool.input.started",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "assistantMessageID": "msg_skew",
+                "id": "call_read_1",
+                "name": "read",
+            },
+        },
+        state,
+    )
+    _handle_serve_event(
+        {
+            "id": "evt_in_start_2",
+            "type": "session.tool.input.started",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "assistantMessageID": "msg_skew",
+                "id": "call_skill_1",
+                "name": "skill",
+            },
+        },
+        state,
+    )
+
+    # Polled snapshot during streaming with slightly earlier created timestamp and empty input.
+    streaming_snapshot = normalize_message_envelope(
+        {
+            "data": {
+                "id": "msg_skew",
+                "type": "assistant",
+                "time": {"created": int(state.progress_started_at_ms or 0) - 10},
+                "content": [
+                    {
+                        "type": "tool",
+                        "id": "call_read_1",
+                        "name": "read",
+                        "state": {"status": "streaming", "input": {}},
+                    },
+                    {
+                        "type": "tool",
+                        "id": "call_skill_1",
+                        "name": "skill",
+                        "state": {"status": "streaming", "input": {}},
+                    },
+                ],
+            }
+        },
+        fallback_session_id="ses_v2_obs",
+    )
+    state.ingest_message_snapshot(streaming_snapshot)
+    assert "msg_skew" not in state.ignored_progress_message_ids
+    assert output == [], f"Streaming snapshots must not emit empty-input tool/skill lines: {output}"
+
+    # Empty message id must never poison ignored_progress_message_ids either.
+    state.record_message({"id": "", "role": "assistant", "time": {"created": 1}})
+    assert "" not in state.ignored_progress_message_ids
+
+    # 2. session.tool.input.ended parses JSON args and session.tool.called emits complete details.
+    _handle_serve_event(
+        {
+            "id": "evt_in_end_1",
+            "type": "session.tool.input.ended",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "assistantMessageID": "msg_skew",
+                "id": "call_read_1",
+                "text": '{"path":"src/app.c","offset":10,"limit":50}',
+            },
+        },
+        state,
+    )
+    _handle_serve_event(
+        {
+            "id": "evt_called_1",
+            "type": "session.tool.called",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "assistantMessageID": "msg_skew",
+                "id": "call_read_1",
+                "input": {},
+            },
+        },
+        state,
+    )
+    _handle_serve_event(
+        {
+            "id": "evt_called_2",
+            "type": "session.tool.called",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "assistantMessageID": "msg_skew",
+                "id": "call_skill_1",
+                "input": {"id": "deephole-audit"},
+            },
+        },
+        state,
+    )
+
+    # 3. Direct session.skill.activated event emits [skill] line.
+    _handle_serve_event(
+        {
+            "id": "evt_skill_act",
+            "type": "session.skill.activated",
+            "data": {
+                "sessionID": "ses_v2_obs",
+                "id": "threat-check",
+                "name": "threat-check",
+                "text": "secret skill body",
+            },
+        },
+        state,
+    )
+
+    # 4. V2.3.2 subagent and execute tools log metadata without leaking prompt/code bodies.
+    state.emit_tool_call(
+        call_id="call_sub_1",
+        tool_name="subagent",
+        input_value={"agent": "explore", "description": "Find auth handlers", "prompt": "secret prompt body"},
+    )
+    state.emit_tool_call(
+        call_id="call_exec_1",
+        tool_name="execute",
+        input_value={"code": "return await tools.code_graph.find()"},
+    )
+
+    assert output == [
+        "[vulnerability_mining][ses_v2_obs][tool] name=read path=src/app.c offset=10 limit=50",
+        "[vulnerability_mining][ses_v2_obs][skill] name=deephole-audit",
+        "[vulnerability_mining][ses_v2_obs][skill] name=threat-check",
+        '[vulnerability_mining][ses_v2_obs][tool] name=subagent agent=explore description="Find auth handlers"',
+        "[vulnerability_mining][ses_v2_obs][tool] name=execute code_chars=36",
+    ]
+    joined = "\n".join(output)
+    assert "secret skill body" not in joined
+    assert "secret prompt body" not in joined
+    assert "tools.code_graph.find" not in joined
+
+
+def test_v232_adopted_listener_and_empty_spec_fallback_preserve_model_and_sse(
+    tmp_path: Path,
+) -> None:
+    """Verify V2 OpenAPI discovery runs after adoption and empty-spec fallback still sets model & avoids SSE race."""
+    from unittest.mock import AsyncMock
+    import httpx
+    from task_agent._opencode_v2 import V2OpenApiSpec, submit_and_resolve_v2_prompt
+    from task_agent.serve_client import _EventChannelRuntime
+
+    async def scenario() -> None:
+        # Part A: _mark_global_event_unsupported sets flag BEFORE releasing runtime.ready
+        # and preserves exact directory casing.
+        manager = OpenCodeServeManager()
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="2",
+        )
+        manager._port = 41999
+        mixed_dir = tmp_path / "MixedCaseProject"
+        mixed_dir.mkdir()
+        dir_key = manager._event_directory_key(mixed_dir)
+        manager._event_directories["ses_1"] = dir_key
+        manager._event_directory_paths[dir_key] = mixed_dir
+        global_rt = _EventChannelRuntime(key="global", path="/api/global/event", params={}, headers={})
+
+        observed_flag_on_wakeup: list[bool] = []
+
+        async def waiter() -> None:
+            await global_rt.ready.wait()
+            observed_flag_on_wakeup.append(manager._global_event_unsupported)
+
+        wait_task = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        # Prevent background legacy channel from attempting a real socket connection.
+        manager._run_event_channel = AsyncMock()
+        await manager._mark_global_event_unsupported(global_rt)
+        await wait_task
+        assert observed_flag_on_wakeup == [True]
+        assert manager._legacy_event_channels[dir_key].headers.get("x-opencode-directory") == str(mixed_dir)
+
+        # Part B: submit_and_resolve_v2_prompt still posts /api/session/{id}/model when openapi_spec is empty.
+        requests_seen: list[tuple[str, str, dict | None]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8")) if request.content else None
+            requests_seen.append((request.method, request.url.path, body))
+            if request.method == "POST" and request.url.path == "/api/session/ses_empty/model":
+                return httpx.Response(204)
+            if request.method == "POST" and request.url.path == "/api/session/ses_empty/prompt":
+                if "text" not in (body or {}) or "prompt" in (body or {}):
+                    return httpx.Response(400, json={"_tag": "InvalidRequestError"})
+                return httpx.Response(200, json={"data": {"id": "msg_u1", "type": "user", "text": "hi"}})
+            if request.method == "GET" and request.url.path == "/api/session/ses_empty/message":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "msg_idle", "type": "idle", "outcome": "succeeded", "time": {"created": 102}},
+                            {
+                                "id": "msg_a1",
+                                "type": "assistant",
+                                "finish": "stop",
+                                "time": {"created": 100, "completed": 101},
+                                "content": [{"type": "text", "text": "ok"}],
+                            },
+                            {"id": "msg_u1", "type": "user", "text": "hi", "time": {"created": 99}},
+                        ]
+                    },
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://127.0.0.1:41999",
+        ) as client:
+            resp = await submit_and_resolve_v2_prompt(
+                client,
+                session_id="ses_empty",
+                prompt="hi",
+                payload={
+                    "agent": "build",
+                    "parts": [{"type": "text", "text": "hi"}],
+                    "model": {"providerID": "corp", "modelID": "glm-5"},
+                },
+                params={},
+                headers={},
+                discovered_paths=frozenset(),
+                openapi_spec=V2OpenApiSpec(),
+                baseline_message_id="",
+                event_state=None,
+                is_terminal_fn=lambda msg: True,
+                response_id_fn=lambda msg: str((msg.get("info") or {}).get("id") or ""),
+                assistant_error_fn=lambda msg: None,
+                cancel_event=None,
+                poll_interval=0.01,
+            )
+            assert resp.status_code == 200
+            assert ("POST", "/api/session/ses_empty/model", {"model": {"providerID": "corp", "id": "glm-5"}}) in requests_seen
+
+        # Part C: _ensure_v2_openapi_discovered populates spec when initially empty (e.g. after adoption).
+        def openapi_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/openapi.json":
+                return httpx.Response(
+                    200,
+                    json={
+                        "openapi": "3.1.0",
+                        "paths": {
+                            "/api/event": {"get": {}},
+                            "/api/session/{sessionID}/prompt": {"post": {}},
+                        },
+                    },
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(openapi_handler),
+            base_url="http://127.0.0.1:41999",
+        ) as disc_client:
+            manager._discovered_v2_paths = frozenset()
+            manager._v2_openapi = V2OpenApiSpec()
+            await manager._ensure_v2_openapi_discovered(disc_client)
+            assert "/api/event" in manager._discovered_v2_paths
+            assert "/api/session/{sessionID}/prompt" in manager._discovered_v2_paths
+
+    asyncio.run(scenario())
