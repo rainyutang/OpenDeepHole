@@ -314,6 +314,18 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
     v2_plugin_uris = [uri for uri in plugin_uris if "opendeephole-" in uri]
     assert len(v2_plugin_uris) == 2
     assert all("-v2-" in uri for uri in v2_plugin_uris)
+    from urllib.parse import unquote, urlparse
+
+    v2_plugin_entry_uris: list[str] = []
+    for uri in v2_plugin_uris:
+        plugin_dir = Path(unquote(urlparse(uri).path))
+        assert plugin_dir.is_dir(), f"OpenCode 2.3 requires plugin directory, got {plugin_dir}"
+        pkg = json.loads((plugin_dir / "package.json").read_text(encoding="utf-8"))
+        assert pkg["type"] == "module"
+        assert pkg["main"] == "./index.mjs"
+        entry = plugin_dir / "index.mjs"
+        assert entry.is_file()
+        v2_plugin_entry_uris.append(entry.as_uri())
 
     session_id = "sess-v2-node-test"
     canonical_cmd = f"{sys.executable} /opt/validator/validate.py --strict"
@@ -346,8 +358,8 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
             import assert from "node:assert/strict"
             import fs from "node:fs/promises"
 
-            const fwMod = (await import({json.dumps(v2_plugin_uris[0])})).default
-            const kbMod = (await import({json.dumps(v2_plugin_uris[1])})).default
+            const fwMod = (await import({json.dumps(v2_plugin_entry_uris[0])})).default
+            const kbMod = (await import({json.dumps(v2_plugin_entry_uris[1])})).default
 
             assert.equal(typeof fwMod, "object")
             assert.equal(fwMod.id, "opendeephole-file-write-hook")
@@ -358,8 +370,20 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
 
             const hooks = {{ event: [], perm: [], shell: [], before: [], after: [] }}
             const ctx = {{
-              directory: {json.dumps(str(tmp_path))},
-              event: {{ subscribe: async (fn) => hooks.event.push(fn) }},
+              location: {{ directory: {json.dumps(str(tmp_path))} }},
+              worktree: {{}},
+              event: {{
+                subscribe: async (arg) => {{
+                  hooks.event.push(arg)
+                  async function* stream() {{
+                    yield {{
+                      type: "session.created",
+                      data: {{ sessionID: "child-sess-1", parentID: {json.dumps(session_id)} }},
+                    }}
+                  }}
+                  return stream()
+                }},
+              }},
               permission: {{ hook: async (name, fn) => {{ if (name === "evaluate") hooks.perm.push(fn) }} }},
               shell: {{ hook: async (name, fn) => {{ if (name === "create.before") hooks.shell.push(fn) }} }},
               tool: {{
@@ -371,8 +395,9 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
             }}
             await fwMod.setup(ctx)
             await kbMod.setup(ctx)
+            await new Promise((r) => setTimeout(r, 20))
 
-            // 1. Permission evaluation hook
+            // 1. Permission evaluation hook (including relative resource paths in OpenCode 2.3)
             const permShellOk = {{ sessionID: {json.dumps(session_id)}, action: "shell", effect: "ask", resources: ["python3 /opt/validator/validate.py --tampered"] }}
             await hooks.perm[0](permShellOk)
             assert.equal(permShellOk.effect, "allow")
@@ -381,15 +406,15 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
             await hooks.perm[0](permShellBad)
             assert.equal(permShellBad.effect, "deny")
 
-            const permEditOk = {{ sessionID: {json.dumps(session_id)}, action: "write", effect: "ask", resources: [{json.dumps(str(tmp_path / 'allowed' / 'out.json'))}] }}
-            await hooks.perm[0](permEditOk)
-            assert.equal(permEditOk.effect, "allow")
+            const permEditRelOk = {{ sessionID: {json.dumps(session_id)}, action: "write", effect: "ask", resources: ["allowed/out.json"] }}
+            await hooks.perm[0](permEditRelOk)
+            assert.equal(permEditRelOk.effect, "allow")
 
             const permQuestion = {{ sessionID: {json.dumps(session_id)}, action: "question", effect: "allow", resources: ["*"] }}
             await hooks.perm[0](permQuestion)
             assert.equal(permQuestion.effect, "deny")
 
-            // 2. Shell hook strips OPENCODE_SERVER_PASSWORD and rewrites bound python script command
+            // 2. Shell hook with sessionID (v2.0 style) AND without sessionID (real v2.3.2 style after tool.execute.before)
             const shellEvt = {{
               sessionID: {json.dumps(session_id)},
               command: "python3 /opt/validator/validate.py --wrong-arg",
@@ -401,30 +426,51 @@ def test_v2_generated_plugins_execute_under_node_esm_contract(tmp_path: Path) ->
             assert.equal(shellEvt.env.PATH.startsWith("/opt/custom-bin"), true)
             assert.equal(shellEvt.command, {json.dumps(canonical_cmd)})
 
-            // 3. Tool before/after hooks: command audit + file write metadata + knowledge binding
-            const bashArgs = {{ command: "python3 /opt/validator/validate.py --ignored" }}
-            await hooks.before[0]({{ tool: "bash", sessionID: {json.dumps(session_id)}, callID: "c1" }}, {{ args: bashArgs }})
-            assert.equal(bashArgs.command, {json.dumps(canonical_cmd)})
+            // 3. Real OpenCode 2.3 single-arg tool.execute.before + shell.create.before without sessionID + single-arg execute.after
+            const shellInput = {{ command: "python3 /opt/validator/validate.py --ignored" }}
+            await hooks.before[0]({{ tool: "shell", sessionID: {json.dumps(session_id)}, id: "c1", input: shellInput }})
+            assert.equal(shellInput.command, {json.dumps(canonical_cmd)})
 
-            await hooks.after[0](
-              {{ tool: "bash", sessionID: {json.dumps(session_id)}, callID: "c1", args: bashArgs }},
-              {{ output: "running...\\nVALID_OK\\n", metadata: {{ exitCode: 0 }} }},
-            )
+            const shellEvtNoSid = {{
+              command: shellInput.command,
+              env: {{ OPENCODE_SERVER_PASSWORD: "secret2", PATH: "/usr/bin" }},
+            }}
+            await hooks.shell[0](shellEvtNoSid)
+            assert.equal("OPENCODE_SERVER_PASSWORD" in shellEvtNoSid.env, false)
+            assert.equal(shellEvtNoSid.env.PATH.startsWith("/opt/custom-bin"), true)
 
-            const writeOutput = {{ metadata: {{ filepath: "allowed/result.json", exists: false }} }}
-            await hooks.after[0](
-              {{ tool: "write", sessionID: {json.dumps(session_id)}, callID: "c2", args: {{ filePath: "allowed/result.json" }} }},
-              writeOutput,
-            )
-            assert.equal(writeOutput.metadata.opendeepholeFileWrites.files.length, 1)
+            await hooks.after[0]({{
+              tool: "shell",
+              sessionID: {json.dumps(session_id)},
+              id: "c1",
+              input: shellInput,
+              status: "completed",
+              result: {{
+                output: {{ exitCode: 0, output: "running...\\nVALID_OK\\n" }},
+                content: [{{ type: "text", text: "running...\\nVALID_OK\\n" }}],
+                metadata: {{ status: "completed", exit: 0 }},
+              }},
+            }})
 
-            // Knowledge plugin blocks set_project and injects project_id on query tools
+            const writeAfterEvt = {{
+              tool: "write",
+              sessionID: {json.dumps(session_id)},
+              id: "c2",
+              input: {{ path: "allowed/result.json", content: "hi" }},
+              status: "completed",
+              result: {{ output: "Created file successfully: allowed/result.json", content: [{{ type: "text", text: "Created file successfully: allowed/result.json" }}] }},
+            }}
+            await hooks.after[0](writeAfterEvt)
+            assert.equal(writeAfterEvt.result.metadata.opendeepholeFileWrites.files.length, 1)
+            assert.equal(writeAfterEvt.result.metadata.opendeepholeFileWrites.files[0].created, true)
+
+            // Knowledge plugin blocks set_project and injects project_id on query tools (including inherited child session!)
             await assert.rejects(
-              () => hooks.before[1]({{ tool: "mcp__kb__set_project", sessionID: {json.dumps(session_id)} }}, {{ args: {{}} }}),
+              () => hooks.before[1]({{ tool: "mcp__kb__set_project", sessionID: "child-sess-1", input: {{}} }}),
               /platform-only/,
             )
             const kbQueryArgs = {{ query: "auth" }}
-            await hooks.before[1]({{ tool: "mcp__kb__search_docs", sessionID: {json.dumps(session_id)} }}, {{ args: kbQueryArgs }})
+            await hooks.before[1]({{ tool: "mcp__kb__search_docs", sessionID: "child-sess-1", input: kbQueryArgs }})
             assert.equal(kbQueryArgs.project_id, "proj-42")
             console.log("NODE_V2_PLUGINS_OK")
             """
@@ -1235,6 +1281,12 @@ def test_opencode_v232_api_info_html_fallback_model_catalog_and_strict_schema(
     tmp_path: Path,
 ) -> None:
     """Regression test for OpenCode 2.3.2 `/api/info` health check, HTML fallback routes, and Effect Schema."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        free_port = int(sock.getsockname()[1])
+
     state_file = tmp_path / "v232_events.jsonl"
     v232_bin = _create_mock_opencode_v232_binary(tmp_path, state_file)
     project_dir = tmp_path / "project232"
@@ -1253,6 +1305,7 @@ def test_opencode_v232_api_info_html_fallback_model_catalog_and_strict_schema(
               opencode_version: "2"
               executable: /nonexistent/opencode-v1
               executable_v2: {v232_bin}
+              port: {free_port}
               timeout: 30
               idle_timeout: 15
             model_pool:
@@ -1328,7 +1381,11 @@ def test_platform_runtime_preserves_opencode_v2_for_scan_resume_and_live_refresh
         ensure_platform_runtime_configured,
         refresh_platform_runtime_config,
     )
-    from task_agent.host import _get_opencode_configuration_state, configure_opencode
+    from task_agent.host import (
+        _get_opencode_configuration_state,
+        configure_opencode,
+        reset_opencode_configuration,
+    )
 
     previous_host_state = _get_opencode_configuration_state()
     monkeypatch.setattr(backend_config, "_config", None)
@@ -1404,6 +1461,8 @@ def test_platform_runtime_preserves_opencode_v2_for_scan_resume_and_live_refresh
     finally:
         if previous_host_state[0] == "host" and previous_host_state[1] is not None:
             configure_opencode(previous_host_state[1])
+        else:
+            reset_opencode_configuration()
 
 
 def test_backend_config_load_normalizes_opencode_version_and_executable_v2(tmp_path: Path) -> None:
@@ -1450,3 +1509,327 @@ def test_backend_config_load_normalizes_opencode_version_and_executable_v2(tmp_p
     )
     with pytest.raises(ValueError, match="Unsupported OpenCode version"):
         backend_config.load_config(str(invalid_yaml))
+
+
+def test_opencode_v232_wire_helpers_envelopes_messages_permissions_mcp_and_sse(tmp_path: Path) -> None:
+    """Unit tests covering exact OpenCode 2.3.2 OpenAPI wire formats."""
+    import base64
+    from task_agent._opencode_v2 import (
+        build_v2_mcp_put_config,
+        extract_config_providers_v2,
+        extract_mcp_status_map_v2,
+        normalize_message_list,
+        normalize_v2_error,
+        translate_v1_permissions_to_v2,
+        translate_v2_permissions_to_v1,
+    )
+    from task_agent.serve_client import (
+        _ServeEventState,
+        _event_properties,
+        _handle_serve_event,
+        _session_id,
+    )
+
+    # 1. Exact user-reported `POST /api/session` response envelope `{data: {id: "ses_..."}}`
+    assert _session_id({
+        "data": {
+            "id": "ses_e0d8ed169ffejg9C9etGjAc3xL",
+            "projectID": "global",
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1795068866202, "updated": 1795068866202},
+            "title": "threat-pattern-iterative-audit",
+        }
+    }) == "ses_e0d8ed169ffejg9C9etGjAc3xL"
+
+    # 2. `GET /api/session/{id}/message` desc cursor -> chronological asc + native 2.3 message types
+    desc_cursor = base64.urlsafe_b64encode(
+        json.dumps({"id": "msg_3", "order": "desc", "direction": "previous"}).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    raw_messages = {
+        "data": [
+            {"id": "msg_3", "time": {"created": 300}, "type": "idle", "outcome": "succeeded"},
+            {
+                "id": "msg_2",
+                "time": {"created": 200, "completed": 250},
+                "type": "assistant",
+                "agent": "build",
+                "model": {"id": "Qwen3-Coder", "providerID": "openai-compatible"},
+                "finish": "stop",
+                "tokens": {"input": 100, "output": 40, "reasoning": 0, "cache": {"read": 5, "write": 0}},
+                "content": [
+                    {
+                        "type": "tool",
+                        "id": "call_1",
+                        "name": "write",
+                        "executed": True,
+                        "state": {
+                            "status": "completed",
+                            "input": {"path": "out/a.txt", "content": "hi"},
+                            "content": [{"type": "text", "text": "Created file successfully: out/a.txt"}],
+                            "metadata": {"truncated": False},
+                        },
+                    },
+                    {"type": "text", "text": '{"ok": true}'},
+                ],
+            },
+            {"id": "msg_1", "time": {"created": 100}, "type": "user", "text": "hello"},
+        ],
+        "cursor": {"previous": desc_cursor, "next": None},
+    }
+    normalized = normalize_message_list(raw_messages, fallback_session_id="ses_1")
+    assert normalized is not None
+    assert [m["info"]["id"] for m in normalized] == ["msg_1", "msg_2", "msg_3"]
+    assert [m["info"]["role"] for m in normalized] == ["user", "assistant", "idle"]
+    asst = normalized[1]
+    assert asst["info"]["providerID"] == "openai-compatible"
+    assert asst["info"]["modelID"] == "Qwen3-Coder"
+    assert asst["parts"][0]["type"] == "tool"
+    assert asst["parts"][0]["tool"] == "write"
+    assert asst["parts"][0]["callID"] == "call_1"
+    assert asst["parts"][0]["state"]["output"] == "Created file successfully: out/a.txt"
+    assert asst["parts"][1] == {"id": "msg_2:text:1", "type": "text", "text": '{"ok": true}', "messageID": "msg_2"}
+
+    # 3. Error normalization preserves HTTP status + responseBody (e.g. TM.00001005)
+    norm_err = normalize_v2_error({
+        "type": "api",
+        "message": "Invalid API key",
+        "status": 401,
+        "response": {"body": '{"error":{"code":"TM.00001005"}}'},
+    })
+    assert norm_err["name"] == "APIError"
+    assert norm_err["data"]["statusCode"] == 401
+    assert "TM.00001005" in norm_err["data"]["responseBody"]
+
+    # 4. Permission rule translation (bash -> shell + directory-relative resource)
+    proj_dir = tmp_path / "proj"
+    v2_perms = translate_v1_permissions_to_v2(
+        [
+            {"permission": "bash", "pattern": "*", "action": "deny"},
+            {"permission": "edit", "pattern": str(proj_dir / "out" / "**"), "action": "allow"},
+        ],
+        directory=proj_dir,
+    )
+    assert {"action": "shell", "resource": "*", "effect": "deny"} in v2_perms
+    assert {"action": "edit", "resource": "out/**", "effect": "allow"} in v2_perms
+    v1_roundtrip = translate_v2_permissions_to_v1(v2_perms)
+    assert {"permission": "shell", "pattern": "*", "action": "deny"} in v1_roundtrip
+
+    # 5. MCP config translation and status envelope parsing
+    put_cfg = build_v2_mcp_put_config({
+        "type": "remote",
+        "url": "http://127.0.0.1:9000/mcp",
+        "enabled": False,
+        "timeout": 4500,
+    })
+    assert put_cfg == {
+        "type": "remote",
+        "url": "http://127.0.0.1:9000/mcp",
+        "disabled": True,
+        "timeout": {"startup": 4500, "catalog": 4500, "execution": 4500},
+    }
+    mcp_map = extract_mcp_status_map_v2({
+        "location": {"directory": str(proj_dir)},
+        "data": [{"name": "kb", "status": {"status": "connected"}}],
+    })
+    assert mcp_map == {"kb": {"status": "connected"}}
+
+    # 6. `GET /api/config` document array provider extraction
+    cfg_provs, cfg_valid = extract_config_providers_v2([
+        {"type": "document", "path": "/tmp/opencode.json", "info": {"provider": {"custom": {"models": {"m1": {"name": "M1"}}}}}},
+    ])
+    assert cfg_valid is True
+    assert cfg_provs[0]["id"] == "custom"
+
+    # 7. Real 2.3.2 SSE events (`data` field, `session.tool.input.started` -> `called` name lookup, `session.execution.succeeded`)
+    emitted: list[str] = []
+    writes: list = []
+    state = _ServeEventState("opencode", "ses_sse", emitted.append, on_file_write=writes.append)
+    state.start_progress()
+    ev_type, ev_props = _event_properties({"type": "session.execution.started", "data": {"sessionID": "ses_sse"}})
+    assert ev_type == "session.execution.started" and ev_props["sessionID"] == "ses_sse"
+    _handle_serve_event({"type": "session.execution.started", "data": {"sessionID": "ses_sse"}}, state)
+    _handle_serve_event(
+        {"type": "session.tool.input.started", "data": {"sessionID": "ses_sse", "assistantMessageID": "msg_a", "id": "call_w", "name": "write"}},
+        state,
+    )
+    _handle_serve_event(
+        {"type": "session.tool.called", "data": {"sessionID": "ses_sse", "assistantMessageID": "msg_a", "id": "call_w", "input": {"path": "out/f.txt", "content": "x"}}},
+        state,
+    )
+    _handle_serve_event(
+        {
+            "type": "session.tool.success",
+            "data": {
+                "sessionID": "ses_sse",
+                "assistantMessageID": "msg_a",
+                "id": "call_w",
+                "content": [{"type": "text", "text": "Created file successfully: out/f.txt"}],
+            },
+        },
+        state,
+    )
+    _handle_serve_event({"type": "session.execution.succeeded", "data": {"sessionID": "ses_sse"}}, state)
+    assert state.session_terminal is True
+    assert any("name=write" in line for line in emitted), emitted
+    assert len(writes) == 1 and writes[0].path == "out/f.txt" and writes[0].created is True
+
+
+def test_real_opencode_v232_binary_integration(tmp_path: Path) -> None:
+    """Opt-in integration test against an isolated real opencode 2.3.x binary.
+
+    Enable via `OPENDEEPHOLE_REAL_OPENCODE_V2_BIN=/path/to/opencode`.
+    """
+    real_bin = os.environ.get("OPENDEEPHOLE_REAL_OPENCODE_V2_BIN", "").strip()
+    if not real_bin or not Path(real_bin).is_file():
+        pytest.skip("Set OPENDEEPHOLE_REAL_OPENCODE_V2_BIN to run real opencode 2.x integration test")
+
+    import http.server
+    import socket
+    import threading
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        llm_port = int(s.getsockname()[1])
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        serve_port = int(s.getsockname()[1])
+
+    seen_requests: list[dict] = []
+
+    class _MockLLM(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            ln = int(self.headers.get("Content-Length", "0") or 0)
+            body = json.loads(self.rfile.read(ln).decode("utf-8") or "{}")
+            seen_requests.append(body)
+            reply = json.dumps({"verdict": "ok-real-bin", "turn": len(seen_requests)})
+            chunks = [
+                {
+                    "id": f"c{len(seen_requests)}",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": body.get("model", "m1"),
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": reply}, "finish_reason": None}],
+                },
+                {
+                    "id": f"c{len(seen_requests)}",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": body.get("model", "m1"),
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 25, "completion_tokens": 10, "total_tokens": 35},
+                },
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for ch in chunks:
+                self.wfile.write(f"data: {json.dumps(ch)}\n\n".encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", llm_port), _MockLLM)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ws_dir = tmp_path / "workspace"
+    ws_dir.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    yaml_path = tmp_path / "real-v2.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(
+            f"""\
+            schema_version: 2
+            context:
+              project_dir: {project_dir}
+              work_dir: {work_dir}
+              workspace_dir: {ws_dir}
+            serve:
+              tool: opencode
+              opencode_version: "2"
+              executable: /nonexistent/opencode-v1
+              executable_v2: {real_bin}
+              port: {serve_port}
+              timeout: 45
+              idle_timeout: 25
+              opencode_config:
+                provider:
+                  mock:
+                    npm: "@ai-sdk/openai-compatible"
+                    options:
+                      baseURL: "http://127.0.0.1:{llm_port}/v1"
+                      apiKey: "sk-local"
+                    models:
+                      m1:
+                        name: "Mock M1"
+                        limit:
+                          context: 128000
+                          output: 16000
+            model_pool:
+              models:
+                - id: mock/m1
+                  model: mock/m1
+                  capability: high
+                  enabled: true
+            """
+        ),
+        encoding="utf-8",
+    )
+    schema = {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}, "turn": {"type": "integer"}},
+        "required": ["verdict", "turn"],
+        "additionalProperties": False,
+    }
+    xdg_keys = {
+        "XDG_DATA_HOME": str(tmp_path / "xdg/data"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg/config"),
+        "XDG_CACHE_HOME": str(tmp_path / "xdg/cache"),
+        "XDG_STATE_HOME": str(tmp_path / "xdg/state"),
+    }
+    prev_env = {k: os.environ.get(k) for k in xdg_keys}
+    os.environ.update(xdg_keys)
+    try:
+        async def scenario() -> None:
+            await shutdown_opencode()
+            try:
+                t1 = await run_opencode_task(
+                    task_name="real-v2-t1",
+                    task_type="vulnerability_mining",
+                    prompt="Turn 1 check",
+                    required_capability="high",
+                    output_schema=schema,
+                    config_path=yaml_path,
+                )
+                assert t1.status == "success", t1
+                assert t1.structured == {"verdict": "ok-real-bin", "turn": 1}
+                assert t1.session_id.startswith("ses_")
+                t2 = await run_opencode_task(
+                    task_name="real-v2-t2",
+                    task_type="vulnerability_mining",
+                    prompt="Turn 2 continuation",
+                    required_capability="high",
+                    output_schema=schema,
+                    session_id=t1.session_id,
+                    config_path=yaml_path,
+                )
+                assert t2.status == "success", t2
+                assert t2.session_id == t1.session_id
+                assert t2.structured == {"verdict": "ok-real-bin", "turn": 2}
+            finally:
+                await shutdown_opencode()
+
+        asyncio.run(scenario())
+    finally:
+        server.shutdown()
+        server.server_close()
+        for k, v in prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

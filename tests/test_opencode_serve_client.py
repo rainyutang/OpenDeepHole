@@ -9901,6 +9901,7 @@ def test_windows_shell_env_overwrites_mixed_case_path_without_duplicates(tmp_pat
 
     v1_plugin = _managed_file_write_plugin_path(runtime, opencode_version="1")
     v2_plugin = _managed_file_write_plugin_path(runtime, opencode_version="2")
+    v2_plugin_entry = (v2_plugin / "index.mjs") if v2_plugin.is_dir() else v2_plugin
     script = r'''
 import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
@@ -9930,7 +9931,7 @@ assert.equal(v2Event.env.PATH, expected)
 assert.equal("OPENCODE_SERVER_PASSWORD" in v2Event.env, false)
 '''
     completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(v1_plugin), str(v2_plugin), host_python_dir, old_win_path],
+        ["node", "--input-type=module", "-e", script, str(v1_plugin), str(v2_plugin_entry), host_python_dir, old_win_path],
         check=False,
         capture_output=True,
         text=True,

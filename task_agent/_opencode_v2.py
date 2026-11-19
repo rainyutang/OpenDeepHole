@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -91,9 +92,13 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const pluginDirectory = path.dirname(fileURLToPath(import.meta.url))
-const bindingDirectory = path.join(pluginDirectory, "command-bindings")
+const bindingRoot = path.basename(pluginDirectory) === ".opendeephole-plugins"
+  ? pluginDirectory
+  : path.dirname(pluginDirectory)
+const bindingDirectory = path.join(bindingRoot, "command-bindings")
 const parents = new Map()
 const childBindings = new Map()
+const pendingShellBindings = new Map()
 const digest = (value) => crypto.createHash("sha256").update(String(value || "")).digest("hex")
 const bindingPath = (sessionID) => path.join(bindingDirectory, `${digest(sessionID)}.json`)
 const normalizedTool = (value) => String(value || "").trim().toLowerCase().replaceAll("-", "_")
@@ -112,7 +117,27 @@ const readDirectBinding = async (sessionID) => {
   }
 }
 
-const resolveBinding = async (sessionID) => {
+const lookupParentFromSessionApi = async (ctx, sessionID) => {
+  if (!sessionID || typeof ctx?.session?.get !== "function") return ""
+  for (const arg of [{ sessionID }, { id: sessionID }, sessionID]) {
+    try {
+      const info = await ctx.session.get(arg)
+      const data = objectValue(info?.data || info)
+      const parentID = pathText(data.parentID) || pathText(data.parentId)
+      if (parentID) {
+        parents.set(sessionID, parentID)
+        if (parents.size > 4096) parents.delete(parents.keys().next().value)
+        return parentID
+      }
+      if (pathText(data.id)) return ""
+    } catch {
+      // Try next calling convention.
+    }
+  }
+  return ""
+}
+
+const resolveBinding = async (sessionID, ctx = null) => {
   let current = String(sessionID || "")
   const visited = new Set()
   for (let depth = 0; current && depth < 32 && !visited.has(current); depth += 1) {
@@ -125,9 +150,39 @@ const resolveBinding = async (sessionID) => {
       }
       return binding
     }
-    current = String(parents.get(current) || "")
+    let nextParent = String(parents.get(current) || "")
+    if (!nextParent && ctx) {
+      nextParent = await lookupParentFromSessionApi(ctx, current)
+    }
+    current = nextParent
   }
   return null
+}
+
+const rememberPendingShellBinding = (command, binding) => {
+  const key = pathText(command)
+  if (!key || !binding) return
+  const now = Date.now()
+  pendingShellBindings.set(key, { binding, ts: now })
+  if (pendingShellBindings.size > 256) {
+    for (const [entryKey, entry] of pendingShellBindings.entries()) {
+      if (now - entry.ts > 60_000 || pendingShellBindings.size > 256) {
+        pendingShellBindings.delete(entryKey)
+      }
+    }
+  }
+}
+
+const lookupPendingShellBinding = (command) => {
+  const key = pathText(command)
+  if (!key) return null
+  const entry = pendingShellBindings.get(key)
+  if (!entry) return null
+  if (Date.now() - entry.ts > 60_000) {
+    pendingShellBindings.delete(key)
+    return null
+  }
+  return entry.binding
 }
 
 const commandText = (args) => pathText(args?.command) || pathText(args?.cmd)
@@ -200,29 +255,57 @@ const wildcardMatch = (pattern, text) => {
 
 const toolAllowed = (binding, tool) => {
   if (!Array.isArray(binding.tool_rules)) return false
-  let allowed = false
-  for (const [pattern, enabled] of binding.tool_rules) {
-    if (wildcardMatch(pattern, tool)) allowed = enabled === true
+  const evaluate = (name) => {
+    let matched = false
+    let allowed = false
+    for (const [pattern, enabled] of binding.tool_rules) {
+      if (wildcardMatch(pattern, name)) {
+        matched = true
+        allowed = enabled === true
+      }
+    }
+    return { matched, allowed }
   }
-  return allowed
+  const direct = evaluate(tool)
+  if (direct.matched) return direct.allowed
+  const norm = normalizedTool(tool)
+  if (norm === "shell") return evaluate("bash").allowed
+  if (norm === "bash") return evaluate("shell").allowed
+  return false
 }
 
-const permissionRuleOutcome = (binding, action, resource) => {
+const resourceCandidates = (resource, directory) => {
+  const raw = String(resource ?? "")
+  const items = new Set([raw])
+  if (raw.includes("\\")) items.add(raw.replaceAll("\\", "/"))
+  if (directory && raw && raw !== "*" && !path.isAbsolute(raw)) {
+    const resolved = path.resolve(directory, raw)
+    items.add(resolved)
+    if (resolved.includes("\\")) items.add(resolved.replaceAll("\\", "/"))
+  }
+  return [...items]
+}
+
+const permissionRuleOutcome = (binding, action, resource, directory = "") => {
   if (!Array.isArray(binding?.permission_rules)) return ""
   const normalizedAction = normalizedTool(action)
+  const candidates = resourceCandidates(resource, directory)
   let outcome = ""
   for (const rule of binding.permission_rules) {
     if (!rule || typeof rule !== "object") continue
-    const rulePerm = normalizedTool(rule.permission)
+    const rulePerm = normalizedTool(rule.permission ?? rule.action)
     const actionMatches = rulePerm === "*"
       || rulePerm === normalizedAction
       || (normalizedAction === "shell" && rulePerm === "bash")
       || (normalizedAction === "bash" && rulePerm === "shell")
       || (["write", "apply_patch", "patch"].includes(normalizedAction) && rulePerm === "edit")
     if (!actionMatches) continue
-    const pattern = String(rule.pattern ?? "*")
-    if (wildcardMatch(pattern, resource)) {
-      outcome = String(rule.action || "")
+    const rawPattern = String(rule.pattern ?? rule.resource ?? "*")
+    const patternVariants = rawPattern.includes("\\")
+      ? [rawPattern, rawPattern.replaceAll("\\", "/")]
+      : [rawPattern]
+    if (patternVariants.some((pat) => candidates.some((cand) => wildcardMatch(pat, cand)))) {
+      outcome = String(rule.effect ?? rule.action ?? "")
     }
   }
   return outcome
@@ -241,9 +324,21 @@ const unboundCommandError = (binding, phase) => permissionDeniedError(
   binding, `Shell command is not bound to this OpenDeepHole task (${phase}).`,
 )
 
+const contentText = (items) => {
+  if (!Array.isArray(items)) return ""
+  return items
+    .filter((item) => item && typeof item === "object" && typeof item.text === "string" && item.text.length)
+    .map((item) => item.text)
+    .join("\n")
+}
+
 const commandOutputText = (output, metadata, errorObj) => {
+  const outputObj = objectValue(output?.output)
   const values = [
-    typeof output === "string" ? output : output?.output,
+    typeof output === "string" ? output : null,
+    typeof output?.output === "string" ? output.output : null,
+    typeof outputObj.output === "string" ? outputObj.output : null,
+    contentText(output?.content),
     metadata.output,
     metadata.stdout,
     metadata.stderr,
@@ -275,7 +370,7 @@ const appendAudit = async (binding, event) => {
   )
 }
 
-const writtenFiles = (tool, args, metadata, directory) => {
+const writtenFiles = (tool, args, metadata, directory, resultTarget = null) => {
   const files = []
   const addFile = (rawPath, created = false) => {
     const value = pathText(rawPath)
@@ -293,8 +388,11 @@ const writtenFiles = (tool, args, metadata, directory) => {
       || pathText(args.filePath)
       || pathText(args.file_path)
       || pathText(args.path)
+    const outputSummary = typeof resultTarget?.output === "string"
+      ? resultTarget.output
+      : contentText(resultTarget?.content)
     const created = tool === "write"
-      ? metadata.exists === false
+      ? (metadata.exists === false || /^created file successfully/i.test(outputSummary.trim()))
       : (args.oldString ?? args.old_string) === ""
     addFile(rawPath, created)
   } else if (["apply_patch", "patch"].includes(tool)) {
@@ -341,7 +439,7 @@ const extractSessionID = (first, second) => pathText(first?.sessionID)
   || pathText(first?.sessionId)
   || pathText(second?.sessionID)
 
-const handleEventEnvelope = async (raw) => {
+const handleEventEnvelope = async (raw, ctx = null) => {
   const event = raw?.event && typeof raw.event === "object" ? raw.event : raw
   const props = objectValue(event?.properties || event?.data || event)
   const info = objectValue(props.info || props.session)
@@ -352,7 +450,7 @@ const handleEventEnvelope = async (raw) => {
     parents.set(sessionID, parentID)
     if (parents.size > 4096) parents.delete(parents.keys().next().value)
     if (eventType === "session.created" || eventType === "session.forked") {
-      const binding = await resolveBinding(parentID)
+      const binding = await resolveBinding(parentID, ctx)
       if (binding?.binding_id) childBindings.set(sessionID, binding.binding_id)
       if (childBindings.size > 4096) childBindings.delete(childBindings.keys().next().value)
     }
@@ -363,22 +461,41 @@ const handleEventEnvelope = async (raw) => {
   }
 }
 
+const subscribeEvents = async (ctx) => {
+  const handler = (raw) => handleEventEnvelope(raw, ctx)
+  if (typeof ctx?.event?.subscribe === "function") {
+    const arg = Object.assign(handler, {
+      types: ["session.created", "session.forked", "session.deleted"],
+    })
+    const result = await ctx.event.subscribe(arg)
+    if (result && typeof result[Symbol.asyncIterator] === "function") {
+      ;(async () => {
+        for await (const ev of result) {
+          try { await handler(ev) } catch {}
+        }
+      })().catch(() => {})
+    }
+  } else if (typeof ctx?.event?.hook === "function") {
+    await ctx.event.hook("event", handler)
+  }
+}
+
 export default {
   id: "opendeephole-file-write-hook",
   async setup(ctx) {
-    const directory = pathText(ctx?.directory) || pathText(ctx?.worktree) || process.cwd()
+    const directory = pathText(ctx?.location?.directory)
+      || pathText(ctx?.location?.project?.directory)
+      || pathText(ctx?.directory)
+      || pathText(ctx?.worktree)
+      || process.cwd()
 
-    if (typeof ctx?.event?.subscribe === "function") {
-      await ctx.event.subscribe(handleEventEnvelope)
-    } else if (typeof ctx?.event?.hook === "function") {
-      await ctx.event.hook("event", handleEventEnvelope)
-    }
+    await subscribeEvents(ctx)
 
     if (typeof ctx?.permission?.hook === "function") {
       await ctx.permission.hook("evaluate", async (event) => {
         if (!event || typeof event !== "object") return
         const sessionID = extractSessionID(event)
-        const binding = sessionID ? await resolveBinding(sessionID) : null
+        const binding = sessionID ? await resolveBinding(sessionID, ctx) : null
         const action = normalizedTool(event.action || event.permission || event.tool)
         const resources = Array.isArray(event.resources) && event.resources.length
           ? event.resources.map((item) => String(item ?? ""))
@@ -399,7 +516,9 @@ export default {
           event.effect = allBound ? "allow" : "deny"
           return
         }
-        const outcomes = resources.map((res) => permissionRuleOutcome(binding, action, res)).filter(Boolean)
+        const outcomes = resources
+          .map((res) => permissionRuleOutcome(binding, action, res, directory))
+          .filter(Boolean)
         if (outcomes.includes("deny")) {
           event.effect = "deny"
         } else if (outcomes.length === resources.length && outcomes.every((item) => item === "allow")) {
@@ -414,26 +533,33 @@ export default {
       await ctx.shell.hook("create.before", async (event) => {
         if (!event || typeof event !== "object") return
         const sessionID = extractSessionID(event)
-        const binding = sessionID ? await resolveBinding(sessionID) : null
-        event.env = applyPrependedPath(event.env || process.env, binding)
-        if (typeof event.command === "string") {
-          if (!binding) {
-            throw permissionDeniedError(null, "This Session has no active OpenDeepHole task permission binding")
+        if (sessionID) {
+          const binding = await resolveBinding(sessionID, ctx)
+          event.env = applyPrependedPath(event.env || process.env, binding)
+          if (typeof event.command === "string") {
+            if (!binding) {
+              throw permissionDeniedError(null, "This Session has no active OpenDeepHole task permission binding")
+            }
+            if (!toolAllowed(binding, "bash") && !toolAllowed(binding, "shell")) {
+              throw permissionDeniedError(binding, "Tool is not allowed for this OpenDeepHole task")
+            }
+            const canonical = boundCommand(binding, pathText(event.command))
+            if (!canonical) throw unboundCommandError(binding, "shell.create.before")
+            event.command = canonical
           }
-          if (!toolAllowed(binding, "bash") && !toolAllowed(binding, "shell")) {
-            throw permissionDeniedError(binding, "Tool is not allowed for this OpenDeepHole task")
-          }
-          const canonical = boundCommand(binding, pathText(event.command))
-          if (!canonical) throw unboundCommandError(binding, "shell.create.before")
-          event.command = canonical
+          return
         }
+        // OpenCode 2.3.x omits sessionID from shell.create.before; tool.execute.before
+        // and permission.evaluate already enforce session-scoped command bindings.
+        const pendingBinding = lookupPendingShellBinding(event.command)
+        event.env = applyPrependedPath(event.env || process.env, pendingBinding)
       })
     }
 
     if (typeof ctx?.tool?.hook === "function") {
       await ctx.tool.hook("execute.before", async (first, second) => {
         const sessionID = extractSessionID(first, second)
-        const binding = await resolveBinding(sessionID)
+        const binding = await resolveBinding(sessionID, ctx)
         const rawToolName = String(first?.tool || "")
         if (!binding) {
           throw permissionDeniedError(null, "This Session has no active OpenDeepHole task permission binding")
@@ -456,6 +582,7 @@ export default {
         if (!canonical) throw unboundCommandError(binding, "before")
         if (typeof args.command === "string") args.command = canonical
         if (typeof args.cmd === "string") args.cmd = canonical
+        rememberPendingShellBinding(canonical, binding)
       })
 
       await ctx.tool.hook("execute.after", async (first, second) => {
@@ -472,7 +599,7 @@ export default {
             ? first.result
             : first
         const originalMetadata = objectValue(resultTarget?.metadata || first?.metadata)
-        const binding = await resolveBinding(sessionID)
+        const binding = await resolveBinding(sessionID, ctx)
 
         if (["bash", "shell"].includes(tool)) {
           if (!binding) return
@@ -482,11 +609,13 @@ export default {
             if (status === "error") return
             throw unboundCommandError(binding, "after")
           }
+          const outputObj = objectValue(resultTarget?.output)
           const outputMetadata = objectValue(resultTarget?.structured)
           const nestedMetadata = objectValue(originalMetadata.structured)
           const rawExitCode = originalMetadata.exitCode ?? originalMetadata.exit_code
-            ?? originalMetadata.exit ?? originalMetadata.code ?? nestedMetadata.exit
-            ?? outputMetadata.exit ?? resultTarget?.exit
+            ?? originalMetadata.exit ?? originalMetadata.code
+            ?? outputObj.exitCode ?? outputObj.exit
+            ?? nestedMetadata.exit ?? outputMetadata.exit ?? resultTarget?.exit
             ?? (status === "error" ? (first?.error?.exitCode ?? first?.error?.code) : undefined)
           const exitCode = rawExitCode !== undefined && rawExitCode !== null && rawExitCode !== ""
             && Number.isFinite(Number(rawExitCode))
@@ -520,7 +649,7 @@ export default {
         }
 
         if (status === "error" || !["write", "edit", "apply_patch", "patch"].includes(tool)) return
-        const files = writtenFiles(tool, args, originalMetadata, directory)
+        const files = writtenFiles(tool, args, originalMetadata, directory, resultTarget)
         if (!files.length) return
         const enrichedMetadata = {
           ...originalMetadata,
@@ -565,10 +694,11 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const bindingDirectory = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "knowledge-bindings",
-)
+const pluginDirectory = path.dirname(fileURLToPath(import.meta.url))
+const bindingRoot = path.basename(pluginDirectory) === ".opendeephole-plugins"
+  ? pluginDirectory
+  : path.dirname(pluginDirectory)
+const bindingDirectory = path.join(bindingRoot, "knowledge-bindings")
 const parents = new Map()
 const pathText = (value) => typeof value === "string" ? value.trim() : ""
 const objectValue = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {}
@@ -589,14 +719,38 @@ const readDirectBinding = async (sessionID) => {
   }
 }
 
-const resolveBinding = async (sessionID) => {
+const lookupParentFromSessionApi = async (ctx, sessionID) => {
+  if (!sessionID || typeof ctx?.session?.get !== "function") return ""
+  for (const arg of [{ sessionID }, { id: sessionID }, sessionID]) {
+    try {
+      const info = await ctx.session.get(arg)
+      const data = objectValue(info?.data || info)
+      const parentID = pathText(data.parentID) || pathText(data.parentId)
+      if (parentID) {
+        parents.set(sessionID, parentID)
+        if (parents.size > 4096) parents.delete(parents.keys().next().value)
+        return parentID
+      }
+      if (pathText(data.id)) return ""
+    } catch {
+      // Try next calling convention.
+    }
+  }
+  return ""
+}
+
+const resolveBinding = async (sessionID, ctx = null) => {
   let current = String(sessionID || "")
   const visited = new Set()
   for (let depth = 0; current && depth < 32 && !visited.has(current); depth += 1) {
     visited.add(current)
     const binding = await readDirectBinding(current)
     if (binding) return binding
-    current = String(parents.get(current) || "")
+    let nextParent = String(parents.get(current) || "")
+    if (!nextParent && ctx) {
+      nextParent = await lookupParentFromSessionApi(ctx, current)
+    }
+    current = nextParent
   }
   return null
 }
@@ -615,20 +769,34 @@ const handleEventEnvelope = async (raw) => {
   if (eventType === "session.deleted" && sessionID) parents.delete(sessionID)
 }
 
+const subscribeEvents = async (ctx) => {
+  if (typeof ctx?.event?.subscribe === "function") {
+    const arg = Object.assign(handleEventEnvelope, {
+      types: ["session.created", "session.forked", "session.deleted"],
+    })
+    const result = await ctx.event.subscribe(arg)
+    if (result && typeof result[Symbol.asyncIterator] === "function") {
+      ;(async () => {
+        for await (const ev of result) {
+          try { await handleEventEnvelope(ev) } catch {}
+        }
+      })().catch(() => {})
+    }
+  } else if (typeof ctx?.event?.hook === "function") {
+    await ctx.event.hook("event", handleEventEnvelope)
+  }
+}
+
 export default {
   id: "opendeephole-knowledge-project-hook",
   async setup(ctx) {
-    if (typeof ctx?.event?.subscribe === "function") {
-      await ctx.event.subscribe(handleEventEnvelope)
-    } else if (typeof ctx?.event?.hook === "function") {
-      await ctx.event.hook("event", handleEventEnvelope)
-    }
+    await subscribeEvents(ctx)
     if (typeof ctx?.tool?.hook === "function") {
       await ctx.tool.hook("execute.before", async (first, second) => {
         const sessionID = pathText(first?.sessionID)
           || pathText(first?.session?.id)
           || pathText(second?.sessionID)
-        const binding = await resolveBinding(sessionID)
+        const binding = await resolveBinding(sessionID, ctx)
         if (!binding) return
         const tool = String(first?.tool || "")
         const blocked = Array.isArray(binding.blocked_tool_ids) ? binding.blocked_tool_ids : []
@@ -879,9 +1047,312 @@ class V2OpenApiSpec:
         return False
 
 
+def _fill_route_params(template: str, *values: str) -> str:
+    rendered = template
+    for value in values:
+        rendered = _PATH_PARAM_RE.sub(value, rendered, count=1)
+    return rendered
+
+
+_V2_ENVELOPE_WRAPPER_KEYS = frozenset({
+    "data",
+    "cursor",
+    "location",
+    "next",
+    "previous",
+    "total",
+    "meta",
+})
+
+
+def unwrap_v2_data(payload: Any) -> Any:
+    """Unwrap OpenCode 2.3+ `{data: ..., cursor?, location?}` envelopes safely."""
+    if not isinstance(payload, dict) or "data" not in payload:
+        return payload
+    data = payload.get("data")
+    if data is None:
+        return payload
+    if any(key in payload for key in ("info", "role", "name", "error")):
+        return payload
+    if set(payload.keys()).issubset(_V2_ENVELOPE_WRAPPER_KEYS):
+        return data
+    if "id" not in payload and "type" not in payload and isinstance(data, (dict, list)):
+        return data
+    return payload
+
+
+def normalize_v2_error(error: Any) -> Any:
+    """Normalize OpenCode 2.3 `{type, message, status, response}` errors to `{name, message, data}`."""
+    if not isinstance(error, dict):
+        return error
+    if "name" in error and ("data" in error or "type" not in error):
+        return error
+    err_type = str(error.get("type") or "").strip()
+    message = str(error.get("message") or "").strip()
+    status = error.get("status")
+    response_obj = error.get("response") if isinstance(error.get("response"), dict) else {}
+    resp_body = response_obj.get("body")
+    type_name_map = {
+        "api": "APIError",
+        "auth": "ProviderAuthError",
+        "context_overflow": "ContextOverflowError",
+        "context-overflow": "ContextOverflowError",
+        "aborted": "MessageAbortedError",
+        "interrupted": "MessageAbortedError",
+        "output_length": "MessageOutputLengthError",
+        "output-length": "MessageOutputLengthError",
+        "structured_output": "StructuredOutputError",
+        "structured-output": "StructuredOutputError",
+        "content_filter": "ContentFilterError",
+        "content-filter": "ContentFilterError",
+    }
+    name = str(
+        error.get("name")
+        or type_name_map.get(err_type.lower())
+        or (err_type if err_type else "UnknownError")
+    )
+    data: dict[str, Any] = {}
+    if isinstance(error.get("data"), dict):
+        data.update(error["data"])
+    if message and "message" not in data:
+        data["message"] = message
+    if status is not None and "statusCode" not in data:
+        data["statusCode"] = status
+    if resp_body is not None and "responseBody" not in data:
+        data["responseBody"] = resp_body
+    if error.get("retryAfterMs") is not None and "retryAfterMs" not in data:
+        data["retryAfterMs"] = error["retryAfterMs"]
+    normalized: dict[str, Any] = {
+        "name": name,
+        "message": message or str(data.get("message") or ""),
+    }
+    if data:
+        normalized["data"] = data
+    if err_type:
+        normalized["type"] = err_type
+    return normalized
+
+
+def _relative_resource_for_directory(resource: str, directory: Path | str | None) -> str | None:
+    """Return a directory-relative pattern when `resource` lies under `directory`."""
+    if not directory or not resource or resource == "*":
+        return None
+    dir_str = str(directory).strip()
+    if not dir_str:
+        return None
+    dir_posix = dir_str.replace("\\", "/").rstrip("/")
+    res_posix = resource.replace("\\", "/")
+    if not dir_posix:
+        return None
+    # Match case-insensitively on Windows drive paths (e.g. C:/...) and exact on POSIX.
+    is_win = len(dir_posix) >= 2 and dir_posix[1] == ":"
+    cmp_dir = dir_posix.lower() if is_win else dir_posix
+    cmp_res = res_posix.lower() if is_win else res_posix
+    if cmp_res == cmp_dir:
+        return "*"
+    prefix = f"{cmp_dir}/"
+    if cmp_res.startswith(prefix):
+        rel = res_posix[len(dir_posix) + 1:].lstrip("/")
+        return rel or "*"
+    return None
+
+
+def translate_v1_permissions_to_v2(
+    rules: Any,
+    *,
+    directory: Path | str | None = None,
+) -> list[dict[str, str]]:
+    """Translate V1 `{permission, pattern, action}` rules into V2.3 `{action, resource, effect}`."""
+    if not isinstance(rules, list):
+        return []
+    translated: list[dict[str, str]] = []
+    seen_entries: set[tuple[str, str, str]] = set()
+
+    def _append(action: str, resource: str, effect: str) -> None:
+        entry = {"action": action, "resource": resource, "effect": effect}
+        key = (action, resource, effect)
+        # Preserve override order if the same (action, resource) reappears with a different effect,
+        # while avoiding duplicate identical rules right next to each other.
+        if translated and translated[-1] == entry:
+            return
+        if key in seen_entries and not any(
+            existing["action"] == action and existing["resource"] == resource and existing["effect"] != effect
+            for existing in translated
+        ):
+            return
+        seen_entries.add(key)
+        translated.append(entry)
+
+    for raw in rules:
+        if not isinstance(raw, dict):
+            continue
+        if "effect" in raw and "resource" in raw and "permission" not in raw:
+            action = str(raw.get("action") or "*").strip() or "*"
+            if action == "bash":
+                action = "shell"
+            resource = str(raw.get("resource") if raw.get("resource") is not None else "*")
+            effect = str(raw.get("effect") or "deny").strip().lower()
+        else:
+            perm = str(raw.get("permission") or raw.get("action") or "*").strip() or "*"
+            if perm == "bash":
+                action = "shell"
+            elif perm in {"write", "apply_patch", "patch"}:
+                action = "edit"
+            else:
+                action = perm
+            resource = str(raw.get("pattern") if raw.get("pattern") is not None else "*")
+            effect = str(raw.get("action") or raw.get("effect") or "deny").strip().lower()
+        if effect not in {"allow", "deny", "ask"}:
+            effect = "deny"
+        _append(action, resource, effect)
+        if directory is not None and action in {"edit", "read", "external_directory"}:
+            rel = _relative_resource_for_directory(resource, directory)
+            if rel and rel != resource:
+                _append(action, rel, effect)
+    return translated
+
+
+def translate_v2_permissions_to_v1(rules: Any) -> list[dict[str, str]]:
+    """Translate V2.3 `{action, resource, effect}` rules back into V1 `{permission, pattern, action}`."""
+    if not isinstance(rules, list):
+        return []
+    translated: list[dict[str, str]] = []
+    for raw in rules:
+        if not isinstance(raw, dict):
+            continue
+        if "permission" in raw and "pattern" in raw and "effect" not in raw:
+            translated.append({
+                "permission": str(raw.get("permission") or "*"),
+                "pattern": str(raw.get("pattern") if raw.get("pattern") is not None else "*"),
+                "action": str(raw.get("action") or "deny"),
+            })
+            continue
+        perm = str(raw.get("action") or "*").strip() or "*"
+        pattern = str(raw.get("resource") if raw.get("resource") is not None else "*")
+        effect = str(raw.get("effect") or "deny").strip().lower()
+        if effect not in {"allow", "deny", "ask"}:
+            effect = "deny"
+        translated.append({
+            "permission": perm,
+            "pattern": pattern,
+            "action": effect,
+        })
+    return translated
+
+
+def build_v2_mcp_put_config(
+    config: dict[str, Any],
+    *,
+    disabled: bool | None = None,
+) -> dict[str, Any]:
+    """Translate an OpenDeepHole MCP config dict into strict OpenCode 2.3 PUT schema."""
+    mcp_type = str(config.get("type") or "").strip().lower()
+    if not mcp_type:
+        mcp_type = "remote" if config.get("url") else "local"
+    result: dict[str, Any] = {"type": mcp_type}
+    if mcp_type == "remote":
+        if config.get("url"):
+            result["url"] = str(config["url"])
+        if isinstance(config.get("headers"), dict):
+            result["headers"] = {str(k): str(v) for k, v in config["headers"].items()}
+        if "oauth" in config and (config["oauth"] is False or isinstance(config["oauth"], dict)):
+            result["oauth"] = config["oauth"]
+    else:
+        command = config.get("command")
+        if isinstance(command, list):
+            result["command"] = [str(item) for item in command]
+        elif isinstance(command, str) and command.strip():
+            result["command"] = [command.strip()]
+        if isinstance(config.get("cwd"), str) and config["cwd"].strip():
+            result["cwd"] = config["cwd"].strip()
+        if isinstance(config.get("environment"), dict):
+            result["environment"] = {str(k): str(v) for k, v in config["environment"].items()}
+
+    if disabled is not None:
+        result["disabled"] = bool(disabled)
+    elif "disabled" in config:
+        result["disabled"] = bool(config["disabled"])
+    elif "enabled" in config:
+        result["disabled"] = not bool(config["enabled"])
+
+    raw_timeout = config.get("timeout")
+    if isinstance(raw_timeout, dict):
+        timeout_obj: dict[str, int] = {}
+        for key in ("startup", "catalog", "execution"):
+            val = raw_timeout.get(key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+                timeout_obj[key] = int(val)
+        if timeout_obj:
+            result["timeout"] = timeout_obj
+    elif isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool) and raw_timeout > 0:
+        ms = int(raw_timeout)
+        result["timeout"] = {"startup": ms, "catalog": ms, "execution": ms}
+
+    if isinstance(config.get("codemode"), bool):
+        result["codemode"] = config["codemode"]
+    if isinstance(config.get("protocol"), str) and config["protocol"] in {"legacy", "auto", "2026-07-28"}:
+        result["protocol"] = config["protocol"]
+    if isinstance(config.get("pool"), bool):
+        result["pool"] = config["pool"]
+    return result
+
+
+def extract_mcp_status_map_v2(value: Any) -> dict[str, Any]:
+    """Normalize MCP status payloads across 1.x map and 2.3 `{location, data: [{name, status}]}` shapes."""
+    unwrapped = unwrap_v2_data(value)
+    if isinstance(unwrapped, list):
+        mapped: dict[str, Any] = {}
+        for item in unwrapped:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            status = item.get("status")
+            if isinstance(status, dict):
+                mapped[name] = status
+            elif isinstance(status, str):
+                mapped[name] = {"status": status}
+        return mapped
+    if isinstance(unwrapped, dict):
+        nested = unwrapped.get("status")
+        if isinstance(nested, dict):
+            return nested
+        return unwrapped
+    return {}
+
+
+def extract_config_providers_v2(config_data: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Extract provider definitions from OpenCode 2.x `GET /api/config` dict or document list."""
+    merged: list[dict[str, Any]] = []
+    any_valid = False
+    documents: list[dict[str, Any]] = []
+    if isinstance(config_data, dict):
+        documents.append(config_data)
+    elif isinstance(config_data, list):
+        for item in config_data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "document" and isinstance(item.get("info"), dict):
+                documents.append(item["info"])
+            else:
+                documents.append(item)
+    for doc in documents:
+        for cfg_key in ("provider", "providers"):
+            raw_prov = doc.get(cfg_key)
+            if isinstance(raw_prov, (dict, list)):
+                extracted, valid = extract_provider_list_v2({"providers": raw_prov})
+                if valid:
+                    any_valid = True
+                    merged.extend(extracted)
+    if any_valid:
+        return merged, True
+    return extract_provider_list_v2(config_data)
+
+
 async def discover_v2_openapi_spec(client: httpx.AsyncClient) -> V2OpenApiSpec:
-    """Fetch `/doc` or `/api/doc` once to discover OpenCode 2.x routes and schemas."""
-    for doc_path in ("/doc", "/api/doc"):
+    """Fetch `/openapi.json`, `/api/openapi.json`, `/doc`, or `/api/doc` once to discover OpenCode 2.x routes."""
+    for doc_path in ("/openapi.json", "/api/openapi.json", "/doc", "/api/doc"):
         try:
             response = await client.get(doc_path, timeout=2.0)
             if response.status_code != 200 or is_html_fallback_response(response):
@@ -899,7 +1370,7 @@ async def discover_v2_openapi_spec(client: httpx.AsyncClient) -> V2OpenApiSpec:
 
 
 async def discover_v2_openapi_paths(client: httpx.AsyncClient) -> frozenset[str]:
-    """Fetch `/doc` or `/api/doc` once to discover supported OpenAPI route templates."""
+    """Fetch OpenAPI spec once to discover supported OpenAPI route templates."""
     return (await discover_v2_openapi_spec(client)).paths
 
 
@@ -942,7 +1413,7 @@ def extract_model_list_v2(data: Any) -> tuple[list[dict[str, Any]], bool]:
             or raw.get("provider")
             or ""
         ).strip()
-        local_id = str(raw.get("id") or raw.get("modelID") or raw.get("model_id") or "").strip()
+        local_id = str(raw.get("modelID") or raw.get("model_id") or raw.get("id") or "").strip()
         if not provider_id and "/" in local_id:
             provider_id, local_id = local_id.split("/", 1)
             provider_id = provider_id.strip()
@@ -1001,33 +1472,223 @@ def extract_provider_list_v2(data: Any) -> tuple[list[dict[str, Any]], bool]:
     return [], False
 
 
+def _v2_tool_content_to_output(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    texts: list[str] = []
+    for item in content:
+        if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"]:
+            texts.append(item["text"])
+        elif isinstance(item, str) and item:
+            texts.append(item)
+    return "\n".join(texts)
+
+
+def _normalize_v2_content_parts(content: Any, *, message_id: str = "") -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return []
+    parts: list[dict[str, Any]] = []
+    for index, item in enumerate(content):
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type in {"text", "reasoning"}:
+            part: dict[str, Any] = {
+                "id": str(item.get("id") or f"{message_id or 'part'}:{item_type}:{index}"),
+                "type": item_type,
+                "text": str(item.get("text") or ""),
+            }
+            if message_id:
+                part["messageID"] = message_id
+            parts.append(part)
+        elif item_type == "tool":
+            call_id = str(item.get("id") or item.get("callID") or f"call:{index}")
+            tool_name = str(item.get("name") or item.get("tool") or "")
+            raw_state = item.get("state") if isinstance(item.get("state"), dict) else {}
+            raw_status = str(raw_state.get("status") or "").strip().lower()
+            status = "pending" if raw_status == "streaming" else (raw_status or "pending")
+            norm_state: dict[str, Any] = {
+                "status": status,
+                "input": raw_state.get("input") if isinstance(raw_state.get("input"), dict) else {},
+            }
+            if isinstance(raw_state.get("metadata"), dict):
+                norm_state["metadata"] = dict(raw_state["metadata"])
+            if isinstance(raw_state.get("output"), str):
+                norm_state["output"] = raw_state["output"]
+            elif raw_state.get("content") is not None:
+                norm_state["output"] = _v2_tool_content_to_output(raw_state.get("content"))
+            if raw_state.get("error") is not None:
+                norm_state["error"] = normalize_v2_error(raw_state.get("error"))
+            if isinstance(item.get("time"), dict):
+                norm_state["time"] = dict(item["time"])
+            tool_part: dict[str, Any] = {
+                "id": call_id,
+                "callID": call_id,
+                "type": "tool",
+                "tool": tool_name,
+                "state": norm_state,
+            }
+            if message_id:
+                tool_part["messageID"] = message_id
+            parts.append(tool_part)
+        else:
+            parts.append(dict(item))
+    return parts
+
+
 def normalize_message_envelope(raw: Any, fallback_session_id: str = "") -> dict[str, Any] | None:
-    """Normalize both `{info, parts}` and flat `{id, role, parts, ...}` message shapes."""
-    if not isinstance(raw, dict):
+    """Normalize 1.x `{info, parts}`, flat `{id, role, parts}`, and 2.3 `{id, type, content}` messages."""
+    unwrapped = unwrap_v2_data(raw)
+    if not isinstance(unwrapped, dict):
         return None
-    if isinstance(raw.get("info"), dict):
-        return raw
-    role = raw.get("role")
+    if isinstance(unwrapped.get("info"), dict):
+        return unwrapped
+    role = unwrapped.get("role")
     if isinstance(role, str) and role.strip():
         info = {
             key: value
-            for key, value in raw.items()
+            for key, value in unwrapped.items()
             if key != "parts"
         }
         if fallback_session_id and not info.get("sessionID"):
             info["sessionID"] = fallback_session_id
-        parts = raw.get("parts")
+        if info.get("error") is not None:
+            info["error"] = normalize_v2_error(info["error"])
+        parts = unwrapped.get("parts")
         return {
             "info": info,
             "parts": parts if isinstance(parts, list) else [],
         }
+
+    msg_type = str(unwrapped.get("type") or "").strip().lower()
+    if not msg_type:
+        return None
+    msg_id = str(unwrapped.get("id") or "").strip()
+    session_id = str(unwrapped.get("sessionID") or fallback_session_id or "").strip()
+
+    if msg_type == "assistant":
+        info = {
+            "id": msg_id,
+            "sessionID": session_id,
+            "role": "assistant",
+            "type": "assistant",
+        }
+        if unwrapped.get("agent"):
+            info["agent"] = str(unwrapped["agent"])
+        model_obj = unwrapped.get("model")
+        if isinstance(model_obj, dict):
+            provider_id = str(model_obj.get("providerID") or "").strip()
+            model_id = str(model_obj.get("id") or model_obj.get("modelID") or "").strip()
+            if provider_id:
+                info["providerID"] = provider_id
+            if model_id:
+                info["modelID"] = model_id
+            info["model"] = dict(model_obj)
+        for field_name in ("time", "finish", "rawFinish", "cost", "tokens", "retry", "snapshot", "metadata"):
+            if field_name in unwrapped and unwrapped[field_name] is not None:
+                info[field_name] = unwrapped[field_name]
+        if unwrapped.get("error") is not None:
+            info["error"] = normalize_v2_error(unwrapped["error"])
+        parts = _normalize_v2_content_parts(unwrapped.get("content"), message_id=msg_id)
+        return {"info": info, "parts": parts}
+
+    if msg_type == "user":
+        info = {
+            "id": msg_id,
+            "sessionID": session_id,
+            "role": "user",
+            "type": "user",
+        }
+        for field_name in ("time", "metadata"):
+            if field_name in unwrapped and unwrapped[field_name] is not None:
+                info[field_name] = unwrapped[field_name]
+        text = str(unwrapped.get("text") or "")
+        parts = [{"type": "text", "text": text, **({"messageID": msg_id} if msg_id else {})}] if text else []
+        return {"info": info, "parts": parts}
+
+    if msg_type == "idle":
+        info = {
+            "id": msg_id,
+            "sessionID": session_id,
+            "role": "idle",
+            "type": "idle",
+            "outcome": str(unwrapped.get("outcome") or "").strip().lower(),
+        }
+        if unwrapped.get("time") is not None:
+            info["time"] = unwrapped["time"]
+        if unwrapped.get("error") is not None:
+            info["error"] = normalize_v2_error(unwrapped["error"])
+        return {"info": info, "parts": []}
+
+    if msg_type in {
+        "system",
+        "synthetic",
+        "skill",
+        "shell",
+        "agent-switched",
+        "model-switched",
+        "location-switched",
+        "compaction",
+    }:
+        info = {
+            "id": msg_id,
+            "sessionID": session_id,
+            "role": "system" if msg_type in {"system", "synthetic"} else msg_type,
+            "type": msg_type,
+        }
+        if unwrapped.get("time") is not None:
+            info["time"] = unwrapped["time"]
+        if unwrapped.get("error") is not None:
+            info["error"] = normalize_v2_error(unwrapped["error"])
+        text = str(unwrapped.get("text") or "")
+        parts = [{"type": "text", "text": text, **({"messageID": msg_id} if msg_id else {})}] if text else []
+        return {"info": info, "parts": parts}
+
+    return None
+
+
+def _cursor_indicates_desc(cursor: Any) -> bool:
+    if not isinstance(cursor, dict):
+        return False
+    for key in ("previous", "next"):
+        token = cursor.get(key)
+        if not isinstance(token, str) or not token.strip():
+            continue
+        padded = token.strip() + "=" * (-len(token.strip()) % 4)
+        for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+            try:
+                decoded = json.loads(decoder(padded.encode("ascii")).decode("utf-8"))
+                if isinstance(decoded, dict):
+                    order = str(decoded.get("order") or "").strip().lower()
+                    if order == "desc":
+                        return True
+                    if order == "asc":
+                        return False
+            except Exception:
+                continue
+    return False
+
+
+def _created_timestamp(message: dict[str, Any]) -> float | None:
+    info = message.get("info")
+    if not isinstance(info, dict):
+        return None
+    msg_time = info.get("time")
+    if isinstance(msg_time, dict):
+        created = msg_time.get("created")
+        if isinstance(created, (int, float)) and not isinstance(created, bool):
+            return float(created)
     return None
 
 
 def normalize_message_list(raw: Any, fallback_session_id: str = "") -> list[dict[str, Any]] | None:
-    """Normalize a `/message` response (list or `{messages|data: [...]}`) into `{info, parts}` items."""
+    """Normalize a `/message` response into chronological oldest-to-newest `{info, parts}` items."""
     items: Any = raw
+    is_desc = False
     if isinstance(raw, dict):
+        is_desc = _cursor_indicates_desc(raw.get("cursor"))
         for key in ("messages", "items", "data"):
             if isinstance(raw.get(key), list):
                 items = raw[key]
@@ -1039,6 +1700,13 @@ def normalize_message_list(raw: Any, fallback_session_id: str = "") -> list[dict
         envelope = normalize_message_envelope(item, fallback_session_id=fallback_session_id)
         if envelope is not None:
             normalized.append(envelope)
+    if not is_desc and len(normalized) >= 2:
+        first_ts = _created_timestamp(normalized[0])
+        last_ts = _created_timestamp(normalized[-1])
+        if first_ts is not None and last_ts is not None and first_ts > last_ts:
+            is_desc = True
+    if is_desc:
+        normalized.reverse()
     return normalized
 
 
@@ -1050,38 +1718,64 @@ async def auto_reject_v2_interactive_event(
     session_id: str,
     params: dict[str, str],
     headers: dict[str, str],
+    openapi_spec: V2OpenApiSpec | None = None,
 ) -> None:
     """Reject unexpected interactive prompts in OpenCode 2.x so unattended scans never hang."""
+    request_obj = props.get("request") if isinstance(props.get("request"), dict) else {}
+    form_obj = props.get("form") if isinstance(props.get("form"), dict) else {}
     request_id = str(
         props.get("id")
         or props.get("requestID")
-        or (props.get("request") or {}).get("id")
-        if isinstance(props.get("request"), dict)
-        else props.get("id") or props.get("requestID") or ""
+        or request_obj.get("id")
+        or form_obj.get("id")
+        or ""
     ).strip()
     if not session_id or not request_id:
         return
     quoted_sid = quote(session_id, safe="")
     quoted_rid = quote(request_id, safe="")
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    candidates: list[tuple[str, str, dict[str, Any] | None]] = []
     if event_type in {"permission.asked", "permission.ask"}:
-        candidates.extend([
-            (f"/api/session/{quoted_sid}/permission/{quoted_rid}/reply", {"reply": "reject", "effect": "deny", "action": "deny"}),
-            (f"/api/permission/{quoted_rid}/reply", {"reply": "reject", "effect": "deny"}),
-        ])
+        perm_path = f"/api/session/{quoted_sid}/permission/{quoted_rid}/reply"
+        perm_schema = (
+            openapi_spec.request_schema(
+                "post",
+                "/api/session/{sessionID}/permission/{requestID}/reply",
+                "/api/session/{id}/permission/{requestID}/reply",
+            )
+            if openapi_spec is not None
+            else None
+        )
+        perm_props = (
+            openapi_spec.object_properties(perm_schema)
+            if (openapi_spec is not None and perm_schema is not None)
+            else None
+        )
+        if perm_props is not None and "decision" in perm_props and "effect" not in perm_props:
+            candidates.append(("POST", perm_path, {"decision": "reject"}))
+        else:
+            candidates.extend([
+                ("POST", perm_path, {"decision": "reject", "reply": "reject", "effect": "deny", "action": "deny"}),
+                ("POST", perm_path, {"decision": "reject"}),
+                ("POST", f"/api/permission/{quoted_rid}/reply", {"decision": "reject", "reply": "reject", "effect": "deny"}),
+            ])
     elif event_type in {"question.asked", "question.ask"}:
         candidates.extend([
-            (f"/api/question/{quoted_rid}/reject", {}),
-            (f"/api/session/{quoted_sid}/question/{quoted_rid}/reject", {}),
+            ("POST", f"/api/question/{quoted_rid}/reject", {}),
+            ("POST", f"/api/session/{quoted_sid}/question/{quoted_rid}/reject", {}),
         ])
     elif event_type in {"form.created", "session.form.created"}:
         candidates.extend([
-            (f"/api/session/{quoted_sid}/form/{quoted_rid}/cancel", {}),
-            (f"/api/form/{quoted_rid}/cancel", {}),
+            ("DELETE", f"/api/session/{quoted_sid}/form/{quoted_rid}", None),
+            ("POST", f"/api/session/{quoted_sid}/form/{quoted_rid}/cancel", {}),
+            ("POST", f"/api/form/{quoted_rid}/cancel", {}),
         ])
-    for path, body in candidates:
+    for method, path, body in candidates:
         try:
-            resp = await client.post(path, params=params, headers=headers, json=body, timeout=2.0)
+            if method == "DELETE":
+                resp = await client.delete(path, params=params, headers=headers, timeout=2.0)
+            else:
+                resp = await client.post(path, params=params, headers=headers, json=body, timeout=2.0)
             if resp.status_code < 400 and not is_html_fallback_response(resp):
                 return
         except Exception:
@@ -1115,6 +1809,7 @@ def build_v2_session_create_bodies(
     directory: Path | str | None,
     permissions: Any = None,
     model_spec: dict[str, str] | None = None,
+    agent: str | None = None,
     openapi_spec: V2OpenApiSpec | None = None,
 ) -> list[dict[str, Any]]:
     """Build ordered `POST /api/session` candidate bodies respecting Effect Schema validation."""
@@ -1133,24 +1828,37 @@ def build_v2_session_create_bodies(
                 guided["location"] = {"directory": dir_str}
             elif "directory" in props:
                 guided["directory"] = dir_str
-        if permissions is not None and "permission" in props:
-            guided["permission"] = permissions
+        if permissions is not None:
+            if "permissions" in props:
+                guided["permissions"] = translate_v1_permissions_to_v2(permissions, directory=directory)
+            elif "permission" in props:
+                guided["permission"] = permissions
         if isinstance(model_spec, dict) and "model" in props:
             guided["model"] = _format_v2_model_value(model_spec, props.get("model"), openapi_spec)
+        if agent and "agent" in props:
+            guided["agent"] = str(agent)
         candidates.append(guided)
+        if dir_str and "location" in props:
+            fallback_loc = {"title": clean_title, "location": {"directory": dir_str}}
+            if fallback_loc not in candidates:
+                candidates.append(fallback_loc)
     else:
         # Without an OpenAPI request schema, prefer strict V2-safe payloads before legacy fields.
-        if dir_str and permissions is None:
-            candidates.append({"title": clean_title})
-        else:
+        if dir_str:
+            v23_like: dict[str, Any] = {"title": clean_title, "location": {"directory": dir_str}}
+            if permissions is not None:
+                v23_like["permissions"] = translate_v1_permissions_to_v2(permissions, directory=directory)
+            candidates.append(v23_like)
+            if permissions is not None:
+                candidates.append({"title": clean_title, "location": {"directory": dir_str}})
+        if dir_str or permissions is not None:
             legacy_like: dict[str, Any] = {"title": clean_title}
             if dir_str:
                 legacy_like["directory"] = dir_str
             if permissions is not None:
                 legacy_like["permission"] = permissions
-            candidates.append(legacy_like)
-        if dir_str:
-            candidates.append({"title": clean_title, "location": {"directory": dir_str}})
+            if legacy_like not in candidates:
+                candidates.append(legacy_like)
 
     minimal = {"title": clean_title}
     if minimal not in candidates:
@@ -1168,6 +1876,7 @@ async def create_v2_session(
     model_spec: dict[str, str] | None,
     params: dict[str, str],
     headers: dict[str, str],
+    agent: str | None = None,
     openapi_spec: V2OpenApiSpec | None = None,
 ) -> httpx.Response:
     """Create a V2 session, retrying with stricter minimal bodies if Effect Schema returns 400/422."""
@@ -1176,6 +1885,7 @@ async def create_v2_session(
         directory=directory,
         permissions=permissions,
         model_spec=model_spec,
+        agent=agent,
         openapi_spec=openapi_spec,
     )
     response: httpx.Response | None = None
@@ -1198,9 +1908,10 @@ def _build_v2_prompt_bodies_for_route(
     prompt: str,
     payload: dict[str, Any],
     openapi_spec: V2OpenApiSpec | None,
+    system_injected_separately: bool = False,
 ) -> list[dict[str, Any]]:
     """Build ordered JSON bodies for a V2 prompt/message endpoint."""
-    system_text = str(payload.get("system") or "").strip()
+    system_text = "" if system_injected_separately else str(payload.get("system") or "").strip()
     effective_prompt = f"{system_text}\n\n{prompt}" if system_text else prompt
     effective_parts = [{"type": "text", "text": effective_prompt}]
     raw_parts = payload.get("parts") if isinstance(payload.get("parts"), list) else [{"type": "text", "text": prompt}]
@@ -1220,8 +1931,8 @@ def _build_v2_prompt_bodies_for_route(
     if props is not None:
         guided: dict[str, Any] = {}
         has_system_prop = "system" in props
-        chosen_text = prompt if has_system_prop else effective_prompt
-        chosen_parts = raw_parts if has_system_prop else effective_parts
+        chosen_text = prompt if (has_system_prop or system_injected_separately) else effective_prompt
+        chosen_parts = raw_parts if (has_system_prop or system_injected_separately) else effective_parts
         if has_system_prop and system_text:
             guided["system"] = system_text
         if "agent" in props and payload.get("agent"):
@@ -1266,10 +1977,10 @@ def _build_v2_prompt_bodies_for_route(
         if payload.get("format") is not None:
             strict_parts["format"] = payload["format"]
         for candidate in (
+            {"text": effective_prompt},
             strict_parts,
             {"parts": effective_parts},
             {"prompt": effective_parts},
-            {"text": effective_prompt},
             {"prompt": effective_prompt},
         ):
             if candidate not in bodies:
@@ -1312,6 +2023,39 @@ def _has_active_tool_parts(message: dict[str, Any]) -> bool:
     return False
 
 
+def _session_snapshot_busy_state(raw_session: Any) -> tuple[bool, bool]:
+    """Return `(is_busy, is_idle)` from a V2 `GET /api/session/{id}` response."""
+    sess_data = unwrap_v2_data(raw_session)
+    if not isinstance(sess_data, dict):
+        return False, False
+    status_val = sess_data.get("status")
+    if status_val is not None:
+        status_type = (
+            str(status_val.get("type") or "")
+            if isinstance(status_val, dict)
+            else str(status_val or "")
+        ).lower()
+        if status_type in {"busy", "running", "retry"}:
+            return True, False
+        if status_type in {"idle", "error", "completed"}:
+            return False, True
+    time_obj = sess_data.get("time") if isinstance(sess_data.get("time"), dict) else {}
+    busy_ts = time_obj.get("busy")
+    idle_ts = time_obj.get("idle")
+    if isinstance(busy_ts, (int, float)) and not isinstance(busy_ts, bool):
+        if isinstance(idle_ts, (int, float)) and not isinstance(idle_ts, bool):
+            if busy_ts > idle_ts:
+                return True, False
+            return False, True
+        return True, False
+    if isinstance(idle_ts, (int, float)) and not isinstance(idle_ts, bool):
+        return False, True
+    outcome = str(sess_data.get("outcome") or "").strip().lower()
+    if outcome in {"succeeded", "failed", "interrupted"}:
+        return False, True
+    return False, False
+
+
 async def submit_and_resolve_v2_prompt(
     client: httpx.AsyncClient,
     *,
@@ -1335,8 +2079,8 @@ async def submit_and_resolve_v2_prompt(
 
     Supports both:
     - Synchronous `/api/session/{id}/message` (or `/session/{id}/message`) returning `{info, parts}`
-    - Asynchronous `/api/session/{id}/prompt` returning an immediate queue envelope while the
-      assistant turn executes in the background and emits SSE events + `/message` records.
+    - Asynchronous `/api/session/{id}/prompt` returning an immediate queue/user-message envelope
+      while the assistant turn executes in the background and emits SSE events + `/message` records.
     """
     spec = openapi_spec if openapi_spec is not None else V2OpenApiSpec(paths=discovered_paths)
     quoted_sid = quote(session_id, safe="")
@@ -1360,12 +2104,22 @@ async def submit_and_resolve_v2_prompt(
     model_spec = payload.get("model")
     if isinstance(model_spec, dict) and model_route_template is not None:
         model_schema = spec.request_schema("post", model_route_template)
-        formatted_model = _format_v2_model_value(model_spec, model_schema, spec)
-        model_body = (
-            formatted_model
-            if isinstance(formatted_model, dict)
-            else {"model": formatted_model}
+        outer_props = (
+            spec.object_properties(model_schema)
+            if model_schema is not None
+            else None
         )
+        if outer_props is not None and "model" in outer_props:
+            model_body: dict[str, Any] = {
+                "model": _format_v2_model_value(model_spec, outer_props.get("model"), spec)
+            }
+        else:
+            formatted_model = _format_v2_model_value(model_spec, model_schema, spec)
+            model_body = (
+                formatted_model
+                if isinstance(formatted_model, dict)
+                else {"model": formatted_model}
+            )
         try:
             await client.post(
                 _fill_route_param(model_route_template, quoted_sid),
@@ -1376,6 +2130,71 @@ async def submit_and_resolve_v2_prompt(
             )
         except Exception:
             pass
+
+    agent_route_template = spec.match_route(
+        "post",
+        "/api/session/{sessionID}/agent",
+        "/api/session/:sessionID/agent",
+    )
+    agent_name = str(payload.get("agent") or "").strip()
+    if agent_name and agent_route_template is not None:
+        try:
+            await client.post(
+                _fill_route_param(agent_route_template, quoted_sid),
+                params=params,
+                headers=headers,
+                json={"agent": agent_name},
+                timeout=10.0,
+            )
+        except Exception:
+            pass
+
+    system_text = str(payload.get("system") or "").strip()
+    system_injected_separately = False
+    instructions_put_template = spec.match_route(
+        "put",
+        "/api/experimental/session/{sessionID}/instructions/entries/{key}",
+        "/api/experimental/session/:sessionID/instructions/entries/:key",
+    )
+    if instructions_put_template is not None:
+        inst_path = _fill_route_params(
+            instructions_put_template,
+            quoted_sid,
+            "opendeephole_system",
+        )
+        if system_text:
+            try:
+                inst_resp = await client.put(
+                    inst_path,
+                    params=params,
+                    headers=headers,
+                    json={"value": system_text},
+                    timeout=10.0,
+                )
+                if inst_resp.status_code < 400 and not is_html_fallback_response(inst_resp):
+                    system_injected_separately = True
+            except Exception:
+                pass
+        else:
+            instructions_del_template = spec.match_route(
+                "delete",
+                "/api/experimental/session/{sessionID}/instructions/entries/{key}",
+                "/api/experimental/session/:sessionID/instructions/entries/:key",
+            )
+            if instructions_del_template is not None:
+                try:
+                    await client.delete(
+                        _fill_route_params(
+                            instructions_del_template,
+                            quoted_sid,
+                            "opendeephole_system",
+                        ),
+                        params=params,
+                        headers=headers,
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
 
     if async_prompt_template and not sync_message_template:
         route_templates = [
@@ -1404,6 +2223,7 @@ async def submit_and_resolve_v2_prompt(
             prompt=prompt,
             payload=payload,
             openapi_spec=spec if spec.raw_spec else None,
+            system_injected_separately=system_injected_separately,
         )
         for body_idx, body in enumerate(bodies):
             response = await client.post(
@@ -1424,27 +2244,29 @@ async def submit_and_resolve_v2_prompt(
     if response.status_code >= 400:
         return response
 
-    # Check if the response itself is already a completed assistant message envelope.
+    # Check if the response itself is already a completed assistant message envelope,
+    # or capture the newly created user message ID in OpenCode 2.3 async prompt mode.
     parsed: Any = None
     if response.content and response.content.strip() and not is_html_fallback_response(response):
         try:
             parsed = response.json()
         except ValueError:
             parsed = None
+    submitted_user_msg_id = ""
     normalized_direct = normalize_message_envelope(parsed, fallback_session_id=session_id)
-    if (
-        normalized_direct is not None
-        and str(normalized_direct.get("info", {}).get("role") or "") == "assistant"
-        and is_terminal_fn(normalized_direct)
-    ):
-        if normalized_direct is not parsed:
-            return httpx.Response(
-                status_code=200,
-                headers={"content-type": "application/json"},
-                content=json.dumps(normalized_direct, ensure_ascii=False).encode("utf-8"),
-                request=response.request,
-            )
-        return response
+    if normalized_direct is not None:
+        direct_role = str(normalized_direct.get("info", {}).get("role") or "")
+        if direct_role == "assistant" and is_terminal_fn(normalized_direct):
+            if normalized_direct is not parsed:
+                return httpx.Response(
+                    status_code=200,
+                    headers={"content-type": "application/json"},
+                    content=json.dumps(normalized_direct, ensure_ascii=False).encode("utf-8"),
+                    request=getattr(response, "request", None),
+                )
+            return response
+        if direct_role == "user":
+            submitted_user_msg_id = response_id_fn(normalized_direct)
 
     # Asynchronous V2 prompt mode: wait for session completion via optional `/wait`,
     # SSE `session_terminal`, and `/api/session/{id}/message` history reconciliation.
@@ -1458,16 +2280,19 @@ async def submit_and_resolve_v2_prompt(
     wait_task: asyncio.Task | None = None
     if wait_route is not None:
         resolved_wait_path = _fill_route_param(wait_route, quoted_sid)
+        wait_has_body = spec.request_schema("post", wait_route) is not None
+        wait_kwargs: dict[str, Any] = {
+            "params": params,
+            "headers": headers,
+            "timeout": request_timeout,
+        }
+        if wait_has_body:
+            wait_kwargs["json"] = {}
         wait_task = asyncio.create_task(
-            client.post(
-                resolved_wait_path,
-                params=params,
-                headers=headers,
-                json={},
-                timeout=request_timeout,
-            )
+            client.post(resolved_wait_path, **wait_kwargs)
         )
 
+    active_route = spec.match_route("get", "/api/session/active")
     history_paths = [
         f"/api/session/{quoted_sid}/message",
         f"/api/session/{quoted_sid}/messages",
@@ -1515,12 +2340,45 @@ async def submit_and_resolve_v2_prompt(
                     continue
 
             new_assistants: list[dict[str, Any]] = []
+            turn_idle_record: dict[str, Any] | None = None
             if messages is not None:
-                assistants = [
-                    msg for msg in messages
-                    if str((msg.get("info") or {}).get("role") or "") == "assistant"
-                ]
-                if baseline_message_id:
+                turn_slice = messages
+                if submitted_user_msg_id:
+                    user_idx = next(
+                        (
+                            idx for idx, msg in enumerate(messages)
+                            if response_id_fn(msg) == submitted_user_msg_id
+                        ),
+                        None,
+                    )
+                    if user_idx is not None:
+                        turn_slice = messages[user_idx + 1:]
+                elif baseline_message_id:
+                    base_idx = next(
+                        (
+                            idx for idx, msg in enumerate(messages)
+                            if response_id_fn(msg) == baseline_message_id
+                        ),
+                        None,
+                    )
+                    if base_idx is not None:
+                        turn_slice = messages[base_idx + 1:]
+
+                for msg in turn_slice:
+                    role = str((msg.get("info") or {}).get("role") or "")
+                    if role == "assistant":
+                        new_assistants.append(msg)
+                        turn_idle_record = None
+                    elif role == "idle":
+                        turn_idle_record = msg
+
+                # If submitted_user_msg_id was not present in the slice, fall back to
+                # assistant-only baseline slicing so mocks omitting user rows still work.
+                if not submitted_user_msg_id and baseline_message_id and not new_assistants:
+                    assistants = [
+                        msg for msg in messages
+                        if str((msg.get("info") or {}).get("role") or "") == "assistant"
+                    ]
                     baseline_idx = next(
                         (
                             idx for idx, msg in enumerate(assistants)
@@ -1530,8 +2388,9 @@ async def submit_and_resolve_v2_prompt(
                     )
                     if baseline_idx is not None:
                         new_assistants = assistants[baseline_idx + 1:]
-                else:
-                    new_assistants = assistants
+
+                if turn_idle_record is not None:
+                    terminal_event_seen = True
 
             if new_assistants:
                 saw_busy_or_new_message = True
@@ -1542,11 +2401,25 @@ async def submit_and_resolve_v2_prompt(
                             status_code=200,
                             headers={"content-type": "application/json"},
                             content=json.dumps(msg, ensure_ascii=False).encode("utf-8"),
-                            request=response.request,
+                            request=getattr(response, "request", None),
                         )
 
                 session_busy = False
-                if not terminal_event_seen:
+                if not terminal_event_seen and active_route is not None:
+                    try:
+                        active_resp = await client.get(
+                            active_route, params=params, headers=headers, timeout=5.0,
+                        )
+                        if active_resp.status_code == 200 and not is_html_fallback_response(active_resp):
+                            active_map = unwrap_v2_data(active_resp.json())
+                            if isinstance(active_map, dict) and session_id in active_map:
+                                session_busy = True
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+
+                if not terminal_event_seen and not session_busy:
                     for sess_path in session_paths:
                         try:
                             sess_resp = await client.get(
@@ -1555,20 +2428,10 @@ async def submit_and_resolve_v2_prompt(
                             if is_route_miss_response(sess_resp):
                                 continue
                             if sess_resp.status_code == 200:
-                                sess_data = sess_resp.json()
-                                status_val = (
-                                    sess_data.get("status")
-                                    if isinstance(sess_data, dict)
-                                    else None
-                                )
-                                status_type = (
-                                    str(status_val.get("type") or "")
-                                    if isinstance(status_val, dict)
-                                    else str(status_val or "")
-                                ).lower()
-                                if status_type in {"busy", "running", "retry"}:
+                                is_busy, is_idle = _session_snapshot_busy_state(sess_resp.json())
+                                if is_busy:
                                     session_busy = True
-                                elif status_type in {"idle", "error", "completed"}:
+                                elif is_idle:
                                     terminal_event_seen = True
                                 session_paths = [sess_path]
                             break
@@ -1599,11 +2462,32 @@ async def submit_and_resolve_v2_prompt(
                             status_code=200,
                             headers={"content-type": "application/json"},
                             content=json.dumps(final_envelope, ensure_ascii=False).encode("utf-8"),
-                            request=response.request,
+                            request=getattr(response, "request", None),
                         )
                     idle_observed_at = time.monotonic()
                 else:
                     idle_observed_at = None
+            elif terminal_event_seen and turn_idle_record is not None:
+                idle_info = turn_idle_record.get("info") if isinstance(turn_idle_record.get("info"), dict) else {}
+                idle_err = idle_info.get("error")
+                if idle_err is not None:
+                    synth = {
+                        "info": {
+                            "id": str(idle_info.get("id") or f"v2-error-{int(time.time() * 1000)}"),
+                            "sessionID": session_id,
+                            "role": "assistant",
+                            "error": normalize_v2_error(idle_err),
+                        },
+                        "parts": [],
+                    }
+                    return httpx.Response(
+                        status_code=200,
+                        headers={"content-type": "application/json"},
+                        content=json.dumps(synth, ensure_ascii=False).encode("utf-8"),
+                        request=getattr(response, "request", None),
+                    )
+                if saw_busy_or_new_message:
+                    break
             elif terminal_event_seen and saw_busy_or_new_message:
                 break
 
@@ -1629,7 +2513,7 @@ async def submit_and_resolve_v2_prompt(
                     status_code=200,
                     headers={"content-type": "application/json"},
                     content=json.dumps(synth, ensure_ascii=False).encode("utf-8"),
-                    request=response.request,
+                    request=getattr(response, "request", None),
                 )
 
             await asyncio.sleep(poll_interval)
