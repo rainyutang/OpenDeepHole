@@ -681,6 +681,65 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(skill_paths)
         self.assertTrue(any(path.name == "skills" for path in skill_paths))
+        task_output = task_context.call_args.kwargs.get("output")
+        self.assertTrue(callable(task_output))
+        with patch("builtins.print") as mock_print:
+            task_output("[fp_review][ses_1][tool] name=read path=src/a.c")
+            task_output("")
+        mock_print.assert_called_once_with(
+            "[fp_review][ses_1][tool] name=read path=src/a.c",
+            flush=True,
+        )
+
+    async def test_adversarial_fp_review_inherits_console_output_callback(self) -> None:
+        from deephole_client.fp_review import run_fp_review
+        from task_agent import opencode_task_context
+        from task_agent.task_service import get_opencode_execution_context
+
+        observed_callbacks: list[object] = []
+        observed_output_kwarg_present: list[bool] = []
+
+        async def fake_run_opencode_task(**kwargs):
+            observed_output_kwarg_present.append("output" in kwargs)
+            observed_callbacks.append(get_opencode_execution_context().on_output)
+            return SimpleNamespace(
+                status="success",
+                structured={
+                    "verdict": "false_positive",
+                    "reason": "guarded",
+                    "evidence": "checked",
+                },
+                output_source={"model": "provider/model", "session_id": "ses-adv"},
+                text="",
+            )
+
+        captured_lines: list[str] = []
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch(
+                "task_agent.run_opencode_task",
+                new=fake_run_opencode_task,
+            ),
+            opencode_task_context(
+                project_dir=Path(tmp),
+                work_dir=Path(tmp),
+                output=captured_lines.append,
+            ),
+        ):
+            result = await run_fp_review(
+                method_id="adversarial",
+                project_path=tmp,
+                code_scan_path=tmp,
+                work_dir=tmp,
+                scan_id="scan-1",
+                review_id="review-adv",
+                vuln_index=0,
+                vulnerability={"index": 0, "vulnerability_report": "# report"},
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(observed_output_kwarg_present, [False])
+        self.assertEqual(observed_callbacks, [captured_lines.append])
 
     async def test_stage_events_are_uploaded_for_every_method(self) -> None:
         reporter = SimpleNamespace(

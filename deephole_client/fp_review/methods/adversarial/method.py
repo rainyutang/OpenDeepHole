@@ -392,7 +392,6 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             invalid_json_retry_count=retry_count,
             config_path=kwargs.get("task_agent_config"),
             readable_paths=kwargs.get("review_notes_dir"),
-            output=None,
             cancel_event=cancel_event,
         )
         payload = _stage_payload(stage, result, vulnerability)

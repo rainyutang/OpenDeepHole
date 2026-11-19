@@ -1137,6 +1137,10 @@ async def _run_single_fp_review_item(
                 source,
             )
 
+    def task_output(line: str) -> None:
+        if line:
+            print(str(line), flush=True)
+
     with opencode_task_context(
         scan_id=item.scan_id,
         execution_kind="fp_review",
@@ -1146,6 +1150,7 @@ async def _run_single_fp_review_item(
         feedback_entries=item.feedback_entries,
         code_graph_mcp=item.code_graph_mcp,
         knowledge_base_mcp=item.knowledge_base_mcp,
+        output=task_output,
         cancel_event=item.cancel_event,
         skill_paths=list(loaded.manifest.skill_paths) or None,
         task_metadata={
