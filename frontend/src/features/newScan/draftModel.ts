@@ -83,7 +83,7 @@ export function defaultScanDraft(): ScanDraft {
     codeGraphMcp: defaultScanCodeGraphMcp(),
     threatAnalysisEnabled: true,
     threatAnalysisMethod: "",
-    threatAnalysisGenerateAttackTree: true,
+    threatAnalysisGenerateAttackTree: false,
     autoFpReview: true,
     autoResumeEnabled: true,
     fpReviewMethod: "",
@@ -281,6 +281,9 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
   const next: Partial<ScanDraft> = {};
   next.miningEngines = Object.fromEntries(engines.map((engine) => [engine.engine_id, { selected: miningEngineSelectedByDefault(engine.engine_id) }]));
   next.threatAnalysisMethod = threatMethods.find((method) => method.method_id === "opencode_lightweight_threat_analysis")?.method_id || threatMethods[0]?.method_id || "";
+  if (next.threatAnalysisMethod === "deephole_compact_threat_analysis" && next.miningEngines[THREAT_AUDIT_ENGINE_ID]) {
+    next.miningEngines[THREAT_AUDIT_ENGINE_ID] = { selected: false };
+  }
   next.fpReviewMethod = fpMethods.find((method) => method.default)?.method_id || fpMethods[0]?.method_id || "";
 
   if (copied) {

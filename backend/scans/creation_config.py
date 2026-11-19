@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from deephole_client.scan_modes import (
+    SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
@@ -135,10 +136,18 @@ def resolve_creation_configuration(
             status_code=422,
             detail="快速模式和标准模式的规则由高级配置决定",
         )
+    default_engine_attack_tree = not (
+        requested_scan_mode == SCAN_MODE_CUSTOM
+        and str(body.threat_analysis_method or "").strip()
+        == "deephole_compact_threat_analysis"
+        and body.threat_analysis_enabled is not False
+        and body.threat_analysis_generate_attack_tree is not True
+    )
     mining_engine_selections = _resolve_scan_mining_engines(
         scan_overrides=body.mining_engines,
         scan_mode=requested_scan_mode,
         threat_analysis_enabled=body.threat_analysis_enabled,
+        generate_attack_tree=default_engine_attack_tree,
     )
     threat_analysis_enabled = _resolve_threat_analysis_enabled(
         requested=body.threat_analysis_enabled,
@@ -166,10 +175,21 @@ def resolve_creation_configuration(
             status_code=422,
             detail="快速模式和标准模式固定使用默认威胁分析方法",
         )
-    if fixed_profile and body.threat_analysis_generate_attack_tree is False:
+    if (
+        requested_scan_mode == SCAN_MODE_QUICK
+        and body.threat_analysis_generate_attack_tree is False
+    ):
         raise ApplicationError(
             status_code=422,
-            detail="快速模式和标准模式固定生成攻击树",
+            detail="快速模式固定生成攻击树",
+        )
+    if (
+        requested_scan_mode == SCAN_MODE_STANDARD
+        and body.threat_analysis_generate_attack_tree is True
+    ):
+        raise ApplicationError(
+            status_code=422,
+            detail="标准模式固定不生成攻击树",
         )
     if (
         requested_scan_mode == SCAN_MODE_MULTI_VERSION
@@ -179,8 +199,11 @@ def resolve_creation_configuration(
             status_code=422,
             detail="多版本测试模式不支持关闭攻击树生成",
         )
-    threat_analysis_generate_attack_tree = True
-    if body.threat_analysis_generate_attack_tree is False:
+    if requested_scan_mode == SCAN_MODE_STANDARD:
+        threat_analysis_generate_attack_tree = False
+    elif requested_scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_MULTI_VERSION}:
+        threat_analysis_generate_attack_tree = True
+    elif body.threat_analysis_generate_attack_tree is False:
         if (
             not threat_analysis_enabled
             or threat_analysis_method != "deephole_compact_threat_analysis"
@@ -189,15 +212,25 @@ def resolve_creation_configuration(
                 status_code=422,
                 detail="仅启用 DeepHole精简威胁分析 时可关闭攻击树生成",
             )
-        if any(
-            item.enabled and item.engine_id == "threat_audit"
-            for item in mining_engine_selections
-        ):
-            raise ApplicationError(
-                status_code=422,
-                detail="DeepHole基于攻击威胁的漏洞挖掘引擎依赖攻击树产物，请启用生成攻击树或改用基于攻击模式的漏洞挖掘引擎",
-            )
         threat_analysis_generate_attack_tree = False
+    elif body.threat_analysis_generate_attack_tree is True:
+        threat_analysis_generate_attack_tree = True
+    elif (
+        requested_scan_mode == SCAN_MODE_CUSTOM
+        and threat_analysis_enabled
+        and threat_analysis_method == "deephole_compact_threat_analysis"
+    ):
+        threat_analysis_generate_attack_tree = False
+    else:
+        threat_analysis_generate_attack_tree = True
+    if not threat_analysis_generate_attack_tree and any(
+        item.enabled and item.engine_id == "threat_audit"
+        for item in mining_engine_selections
+    ):
+        raise ApplicationError(
+            status_code=422,
+            detail="DeepHole基于攻击威胁的漏洞挖掘引擎依赖攻击树产物，请启用生成攻击树或改用基于攻击模式的漏洞挖掘引擎",
+        )
     threat_analysis_method_selection = threat_analysis_method_selection.model_copy(
         update={"generate_attack_tree": threat_analysis_generate_attack_tree}
     )

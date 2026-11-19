@@ -245,7 +245,12 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
                 className="mr-3"
                 type="radio"
                 checked={threatAnalysisMethod === method.method_id}
-                onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>{threatAnalysisMethod === "deephole_compact_threat_analysis" && <div className="mt-4 flex items-start justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3.5"><div><h3 className="text-sm font-medium text-slate-200">生成攻击树</h3><p className="mt-1 text-xs text-slate-400">关闭后跳过价值资产识别与攻击树构建，仅逐个高风险模块直接分析可能面临的攻击模式，适合搭配基于攻击模式的漏洞挖掘引擎。</p></div><Toggle
+                onChange={() => {
+                  setThreatAnalysisMethod(method.method_id);
+                  if (method.method_id === "deephole_compact_threat_analysis" && !threatAnalysisGenerateAttackTree && miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected) {
+                    setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } }));
+                  }
+                }} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>{threatAnalysisMethod === "deephole_compact_threat_analysis" && <div className="mt-4 flex items-start justify-between gap-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3.5"><div><h3 className="text-sm font-medium text-slate-200">生成攻击树</h3><p className="mt-1 text-xs text-slate-400">默认关闭，跳过价值资产识别与攻击树构建，仅逐个高风险模块直接分析可能面临的攻击模式，适合搭配基于攻击模式的漏洞挖掘引擎；开启后将识别价值资产并构建攻击树。</p></div><Toggle
                   checked={threatAnalysisGenerateAttackTree}
                   onChange={() => {
                     const next = !threatAnalysisGenerateAttackTree;

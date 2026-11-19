@@ -376,8 +376,11 @@ export function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): st
     }
     return `漏洞挖掘 / ${running.engine.engine_label}`;
   }
+  const threatRunningStageLabel = scan.threat_analysis_method_selection?.generate_attack_tree === false
+    ? "威胁分析 / 模块攻击威胁分析"
+    : "威胁分析 / 攻击树分析";
   if (scan.threat_analysis_run?.status === "running" && !isThreatAnalysisResultReady(scan.threat_analysis)) {
-    return "威胁分析 / 攻击树分析";
+    return threatRunningStageLabel;
   }
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
@@ -385,7 +388,7 @@ export function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): st
     return `漏洞挖掘 / ${fpReviewMethodLabel(scan.fp_review_method, scan.fp_review_method_selection)}`;
   }
   if (latest?.phase === "variant_hunt") return "威胁分析 / 历史同类问题挖掘";
-  if (latest?.phase === "threat_analysis") return "威胁分析 / 攻击树分析";
+  if (latest?.phase === "threat_analysis") return threatRunningStageLabel;
   if (latest?.phase === "threat_audit") return `漏洞挖掘 / ${THREAT_AUDIT_ENGINE_LABEL}`;
   if (latest?.phase === "git_history") return "威胁分析 / Git 历史问题分析";
   if (latest?.phase === "auditing") return `漏洞挖掘 / ${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点 AI 审计`;

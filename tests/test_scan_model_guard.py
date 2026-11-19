@@ -362,11 +362,14 @@ def test_fixed_modes_snapshot_pipeline_defaults(
     assert scan.project_path == meta.project_path == "/repo/project"
     assert scan.code_scan_path == meta.code_scan_path == "/repo/project/src"
     assert scan.threat_analysis_enabled is True
+    expected_generate_tree = scan_mode == "quick"
     assert scan.threat_analysis_method == expected_method
     assert meta.threat_analysis_method == expected_method
     assert command["threat_analysis_method"] == expected_method
+    assert command["threat_analysis_generate_attack_tree"] is expected_generate_tree
     assert scan.threat_analysis_method_selection.method_id == expected_method
     assert scan.threat_analysis_method_selection.method_label == expected_label
+    assert scan.threat_analysis_method_selection.generate_attack_tree is expected_generate_tree
     assert meta.threat_analysis_method_selection == scan.threat_analysis_method_selection
     assert scan.auto_fp_review is True
     assert [item.engine_id for item in scan.mining_engines] == [

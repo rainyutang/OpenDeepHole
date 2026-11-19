@@ -345,7 +345,6 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
             scan_mode="custom",
             threat_analysis_enabled=True,
             threat_analysis_method="deephole_compact_threat_analysis",
-            threat_analysis_generate_attack_tree=False,
             mining_engines=[MiningEngineRequest(engine_id="threat_pattern_audit")],
         ),
         remote_cfg,
@@ -354,6 +353,56 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
     )
     assert valid.threat_analysis_generate_attack_tree is False
     assert valid.threat_analysis_method_selection.generate_attack_tree is False
+
+    standard_default = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="standard",
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert standard_default.threat_analysis_method == "deephole_compact_threat_analysis"
+    assert standard_default.threat_analysis_generate_attack_tree is False
+    assert standard_default.threat_analysis_method_selection.generate_attack_tree is False
+
+    custom_default_engines = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="custom",
+            threat_analysis_method="deephole_compact_threat_analysis",
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert custom_default_engines.threat_analysis_generate_attack_tree is False
+    assert "threat_audit" not in {
+        item.engine_id for item in custom_default_engines.mining_engine_selections
+    }
+
+    custom_tree_enabled = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="custom",
+            threat_analysis_enabled=True,
+            threat_analysis_method="deephole_compact_threat_analysis",
+            threat_analysis_generate_attack_tree=True,
+            mining_engines=[MiningEngineRequest(engine_id="threat_audit")],
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert custom_tree_enabled.threat_analysis_generate_attack_tree is True
+    assert custom_tree_enabled.threat_analysis_method_selection.generate_attack_tree is True
 
     store = SqliteScanStore(tmp_path / "compact-no-tree.db")
     scan = ScanStatus(
@@ -381,7 +430,8 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
     assert loaded_meta.threat_analysis_method_selection.generate_attack_tree is False
 
     for invalid_kwargs in (
-        dict(scan_mode="standard", threat_analysis_generate_attack_tree=False),
+        dict(scan_mode="standard", threat_analysis_generate_attack_tree=True),
+        dict(scan_mode="quick", threat_analysis_generate_attack_tree=False),
         dict(
             scan_mode="custom",
             threat_analysis_enabled=True,
@@ -393,7 +443,6 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
             scan_mode="custom",
             threat_analysis_enabled=True,
             threat_analysis_method="deephole_compact_threat_analysis",
-            threat_analysis_generate_attack_tree=False,
             mining_engines=[MiningEngineRequest(engine_id="threat_audit")],
         ),
     ):

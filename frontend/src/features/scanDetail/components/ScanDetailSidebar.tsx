@@ -136,7 +136,7 @@ function ScanSidebarContent({
         <SidebarSection title="执行流程">
           <SidebarNavigationButton
             label="威胁分析"
-            detail={flow.threatAnalysisNode.detail === "等待生成攻击树" ? undefined : flow.threatAnalysisNode.detail}
+            detail={flow.threatAnalysisNode.detail === "等待生成攻击树" || flow.threatAnalysisNode.detail === "等待分析模块攻击威胁" ? undefined : flow.threatAnalysisNode.detail}
             current={flow.threatAnalysisNode.active}
             status={flow.threatAnalysisNode.status}
             tone={flow.threatAnalysisNode.tone}

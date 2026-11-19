@@ -194,7 +194,8 @@ export function ScanOverview({
                 : scan.threat_analysis_run?.status === "error"
                   ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
                   : isThreatAnalysisSelected(scan)
-                    ? scan.threat_analysis_run?.error_message || "等待生成攻击树"
+                    ? scan.threat_analysis_run?.error_message
+                      || (scan.threat_analysis_method_selection?.generate_attack_tree === false ? "等待分析模块攻击威胁" : "等待生成攻击树")
                     : "本次扫描未选择威胁分析"}
             />
             {engines.map((engine) => {

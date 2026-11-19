@@ -269,6 +269,7 @@ def _resolve_scan_mining_engines(
     scan_overrides: list[MiningEngineRequest] | None,
     scan_mode: str,
     threat_analysis_enabled: bool | None = None,
+    generate_attack_tree: bool = True,
 ) -> list[MiningEngineSelection]:
     catalog = _repository_mining_engine_catalog()
     available = {item.engine_id: item for item in catalog.engines}
@@ -367,7 +368,12 @@ def _resolve_scan_mining_engines(
         )]
 
     if requested is None:
-        selected_ids = [item.engine_id for item in catalog.engines if item.engine_id not in OPT_IN_MINING_ENGINE_IDS]
+        selected_ids = [
+            item.engine_id
+            for item in catalog.engines
+            if item.engine_id not in OPT_IN_MINING_ENGINE_IDS
+            and (generate_attack_tree or item.engine_id != "threat_audit")
+        ]
     else:
         selected_ids = [item.engine_id.strip() for item in requested]
     selections = [
