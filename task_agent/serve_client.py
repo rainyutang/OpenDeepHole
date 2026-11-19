@@ -6870,6 +6870,23 @@ class OpenCodeServeManager:
             raise RuntimeError("OpenCode serve is not running")
         return f"http://127.0.0.1:{self._port}"
 
+    def is_preparing(self) -> bool:
+        """Return True while a shared Serve startup or recovery task is in flight."""
+        return self._preparation is not None and not self._preparation._task.done()
+
+    def is_ready_for_prompt(self) -> bool:
+        """Return True when Serve can admit prompts without lifecycle preparation."""
+        if self._shutting_down:
+            return True
+        return bool(
+            not self._lock.locked()
+            and self._proc is not None
+            and self._proc.poll() is None
+            and self._ready_generation == self._process_generation
+            and not self._restart_required
+            and (not self._dirty or self._active_sessions > 0)
+        )
+
     async def prepare_prompt(
         self, *, tool: str, executable: str, opencode_version: str = OPENCODE_V1,
         directory: Path | None = None,
@@ -6967,6 +6984,12 @@ class OpenCodeServeManager:
             ) from exc
         finally:
             self._preparation_phase = "idle"
+            current = asyncio.current_task()
+            if self._preparation is not None and self._preparation._task is current:
+                self._preparation = None
+            from .model_pool import wake_model_pool_waiters
+
+            wake_model_pool_waiters()
 
     def mark_dirty(self) -> None:
         # Keep active sessions stable, but make the next idle acquisition reload
@@ -10703,6 +10726,9 @@ class OpenCodeServeManager:
     async def shutdown(self) -> None:
         self._shutting_down = True
         self._ready_generation = None
+        from .model_pool import wake_model_pool_waiters
+
+        wake_model_pool_waiters()
         preparation = self._preparation
         if preparation is not None:
             if not await cancel_tasks_bounded(

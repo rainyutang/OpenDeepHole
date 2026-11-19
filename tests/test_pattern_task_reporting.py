@@ -401,3 +401,62 @@ def test_output_source_and_tracker_accept_invocation_metadata_and_reject_invalid
         assert tracker.tasks["task"].started_at == "2026-11-18T01:23:45+00:00"
 
     asyncio.run(exercise())
+
+
+def test_tracker_invocation_refreshes_started_at_before_session_bound_only():
+    from task_agent.host import OpenCodeInvocationMetadata
+
+    async def exercise():
+        reporter = RecordingReporter()
+        tracker = PatternTaskTracker("scan", reporter)
+        tracker.tasks["task"] = ThreatPatternAuditTask(task_id="task", status="running")
+
+        initial = OpenCodeInvocationMetadata(
+            backend="opencode",
+            tool="opencode",
+            model_id="m-1",
+            model="provider/m-1",
+            attempt=1,
+            started_at="2026-11-19T10:00:00+00:00",
+            serve_session_id="",
+        )
+        await tracker.invocation("task", initial)
+        assert tracker.tasks["task"].started_at == "2026-11-19T10:00:00+00:00"
+
+        # Pre-session resume after Serve cold start refreshes started_at on the same attempt.
+        resumed = OpenCodeInvocationMetadata(
+            backend="opencode",
+            tool="opencode",
+            model_id="m-1",
+            model="provider/m-1",
+            attempt=1,
+            started_at="2026-11-19T10:00:25+00:00",
+            serve_session_id="",
+        )
+        await tracker.invocation("task", resumed)
+        assert tracker.tasks["task"].started_at == "2026-11-19T10:00:25+00:00"
+
+        # Once a Session ID is bound, same-attempt callbacks keep the bound start time.
+        bound = OpenCodeInvocationMetadata(
+            backend="opencode",
+            tool="opencode",
+            model_id="m-1",
+            model="provider/m-1",
+            attempt=1,
+            started_at="2026-11-19T10:00:25+00:00",
+            serve_session_id="ses-1",
+        )
+        await tracker.invocation("task", bound)
+        late = OpenCodeInvocationMetadata(
+            backend="opencode",
+            tool="opencode",
+            model_id="m-1",
+            model="provider/m-1",
+            attempt=1,
+            started_at="2026-11-19T10:05:00+00:00",
+            serve_session_id="ses-1",
+        )
+        await tracker.invocation("task", late)
+        assert tracker.tasks["task"].started_at == "2026-11-19T10:00:25+00:00"
+
+    asyncio.run(exercise())

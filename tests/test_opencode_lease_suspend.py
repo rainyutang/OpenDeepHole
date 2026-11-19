@@ -259,3 +259,69 @@ def test_discard_does_not_release_another_half_open_probe(monkeypatch):
         await pool.release_model_lease(another, outcome="success", health_outcome="success")
 
     asyncio.run(run())
+
+
+def test_resume_with_reset_started_at_refreshes_iso_timestamps_and_keeps_duration(monkeypatch):
+    clock = [100.0]
+    now_iso = ["2026-11-19T00:00:00+00:00"]
+    monkeypatch.setattr(pool, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(pool, "_now_iso", lambda: now_iso[0])
+
+    async def run():
+        lease = await pool.acquire_model_lease(
+            config(), task_id="cold-task", stats_scope_id="scan",
+        )
+        assert lease.started_at_iso == "2026-11-19T00:00:00+00:00"
+        clock[0] = 105.0
+        now_iso[0] = "2026-11-19T00:00:05+00:00"
+        suspended = await pool.suspend_model_lease(lease)
+        clock[0] = 405.0
+        now_iso[0] = "2026-11-19T00:05:05+00:00"
+        resumed = await pool.resume_model_lease(suspended, reset_started_at=True)
+        assert resumed is not None
+        assert resumed.started_at == 400.0
+        assert resumed.started_at_iso == "2026-11-19T00:05:05+00:00"
+        live = pool.model_pool_snapshot("scan")
+        assert live["models"][0]["last_started_at"] == "2026-11-19T00:05:05+00:00"
+        assert live["models"][0]["active_tasks"][0]["started_at"] == "2026-11-19T00:05:05+00:00"
+        clock[0] = 435.0
+        now_iso[0] = "2026-11-19T00:05:35+00:00"
+        await pool.release_model_lease(resumed, outcome="success", duration_seconds=35.0)
+        done = pool.model_pool_snapshot("scan")
+        completed = done["completed_tasks"][0]
+        assert completed["started_at"] == "2026-11-19T00:05:05+00:00"
+        assert completed["duration_seconds"] == 35.0
+
+    asyncio.run(run())
+
+
+def test_suspend_preserves_original_fifo_sequence_for_equal_priority():
+    async def run():
+        cfg = config(1)
+        first = await pool.acquire_model_lease(cfg, task_id="first", stats_scope_id="scan", priority=50)
+        second_task = asyncio.create_task(
+            pool.acquire_model_lease(cfg, task_id="second", stats_scope_id="scan", priority=50)
+        )
+        await asyncio.sleep(0)
+        assert not second_task.done()
+        suspended = await pool.suspend_model_lease(first)
+        # While first is suspended (not resume_ready), second takes the freed slot.
+        second = await asyncio.wait_for(second_task, 1)
+        third_task = asyncio.create_task(
+            pool.acquire_model_lease(cfg, task_id="third", stats_scope_id="scan", priority=50)
+        )
+        await asyncio.sleep(0)
+        resume_first = asyncio.create_task(pool.resume_model_lease(suspended))
+        await asyncio.sleep(0)
+        assert not third_task.done()
+        assert not resume_first.done()
+        await pool.release_model_lease(second, outcome="success")
+        # First has an earlier original sequence than third, so first resumes before third.
+        restored = await asyncio.wait_for(resume_first, 1)
+        assert restored is not None
+        assert not third_task.done()
+        await pool.release_model_lease(restored, outcome="success")
+        third = await asyncio.wait_for(third_task, 1)
+        await pool.release_model_lease(third, outcome="success")
+
+    asyncio.run(run())

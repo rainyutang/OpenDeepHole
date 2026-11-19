@@ -52,6 +52,7 @@ from .model_pool import (
     resume_model_lease,
     suspend_model_lease,
     update_model_lease_context,
+    wake_model_pool_waiters,
 )
 from .output_format import format_task_output, task_output_stage
 from .serve_client import (
@@ -528,6 +529,43 @@ class OpenCodeTaskService:
         self._session_runtimes: dict[str, _SessionRuntime] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._active_session_tasks: dict[str, str] = {}
+        self._serve_preparing_count: int = 0
+        self._serve_bootstrap_task_id: str | None = None
+
+    def _serve_is_ready(self) -> bool:
+        manager = get_serve_manager()
+        is_ready = getattr(manager, "is_ready_for_prompt", None)
+        return True if not callable(is_ready) else bool(is_ready())
+
+    def _serve_is_preparing(self) -> bool:
+        if self._serve_preparing_count > 0:
+            return True
+        manager = get_serve_manager()
+        is_preparing = getattr(manager, "is_preparing", None)
+        return bool(callable(is_preparing) and is_preparing())
+
+    def _task_admission_allowed(self, task_id: str) -> bool:
+        if not get_config_reload_coordinator().admission(task_id):
+            return False
+        if self._serve_is_preparing():
+            return False
+        if (
+            not self._serve_is_ready()
+            and self._serve_bootstrap_task_id not in (None, task_id)
+        ):
+            return False
+        return True
+
+    def _admit_task(self, task_id: str) -> None:
+        get_config_reload_coordinator().admit_task(task_id)
+        if not self._serve_is_ready() and self._serve_bootstrap_task_id is None:
+            self._serve_bootstrap_task_id = task_id
+
+    def _release_serve_bootstrap(self, task_id: str, *, wake: bool = True) -> None:
+        if self._serve_bootstrap_task_id == task_id:
+            self._serve_bootstrap_task_id = None
+            if wake:
+                wake_model_pool_waiters()
 
     @staticmethod
     def _validation_debug_enabled(record: _TaskRecord) -> bool:
@@ -914,6 +952,7 @@ class OpenCodeTaskService:
                         source=OutputSource(), error="OpenCode task worker exited without a result",
                     )
             finally:
+                self._release_serve_bootstrap(record.task_id)
                 get_config_reload_coordinator().release_task(record.task_id)
 
     async def _release_task_lease(self, record: _TaskRecord, lease: ModelLease | None, **kwargs) -> None:
@@ -944,6 +983,9 @@ class OpenCodeTaskService:
         runtime: _SessionRuntime,
         get_lease: Callable[[], ModelLease],
         set_lease: Callable[[ModelLease], None],
+        *,
+        reset_lease_started_at: bool = False,
+        on_lease_resumed: Callable[[ModelLease, str], Any] | None = None,
         **kwargs: Any,
     ) -> OpenCodePromptResult:
         """Queue Serve recovery without surrendering this message or its Session."""
@@ -954,9 +996,12 @@ class OpenCodeTaskService:
             if prepare is not None:
                 deadline.check(phase="prompt")
                 prepared = await prepare(**runtime.kwargs())
+                if not isinstance(prepared, OpenCodeServePreparation):
+                    self._release_serve_bootstrap(record.task_id)
                 if isinstance(prepared, OpenCodeServePreparation):
                     waiting_started = time.monotonic()
                     waiting_status = "failure"
+                    resumed_at_iso = ""
                     session_id = kwargs.get("session_id") or record.last_session_id
                     self._emit_task_progress(
                         record, f"SERVE WAIT_START remaining={deadline.remaining():.3f}s",
@@ -965,28 +1010,50 @@ class OpenCodeTaskService:
                     try:
                         with deadline.paused():
                             while isinstance(prepared, OpenCodeServePreparation):
-                                suspended = await suspend_model_lease(get_lease())
-                                record.suspended_lease = suspended
-                                await self._notify_lease_state(record, "queued")
-                                await prepared.wait(
-                                    cancel_event=deadline.cancel_event,
-                                    on_line=lambda line: self._emit_task_progress(
-                                        record, line, session_id=session_id,
-                                    ),
-                                )
+                                self._serve_preparing_count += 1
+                                try:
+                                    suspended = await suspend_model_lease(get_lease())
+                                    record.suspended_lease = suspended
+                                    await self._notify_lease_state(record, "queued")
+                                    await prepared.wait(
+                                        cancel_event=deadline.cancel_event,
+                                        on_line=lambda line: self._emit_task_progress(
+                                            record, line, session_id=session_id,
+                                        ),
+                                    )
+                                finally:
+                                    self._serve_preparing_count = max(
+                                        0, self._serve_preparing_count - 1,
+                                    )
+                                    self._release_serve_bootstrap(
+                                        record.task_id, wake=False,
+                                    )
+                                    wake_model_pool_waiters()
                                 resumed = await resume_model_lease(
                                     suspended,
                                     cancel_event=deadline.cancel_event,
                                     admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
+                                    reset_started_at=reset_lease_started_at,
                                 )
                                 if resumed is None:
                                     raise asyncio.CancelledError()
                                 set_lease(resumed)
                                 record.suspended_lease = None
+                                resumed_at_iso = (
+                                    resumed.started_at_iso
+                                    if reset_lease_started_at
+                                    else _now_iso()
+                                )
                                 # Recovery can be requested after the capacity grant.
                                 # Atomically reserve Serve before resuming the clock.
                                 prepared = await prepare(**runtime.kwargs())
                             permit = prepared
+                            if on_lease_resumed is not None and resumed_at_iso:
+                                resumed_outcome = on_lease_resumed(
+                                    get_lease(), resumed_at_iso,
+                                )
+                                if inspect.isawaitable(resumed_outcome):
+                                    await resumed_outcome
                             await self._notify_lease_state(record, "running")
                             waiting_status = "ready"
                     except asyncio.CancelledError:
@@ -1002,6 +1069,8 @@ class OpenCodeTaskService:
                             session_id=session_id,
                         )
                 permit = prepared
+            else:
+                self._release_serve_bootstrap(record.task_id)
             probe_confirmed = False
 
             def confirm_probe() -> Awaitable[bool] | None:
@@ -1138,8 +1207,8 @@ class OpenCodeTaskService:
                     avoid_model_identities=set(avoid_model_identities),
                     quota_wait_budget=quota_wait_budget,
                     on_queued=lambda: self._notify_lease_state(record, "queued"),
-                    admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
-                    on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
+                    admission_allowed=lambda: self._task_admission_allowed(record.task_id),
+                    on_admitted=lambda: self._admit_task(record.task_id),
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -1350,7 +1419,12 @@ class OpenCodeTaskService:
                             nonlocal lease
                             lease = value
 
-                        async def invoke_message(message_prompt: str) -> OpenCodePromptResult:
+                        async def invoke_message(
+                            message_prompt: str,
+                            *,
+                            reset_lease_started_at: bool = False,
+                            on_lease_resumed: Callable[[ModelLease, str], Any] | None = None,
+                        ) -> OpenCodePromptResult:
                             message_writes.clear()
                             try:
                                 result = await self._run_prepared_prompt(
@@ -1359,6 +1433,8 @@ class OpenCodeTaskService:
                                     runtime,
                                     lambda: lease,
                                     replace_lease,
+                                    reset_lease_started_at=reset_lease_started_at,
+                                    on_lease_resumed=on_lease_resumed,
                                     prompt=message_prompt,
                                     model=model,
                                     idle_timeout=idle_timeout_seconds,
@@ -1436,9 +1512,28 @@ class OpenCodeTaskService:
                         try:
                             message_started = _execution_time(record)
                             message_started_at = _now_iso()
+
+                            async def on_business_lease_resumed(
+                                resumed: ModelLease,
+                                resumed_at_iso: str,
+                            ) -> None:
+                                nonlocal message_started_at
+                                refreshed = resumed.started_at_iso or resumed_at_iso
+                                record.started_at = refreshed
+                                source.started_at = refreshed
+                                message_started_at = resumed_at_iso
+                                if context.on_invocation_metadata:
+                                    invocation_outcome = context.on_invocation_metadata(source)
+                                    if inspect.isawaitable(invocation_outcome):
+                                        await invocation_outcome
+
                             try:
                                 last_sent_prompt = current_prompt
-                                details = await invoke_message(current_prompt)
+                                details = await invoke_message(
+                                    current_prompt,
+                                    reset_lease_started_at=True,
+                                    on_lease_resumed=on_business_lease_resumed,
+                                )
                             except OpenCodeTaskQualityError as quality_error:
                                 failure_result = quality_error.prompt_result
                                 if failure_result is not None:
@@ -1504,8 +1599,20 @@ class OpenCodeTaskService:
                                     )
                                     last_sent_prompt = correction_prompt
                                     in_followup_correction = True
+
+                                    def on_retry_lease_resumed(
+                                        _resumed: ModelLease,
+                                        resumed_at_iso: str,
+                                    ) -> None:
+                                        nonlocal retry_started_at
+                                        retry_started_at = resumed_at_iso
+
                                     try:
-                                        details = await invoke_message(correction_prompt)
+                                        details = await invoke_message(
+                                            correction_prompt,
+                                            reset_lease_started_at=False,
+                                            on_lease_resumed=on_retry_lease_resumed,
+                                        )
                                     except OpenCodeTaskQualityError as retry_error:
                                         retry_result = retry_error.prompt_result
                                         if retry_result is not None:
@@ -1942,6 +2049,7 @@ class OpenCodeTaskService:
                         total_session_attempts,
                     )
             finally:
+                self._release_serve_bootstrap(record.task_id)
                 if (
                     not recovery_required
                     and session_id
@@ -2336,8 +2444,8 @@ class OpenCodeTaskService:
                 prefer_lowest_capability=True,
                 wait_when_unavailable=False,
                 record_completion_on_failure=False,
-                admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
-                on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
+                admission_allowed=lambda: self._task_admission_allowed(record.task_id),
+                on_admitted=lambda: self._admit_task(record.task_id),
             )
             if formatter_lease is None:
                 raise asyncio.CancelledError()
@@ -2383,6 +2491,7 @@ class OpenCodeTaskService:
                 formatter_runtime,
                 lambda: formatter_lease,
                 replace_formatter_lease,
+                reset_lease_started_at=True,
                 prompt=formatter_prompt,
                 model=formatter_model,
                 idle_timeout=idle_timeout_seconds,
@@ -2663,8 +2772,8 @@ class OpenCodeTaskService:
                 wait_when_unavailable=not validation_debug,
                 record_completion_on_failure=not has_fresh_retry,
                 quota_wait_budget=quota_wait_budget,
-                admission_allowed=lambda: get_config_reload_coordinator().admission(record.task_id),
-                on_admitted=lambda: get_config_reload_coordinator().admit_task(record.task_id),
+                admission_allowed=lambda: self._task_admission_allowed(record.task_id),
+                on_admitted=lambda: self._admit_task(record.task_id),
             )
             if correction_lease is None:
                 raise asyncio.CancelledError()
@@ -2751,6 +2860,13 @@ class OpenCodeTaskService:
                     message_writes[key] = value
                     response_files.record(value)
 
+                def on_correction_lease_resumed(
+                    _resumed: ModelLease,
+                    resumed_at_iso: str,
+                ) -> None:
+                    nonlocal correction_retry_started_at_iso
+                    correction_retry_started_at_iso = resumed_at_iso
+
                 try:
                     details = await self._run_prepared_prompt(
                         record,
@@ -2758,6 +2874,8 @@ class OpenCodeTaskService:
                         correction_runtime,
                         lambda: correction_lease,
                         replace_correction_lease,
+                        reset_lease_started_at=(output_attempt == 1),
+                        on_lease_resumed=on_correction_lease_resumed,
                         prompt=correction_prompt,
                         model=correction_model,
                         idle_timeout=idle_timeout_seconds,

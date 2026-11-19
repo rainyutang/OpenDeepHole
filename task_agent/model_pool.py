@@ -138,6 +138,7 @@ class ModelLease:
     access_half_open_probe: bool = False
     quota_wait_budget: ModelQuotaWaitBudget | None = None
     lease_id: str = ""
+    request_sequence: int = 0
 
 
 @dataclass
@@ -1598,6 +1599,7 @@ def _grant_lease_locked(
         access_half_open_probe=access_half_open_probe,
         quota_wait_budget=request.quota_wait_budget,
         lease_id=lease_id,
+        request_sequence=request.sequence,
     )
 
 
@@ -2061,11 +2063,15 @@ async def suspend_model_lease(
         context = dict(saved["context"])
         context.pop("planned_task_id", None)
         context["waiting_reason"] = "serve_recovery"
-        _pending_sequence += 1
+        if lease.request_sequence > 0:
+            sequence = lease.request_sequence
+        else:
+            _pending_sequence += 1
+            sequence = _pending_sequence
         now = time.monotonic()
         request = _PendingLeaseRequest(
             request_id=lease.task_id,
-            sequence=_pending_sequence,
+            sequence=sequence,
             priority=normalize_priority(context.get("priority", 50)),
             revision=max(1, int(context.get("revision", 1))),
             cli_config={},
@@ -2108,6 +2114,7 @@ async def resume_model_lease(
     cancel_event: Any = None,
     admission_allowed: Callable[[], bool] | None = None,
     on_queued: Callable[[], Any] | None = None,
+    reset_started_at: bool = False,
 ) -> ModelLease | None:
     """Reacquire the original model through the existing priority queue.
 
@@ -2164,16 +2171,19 @@ async def resume_model_lease(
                         state.quota_half_open_probe_in_flight = True
                     _global_running += 1
                     _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1
+                    resumed_at_iso = _now_iso() if reset_started_at else previous.started_at_iso
                     restored = replace(
                         previous,
                         running=_running_by_model[option.id],
                         global_running=_global_running,
                         started_at=previous.started_at + suspended.wait_seconds,
+                        started_at_iso=resumed_at_iso,
                         quota_half_open_probe=half_open,
                         quota_wait_budget=request.quota_wait_budget,
                         lease_id=uuid4().hex,
                     )
                     active = copy.deepcopy(suspended.active_task)
+                    active["started_at"] = resumed_at_iso
                     active["lease_started_at"] = restored.started_at
                     active["lease_id"] = restored.lease_id
                     for key in ("waiting_reason", "wait_reason"):
@@ -2182,10 +2192,14 @@ async def resume_model_lease(
                     item = _global_stats_by_model[option.id]
                     item.running += 1
                     item.last_status = "running"
+                    if reset_started_at:
+                        item.last_started_at = resumed_at_iso
                     if restored.stats_scope_id:
                         item = _stats_by_scope[restored.stats_scope_id][option.id]
                         item.running += 1
                         item.last_status = "running"
+                        if reset_started_at:
+                            item.last_started_at = resumed_at_iso
                     _touch_queue_locked(restored.stats_scope_id)
                     _notify_pool_changed_locked()
                     return restored
@@ -2646,3 +2660,9 @@ async def notify_model_pool_config_changed() -> None:
         for scope_id in set(_stats_by_scope) | set(_scope_updated_at):
             _scope_updated_at[scope_id] = now
         _notify_pool_changed_locked()
+
+
+def wake_model_pool_waiters() -> None:
+    """Wake queued lease waiters without awaiting locks or modifying snapshots."""
+    for changed in tuple(_change_waiters):
+        changed.set()

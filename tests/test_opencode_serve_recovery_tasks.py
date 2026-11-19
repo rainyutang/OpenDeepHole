@@ -277,3 +277,354 @@ def test_nested_deadline_pause_never_replenishes_spent_budget(clock_and_pool):
     clock.advance(10)
     with pytest.raises(asyncio.TimeoutError):
         budget.check(phase="message")
+
+
+def test_serve_preparation_blocks_cascade_lease_preacquisition_and_refreshes_started_at(
+    tmp_path, monkeypatch, clock_and_pool,
+):
+    now_iso = ["2026-11-19T10:00:00+00:00"]
+    monkeypatch.setattr(model_pool, "_now_iso", lambda: now_iso[0])
+    monkeypatch.setattr(task_service, "_now_iso", lambda: now_iso[0])
+
+    async def run():
+        service = OpenCodeTaskService()
+        config = _config(max_retries=0)
+        config.opencode.models = [{
+            "id": "model-low", "model": "provider/model-low", "capability": "low",
+            "max_concurrency": 2,
+        }]
+        immutable_runtime = _runtime(tmp_path)
+
+        def make_runtime(_record, lease, **_kwargs):
+            src = _source()
+            src.started_at = lease.started_at_iso
+            return immutable_runtime, "provider/model-low", src
+
+        service._runtime_for_task = AsyncMock(side_effect=make_runtime)
+        serve_ready = False
+        prep_entered = asyncio.Event()
+        release_prep = asyncio.Event()
+        wave1_started = asyncio.Event()
+        release_wave1 = asyncio.Event()
+        wave1_names: list[str] = []
+        prepare_calls = 0
+        invocations_by_task: dict[str, list[str]] = {}
+        states_by_task: dict[str, list[str]] = {}
+
+        async def wait_prep(**_kwargs):
+            nonlocal serve_ready
+            prep_entered.set()
+            await release_prep.wait()
+            serve_ready = True
+
+        shared_prep = _Preparation(wait_prep)
+
+        async def prepare_prompt(**_kwargs):
+            nonlocal prepare_calls
+            prepare_calls += 1
+            if not serve_ready:
+                return shared_prep
+            return _Permit()
+
+        async def run_prompt(**kwargs):
+            name = kwargs["session_title"]
+            if len(wave1_names) < 2:
+                wave1_names.append(name)
+                if len(wave1_names) == 2:
+                    wave1_started.set()
+                await release_wave1.wait()
+            return OpenCodePromptResult(
+                session_id=f"ses-{name}",
+                message_id=f"msg-{name}",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(
+            prepare_prompt=prepare_prompt,
+            run_prompt=run_prompt,
+            is_preparing=lambda: prep_entered.is_set() and not serve_ready,
+            is_ready_for_prompt=lambda: serve_ready,
+        )
+        patches = _service_patches(manager, runtime_config=config)
+
+        async def launch_one(idx: int):
+            name = f"task-{idx}"
+            states_by_task[name] = []
+            invocations_by_task[name] = []
+
+            def record_invocation(src):
+                invocations_by_task[name].append(src.started_at)
+
+            with _task_context(
+                tmp_path,
+                scan_id="scan-cold",
+                on_invocation_metadata=record_invocation,
+            ):
+                return await service.run_task(OpenCodeTaskSpec(
+                    task_name=name,
+                    prompt=f"prompt-{idx}",
+                    directory=tmp_path,
+                    required_capability="low",
+                    timeout_seconds=1800,
+                    attempt=0,
+                    lease_state_callback=states_by_task[name].append,
+                ))
+
+        with patches[0], patches[4], patches[5]:
+            tasks = [asyncio.create_task(launch_one(i)) for i in range(4)]
+            await asyncio.wait_for(prep_entered.wait(), 2)
+            # Let event loop settle so any cascade would have already triggered.
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            mid_prep = model_pool.model_pool_snapshot("scan-cold")
+            assert prepare_calls == 1
+            assert mid_prep["global_running"] == 0
+            assert mid_prep["models"][0]["total"] == 1
+            assert len(mid_prep["queued_tasks"]) == 4
+            assert states_by_task["task-0"] == ["running", "queued"]
+            for i in range(1, 4):
+                assert states_by_task[f"task-{i}"] == ["queued"]
+                assert invocations_by_task[f"task-{i}"] == []
+
+            # Serve becomes ready 20 seconds later at T1.
+            now_iso[0] = "2026-11-19T10:00:20+00:00"
+            clock_and_pool.advance(20)
+            release_prep.set()
+            await asyncio.wait_for(wave1_started.wait(), 2)
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            wave1_snap = model_pool.model_pool_snapshot("scan-cold")
+            assert wave1_snap["global_running"] == 2
+            assert wave1_snap["models"][0]["total"] == 2
+            assert len(wave1_snap["queued_tasks"]) == 2
+            active_by_name = {
+                item["task_name"]: item
+                for item in wave1_snap["models"][0]["active_tasks"]
+            }
+            assert set(active_by_name) == {"task-0", "task-1"}
+            assert active_by_name["task-0"]["started_at"] == "2026-11-19T10:00:20+00:00"
+            assert active_by_name["task-1"]["started_at"] == "2026-11-19T10:00:20+00:00"
+            assert invocations_by_task["task-0"][-1] == "2026-11-19T10:00:20+00:00"
+            assert invocations_by_task["task-1"] == ["2026-11-19T10:00:20+00:00"]
+
+            # Wave 1 finishes 10 minutes later at T2; wave 2 must start at T2.
+            now_iso[0] = "2026-11-19T10:10:20+00:00"
+            clock_and_pool.advance(600)
+            release_wave1.set()
+            results = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+
+        by_name = {
+            item["task_name"]: item
+            for item in model_pool.model_pool_snapshot("scan-cold")["completed_tasks"]
+        }
+        assert [r.status for r in results] == ["success"] * 4
+        assert results[0].started_at == "2026-11-19T10:00:20+00:00"
+        assert results[1].started_at == "2026-11-19T10:00:20+00:00"
+        assert results[2].started_at == "2026-11-19T10:10:20+00:00"
+        assert results[3].started_at == "2026-11-19T10:10:20+00:00"
+        assert by_name["task-0"]["started_at"] == "2026-11-19T10:00:20+00:00"
+        assert by_name["task-0"]["session_events"][0]["started_at"] == "2026-11-19T10:00:20+00:00"
+        assert by_name["task-1"]["started_at"] == "2026-11-19T10:00:20+00:00"
+        assert by_name["task-2"]["started_at"] == "2026-11-19T10:10:20+00:00"
+        assert by_name["task-3"]["started_at"] == "2026-11-19T10:10:20+00:00"
+
+    asyncio.run(run())
+
+
+def test_validation_retry_recovery_preserves_attempt_start_and_refreshes_retry_event(
+    tmp_path, monkeypatch, clock_and_pool,
+):
+    now_iso = ["2026-11-19T10:00:00+00:00"]
+    monkeypatch.setattr(model_pool, "_now_iso", lambda: now_iso[0])
+    monkeypatch.setattr(task_service, "_now_iso", lambda: now_iso[0])
+
+    async def run():
+        service = OpenCodeTaskService()
+        config = _config(max_retries=0)
+        config.opencode.models = [{
+            "id": "model-low", "model": "provider/model-low", "capability": "low",
+            "max_concurrency": 2,
+        }]
+        immutable_runtime = _runtime(tmp_path)
+
+        def make_runtime(_record, lease, **_kwargs):
+            src = _source()
+            src.started_at = lease.started_at_iso
+            return immutable_runtime, "provider/model-low", src
+
+        service._runtime_for_task = AsyncMock(side_effect=make_runtime)
+        need_recovery = False
+        recovery_entered = asyncio.Event()
+        release_recovery = asyncio.Event()
+        validations = 0
+        calls = 0
+
+        async def wait_recovery(**_kwargs):
+            nonlocal need_recovery
+            recovery_entered.set()
+            await release_recovery.wait()
+            need_recovery = False
+
+        shared_prep = _Preparation(wait_recovery)
+
+        async def prepare_prompt(**_kwargs):
+            if need_recovery:
+                return shared_prep
+            return _Permit()
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            session_id = kwargs.get("session_id") or "ses-1"
+            cb = kwargs["on_session_id"](session_id)
+            if cb is not None:
+                await cb
+            clock_and_pool.advance(10)
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id=f"msg-{calls}",
+                lines=["ok"],
+                text="ok",
+                model="provider/model-low",
+            )
+
+        def validate():
+            nonlocal validations, need_recovery
+            validations += 1
+            if validations == 1:
+                need_recovery = True
+                now_iso[0] = "2026-11-19T10:00:10+00:00"
+                return "needs fix"
+            return ""
+
+        manager = SimpleNamespace(
+            prepare_prompt=prepare_prompt,
+            run_prompt=run_prompt,
+        )
+        patches = _service_patches(manager, runtime_config=config)
+        with patches[0], patches[4], patches[5], _task_context(tmp_path, scan_id="scan-mid"):
+            first = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                task_name="first",
+                prompt="p1",
+                directory=tmp_path,
+                required_capability="low",
+                timeout_seconds=60,
+                attempt=0,
+                post_session_validator=validate,
+                post_session_validation_retry_count=1,
+            )))
+            await asyncio.wait_for(recovery_entered.wait(), 2)
+            second = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                task_name="second",
+                prompt="p2",
+                directory=tmp_path,
+                required_capability="low",
+                timeout_seconds=60,
+                attempt=0,
+            )))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # Second task must remain queued while first is waiting on Serve recovery.
+            snap = model_pool.model_pool_snapshot("scan-mid")
+            assert snap["global_running"] == 0
+            assert snap["models"][0]["total"] == 1
+            assert len(snap["queued_tasks"]) == 2
+
+            now_iso[0] = "2026-11-19T10:02:00+00:00"
+            clock_and_pool.advance(110)
+            release_recovery.set()
+            r1, r2 = await asyncio.wait_for(asyncio.gather(first, second), 2)
+
+        assert r1.status == "success"
+        assert r2.status == "success"
+        assert r1.started_at == "2026-11-19T10:00:00+00:00"
+        assert r2.started_at == "2026-11-19T10:02:00+00:00"
+        completed = {
+            item["task_name"]: item
+            for item in model_pool.model_pool_snapshot("scan-mid")["completed_tasks"]
+        }
+        assert completed["first"]["started_at"] == "2026-11-19T10:00:00+00:00"
+        events = completed["first"]["session_events"]
+        assert events[0]["phase"] == "business"
+        assert events[0]["started_at"] == "2026-11-19T10:00:00+00:00"
+        assert events[1]["phase"] == "validation_retry"
+        assert events[1]["started_at"] == "2026-11-19T10:02:00+00:00"
+        assert completed["second"]["started_at"] == "2026-11-19T10:02:00+00:00"
+
+    asyncio.run(run())
+
+
+def test_bootstrap_task_cancellation_before_prepare_prompt_unblocks_queued_tasks(
+    tmp_path, clock_and_pool,
+):
+    async def run():
+        service = OpenCodeTaskService()
+        config = _config(max_retries=0)
+        config.opencode.models = [{
+            "id": "model-low", "model": "provider/model-low", "capability": "low",
+            "max_concurrency": 2,
+        }]
+        immutable_runtime = _runtime(tmp_path)
+        serve_ready = False
+        first_in_runtime = asyncio.Event()
+        first_cancel = asyncio.Event()
+
+        async def runtime_for_task(record, lease, **_kwargs):
+            if record.spec.task_name == "first":
+                first_in_runtime.set()
+                await first_cancel.wait()
+                raise asyncio.CancelledError()
+            src = _source()
+            src.started_at = lease.started_at_iso
+            return immutable_runtime, "provider/model-low", src
+
+        service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
+
+        async def prepare_prompt(**_kwargs):
+            nonlocal serve_ready
+            serve_ready = True
+            return _Permit()
+
+        async def run_prompt(**kwargs):
+            return OpenCodePromptResult(
+                session_id="ses-2",
+                message_id="msg-2",
+                lines=["ok"],
+                text="ok",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(
+            prepare_prompt=prepare_prompt,
+            run_prompt=run_prompt,
+            is_preparing=lambda: False,
+            is_ready_for_prompt=lambda: serve_ready,
+        )
+        patches = _service_patches(manager, runtime_config=config)
+        with patches[0], patches[4], patches[5], _task_context(tmp_path, scan_id="scan-cancel"):
+            first_handle = service.submit_task(OpenCodeTaskSpec(
+                task_name="first", prompt="p1", directory=tmp_path,
+                required_capability="low", timeout_seconds=30, attempt=0,
+            ))
+            await asyncio.wait_for(first_in_runtime.wait(), 2)
+            second_handle = service.submit_task(OpenCodeTaskSpec(
+                task_name="second", prompt="p2", directory=tmp_path,
+                required_capability="low", timeout_seconds=30, attempt=0,
+            ))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # Second waits behind bootstrap task before Serve is ready.
+            assert model_pool.model_pool_snapshot("scan-cancel")["global_queued"] == 1
+            first_cancel.set()
+            r1, r2 = await asyncio.wait_for(
+                asyncio.gather(first_handle.result(), second_handle.result()), 2,
+            )
+        assert r1.status == "cancelled"
+        assert r2.status == "success"
+        assert service._serve_bootstrap_task_id is None
+
+    asyncio.run(run())
