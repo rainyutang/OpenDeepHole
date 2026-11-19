@@ -79,3 +79,44 @@ test("historical models contribute counters while live rows and a new scan remai
     root.unmount();
   }
 });
+
+test("planned tasks are hidden from model pool dashboard while queued and running tasks remain visible", () => {
+  const value = pool({
+    global_running: 1,
+    global_queued: 1,
+    planned_tasks: [
+      {
+        planned_task_id: "planned-1",
+        task_type: "vulnerability_mining",
+        task_name: "candidate-audit-1",
+        file: "src/planned.c",
+        line: 42,
+      },
+    ],
+    queued_tasks: [
+      {
+        request_id: "queued-1",
+        task_type: "vulnerability_mining",
+        task_name: "candidate-audit-2",
+        file: "src/queued.c",
+        line: 88,
+      },
+    ],
+    models: [
+      { id: "m", total: 5, success: 4, failure: 1, running: 1, max_concurrency: 2, active_tasks: [{ task_id: "active-1", file: "src/running.c", line: 12 }] },
+    ],
+  });
+  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: value }));
+  try {
+    const rendered = text(root.toJSON());
+    assert.doesNotMatch(rendered, /计划中/);
+    assert.doesNotMatch(rendered, /src\/planned\.c:42/);
+    assert.match(rendered, /运行中和排队中为当前状态。/);
+    assert.match(rendered, /运行中1排队中1累计任务5/);
+    assert.match(rendered, /全局排队任务/);
+    assert.match(rendered, /src\/queued\.c:88/);
+    assert.match(rendered, /src\/running\.c:12/);
+  } finally {
+    root.unmount();
+  }
+});

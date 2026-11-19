@@ -3,7 +3,6 @@ import { formatDateTime, formatDuration, scanQueueTaskTypeLabel } from "./presen
 
 export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; }) {
   const models = pool?.models ?? [];
-  const plannedTasks = pool?.planned_tasks ?? [];
   const queuedTasks = pool?.queued_tasks ?? [];
   const completedTasks = pool?.completed_tasks ?? [];
   const failedTasks = completedTasks.filter((task) => {
@@ -37,14 +36,13 @@ export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; 
 
   return (
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
-      <p className="text-xs text-slate-500">按本扫描累计，含续扫及重试；运行中、排队中和计划中为当前状态。</p>
+      <p className="text-xs text-slate-500">按本扫描累计，含续扫及重试；运行中和排队中为当前状态。</p>
       {!hasEnabledModel && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-6 text-amber-200">
           当前没有启用的模型，新的 OpenCode 任务会保持阻塞排队，直到启用满足能力要求的模型或用户取消。
         </div>
       )}
-      <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
-        <MetricBox label="计划中" value={plannedTasks.length} tone="amber" />
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <MetricBox label="运行中" value={pool.global_running} tone="cyan" />
         <MetricBox label="排队中" value={pool.global_queued} tone="amber" />
         <MetricBox label="累计任务" value={total} />
@@ -52,23 +50,6 @@ export function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null; 
         <MetricBox label="失败" value={failure} tone="red" />
         <MetricBox label="超时/取消" value={timeout + cancelled} tone="amber" />
       </div>
-
-      {plannedTasks.length > 0 && (
-        <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
-          <div className="mb-2 text-xs font-semibold text-slate-400">计划中任务</div>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {plannedTasks.map((task, index) => (
-              <div
-                key={String(task.planned_task_id || index)}
-                className="truncate rounded border border-slate-500/20 bg-slate-800/70 px-2 py-1.5 text-xs text-slate-200"
-                title={modelTaskLabel(task)}
-              >
-                {modelTaskLabel(task)}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {queuedTasks.length > 0 && (
         <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
