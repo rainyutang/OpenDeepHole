@@ -10284,3 +10284,305 @@ def test_provider_busy_api_error_reconciles_turn_for_same_session_retry(
     )
     assert same_session_retry_mode(exc_overflow) is None
     assert deleted_overflow == []
+
+
+def test_run_prompt_classifies_proxy_503_cooldown_and_zero_retry_after(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent.serve_client import (
+        SAME_SESSION_RETRY_CLEAN_REVERTED,
+        same_session_retry_mode,
+    )
+
+    cooldown_error = {
+        "name": "APIError",
+        "data": {
+            "message": "Service in cooldown. Retry after 0 seconds.",
+            "statusCode": 503,
+            "isRetryable": True,
+            "responseHeaders": {
+                "content-length": "115",
+                "content-type": "application/json",
+                "date": "Thu, 19 Nov 2026 13:43:01 GMT",
+                "retry-after": "0",
+            },
+            "responseBody": (
+                '{"error":{"message":"Service in cooldown. Retry after 0 seconds.",'
+                '"type":"proxy_error","code":"entry_in_cooldown"}}'
+            ),
+            "metadata": {
+                "url": "http://10.144.249.4:31944/v1/chat/completions",
+            },
+        },
+    }
+
+    async def run() -> None:
+        deleted_paths: list[str] = []
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._register_event_state = AsyncMock()
+        manager._unregister_event_state = AsyncMock()
+        manager._poll_session_snapshots = AsyncMock()
+        request_failures: list[str] = []
+
+        class CooldownClient(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    return _FakeResponse({"id": "ses_cooldown_1"})
+                if path == "/session/ses_cooldown_1/message":
+                    return _FakeResponse({
+                        "info": {
+                            "id": "msg_cooldown_err",
+                            "sessionID": "ses_cooldown_1",
+                            "role": "assistant",
+                            "error": cooldown_error,
+                        },
+                        "parts": [],
+                    })
+                return await super().post(path, **kwargs)
+
+            async def get(self, path, **kwargs):
+                if path == "/session/ses_cooldown_1/message":
+                    return _FakeResponse([
+                        {
+                            "info": {"id": "msg_user_1", "sessionID": "ses_cooldown_1", "role": "user"},
+                            "parts": [{"type": "text", "text": "audit target"}],
+                        },
+                        {
+                            "info": {
+                                "id": "msg_cooldown_err",
+                                "sessionID": "ses_cooldown_1",
+                                "role": "assistant",
+                                "error": cooldown_error,
+                            },
+                            "parts": [],
+                        },
+                    ])
+                return await super().get(path, **kwargs)
+
+            async def delete(self, path, **kwargs):
+                deleted_paths.append(path)
+                return _FakeResponse(True)
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", CooldownClient)
+        with pytest.raises(OpenCodeProviderQuotaError) as exc_info:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="audit target",
+                model="proxy/model-a",
+                timeout=5,
+                on_model_request_failure=request_failures.append,
+                return_details=True,
+            )
+
+        exc = exc_info.value
+        assert exc.reason_kind == "cooldown"
+        assert exc.status_code == 503
+        assert exc.error_code == "entry_in_cooldown"
+        assert exc.retry_after_seconds is None
+        assert "模型上游服务处于冷却期" in str(exc)
+        assert "entry_in_cooldown" in str(exc)
+        assert "将按退避策略重试" in str(exc)
+        assert request_failures == ["quota"]
+        assert same_session_retry_mode(exc) == SAME_SESSION_RETRY_CLEAN_REVERTED
+        assert deleted_paths == [
+            "/session/ses_cooldown_1/message/msg_cooldown_err",
+            "/session/ses_cooldown_1/message/msg_user_1",
+        ]
+
+    asyncio.run(run())
+
+
+def test_provider_quota_error_classifies_429_503_529_headers_and_redacts_secrets() -> None:
+    from task_agent.serve_client import _provider_quota_error
+
+    # Standard OpenAI 429 with numeric Retry-After header.
+    err_429 = _provider_quota_error({
+        "name": "APIError",
+        "data": {
+            "statusCode": 429,
+            "message": "Rate limit exceeded for Bearer sk-secret1234567890",
+            "responseHeaders": {"Retry-After": "45"},
+            "responseBody": '{"error":{"message":"Rate limit reached","type":"requests","code":"rate_limit_exceeded"}}',
+        },
+    })
+    assert err_429 is not None
+    assert err_429.reason_kind == "quota"
+    assert err_429.status_code == 429
+    assert err_429.error_code == "rate_limit_exceeded"
+    assert err_429.retry_after_seconds == pytest.approx(45.0)
+    assert "sk-secret1234567890" not in str(err_429)
+
+    # Retry-After-Ms header and Anthropic 529 overloaded_error.
+    err_529 = _provider_quota_error({
+        "name": "APIError",
+        "data": {
+            "statusCode": 529,
+            "message": "Overloaded",
+            "responseHeaders": {"retry-after-ms": "12500"},
+            "responseBody": '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+        },
+    })
+    assert err_529 is not None
+    assert err_529.reason_kind == "service_unavailable"
+    assert err_529.status_code == 529
+    assert err_529.error_code == "overloaded_error"
+    assert err_529.retry_after_seconds == pytest.approx(12.5)
+
+    # HTTP-date Retry-After computed relative to response Date header.
+    err_http_date = _provider_quota_error({
+        "name": "APIError",
+        "data": {
+            "statusCode": 503,
+            "message": "Service in cooldown",
+            "responseHeaders": {
+                "Date": "Thu, 19 Nov 2026 13:43:01 GMT",
+                "Retry-After": "Thu, 19 Nov 2026 13:44:31 GMT",
+            },
+            "responseBody": '{"error":{"code":"entry_in_cooldown","type":"proxy_error","message":"Service in cooldown"}}',
+        },
+    })
+    assert err_http_date is not None
+    assert err_http_date.reason_kind == "cooldown"
+    assert err_http_date.retry_after_seconds == pytest.approx(90.0)
+
+    # Past/equal HTTP-date Retry-After is ignored so exponential backoff applies.
+    err_past_date = _provider_quota_error({
+        "name": "APIError",
+        "data": {
+            "statusCode": 503,
+            "message": "Service in cooldown",
+            "responseHeaders": {
+                "Date": "Thu, 19 Nov 2026 13:43:01 GMT",
+                "Retry-After": "Thu, 19 Nov 2026 13:43:01 GMT",
+            },
+        },
+    })
+    assert err_past_date is not None
+    assert err_past_date.retry_after_seconds is None
+
+    # Negative cases must NOT be misclassified as quota/cooldown.
+    assert _provider_quota_error({
+        "name": "APIError",
+        "data": {"statusCode": 403, "message": "对该模型无权限", "responseBody": '{"error_code":"TM.00001005"}'},
+    }) is None
+    assert _provider_quota_error({
+        "name": "APIError",
+        "data": {"statusCode": 500, "message": "Internal server error"},
+    }) is None
+    assert _provider_quota_error({
+        "name": "APIError",
+        "data": {"message": "assistant request failed"},
+    }) is None
+    assert _provider_quota_error({
+        "name": "ContextOverflowError",
+        "data": {"statusCode": 503, "message": "Input exceeds context window"},
+    }) is None
+
+
+def test_run_prompt_classifies_http_503_cooldown_response_and_v2_session_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent._opencode_v2 import submit_and_resolve_v2_prompt
+    from task_agent.serve_client import _ServeEventState, _assistant_message_error, _assistant_message_is_terminal, _response_message_id
+
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._register_event_state = AsyncMock()
+        manager._unregister_event_state = AsyncMock()
+        manager._poll_session_snapshots = AsyncMock()
+        request_failures: list[str] = []
+
+        class Http503Client(_FakeAsyncClient):
+            async def post(self, path, **kwargs):
+                if path == "/session":
+                    return _FakeResponse({"id": "ses_http_503"})
+                if path == "/session/ses_http_503/message":
+                    resp = httpx.Response(
+                        status_code=503,
+                        headers={"retry-after": "18", "content-type": "application/json"},
+                        json={
+                            "error": {
+                                "message": "Service in cooldown. Retry after 18 seconds.",
+                                "type": "proxy_error",
+                                "code": "entry_in_cooldown",
+                            }
+                        },
+                        request=httpx.Request("POST", "http://127.0.0.1:4096/session/ses_http_503/message"),
+                    )
+                    return resp
+                return await super().post(path, **kwargs)
+
+        with monkeypatch.context() as mp:
+            mp.setattr("task_agent.serve_client.httpx.AsyncClient", Http503Client)
+            with pytest.raises(OpenCodeProviderQuotaError) as exc_info:
+                await manager.run_prompt(
+                    tool="opencode",
+                    executable="opencode",
+                    directory=tmp_path,
+                    prompt="run",
+                    model="proxy/model-a",
+                    timeout=5,
+                    on_model_request_failure=request_failures.append,
+                )
+
+        assert exc_info.value.reason_kind == "cooldown"
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.error_code == "entry_in_cooldown"
+        assert exc_info.value.retry_after_seconds == pytest.approx(18.0)
+        assert request_failures == ["quota"]
+
+        # Verify OpenCode v2 synthesis preserves structured session.error payload.
+        event_state = _ServeEventState("opencode", "ses_v2_503", None)
+        event_state.start_progress()
+        structured_503 = {
+            "name": "APIError",
+            "data": {
+                "statusCode": 503,
+                "message": "Service in cooldown. Retry after 0 seconds.",
+                "responseHeaders": {"retry-after": "0"},
+                "responseBody": '{"error":{"code":"entry_in_cooldown","type":"proxy_error","message":"Service in cooldown. Retry after 0 seconds."}}',
+            },
+        }
+        event_state.emit_session_error(structured_503)
+
+        def v2_handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path.endswith("/prompt"):
+                return httpx.Response(202, json={"queued": True})
+            if request.method == "GET" and request.url.path.endswith("/message"):
+                return httpx.Response(200, json=[])
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:4096",
+            transport=httpx.MockTransport(v2_handler),
+        ) as v2_client:
+            synthesized = await submit_and_resolve_v2_prompt(
+                v2_client,
+                session_id="ses_v2_503",
+                prompt="hello",
+                payload={"parts": [{"type": "text", "text": "hello"}]},
+                params={},
+                headers={},
+                discovered_paths=frozenset({"/api/session/{sessionID}/prompt", "/api/session/{sessionID}/message"}),
+                baseline_message_id="",
+                event_state=event_state,
+                is_terminal_fn=_assistant_message_is_terminal,
+                response_id_fn=_response_message_id,
+                assistant_error_fn=_assistant_message_error,
+                cancel_event=None,
+                poll_interval=0.01,
+            )
+        payload = synthesized.json()
+        assert payload["info"]["error"] == structured_503
+
+    asyncio.run(run())

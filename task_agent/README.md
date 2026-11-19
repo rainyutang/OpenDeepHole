@@ -194,7 +194,7 @@ OpenCode 的 YAML 内覆盖配置放在 `serve.opencode_config` 下，其中 MCP
 
 模型池完成历史继续以一个逻辑任务为一项，但会在 `session_events` 中按顺序保留业务 Session、独立 JSON 格式匹配 Session、同 Session JSON 纠正，以及同 Session 必需命令或宿主产物校验纠正；每项包含 Session ID、尝试序号、模型、结果、耗时及失败类别，最终成功也保留之前的超时或不合规事件。JSON 不合规仅区分空输出、无 JSON、JSON 语法错误、Schema 不匹配和无法无损格式化；校验纠正只持久化规范化失败类别和摘要，不持久化校验输出正文。`serve_session_id` 仍是最终权威业务 Session，旧历史缺少事件数组时保持兼容。
 
-OpenCode 即使返回 HTTP 成功，也可能在 assistant `info.error` 的校验包装中携带 Provider 限流。Task Agent 会递归解析其中允许公开的 `error_code`、`type` 和 `retry_after`；`*.429` 且语义为 RPM/TPM 配额不足时不再作为永久模型故障，而是按实际模型身份打开进程内临时熔断。冷却默认依次为 30、60、120、240、300 秒，正数 `retry_after` 优先采用并限制到 300 秒；若有其它合格模型，fresh Session 立即换模，若全部模型都在冷却则当前逻辑任务最多等待 5 分钟且可被取消。冷却到期时同一实际身份只允许一个半开探测，成功即关闭熔断，重复配额错误重新打开并延长冷却；Session 重试次数仍由既有 `max_retries` 控制，进程重启会清空该临时状态。
+OpenCode 即使返回 HTTP 成功，也可能在 assistant `info.error`（含 `responseBody`/`responseHeaders`）或校验包装中携带 Provider 限流、上游代理冷却与 `503`/`529` 服务不可用。Task Agent 会递归解析允许公开的错误码、HTTP 状态码、`type` 与 `Retry-After`；命中 `*.429` 配额不足、标准 `HTTP 429`、上游冷却（如 `entry_in_cooldown` / `Service in cooldown`）或 `HTTP 503`/`529` 过载时，按实际模型身份打开进程内临时熔断冷却。默认退避序列为 30、60、120、240、300 秒，首次优先采用正数 `Retry-After`（上限 300 秒），`0`/`-1` 或无效值走指数退避，连续探测失败时施加指数退避下限，且同一冷却窗口内并发在途报错不重复升级退避档位；若有其它合格模型，任务立即换模（支持同 Session 换模），若全部模型都在冷却则当前逻辑任务最多暂停等待 5 分钟且可被取消。冷却到期时同一实际身份只允许一个半开探测，收到正常进展或成功即关闭熔断，重复报错则重新打开并延长冷却；Session 重试次数仍由既有 `max_retries` 控制，进程重启会清空该临时状态。
 
 同步消息接口若返回 HTTP 成功但正文为空或不是 JSON，组件会按发送前的消息基线从同一 Session 恢复本次新增且已完成的 assistant 消息，并输出不含模型正文的 `RESPONSE_RECOVERED`。无法安全恢复时不会复用旧回复，而是报告仅含状态码、Content-Type、响应字节数和失败类别的协议错误，按健康中性失败换模重试且不降低模型权重；原始响应正文和底层 JSON 解码异常不会进入控制台错误。
 

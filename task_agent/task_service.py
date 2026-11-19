@@ -1830,10 +1830,12 @@ class OpenCodeTaskService:
                 last_source = source
                 logger.warning(
                     "OpenCode task %s session attempt %d/%d hit recoverable "
-                    "Provider quota error code=%s retry_after=%s",
+                    "Provider %s error status=%s code=%s retry_after=%s",
                     record.task_id,
                     session_attempt,
                     total_session_attempts,
+                    getattr(exc, "reason_kind", "quota") or "quota",
+                    getattr(exc, "status_code", None) or "unknown",
                     exc.error_code or "unknown",
                     (
                         f"{exc.retry_after_seconds:g}"

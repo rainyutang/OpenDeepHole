@@ -9,6 +9,7 @@ import fnmatch
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -24,6 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
@@ -720,7 +722,7 @@ class OpenCodeServeStartupError(RuntimeError):
 
 
 class OpenCodeProviderQuotaError(RuntimeError):
-    """Recoverable Provider-side quota exhaustion reported by OpenCode."""
+    """Recoverable Provider-side quota, cooldown, or transient 503/529 unavailability."""
 
     def __init__(
         self,
@@ -729,23 +731,44 @@ class OpenCodeProviderQuotaError(RuntimeError):
         quota_type: str = "",
         identity: str = "",
         retry_after_seconds: float | None = None,
+        status_code: int | None = None,
+        reason_kind: str = "quota",
+        detail: str = "",
     ) -> None:
         self.error_code = error_code
         self.quota_type = quota_type
         self.identity = identity
         self.retry_after_seconds = retry_after_seconds
+        self.status_code = status_code
+        self.reason_kind = str(reason_kind or "quota").strip().lower() or "quota"
+        self.detail = detail
         super().__init__(str(self))
 
     def __str__(self) -> str:
-        scope = f" ({self.quota_type})" if self.quota_type else ""
         retry_note = (
             f"，建议 {self.retry_after_seconds:g} 秒后重试"
             if self.retry_after_seconds is not None
             else "，将按退避策略重试"
         )
+        if self.reason_kind in {"cooldown", "service_unavailable"}:
+            lead = (
+                "模型上游服务处于冷却期"
+                if self.reason_kind == "cooldown"
+                else "模型 Provider 服务暂时不可用"
+            )
+            meta: list[str] = []
+            if self.status_code:
+                meta.append(f"HTTP {self.status_code}")
+            if self.error_code and self.error_code != str(self.status_code or ""):
+                meta.append(f"错误码 {self.error_code}")
+            meta_note = f"（{'，'.join(meta)}）" if meta else ""
+            detail_note = f"：{self.detail}" if self.detail else ""
+            return f"{lead}{meta_note}{detail_note}{retry_note}"
+        scope = f" ({self.quota_type})" if self.quota_type else ""
+        detail_note = f"：{self.detail}" if self.detail else ""
         return (
             f"模型 Provider 请求配额暂不可用{scope}"
-            f"，错误码 {self.error_code or 'unknown'}{retry_note}"
+            f"，错误码 {self.error_code or 'unknown'}{detail_note}{retry_note}"
         )
 
 
@@ -4270,12 +4293,177 @@ def _embedded_json_objects(value: str) -> list[object]:
     return decoded
 
 
-def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
-    """Extract an allowlisted quota signal from nested OpenCode/Provider errors."""
+_NON_RETRYABLE_PROVIDER_ERROR_NAMES = frozenset({
+    "ContextOverflowError",
+    "MessageAbortedError",
+    "MessageOutputLengthError",
+    "StructuredOutputError",
+    "ContentFilterError",
+    "ProviderModelNotFoundError",
+    "ModelNotFoundError",
+})
+
+_EXPLICIT_PROVIDER_COOLDOWN_CODES = frozenset({
+    "entry_in_cooldown",
+    "model_in_cooldown",
+    "service_in_cooldown",
+    "provider_in_cooldown",
+    "channel_in_cooldown",
+    "key_in_cooldown",
+    "upstream_in_cooldown",
+    "endpoint_in_cooldown",
+    "in_cooldown",
+})
+
+_EXPLICIT_PROVIDER_COOLDOWN_PHRASES = (
+    "service in cooldown",
+    "entry in cooldown",
+    "model in cooldown",
+    "provider in cooldown",
+    "in cooldown",
+)
+
+_EXPLICIT_PROVIDER_QUOTA_CODES = frozenset({
+    "rate_limit_exceeded",
+    "rate_limit_error",
+    "insufficient_quota",
+    "quota_exceeded",
+    "too_many_requests",
+    "tokens_limit_exceeded",
+    "requests_limit_exceeded",
+    "throttling_error",
+})
+
+_EXPLICIT_PROVIDER_UNAVAILABLE_CODES = frozenset({
+    "overloaded_error",
+    "service_unavailable",
+    "server_overloaded",
+    "model_overloaded",
+    "upstream_unavailable",
+})
+
+_EXPLICIT_PROVIDER_UNAVAILABLE_PHRASES = (
+    "overloaded",
+    "service unavailable",
+    "temporarily unavailable",
+    "服务器繁忙",
+    "系统繁忙",
+    "服务繁忙",
+    "模型繁忙",
+)
+
+_PROVIDER_TRANSIENT_HTTP_STATUSES = frozenset({429, 503, 529})
+_PROVIDER_DETERMINISTIC_HTTP_STATUSES = frozenset({400, 401, 403, 404, 413, 422})
+
+
+def _parse_http_date_utc(raw_value: object) -> datetime | None:
+    if not isinstance(raw_value, str):
+        return None
+    text = raw_value.strip()
+    if not text:
+        return None
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_retry_after_seconds(
+    raw_value: object,
+    *,
+    unit: str = "seconds",
+    reference_time: datetime | None = None,
+) -> float | None:
+    """Parse a strictly positive Retry-After duration; ignore 0, negative, or invalid hints."""
+    if raw_value is None or isinstance(raw_value, bool):
+        return None
+    if isinstance(raw_value, (int, float)):
+        numeric = float(raw_value)
+        if not math.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric / 1000.0 if unit == "ms" else numeric
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError):
+        if unit != "seconds":
+            return None
+        target_dt = _parse_http_date_utc(text)
+        if target_dt is None:
+            return None
+        anchor = reference_time or datetime.now(timezone.utc)
+        delta = (target_dt - anchor).total_seconds()
+        return delta if math.isfinite(delta) and delta > 0 else None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric / 1000.0 if unit == "ms" else numeric
+
+
+def _extract_retry_after_seconds(
+    candidates: list[dict[str, object]],
+    header_maps: list[dict[str, object]],
+) -> float | None:
+    for headers in header_maps:
+        lowered = {
+            str(key).strip().casefold(): val
+            for key, val in headers.items()
+        }
+        reference_time = _parse_http_date_utc(lowered.get("date"))
+        parsed_ms = _parse_retry_after_seconds(
+            lowered.get("retry-after-ms"),
+            unit="ms",
+            reference_time=reference_time,
+        )
+        if parsed_ms is not None:
+            return parsed_ms
+        parsed_sec = _parse_retry_after_seconds(
+            lowered.get("retry-after"),
+            unit="seconds",
+            reference_time=reference_time,
+        )
+        if parsed_sec is not None:
+            return parsed_sec
+    for candidate in candidates:
+        for key in ("retry_after_ms", "retryAfterMs"):
+            parsed_ms = _parse_retry_after_seconds(candidate.get(key), unit="ms")
+            if parsed_ms is not None:
+                return parsed_ms
+        for key in ("retry_after", "retryAfter", "retry_after_seconds"):
+            parsed_sec = _parse_retry_after_seconds(candidate.get(key), unit="seconds")
+            if parsed_sec is not None:
+                return parsed_sec
+    return None
+
+
+def _provider_quota_error(
+    value: object,
+    *,
+    config_content: str = "",
+) -> OpenCodeProviderQuotaError | None:
+    """Extract an allowlisted quota, proxy cooldown, or 503/529 transient signal."""
+    if value is None:
+        return None
+    outer_name = ""
+    if isinstance(value, dict):
+        outer_name = str(value.get("name") or "").strip()
+        if outer_name in _NON_RETRYABLE_PROVIDER_ERROR_NAMES:
+            return None
+
     queue: list[tuple[object, int]] = [(value, 0)]
     seen: set[int] = set()
     candidates: list[dict[str, object]] = []
-    while queue:
+    header_maps: list[dict[str, object]] = []
+    free_texts: list[str] = []
+    for _ in range(64):
+        if not queue:
+            break
         current, depth = queue.pop(0)
         if depth > 7:
             continue
@@ -4286,25 +4474,39 @@ def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
             seen.add(marker)
         if isinstance(current, dict):
             candidates.append(current)
-            for key, nested in current.items():
-                if key in {
-                    "error",
-                    "data",
-                    "cause",
-                    "message",
-                    "error_msg",
-                    "details",
-                    "value",
-                }:
-                    queue.append((nested, depth + 1))
+            raw_headers = current.get("responseHeaders")
+            if isinstance(raw_headers, dict) and raw_headers:
+                header_maps.append(raw_headers)
+            for key in (
+                "error",
+                "data",
+                "cause",
+                "message",
+                "error_msg",
+                "details",
+                "value",
+                "responseBody",
+            ):
+                if key in current:
+                    queue.append((current[key], depth + 1))
         elif isinstance(current, list):
             queue.extend((item, depth + 1) for item in current[:20])
         elif isinstance(current, str):
-            queue.extend(
-                (item, depth + 1)
-                for item in _embedded_json_objects(current)
-            )
+            snippet = current[:20_000].strip()
+            if snippet:
+                free_texts.append(snippet)
+                queue.extend(
+                    (item, depth + 1)
+                    for item in _embedded_json_objects(snippet)
+                )
 
+    combined_lower = "\n".join(free_texts).casefold()
+    if any(phrase in combined_lower for phrase in _LOCAL_TOOL_PERMISSION_PHRASES):
+        return None
+
+    retry_after_seconds = _extract_retry_after_seconds(candidates, header_maps)
+
+    # Priority 1: preserve existing allowlisted gateway *.429 RPM/TPM quota format.
     for candidate in candidates:
         error_code = str(candidate.get("error_code") or "").strip()
         quota_type = str(candidate.get("type") or "").strip().upper()
@@ -4332,14 +4534,9 @@ def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
         )
         if not quota_type:
             quota_type = str(detail_candidate.get("type") or "").strip().upper()
-        retry_after = candidate.get("retry_after")
-        retry_after_seconds: float | None = None
-        try:
-            parsed_retry_after = float(retry_after)
-        except (TypeError, ValueError):
-            parsed_retry_after = -1
-        if parsed_retry_after > 0:
-            retry_after_seconds = parsed_retry_after
+        candidate_retry_after = _parse_retry_after_seconds(
+            candidate.get("retry_after"), unit="seconds",
+        )
         return OpenCodeProviderQuotaError(
             error_code=error_code,
             quota_type=quota_type,
@@ -4348,9 +4545,132 @@ def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
                 or detail_candidate.get("identity")
                 or ""
             ).strip(),
-            retry_after_seconds=retry_after_seconds,
+            retry_after_seconds=(
+                candidate_retry_after
+                if candidate_retry_after is not None
+                else retry_after_seconds
+            ),
+            status_code=429,
+            reason_kind="quota",
         )
-    return None
+
+    matched_status: int | None = None
+    has_proxy_error_type = False
+    is_api_error = outer_name == "APIError"
+    cooldown_code = ""
+    quota_code = ""
+    unavailable_code = ""
+    fallback_code = ""
+    has_cooldown_phrase = False
+    has_unavailable_phrase = False
+
+    for candidate in candidates:
+        raw_status = (
+            candidate.get("statusCode")
+            if candidate.get("statusCode") is not None
+            else candidate.get("status")
+        )
+        if matched_status is None and isinstance(raw_status, int) and not isinstance(raw_status, bool):
+            matched_status = raw_status
+
+        raw_type = str(candidate.get("type") or "").strip()
+        lowered_type = raw_type.casefold()
+        if lowered_type == "proxy_error":
+            has_proxy_error_type = True
+
+        raw_code = str(
+            candidate.get("error_code")
+            or candidate.get("code")
+            or ""
+        ).strip()
+        lowered_code = raw_code.casefold()
+        if raw_code and not fallback_code:
+            fallback_code = raw_code
+        if lowered_code in _EXPLICIT_PROVIDER_COOLDOWN_CODES and not cooldown_code:
+            cooldown_code = raw_code
+        if (
+            (lowered_code in _EXPLICIT_PROVIDER_QUOTA_CODES or lowered_type in _EXPLICIT_PROVIDER_QUOTA_CODES)
+            and not quota_code
+        ):
+            quota_code = raw_code or raw_type
+        if (
+            (lowered_code in _EXPLICIT_PROVIDER_UNAVAILABLE_CODES or lowered_type in _EXPLICIT_PROVIDER_UNAVAILABLE_CODES)
+            and not unavailable_code
+        ):
+            unavailable_code = raw_code or raw_type
+
+        for msg_key in ("error_msg", "message"):
+            raw_msg = candidate.get(msg_key)
+            if not isinstance(raw_msg, str) or not raw_msg.strip():
+                continue
+            lowered_msg = raw_msg.strip().casefold()
+            if any(phrase in lowered_msg for phrase in _LOCAL_TOOL_PERMISSION_PHRASES):
+                return None
+            if any(phrase in lowered_msg for phrase in _EXPLICIT_PROVIDER_COOLDOWN_PHRASES):
+                has_cooldown_phrase = True
+            if any(phrase in lowered_msg for phrase in _EXPLICIT_PROVIDER_UNAVAILABLE_PHRASES):
+                has_unavailable_phrase = True
+
+    reason_kind = ""
+    matched_code = ""
+    if cooldown_code or (
+        has_cooldown_phrase
+        and (
+            matched_status in _PROVIDER_TRANSIENT_HTTP_STATUSES
+            or has_proxy_error_type
+            or is_api_error
+        )
+        and matched_status not in _PROVIDER_DETERMINISTIC_HTTP_STATUSES
+    ):
+        reason_kind = "cooldown"
+        matched_code = cooldown_code or fallback_code or (str(matched_status) if matched_status else "cooldown")
+    elif matched_status == 429 or (
+        quota_code and matched_status not in _PROVIDER_DETERMINISTIC_HTTP_STATUSES
+    ):
+        reason_kind = "quota"
+        matched_code = quota_code or fallback_code or "429"
+    elif matched_status in {503, 529} or (
+        (unavailable_code or (is_api_error and has_unavailable_phrase))
+        and matched_status not in _PROVIDER_DETERMINISTIC_HTTP_STATUSES
+    ):
+        reason_kind = "service_unavailable"
+        matched_code = unavailable_code or fallback_code or (str(matched_status) if matched_status else "503")
+
+    if not reason_kind:
+        return None
+
+    raw_detail = ""
+    if (
+        isinstance(value, dict)
+        and value.get("name")
+        and isinstance(value.get("data"), dict)
+        and str(value["data"].get("message") or "").strip()
+    ):
+        raw_detail = _error_summary(value)
+    else:
+        for candidate in candidates:
+            for msg_key in ("error_msg", "message"):
+                raw_msg = candidate.get(msg_key)
+                if isinstance(raw_msg, str) and raw_msg.strip():
+                    cleaned = raw_msg.strip()
+                    if not raw_detail or ("{" in raw_detail and "{" not in cleaned):
+                        raw_detail = cleaned
+            if raw_detail and "{" not in raw_detail:
+                break
+
+    safe_code = _one_line_preview(
+        _redact_inline_credentials(matched_code, config_content), 96,
+    )
+    safe_detail = _one_line_preview(
+        _redact_inline_credentials(raw_detail, config_content), 200,
+    ).rstrip("。. ")
+    return OpenCodeProviderQuotaError(
+        error_code=safe_code,
+        retry_after_seconds=retry_after_seconds,
+        status_code=matched_status,
+        reason_kind=reason_kind,
+        detail=safe_detail,
+    )
 
 
 def _provider_model_not_found_error(
@@ -4993,6 +5313,7 @@ class _ServeEventState:
         self.tool_results_emitted: set[tuple[str, str]] = set()
         self.file_writes: dict[tuple[str, str], OpenCodeFileWrite] = {}
         self.session_errors_emitted: set[str] = set()
+        self.last_session_error: object | None = None
         self.event_ids_seen: set[str] = set()
         self.last_session_status = ""
         self.observed_response_text = ""
@@ -5010,6 +5331,7 @@ class _ServeEventState:
         self.ignored_progress_message_ids.update(self.message_roles)
         self.progress_started_at_ms = int(time.time() * 1000)
         self.model_not_found_error = None
+        self.last_session_error = None
         self.session_terminal = False
 
     def close_progress(self) -> None:
@@ -5551,6 +5873,8 @@ class _ServeEventState:
         self.session_terminal = True
         self.finished_tool_input_messages.update(self.message_roles)
         self.finish_tool_inputs()
+        if error is not None and self.progress_started_at_ms is not None and not self.progress_closed:
+            self.last_session_error = error
         model_error = _provider_model_not_found_error(
             error, model=self.model, config_content=self.config_content,
         )
@@ -8851,22 +9175,56 @@ class OpenCodeServeManager:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError:
-                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
                 try:
                     error_body = response.json()
                 except ValueError:
                     error_body = response.content[:20_000].decode("utf-8", errors="replace")
+                raw_response_headers = getattr(response, "headers", None)
+                response_headers = (
+                    dict(raw_response_headers.items())
+                    if hasattr(raw_response_headers, "items")
+                    else {}
+                )
+                http_status_code = int(getattr(response, "status_code", 0) or 0)
+                http_error_payload: dict[str, Any] = {
+                    "statusCode": http_status_code,
+                    "responseHeaders": response_headers,
+                    "responseBody": error_body,
+                }
                 model_error = _provider_model_not_found_error(
                     error_body, model=model, config_content=key.config_content,
                 )
-                if model_error is None and event_state is not None:
+                quota_error = (
+                    None
+                    if model_error is not None
+                    else _provider_quota_error(
+                        http_error_payload, config_content=key.config_content,
+                    )
+                )
+                access_error = (
+                    None
+                    if (model_error is not None or quota_error is not None)
+                    else _provider_model_access_error(
+                        http_error_payload, model=model, config_content=key.config_content,
+                    )
+                )
+                if (
+                    model_error is None
+                    and quota_error is None
+                    and access_error is None
+                    and event_state is not None
+                ):
                     # v1.19 can return a generic HTTP 500 while the specific
-                    # ModelNotFoundError arrives on the Session event channel.
+                    # Provider error arrives on the Session event channel.
                     # Keep that channel open briefly, within the call deadline.
                     drain_until = time.monotonic() + min(
                         _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS, deadline.remaining(),
                     )
-                    while event_state.model_not_found_error is None and time.monotonic() < drain_until:
+                    while (
+                        event_state.model_not_found_error is None
+                        and event_state.last_session_error is None
+                        and time.monotonic() < drain_until
+                    ):
                         try:
                             await deadline.wait(
                                 asyncio.sleep(min(0.01, max(0.0, drain_until - time.monotonic()))),
@@ -8875,9 +9233,28 @@ class OpenCodeServeManager:
                         except asyncio.TimeoutError:
                             break  # Preserve the HTTP failure when the diagnostic budget expires.
                     model_error = event_state.model_not_found_error
+                    if model_error is None and event_state.last_session_error is not None:
+                        quota_error = _provider_quota_error(
+                            event_state.last_session_error,
+                            config_content=key.config_content,
+                        )
+                        if quota_error is None:
+                            access_error = _provider_model_access_error(
+                                event_state.last_session_error,
+                                model=model,
+                                config_content=key.config_content,
+                            )
                 if model_error is not None:
+                    await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
                     await prepare_same_session_retry_error(model_error)
                     raise_model_not_found(model_error)
+                if quota_error is not None:
+                    await deadline.wait(emit_model_request_failure("quota"), phase="response_cleanup")
+                    raise await prepare_same_session_retry_error(quota_error)
+                if access_error is not None:
+                    await deadline.wait(emit_model_request_failure("access_denied"), phase="response_cleanup")
+                    raise await prepare_same_session_retry_error(access_error)
+                await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
                 raise
             except BaseException:
                 await deadline.wait(emit_model_request_failure("failure"), phase="response_cleanup")
@@ -8989,7 +9366,9 @@ class OpenCodeServeManager:
                     and cancel_event.is_set()
                 ):
                     raise asyncio.CancelledError()
-                quota_error = _provider_quota_error(assistant_error)
+                quota_error = _provider_quota_error(
+                    assistant_error, config_content=key.config_content,
+                )
                 if quota_error is not None:
                     await deadline.wait(emit_model_request_failure("quota"), phase="response_cleanup")
                     raise await prepare_same_session_retry_error(quota_error)

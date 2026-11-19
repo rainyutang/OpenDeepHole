@@ -579,9 +579,13 @@ def _quota_backoff_seconds(
     failure_count: int,
     retry_after_seconds: float | None,
 ) -> float:
-    if retry_after_seconds is not None and retry_after_seconds > 0:
-        return min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, max(1.0, retry_after_seconds))
     exponential = MODEL_QUOTA_BACKOFF_INITIAL_SECONDS * (2 ** max(0, failure_count - 1))
+    if retry_after_seconds is not None and retry_after_seconds > 0:
+        bounded_hint = min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, max(1.0, retry_after_seconds))
+        if failure_count <= 1:
+            return bounded_hint
+        floor_backoff = MODEL_QUOTA_BACKOFF_INITIAL_SECONDS * (2 ** max(0, failure_count - 2))
+        return min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, max(bounded_hint, floor_backoff))
     return min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, exponential)
 
 
@@ -621,23 +625,48 @@ def _apply_model_health_outcome_locked(
         state.last_health_failure_at = _now_iso()
         state.last_health_failure_kind = health_outcome
         state.recovery_anchor = now
-        state.quota_half_open_probe_in_flight = False
-        state.access_half_open_probe_in_flight = False
+        if lease.quota_half_open_probe or health_outcome == "quota":
+            state.quota_half_open_probe_in_flight = False
+        if lease.access_half_open_probe or health_outcome == "access_denied":
+            state.access_half_open_probe_in_flight = False
         if health_outcome == "quota":
-            state.quota_failure_count += 1
-            delay = _quota_backoff_seconds(
-                state.quota_failure_count,
-                quota_retry_after_seconds,
+            already_cooling = (
+                state.quota_open_until is not None
+                and now < state.quota_open_until
+                and not lease.quota_half_open_probe
             )
-            state.quota_open_until = now + delay
-            logger.warning(
-                "Opened model Provider quota circuit model_id=%s model=%s "
-                "cooldown_seconds=%s failure_count=%s",
-                lease.option.id,
-                lease.option.model or "<cli-default>",
-                f"{delay:g}",
-                state.quota_failure_count,
-            )
+            if already_cooling:
+                if quota_retry_after_seconds is not None and quota_retry_after_seconds > 0:
+                    requested_delay = min(
+                        MODEL_QUOTA_BACKOFF_MAX_SECONDS,
+                        max(1.0, quota_retry_after_seconds),
+                    )
+                    requested_until = now + requested_delay
+                    if requested_until > state.quota_open_until:
+                        state.quota_open_until = requested_until
+                logger.debug(
+                    "Model Provider quota circuit already open model_id=%s model=%s "
+                    "remaining_seconds=%s failure_count=%s",
+                    lease.option.id,
+                    lease.option.model or "<cli-default>",
+                    f"{max(0.0, (state.quota_open_until or now) - now):.1f}",
+                    state.quota_failure_count,
+                )
+            else:
+                state.quota_failure_count += 1
+                delay = _quota_backoff_seconds(
+                    state.quota_failure_count,
+                    quota_retry_after_seconds,
+                )
+                state.quota_open_until = now + delay
+                logger.warning(
+                    "Opened model Provider quota circuit model_id=%s model=%s "
+                    "cooldown_seconds=%s failure_count=%s",
+                    lease.option.id,
+                    lease.option.model or "<cli-default>",
+                    f"{delay:g}",
+                    state.quota_failure_count,
+                )
         elif health_outcome == "access_denied":
             state.access_open_until = now + MODEL_ACCESS_DENIED_COOLDOWN_SECONDS
             if access_error_message:

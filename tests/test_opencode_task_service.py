@@ -5524,3 +5524,128 @@ def test_half_open_probe_unlocks_peer_slots_on_first_progress_and_stays_closed_a
         assert snap["m-probe"]["circuit_state"] == "closed"
 
     asyncio.run(run())
+
+
+def test_503_entry_in_cooldown_opens_circuit_pauses_other_tasks_and_recovers_in_same_session(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    import task_agent.model_pool as pool
+    from task_agent.serve_client import SAME_SESSION_RETRY_CLEAN_REVERTED, mark_same_session_retry
+
+    async def run() -> None:
+        pool._running_by_model.clear()
+        pool._global_running = 0
+        pool._stats_by_scope.clear()
+        pool._global_stats_by_model.clear()
+        pool._options_by_id.clear()
+        pool._model_health_by_id.clear()
+        pool._active_tasks.clear()
+        pool._pending_requests.clear()
+
+        cli_cfg = SimpleNamespace(models=[
+            {"id": "proxy-m1", "model": "proxy/m1", "capability": "high", "max_concurrency": 2},
+        ])
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "proxy/m1", _source())
+        )
+
+        in_cooldown = True
+        wave_started = asyncio.Event()
+        wave_calls = 0
+        prompt_calls: list[tuple[str, str | None]] = []
+
+        async def run_prompt(**kwargs):
+            nonlocal wave_calls
+            sid = kwargs["session_id"] or f"ses_{len(prompt_calls) + 1}"
+            prompt_calls.append((kwargs["prompt"], kwargs["session_id"]))
+            cb = kwargs["on_session_id"](sid)
+            if hasattr(cb, "__await__"):
+                await cb
+            if in_cooldown:
+                wave_calls += 1
+                if wave_calls >= 2:
+                    wave_started.set()
+                else:
+                    await asyncio.wait_for(wave_started.wait(), timeout=1.0)
+                await _notify_model_request_failure(kwargs, "quota")
+                raise mark_same_session_retry(
+                    OpenCodeProviderQuotaError(
+                        error_code="entry_in_cooldown",
+                        status_code=503,
+                        reason_kind="cooldown",
+                        retry_after_seconds=None,
+                        detail="APIError: Service in cooldown. Retry after 0 seconds",
+                    ),
+                    SAME_SESSION_RETRY_CLEAN_REVERTED,
+                )
+            progress_cb = kwargs.get("on_model_progress")
+            if progress_cb is not None:
+                res = progress_cb()
+                if hasattr(res, "__await__"):
+                    await res
+            return OpenCodePromptResult(
+                session_id=sid,
+                message_id=f"msg_{len(prompt_calls)}",
+                lines=["ok"],
+                text="ok",
+                model="proxy/m1",
+            )
+
+        runtime_cfg = SimpleNamespace(
+            opencode=SimpleNamespace(timeout=30, max_retries=2, models=cli_cfg.models),
+            fp_review_cli=None,
+            opencode_concurrency=2,
+        )
+        bindings = SimpleNamespace(
+            get_workspace=lambda: tmp_path.resolve(),
+            disabled_source_mcp_tools=lambda _directory: (),
+            writable_roots=lambda: (),
+            readable_roots=lambda: (),
+        )
+        caplog.set_level("WARNING")
+        with (
+            patch("task_agent.task_service.get_config", return_value=runtime_cfg),
+            patch("task_agent.task_service.get_host_bindings", return_value=bindings),
+            patch("task_agent.task_service.get_serve_manager", return_value=SimpleNamespace(run_prompt=run_prompt)),
+            patch("task_agent.task_service._task_cli_config", return_value=runtime_cfg.opencode),
+        ):
+            with _task_context(tmp_path, scan_id="scan-503"):
+                t1 = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="task-1", prompt="audit 1", directory=tmp_path, attempt=2,
+                )))
+                t2 = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="task-2", prompt="audit 2", directory=tmp_path, attempt=2,
+                )))
+                t3 = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="task-3", prompt="audit 3", directory=tmp_path, attempt=2,
+                )))
+                await asyncio.wait_for(wave_started.wait(), timeout=1.0)
+                await asyncio.sleep(0.05)
+
+                # Wave 1 (2 concurrent tasks) hit 503 cooldown -> circuit opens ONCE (count=1),
+                # and task-3 + retries stay paused in queue without hammering upstream!
+                state = pool._model_health_by_id["proxy-m1"]
+                assert state.quota_failure_count == 1
+                assert state.quota_open_until is not None
+                assert len(prompt_calls) == 2
+                assert not t1.done() and not t2.done() and not t3.done()
+
+                # Simulate proxy recovery and expire cooldown.
+                in_cooldown = False
+                state.quota_open_until = pool.time.monotonic() - 0.01
+                async with pool._condition:
+                    pool._notify_pool_changed_locked()
+
+                r1, r2, r3 = await asyncio.wait_for(asyncio.gather(t1, t2, t3), timeout=2.0)
+
+        assert r1.status == "success"
+        assert r2.status == "success"
+        assert r3.status == "success"
+        # First two tasks retried in the same sessions (ses_1, ses_2); task-3 never wasted a failed call.
+        assert {r1.session_id, r2.session_id} == {"ses_1", "ses_2"}
+        assert len(prompt_calls) == 5
+        assert "Provider cooldown error status=503 code=entry_in_cooldown retry_after=backoff" in caplog.text
+
+    asyncio.run(run())

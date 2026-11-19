@@ -2541,3 +2541,152 @@ def test_half_open_probe_closes_on_healthy_confirmation_and_snapshot_exposes_cir
         await release_model_lease(retry_granted, outcome="success", health_outcome="success")
 
     asyncio.run(run())
+
+
+def test_concurrent_inflight_quota_failures_do_not_escalate_backoff_or_clear_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        model_pool_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"]),
+    )
+
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "proxy-model",
+            "model": "proxy/model-a",
+            "max_concurrency": 6,
+        }])
+        leases = [
+            await acquire_model_lease(cfg, task_id=f"inflight-{idx}")
+            for idx in range(6)
+        ]
+        assert all(lease is not None for lease in leases)
+
+        # Keep lease[5] as an old pre-circuit in-flight task while leases[0..4] all fail
+        # in the same concurrent wave (e.g. HTTP 503 entry_in_cooldown with retry-after: 0).
+        for lease in leases[:5]:
+            await release_model_lease(
+                lease,
+                outcome="failure",
+                health_outcome="quota",
+                quota_retry_after_seconds=None,
+                record_completion=False,
+            )
+            clock["now"] += 0.01
+
+        state = model_pool_module._model_health_by_id["proxy-model"]
+        assert state.quota_failure_count == 1
+        assert state.quota_open_until == pytest.approx(1030.0)
+
+        # A concurrent failure with a longer explicit retry-after extends the window without escalating count.
+        extra_lease = leases[5]
+        # Advance past first cooldown so a single half-open probe starts, then verify
+        # an unrelated old non-probe lease failing with timeout does NOT clear the probe guard!
+        clock["now"] = 1031.0
+        probe = await acquire_model_lease(cfg, task_id="half-open-probe")
+        assert probe is not None and probe.quota_half_open_probe is True
+        assert state.quota_half_open_probe_in_flight is True
+
+        await release_model_lease(
+            extra_lease,
+            outcome="timeout",
+            health_outcome="timeout",
+            record_completion=False,
+        )
+        assert state.quota_half_open_probe_in_flight is True
+
+        # Another task still cannot bypass the in-flight half-open probe.
+        follower = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                task_id="follower-blocked",
+                wait_when_unavailable=True,
+                quota_wait_budget=ModelQuotaWaitBudget(total_seconds=60.0),
+            )
+        )
+        await asyncio.sleep(0.03)
+        assert not follower.done()
+
+        # Half-open probe fails again even with a tiny retry_after=1s -> count=2, exponential floor 30s!
+        await release_model_lease(
+            probe,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=1.0,
+            record_completion=False,
+        )
+        assert state.quota_failure_count == 2
+        assert state.quota_half_open_probe_in_flight is False
+        assert state.quota_open_until == pytest.approx(1061.0)
+
+        # Failure #3 after cooldown expires with tiny retry_after=1s -> floor escalates to 60s!
+        clock["now"] = 1062.0
+        probe_2 = await asyncio.wait_for(follower, timeout=1.0)
+        assert probe_2 is not None and probe_2.quota_half_open_probe is True
+        await release_model_lease(
+            probe_2,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=1.0,
+            record_completion=False,
+        )
+        assert state.quota_failure_count == 3
+        assert state.quota_open_until == pytest.approx(1122.0)
+
+        # Concurrent longer Retry-After during already-cooling window extends without bumping count.
+        clock["now"] = 1125.0
+        # Open fresh wave on a second model to verify concurrent extension cleanly.
+        cfg2 = SimpleNamespace(models=[{
+            "id": "proxy-model-2",
+            "model": "proxy/model-b",
+            "max_concurrency": 2,
+        }])
+        a = await acquire_model_lease(cfg2, task_id="ext-1")
+        b = await acquire_model_lease(cfg2, task_id="ext-2")
+        await release_model_lease(a, outcome="failure", health_outcome="quota", quota_retry_after_seconds=10.0)
+        await release_model_lease(b, outcome="failure", health_outcome="quota", quota_retry_after_seconds=45.0)
+        state2 = model_pool_module._model_health_by_id["proxy-model-2"]
+        assert state2.quota_failure_count == 1
+        assert state2.quota_open_until == pytest.approx(1170.0)
+
+    asyncio.run(run())
+
+
+def test_503_cooldown_prevents_multi_model_fast_fail_blackhole() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {"id": "cooling-model", "model": "proxy/cooling", "weight": 10, "max_concurrency": 4},
+            {"id": "healthy-model", "model": "proxy/healthy", "weight": 1, "max_concurrency": 2},
+        ])
+        first = await acquire_model_lease(cfg, task_id="hit-503")
+        assert first is not None and first.option.id == "cooling-model"
+        await release_model_lease(
+            first,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=None,
+            record_completion=False,
+        )
+
+        # Even when healthy-model already has running=1 (load ratio > 0) while cooling-model
+        # has running=0, brand-new tasks must route to healthy-model rather than getting sucked
+        # into the fast-failing cooling model.
+        busy_1 = await acquire_model_lease(cfg, task_id="new-task-1")
+        busy_2 = await acquire_model_lease(cfg, task_id="new-task-2")
+        assert busy_1 is not None and busy_1.option.id == "healthy-model"
+        assert busy_2 is not None and busy_2.option.id == "healthy-model"
+
+        queued = asyncio.create_task(acquire_model_lease(cfg, task_id="new-task-3"))
+        await asyncio.sleep(0.03)
+        assert not queued.done()
+
+        await release_model_lease(busy_1, outcome="success", health_outcome="success")
+        admitted = await asyncio.wait_for(queued, timeout=1.0)
+        assert admitted is not None and admitted.option.id == "healthy-model"
+        await release_model_lease(busy_2, outcome="success", health_outcome="success")
+        await release_model_lease(admitted, outcome="success", health_outcome="success")
+
+    asyncio.run(run())

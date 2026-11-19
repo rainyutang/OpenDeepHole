@@ -2497,15 +2497,27 @@ async def submit_and_resolve_v2_prompt(
                 terminal_event_seen
                 and not new_assistants
                 and event_state is not None
-                and getattr(event_state, "session_errors_emitted", None)
+                and (
+                    getattr(event_state, "last_session_error", None) is not None
+                    or getattr(event_state, "session_errors_emitted", None)
+                )
             ):
-                err_text = next(iter(event_state.session_errors_emitted))
+                raw_error = getattr(event_state, "last_session_error", None)
+                if isinstance(raw_error, dict):
+                    synth_error: object = normalize_v2_error(raw_error)
+                else:
+                    err_text = (
+                        next(iter(event_state.session_errors_emitted))
+                        if getattr(event_state, "session_errors_emitted", None)
+                        else str(raw_error or "unknown")
+                    )
+                    synth_error = {"name": "SessionError", "message": err_text}
                 synth = {
                     "info": {
                         "id": f"v2-error-{int(time.time() * 1000)}",
                         "sessionID": session_id,
                         "role": "assistant",
-                        "error": {"name": "SessionError", "message": err_text},
+                        "error": synth_error,
                     },
                     "parts": [],
                 }
