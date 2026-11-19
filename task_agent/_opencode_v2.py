@@ -7,10 +7,13 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
+import shutil
+import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -295,7 +298,7 @@ const permissionRuleOutcome = (binding, action, resource, directory = "") => {
     if (!rule || typeof rule !== "object") continue
     const rulePerm = normalizedTool(rule.permission ?? rule.action)
     const actionMatches = rulePerm === "*"
-      || rulePerm === normalizedAction
+      || wildcardMatch(rulePerm, normalizedAction)
       || (normalizedAction === "shell" && rulePerm === "bash")
       || (normalizedAction === "bash" && rulePerm === "shell")
       || (["write", "apply_patch", "patch"].includes(normalizedAction) && rulePerm === "edit")
@@ -1240,10 +1243,41 @@ def translate_v2_permissions_to_v1(rules: Any) -> list[dict[str, str]]:
     return translated
 
 
+def _normalize_v2_local_mcp_command(
+    command: list[str],
+    *,
+    platform: str | None = None,
+    which_fn: Callable[[str], str | None] | None = None,
+) -> list[str]:
+    """Wrap Windows `.cmd`/`.bat` shims via `cmd.exe /d /c call` for OpenCode 2.x."""
+    if not command:
+        return command
+    active_platform = platform if platform is not None else sys.platform
+    if active_platform != "win32":
+        return command
+    executable = str(command[0] or "").strip()
+    if not executable:
+        return command
+    lookup = which_fn if which_fn is not None else shutil.which
+    resolved = lookup(executable)
+    candidate = str(resolved or executable)
+    if PureWindowsPath(candidate).suffix.casefold() not in {".cmd", ".bat"}:
+        return command
+    comspec = (
+        os.environ.get("COMSPEC")
+        or lookup("cmd.exe")
+        or "cmd.exe"
+    )
+    return [str(comspec), "/d", "/c", "call", candidate, *command[1:]]
+
+
 def build_v2_mcp_put_config(
     config: dict[str, Any],
     *,
     disabled: bool | None = None,
+    directory: Path | str | None = None,
+    platform: str | None = None,
+    which_fn: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Translate an OpenDeepHole MCP config dict into strict OpenCode 2.3 PUT schema."""
     mcp_type = str(config.get("type") or "").strip().lower()
@@ -1259,12 +1293,21 @@ def build_v2_mcp_put_config(
             result["oauth"] = config["oauth"]
     else:
         command = config.get("command")
+        cmd_list: list[str] = []
         if isinstance(command, list):
-            result["command"] = [str(item) for item in command]
+            cmd_list = [str(item) for item in command]
         elif isinstance(command, str) and command.strip():
-            result["command"] = [command.strip()]
+            cmd_list = [command.strip()]
+        if cmd_list:
+            result["command"] = _normalize_v2_local_mcp_command(
+                cmd_list,
+                platform=platform,
+                which_fn=which_fn,
+            )
         if isinstance(config.get("cwd"), str) and config["cwd"].strip():
             result["cwd"] = config["cwd"].strip()
+        elif directory is not None and str(directory).strip():
+            result["cwd"] = str(directory)
         if isinstance(config.get("environment"), dict):
             result["environment"] = {str(k): str(v) for k, v in config["environment"].items()}
 
@@ -1288,8 +1331,15 @@ def build_v2_mcp_put_config(
         ms = int(raw_timeout)
         result["timeout"] = {"startup": ms, "catalog": ms, "execution": ms}
 
-    if isinstance(config.get("codemode"), bool):
-        result["codemode"] = config["codemode"]
+    # OpenCode 2.3.x enables Code Mode by default for MCP servers, folding their
+    # tools behind the `execute` tool that unattended scans disable. Default to
+    # direct tool exposure so codegraph / wx-codegraph / knowledge MCP tools are
+    # dynamically discovered and callable without a hardcoded tool list.
+    result["codemode"] = (
+        config["codemode"]
+        if isinstance(config.get("codemode"), bool)
+        else False
+    )
     if isinstance(config.get("protocol"), str) and config["protocol"] in {"legacy", "auto", "2026-07-28"}:
         result["protocol"] = config["protocol"]
     if isinstance(config.get("pool"), bool):

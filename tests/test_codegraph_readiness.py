@@ -154,3 +154,46 @@ def test_explicit_graph_dir_never_falls_back_to_other_default_database(
 
     asyncio.run(run())
     start.assert_awaited_once()
+
+
+@pytest.mark.parametrize("executable_name", ["codegraph", "wx-codegraph"])
+def test_wx_codegraph_executable_and_database_layout_are_supported(
+    tmp_path: Path, monkeypatch, executable_name: str,
+) -> None:
+    project = tmp_path / "project"
+    (project / "app").mkdir(parents=True)
+    executable = tmp_path / executable_name
+    executable.touch()
+    monkeypatch.setattr(codegraph, "_ready_projects", set())
+    monkeypatch.setattr(codegraph, "_project_locks", {})
+    config = {
+        "enabled": True,
+        "transport": "local",
+        "timeout_seconds": 5,
+        "local": {
+            "executable": str(executable),
+            "args": ["serve", "--mcp"],
+            "environment": {},
+        },
+    }
+    process = SimpleNamespace(
+        returncode=0,
+        communicate=AsyncMock(return_value=(b"", None)),
+    )
+
+    async def create_process(*args, cwd, **kwargs):
+        assert Path(args[0]).name == executable_name
+        assert args[1:] == ("init", "-i")
+        assert Path(cwd) == project
+        database = project / ".codegraph-wx" / "codegraph.db"
+        database.parent.mkdir()
+        database.touch()
+        return process
+
+    start = AsyncMock(side_effect=create_process)
+    monkeypatch.setattr(codegraph.asyncio, "create_subprocess_exec", start)
+
+    assert asyncio.run(codegraph.prepare_scan_codegraph(config, project))
+    start.assert_awaited_once()
+    codegraph._ready_projects.clear()
+    assert codegraph.is_codegraph_ready(project / "app")

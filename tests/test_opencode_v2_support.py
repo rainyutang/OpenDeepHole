@@ -1626,8 +1626,51 @@ def test_opencode_v232_wire_helpers_envelopes_messages_permissions_mcp_and_sse(t
         "type": "remote",
         "url": "http://127.0.0.1:9000/mcp",
         "disabled": True,
+        "codemode": False,
         "timeout": {"startup": 4500, "catalog": 4500, "execution": 4500},
     }
+    local_put_cfg = build_v2_mcp_put_config(
+        {
+            "type": "local",
+            "command": ["codegraph", "serve", "--mcp"],
+            "enabled": True,
+            "timeout": 300000,
+        },
+        directory=proj_dir,
+        platform="linux",
+    )
+    assert local_put_cfg == {
+        "type": "local",
+        "command": ["codegraph", "serve", "--mcp"],
+        "cwd": str(proj_dir),
+        "disabled": False,
+        "codemode": False,
+        "timeout": {"startup": 300000, "catalog": 300000, "execution": 300000},
+    }
+    win_cmd_put_cfg = build_v2_mcp_put_config(
+        {
+            "type": "local",
+            "command": ["codegraph", "serve", "--mcp"],
+            "enabled": True,
+            "codemode": True,
+        },
+        directory=r"D:\产品测试\基站27B\code\app",
+        platform="win32",
+        which_fn=lambda name: r"C:\Users\dev\AppData\Roaming\npm\codegraph.cmd" if name == "codegraph" else r"C:\Windows\System32\cmd.exe",
+    )
+    assert win_cmd_put_cfg["command"][:4] == [
+        win_cmd_put_cfg["command"][0],
+        "/d",
+        "/c",
+        "call",
+    ]
+    assert win_cmd_put_cfg["command"][4:] == [
+        r"C:\Users\dev\AppData\Roaming\npm\codegraph.cmd",
+        "serve",
+        "--mcp",
+    ]
+    assert win_cmd_put_cfg["cwd"] == r"D:\产品测试\基站27B\code\app"
+    assert win_cmd_put_cfg["codemode"] is True
     mcp_map = extract_mcp_status_map_v2({
         "location": {"directory": str(proj_dir)},
         "data": [{"name": "kb", "status": {"status": "connected"}}],
@@ -2120,3 +2163,263 @@ def test_v232_adopted_listener_and_empty_spec_fallback_preserve_model_and_sse(
             assert "/api/session/{sessionID}/prompt" in manager._discovered_v2_paths
 
     asyncio.run(scenario())
+
+
+def test_v2_scan_mcp_acquisition_put_polling_error_preservation_and_plugin_wildcards(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Verify V2 scan MCP works through _ScanMcpAcquisition.put, polls async states, preserves errors, and allows wildcard MCP rules."""
+    import hashlib
+    import shutil
+    import subprocess
+    import httpx
+    from task_agent import serve_client
+    from task_agent._opencode_v2 import FILE_WRITE_PLUGIN_V2_SOURCE, V2OpenApiSpec
+    from task_agent.serve_client import _ScanMcpAcquisition
+
+    monkeypatch.setattr(serve_client, "_V2_MCP_POLL_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(serve_client, "_V2_MCP_MISSING_GRACE_SECONDS", 0.05)
+
+    project_dir = tmp_path / "产品测试" / "基站27B"
+    project_dir.mkdir(parents=True)
+
+    codegraph_cfg = {
+        "enabled": True,
+        "name": "codegraph",
+        "transport": "local",
+        "timeout_seconds": 300,
+        "local": {
+            "executable": "codegraph",
+            "args": ["serve", "--mcp"],
+            "environment": {"CODEGRAPH_MCP_TOOLS": "explore,node"},
+        },
+    }
+
+    async def scenario() -> None:
+        # Part A: _ScanMcpAcquisition supports PUT, sends codemode=False + cwd, and polls missing -> pending -> connected.
+        manager = OpenCodeServeManager()
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="2",
+        )
+        manager._v2_openapi = V2OpenApiSpec(
+            paths=frozenset({
+                "/api/mcp",
+                "/api/experimental/mcp/{server}",
+                "/api/experimental/mcp/{server}/connect",
+                "/api/experimental/mcp/{server}/disconnect",
+            }),
+            raw_spec={
+                "paths": {
+                    "/api/mcp": {"get": {}},
+                    "/api/experimental/mcp/{server}": {"put": {}, "delete": {}},
+                    "/api/experimental/mcp/{server}/connect": {"post": {}},
+                    "/api/experimental/mcp/{server}/disconnect": {"post": {}},
+                }
+            },
+        )
+        manager._discovered_v2_paths = manager._v2_openapi.paths
+
+        put_bodies: list[dict] = []
+        get_responses: list[list[dict]] = [
+            [],  # initial _disconnect_source_graph_mcps GET
+            [],  # immediate GET right after PUT 204 (not materialized yet)
+            [{"name": "codegraph", "status": {"status": "pending"}}],
+            [{"name": "codegraph", "status": {"status": "connected"}}],
+            # Reconnect sequence after connection drops to disabled:
+            [{"name": "codegraph", "status": {"status": "disabled"}}],
+            [{"name": "codegraph", "status": {"status": "pending"}}],
+            [{"name": "codegraph", "status": {"status": "connected"}}],
+        ]
+        connect_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal connect_calls
+            if request.method == "PUT" and request.url.path == "/api/experimental/mcp/codegraph":
+                put_bodies.append(json.loads(request.content.decode("utf-8")))
+                return httpx.Response(204)
+            if request.method == "POST" and request.url.path == "/api/experimental/mcp/codegraph/connect":
+                connect_calls += 1
+                return httpx.Response(204)
+            if request.method == "GET" and request.url.path == "/api/mcp":
+                data = get_responses.pop(0) if get_responses else [{"name": "codegraph", "status": {"status": "connected"}}]
+                return httpx.Response(
+                    200,
+                    json={"location": {"directory": str(project_dir)}, "data": data},
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://127.0.0.1:41999",
+        ) as raw_client:
+            tracked = _ScanMcpAcquisition(raw_client)
+            lease = await manager._acquire_scan_mcp(
+                tracked,
+                project_dir,
+                "scan-v2-cg",
+                codegraph_cfg,
+            )
+            assert tracked.mutation_started is True
+            assert lease.connected is True
+            assert lease.name == "codegraph"
+            assert lease.error == ""
+            assert len(put_bodies) == 1
+            sent_cfg = put_bodies[0]["config"]
+            assert sent_cfg["type"] == "local"
+            assert sent_cfg["codemode"] is False
+            assert sent_cfg["cwd"] == str(project_dir.resolve())
+            assert sent_cfg["command"] == ["codegraph", "serve", "--mcp"]
+
+            # Second acquisition observes disabled -> calls /connect -> polls pending -> connected.
+            tracked_reconnect = _ScanMcpAcquisition(raw_client)
+            lease2 = await manager._acquire_scan_mcp(
+                tracked_reconnect,
+                project_dir,
+                "scan-v2-cg",
+                codegraph_cfg,
+            )
+            assert connect_calls == 1
+            assert lease2.connected is True
+            assert lease2.error == ""
+
+        # Part A2: After a prior runtime disconnect, PUT leaves status="disabled" in OpenCode 2.3.2;
+        # _mcp_upsert_and_statuses must automatically follow up with POST .../connect on attempt 1.
+        manager_re = OpenCodeServeManager()
+        manager_re._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="2",
+        )
+        re_events: list[str] = []
+        re_statuses: list[list[dict]] = [
+            [],  # initial _disconnect_source_graph_mcps GET
+            [{"name": "codegraph", "status": {"status": "disabled"}}],  # GET right after PUT
+            [{"name": "codegraph", "status": {"status": "pending"}}],  # GET after auto-connect
+            [{"name": "codegraph", "status": {"status": "connected"}}],
+        ]
+
+        def re_handler(request: httpx.Request) -> httpx.Response:
+            re_events.append(f"{request.method} {request.url.path}")
+            if request.method == "PUT" and request.url.path == "/api/experimental/mcp/codegraph":
+                return httpx.Response(204)
+            if request.method == "POST" and request.url.path == "/api/experimental/mcp/codegraph/connect":
+                return httpx.Response(204)
+            if request.method == "GET" and request.url.path == "/api/mcp":
+                data = re_statuses.pop(0) if re_statuses else [{"name": "codegraph", "status": {"status": "connected"}}]
+                return httpx.Response(
+                    200,
+                    json={"location": {"directory": str(project_dir)}, "data": data},
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(re_handler),
+            base_url="http://127.0.0.1:41999",
+        ) as re_client:
+            tracked_re = _ScanMcpAcquisition(re_client)
+            lease_re = await manager_re._acquire_scan_mcp(
+                tracked_re,
+                project_dir,
+                "scan-v2-re",
+                codegraph_cfg,
+            )
+            assert lease_re.connected is True
+            assert re_events.count("PUT /api/experimental/mcp/codegraph") == 1
+            assert re_events.count("POST /api/experimental/mcp/codegraph/connect") == 1
+
+        # Part B: When PUT fails with an exception and live status is missing, keep the original exception (not "OpenCode returned no MCP status").
+        manager_err = OpenCodeServeManager()
+        manager_err._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="2",
+        )
+
+        def failing_handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "PUT" and request.url.path == "/api/experimental/mcp/codegraph":
+                return httpx.Response(500, json={"error": "boom-internal"})
+            if request.method == "GET" and request.url.path == "/api/mcp":
+                return httpx.Response(
+                    200,
+                    json={"location": {"directory": str(project_dir)}, "data": []},
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(failing_handler),
+            base_url="http://127.0.0.1:41999",
+        ) as err_client:
+            tracked_err = _ScanMcpAcquisition(err_client)
+            failed_lease = await manager_err._acquire_scan_mcp(
+                tracked_err,
+                project_dir,
+                "scan-v2-err",
+                codegraph_cfg,
+            )
+            assert failed_lease.connected is False
+            assert "OpenCode returned no MCP status" not in failed_lease.error
+            assert "500" in failed_lease.error
+
+    asyncio.run(scenario())
+
+    # Part C: V2 plugin permission.evaluate allows wildcard MCP rules (codegraph_* / custom wx-codegraph tools) and denies unlisted tools.
+    node_bin = shutil.which("node")
+    if node_bin:
+        plugin_root = tmp_path / ".opendeephole-plugins"
+        bindings_dir = plugin_root / "command-bindings"
+        bindings_dir.mkdir(parents=True)
+        plugin_file = plugin_root / "file-write-v2.mjs"
+        plugin_file.write_text(FILE_WRITE_PLUGIN_V2_SOURCE, encoding="utf-8")
+        session_id = "ses_v2_cg_perm"
+        binding_file = bindings_dir / f"{hashlib.sha256(session_id.encode('utf-8')).hexdigest()}.json"
+        binding_file.write_text(
+            json.dumps({
+                "version": 2,
+                "binding_id": "bind_cg",
+                "allowed_commands": [],
+                "audit_path": str(tmp_path / "audit.jsonl"),
+                "tool_rules": [
+                    ["read", True],
+                    ["codegraph_*", True],
+                    ["question", False],
+                ],
+                "permission_rules": [
+                    {"permission": "*", "pattern": "*", "action": "deny"},
+                    {"permission": "read", "pattern": "*", "action": "allow"},
+                    {"permission": "codegraph_*", "pattern": "*", "action": "allow"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        harness = textwrap.dedent(
+            f"""
+            import plugin from {json.dumps(plugin_file.as_uri())};
+            let permHook = null;
+            let beforeHook = null;
+            const ctx = {{
+              location: {{ directory: {json.dumps(str(project_dir))} }},
+              permission: {{ hook: async (name, fn) => {{ if (name === "evaluate") permHook = fn; }} }},
+              tool: {{ hook: async (name, fn) => {{ if (name === "execute.before") beforeHook = fn; }} }},
+            }};
+            await plugin.setup(ctx);
+            const ev1 = {{ sessionID: {json.dumps(session_id)}, action: "codegraph_explore", resources: ["*"], effect: "ask" }};
+            await permHook(ev1);
+            const ev2 = {{ sessionID: {json.dumps(session_id)}, action: "codegraph_wx-custom-callchain", resources: ["*"], effect: "ask" }};
+            await permHook(ev2);
+            const ev3 = {{ sessionID: {json.dumps(session_id)}, action: "execute", resources: ["*"], effect: "ask" }};
+            await permHook(ev3);
+            await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "codegraph_wx-custom-callchain", args: {{}} }});
+            console.log(JSON.stringify({{ ev1: ev1.effect, ev2: ev2.effect, ev3: ev3.effect }}));
+            """
+        )
+        proc = subprocess.run(
+            [node_bin, "--input-type=module", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(proc.stdout.strip())
+        assert result == {"ev1": "allow", "ev2": "allow", "ev3": "deny"}

@@ -12,6 +12,12 @@ from typing import Any, Callable
 _ready_projects: set[Path] = set()
 _project_locks: dict[Path, asyncio.Lock] = {}
 _DEFAULT_GRAPH_DIRS = (".codegraph-wx", ".codegraph")
+_KNOWN_CODEGRAPH_EXECUTABLES = frozenset({
+    "codegraph",
+    "codegraph.exe",
+    "wx-codegraph",
+    "wx-codegraph.exe",
+})
 
 
 def _value(source: Any, name: str, default: Any = None) -> Any:
@@ -85,7 +91,7 @@ async def prepare_scan_codegraph(
     executable = str(_value(local, "executable", "") or "").strip()
     # A scan may bind any MCP implementation. Only the known CodeGraph CLI
     # owns the project graph database and init command.
-    if Path(executable).name.casefold() not in {"codegraph", "codegraph.exe"}:
+    if Path(executable).name.casefold() not in _KNOWN_CODEGRAPH_EXECUTABLES:
         return True
     resolved = shutil.which(executable)
     if resolved is None and Path(executable).is_file():

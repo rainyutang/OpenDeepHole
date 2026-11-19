@@ -116,6 +116,9 @@ _SERVE_PREPARATION_START_TIMEOUT_SECONDS = (
 _SCAN_MCP_INITIAL_CONNECT_ATTEMPTS = 2
 _SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS = 0.5
 _SCAN_MCP_RECOVERY_COOLDOWN_SECONDS = 1.0
+_V2_MCP_PENDING_POLL_MAX_SECONDS = 30.0
+_V2_MCP_MISSING_GRACE_SECONDS = 2.0
+_V2_MCP_POLL_INTERVAL_SECONDS = 0.15
 _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
@@ -693,6 +696,17 @@ class _ScanMcpAcquisition:
         # have changed the remote state without handing back a releasable lease.
         self.mutation_started = True
         return await self.client.post(*args, **kwargs)
+
+    async def put(self, *args, **kwargs):
+        self.phase = "scan_mcp_request"
+        # OpenCode 2.3.x registers/replaces MCP servers via PUT.
+        self.mutation_started = True
+        return await self.client.put(*args, **kwargs)
+
+    async def delete(self, *args, **kwargs):
+        self.phase = "scan_mcp_request"
+        self.mutation_started = True
+        return await self.client.delete(*args, **kwargs)
 
 
 class OpenCodeTaskQualityError(RuntimeError):
@@ -7274,6 +7288,46 @@ class OpenCodeServeManager:
             is not None
         )
 
+    async def _poll_v2_mcp_statuses(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        name: str,
+        *,
+        wait_for_ready: bool,
+        request_timeout: float | None = None,
+    ) -> dict[str, Any]:
+        mcp_base = self._mcp_base_path()
+        params = self._mcp_context_params(directory)
+        headers = _serve_context_headers(directory)
+        timeout_kwargs = {"timeout": request_timeout} if request_timeout is not None else {}
+        poll_budget = min(
+            _V2_MCP_PENDING_POLL_MAX_SECONDS,
+            max(1.0, float(request_timeout or _V2_MCP_PENDING_POLL_MAX_SECONDS)),
+        )
+        now = time.monotonic()
+        poll_deadline = now + poll_budget
+        missing_deadline = now + min(_V2_MCP_MISSING_GRACE_SECONDS, poll_budget)
+        while True:
+            status_resp = await client.get(
+                mcp_base,
+                params=params,
+                headers=headers,
+                **timeout_kwargs,
+            )
+            status_resp.raise_for_status()
+            statuses = self._mcp_status_map(status_resp.json())
+            if not wait_for_ready:
+                return statuses
+            native = statuses.get(name)
+            now = time.monotonic()
+            if isinstance(native, dict):
+                if str(native.get("status") or "") != "pending" or now >= poll_deadline:
+                    return statuses
+            elif now >= missing_deadline:
+                return statuses
+            await asyncio.sleep(_V2_MCP_POLL_INTERVAL_SECONDS)
+
     async def _mcp_upsert_and_statuses(
         self,
         client: httpx.AsyncClient,
@@ -7291,7 +7345,13 @@ class OpenCodeServeManager:
         if self._is_v2():
             quoted_name = quote(name, safe="")
             put_path = f"/api/experimental/mcp/{quoted_name}"
-            put_body = {"config": build_v2_mcp_put_config(config, disabled=disabled)}
+            put_body = {
+                "config": build_v2_mcp_put_config(
+                    config,
+                    disabled=disabled,
+                    directory=directory,
+                )
+            }
             put_resp = await client.put(
                 put_path,
                 params=params,
@@ -7305,25 +7365,35 @@ class OpenCodeServeManager:
                     disabled is not True
                     and not bool(put_body["config"].get("disabled"))
                 )
-                poll_deadline = time.monotonic() + min(5.0, float(request_timeout or 5.0))
-                while True:
-                    status_resp = await client.get(
-                        mcp_base,
+                statuses = await self._poll_v2_mcp_statuses(
+                    client,
+                    directory,
+                    name,
+                    wait_for_ready=wait_for_ready,
+                    request_timeout=request_timeout,
+                )
+                native = statuses.get(name)
+                if (
+                    wait_for_ready
+                    and isinstance(native, dict)
+                    and str(native.get("status") or "") == "disabled"
+                ):
+                    connect_resp = await client.post(
+                        f"/api/experimental/mcp/{quoted_name}/connect",
                         params=params,
                         headers=headers,
                         **timeout_kwargs,
                     )
-                    status_resp.raise_for_status()
-                    statuses = self._mcp_status_map(status_resp.json())
-                    native = statuses.get(name)
-                    if (
-                        not wait_for_ready
-                        or not isinstance(native, dict)
-                        or str(native.get("status") or "") != "pending"
-                        or time.monotonic() >= poll_deadline
-                    ):
-                        return statuses
-                    await asyncio.sleep(0.15)
+                    if not is_route_miss_response(connect_resp):
+                        connect_resp.raise_for_status()
+                        statuses = await self._poll_v2_mcp_statuses(
+                            client,
+                            directory,
+                            name,
+                            wait_for_ready=True,
+                            request_timeout=request_timeout,
+                        )
+                return statuses
         post_config = {**config, "enabled": not disabled} if disabled is not None else config
         response = await client.post(
             mcp_base,
@@ -7678,6 +7748,18 @@ class OpenCodeServeManager:
             assert response is not None
             if not is_route_miss_response(response):
                 response.raise_for_status()
+                if self._is_v2():
+                    statuses = await self._poll_v2_mcp_statuses(
+                        client,
+                        directory,
+                        name,
+                        wait_for_ready=True,
+                        request_timeout=request_timeout,
+                    )
+                    if name not in statuses:
+                        return "missing", "OpenCode returned no MCP status", False
+                    state, error = self._mcp_native_status(statuses.get(name))
+                    return state, error, True
                 return await self._scan_mcp_live_status(
                     client,
                     directory,
@@ -7756,10 +7838,11 @@ class OpenCodeServeManager:
                     cleanup_pending = False
                     if native_state == "connected":
                         return True, "", True, False, True
-                    if native_error:
-                        last_error = native_error
-                    elif native_state != "missing":
-                        last_error = f"OpenCode reported MCP state {native_state}"
+                    if native_state != "missing":
+                        if native_error:
+                            last_error = native_error
+                        else:
+                            last_error = f"OpenCode reported MCP state {native_state}"
                     if native_state in {
                         "needs_auth",
                         "needs_client_registration",
@@ -8703,6 +8786,11 @@ class OpenCodeServeManager:
                     )
                 return captured_token_usage
 
+            if is_v2 and not self._discovered_v2_paths:
+                await deadline.wait(
+                    self._ensure_v2_openapi_discovered(client),
+                    phase="openapi_discovery",
+                )
             if str(scan_id or "").strip():
                 scan_mcp_lease = await deadline.wait(acquire_mcp(
                     client,
@@ -8749,11 +8837,6 @@ class OpenCodeServeManager:
                             "KNOWLEDGE_BASE_MCP unavailable "
                             f"error={_one_line_preview(knowledge_mcp_lease.error)}",
                         )
-            if is_v2 and not self._discovered_v2_paths:
-                await deadline.wait(
-                    self._ensure_v2_openapi_discovered(client),
-                    phase="openapi_discovery",
-                )
             session_base = api_path(normalized_version, "/session")
             if not active_session_id:
                 session_title_text = str(session_title or "").strip() or "DeepHole 2.0 task"
