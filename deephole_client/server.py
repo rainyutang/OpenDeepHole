@@ -1095,6 +1095,9 @@ async def _run_single_fp_review_item(
                 apply_network_env(item.config)
         except Exception:
             pass
+    from deephole_client.platform_runtime import ensure_platform_runtime_configured
+
+    ensure_platform_runtime_configured(item.config)
     project = Path(item.project_path).expanduser().resolve()
     code_scan_path = Path(item.code_scan_path).expanduser().resolve()
     vuln_index = int(item.vulnerability["index"])
@@ -1530,6 +1533,9 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                 apply_network_env(item.config)
         except Exception:
             pass
+    from deephole_client.platform_runtime import ensure_platform_runtime_configured
+
+    ensure_platform_runtime_configured(item.config)
     try:
         work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / item.scan_id
         validation_policy = copy.deepcopy(item.validation_policy)

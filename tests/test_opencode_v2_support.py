@@ -1316,3 +1316,137 @@ def test_opencode_v232_api_info_html_fallback_model_catalog_and_strict_schema(
     assert rejected == [], f"Unexpected Effect Schema rejections: {rejected}"
     info_calls = [e for e in events if e.get("kind") == "request" and e.get("path") == "/api/info"]
     assert len(info_calls) >= 2
+
+
+def test_platform_runtime_preserves_opencode_v2_for_scan_resume_and_live_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.config as backend_config
+    from deephole_client.platform_runtime import (
+        configure_platform_runtime,
+        ensure_platform_runtime_configured,
+        refresh_platform_runtime_config,
+    )
+    from task_agent.host import _get_opencode_configuration_state, configure_opencode
+
+    previous_host_state = _get_opencode_configuration_state()
+    monkeypatch.setattr(backend_config, "_config", None)
+    monkeypatch.setattr(llm_runtime, "_active", None)
+    monkeypatch.setattr(llm_runtime, "_source", None)
+    monkeypatch.delenv("CONFIG_PATH", raising=False)
+    monkeypatch.setattr(
+        "deephole_client.opencode_integration.get_global_opencode_workspace",
+        lambda: tmp_path / "workspace",
+    )
+
+    try:
+        cfg = AgentConfig()
+        apply_remote_config(cfg, {
+            "schema_version": 11,
+            "base": {
+                "tool": "opencode",
+                "opencode_version": "2",
+                "executable": "/opt/v1/opencode",
+                "executable_v2": "/opt/v2/opencode",
+                "no_proxy": "10.0.0.0/8",
+                "opencode_serve_port": None,
+            },
+            "model_pool": {
+                "models": [
+                    {"id": "m1", "model": "openai/gpt-5", "enabled": True},
+                ],
+            },
+        })
+
+        scan_dir = tmp_path / "scans" / "scan-resume-v2"
+        configure_platform_runtime(cfg, scan_dir)
+
+        loaded = backend_config.get_config()
+        assert loaded.opencode.opencode_version == "2"
+        assert loaded.opencode.executable == "/opt/v1/opencode"
+        assert loaded.opencode.executable_v2 == "/opt/v2/opencode"
+
+        options = model_options(loaded.opencode)
+        assert len(options) == 1
+        assert options[0].opencode_version == "2"
+        assert options[0].executable == "/opt/v2/opencode"
+
+        runtime = build_opencode_session_runtime(loaded.opencode, directory=tmp_path)
+        assert runtime.opencode_version == "2"
+        assert runtime.executable == "/opt/v2/opencode"
+
+        # Live refresh immediately after configure_platform_runtime must update the
+        # active backend config in-place without dropping opencode_version.
+        cfg.opencode.opencode_version = "1"
+        refresh_platform_runtime_config(cfg)
+        assert backend_config.get_config().opencode.opencode_version == "1"
+
+        cfg.opencode.opencode_version = "2"
+        cfg.opencode.executable = "opencode"
+        cfg.opencode.executable_v2 = "opencode"
+        refresh_platform_runtime_config(cfg)
+        refreshed = backend_config.get_config()
+        assert refreshed.opencode.opencode_version == "2"
+        assert refreshed.opencode.executable_v2 == "opencode"
+        assert build_opencode_session_runtime(refreshed.opencode, directory=tmp_path).opencode_version == "2"
+
+        # Starting from an uninitialized backend config (e.g., Agent startup or
+        # standalone fp_review / vulnerability_validation), ensure_platform_runtime_configured
+        # must populate backend.config._config with the active 2.x settings.
+        backend_config._config = None
+        ensure_platform_runtime_configured(SimpleNamespace())  # type: ignore[arg-type]
+        assert backend_config._config is None
+        ensure_platform_runtime_configured(cfg)
+        assert backend_config._config is not None
+        assert backend_config.get_config().opencode.opencode_version == "2"
+        assert backend_config.get_config().opencode.executable_v2 == "opencode"
+    finally:
+        if previous_host_state[0] == "host" and previous_host_state[1] is not None:
+            configure_opencode(previous_host_state[1])
+
+
+def test_backend_config_load_normalizes_opencode_version_and_executable_v2(tmp_path: Path) -> None:
+    import backend.config as backend_config
+
+    explicit_yaml = tmp_path / "explicit.yaml"
+    explicit_yaml.write_text(
+        textwrap.dedent(
+            """\
+            opencode:
+              tool: opencode
+              opencode_version: "2.x"
+              executable: /opt/v1/opencode
+              executable_v2: /opt/v2/opencode
+            """
+        ),
+        encoding="utf-8",
+    )
+    loaded = backend_config.load_config(str(explicit_yaml))
+    assert loaded.opencode.opencode_version == "2"
+    assert loaded.opencode.executable == "/opt/v1/opencode"
+    assert loaded.opencode.executable_v2 == "/opt/v2/opencode"
+
+    legacy_v2_yaml = tmp_path / "legacy-v2.yaml"
+    legacy_v2_yaml.write_text(
+        textwrap.dedent(
+            """\
+            opencode:
+              tool: opencode
+              opencode_version: "2"
+              executable: /custom/opencode2
+            """
+        ),
+        encoding="utf-8",
+    )
+    legacy_loaded = backend_config.load_config(str(legacy_v2_yaml))
+    assert legacy_loaded.opencode.opencode_version == "2"
+    assert legacy_loaded.opencode.executable_v2 == "/custom/opencode2"
+
+    invalid_yaml = tmp_path / "invalid.yaml"
+    invalid_yaml.write_text(
+        "opencode:\n  opencode_version: '3'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unsupported OpenCode version"):
+        backend_config.load_config(str(invalid_yaml))

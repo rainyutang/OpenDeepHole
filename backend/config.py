@@ -52,7 +52,9 @@ class OpenCodeModelConfig(BaseModel):
 
 class OpenCodeConfig(BaseModel):
     tool: Literal["opencode"] = "opencode"
+    opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"  # OpenCode-compatible executable name or full path
+    executable_v2: str = "opencode"  # OpenCode 2.x executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -65,6 +67,13 @@ class OpenCodeConfig(BaseModel):
     config_paths: list[str] = []  # optional OpenCode config files to merge
     proxy_url: str = ""  # legacy compatibility; Serve ignores proxy URL injection
     no_proxy: str = ""  # optional no_proxy override for opencode/nga child processes
+
+    @field_validator("opencode_version", mode="before")
+    @classmethod
+    def _normalize_opencode_version(cls, value: object) -> str:
+        from task_agent._opencode_v2 import normalize_opencode_version
+
+        return normalize_opencode_version(value)
 
 
 class MemoryApiDiscoveryConfig(BaseModel):
@@ -286,14 +295,25 @@ def load_config(config_path: str | None = None) -> AppConfig:
 def _normalize_cli_section(section: object) -> None:
     if not isinstance(section, dict):
         return
+    from task_agent._opencode_v2 import normalize_opencode_version
+
     if str(section.pop("invocation_mode", "") or "").strip().lower() == "cli":
         warnings.warn("Legacy OpenCode CLI invocation is no longer supported; using serve", RuntimeWarning)
     tool = str(section.get("tool") or "").strip().lower()
     executable = str(section.get("executable") or "").strip()
     if tool and tool not in _LEGACY_AI_CLI_TOOLS:
         warnings.warn(f"Legacy AI tool {tool!r} is no longer supported; using opencode", RuntimeWarning)
+    opencode_version = normalize_opencode_version(section.get("opencode_version", "1"))
     section["tool"] = "opencode"
+    section["opencode_version"] = opencode_version
     section["executable"] = executable or ("nga" if tool == "nga" else "opencode")
+    raw_executable_v2 = str(section.get("executable_v2") or "").strip()
+    if raw_executable_v2:
+        section["executable_v2"] = raw_executable_v2
+    elif executable and opencode_version == "2" and "executable_v2" not in section:
+        section["executable_v2"] = section["executable"]
+    else:
+        section["executable_v2"] = "opencode"
     models = section.get("models")
     if isinstance(models, list):
         for model in models:

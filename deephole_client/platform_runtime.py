@@ -102,6 +102,23 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
     )
 
 
+def ensure_platform_runtime_configured(config: AgentConfig | None) -> None:
+    """Ensure backend.config._config and Task Agent host bindings mirror live Agent config."""
+    from .llm_runtime import active_config
+
+    resolved = active_config(config)
+    if not isinstance(resolved, AgentConfig):
+        return
+    import backend.config as backend_config
+
+    if backend_config._config is None:
+        backend_config._config = backend_config.AppConfig()
+    refresh_platform_runtime_config(resolved)
+    from .opencode_integration import configure_opencode_component
+
+    configure_opencode_component()
+
+
 def configure_platform_runtime(config: AgentConfig, work_dir: Path) -> None:
     """Configure the platform's Task Agent host adapter for one operation."""
     from .llm_runtime import active_config
@@ -118,7 +135,7 @@ def configure_platform_runtime(config: AgentConfig, work_dir: Path) -> None:
 
     import backend.config as backend_config
 
-    backend_config._config = None
+    backend_config._config = backend_config.load_config(str(config_path))
     from .opencode_integration import configure_opencode_component
 
     configure_opencode_component()
@@ -126,5 +143,6 @@ def configure_platform_runtime(config: AgentConfig, work_dir: Path) -> None:
 
 __all__ = [
     "configure_platform_runtime",
+    "ensure_platform_runtime_configured",
     "refresh_platform_runtime_config",
 ]

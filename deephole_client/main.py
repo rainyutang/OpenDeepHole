@@ -951,6 +951,8 @@ async def _main() -> None:
 
     from deephole_client.llm_runtime import initialize
     initialize(config)
+    from deephole_client.platform_runtime import ensure_platform_runtime_configured
+    ensure_platform_runtime_configured(config)
 
     name = config.agent_name or socket.gethostname()
 
