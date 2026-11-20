@@ -38,7 +38,7 @@
 .coverage-warning { color: #fcd34d; background: #d977061a; border: 1px solid #d977064d; }
 [data-theme="light"] .coverage-notice { color: #1d4ed8; }
 [data-theme="light"] .coverage-warning { color: #92400e; }
-.coverage-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
+.coverage-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
 .coverage-stats > div { border: 1px solid var(--coverage-line); border-radius: 7px; padding: 8px 10px; background: var(--ui-surface-muted, #111827); }
 .coverage-stats span, .coverage-stats small { display: block; color: var(--coverage-muted); font-size: 11px; }
 .coverage-stats strong { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 21px; font-weight: 650; margin: 2px 0; font-variant-numeric: tabular-nums; }
@@ -116,7 +116,7 @@
 .threat-coverage:fullscreen .coverage-detail { height: 100%; min-height: 0; }
 .threat-coverage:fullscreen .coverage-stats small, .threat-coverage:fullscreen .coverage-header p { display: none; }
 .threat-coverage:fullscreen .coverage-diagnostics { flex-shrink: 0; margin-top: 6px; padding-top: 6px; max-height: 100px; }
-@media (max-width: 900px) { .coverage-workspace { grid-template-columns: minmax(0, 1fr) 200px; } .coverage-legend small { display: none; } }
+@media (max-width: 900px) { .coverage-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } .coverage-workspace { grid-template-columns: minmax(0, 1fr) 200px; } .coverage-legend small { display: none; } }
 @media (max-width: 640px) {
   .threat-coverage { padding: 10px; }
   .coverage-header { align-items: flex-start; }

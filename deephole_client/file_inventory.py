@@ -17,9 +17,72 @@ from typing import Any
 
 from backend.file_inventory import (MAX_INVENTORY_ENTRIES, INVENTORY_POLICY_VERSION,
                                     ScanFileInventory, inventory_path_is_hidden, inventory_scope_key)
+from deephole_client.code_graph_build.path_access import io_path
 
 
 logger = logging.getLogger(__name__)
+
+MAX_LINE_COUNT_FILE_BYTES = 16 * 1024 * 1024
+DEFAULT_LINE_COUNT_TIMEOUT_SECONDS = 60.0
+_LINE_COUNT_CHUNK_BYTES = 65536
+_BINARY_EXTENSIONS = frozenset({
+    ".7z", ".a", ".avi", ".bin", ".bmp", ".bz2", ".class", ".db", ".db-shm",
+    ".db-wal", ".dll", ".dylib", ".elf", ".exe", ".gif", ".gz", ".ico", ".jar",
+    ".jpeg", ".jpg", ".lib", ".mov", ".mp3", ".mp4", ".o", ".obj", ".otf",
+    ".pdf", ".png", ".pyc", ".pyo", ".rar", ".so", ".sqlite", ".sqlite3",
+    ".tar", ".ttf", ".war", ".wasm", ".wav", ".webp", ".whl", ".woff",
+    ".woff2", ".xz", ".zip",
+})
+
+
+def _count_file_lines(path: Path, *, max_bytes: int = MAX_LINE_COUNT_FILE_BYTES) -> tuple[int | None, str]:
+    """Count physical lines in a non-binary file without failing inventory collection."""
+    if path.suffix.lower() in _BINARY_EXTENSIONS:
+        return None, "binary"
+    target = io_path(path)
+    try:
+        size = os.stat(target).st_size
+    except OSError:
+        return None, "unreadable"
+    if size == 0:
+        return 0, "counted"
+    if size > max_bytes:
+        return None, "skipped_large"
+    try:
+        with open(target, "rb") as handle:
+            first = handle.read(_LINE_COUNT_CHUNK_BYTES)
+            if not first:
+                return 0, "counted"
+            is_utf16 = (
+                (first.startswith(b"\xff\xfe") and not first.startswith(b"\xff\xfe\x00\x00"))
+                or first.startswith(b"\xfe\xff")
+            )
+            if is_utf16:
+                rest = handle.read(max_bytes - len(first) + 1)
+                data = first + rest
+                if len(data) > max_bytes:
+                    return None, "skipped_large"
+                text = data.decode("utf-16", errors="ignore")
+                if not text:
+                    return 0, "counted"
+                return text.count("\n") + (0 if text.endswith("\n") else 1), "counted"
+            if b"\x00" in first[:8192]:
+                return None, "binary"
+            newlines = first.count(b"\n")
+            last_byte = first[-1]
+            total_read = len(first)
+            while True:
+                chunk = handle.read(_LINE_COUNT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                if total_read > max_bytes:
+                    return None, "skipped_large"
+                newlines += chunk.count(b"\n")
+                last_byte = chunk[-1]
+            return newlines + (0 if last_byte == 10 else 1), "counted"
+    except OSError:
+        return None, "unreadable"
 
 
 @asynccontextmanager
@@ -69,14 +132,18 @@ def collect_file_inventory(
     base: dict, *, excluded: tuple[Path, ...], cancel_event: Any,
     stop_event: threading.Event, max_entries: int = MAX_INVENTORY_ENTRIES,
     timeout_seconds: float = 120.0,
+    line_count_timeout_seconds: float = DEFAULT_LINE_COUNT_TIMEOUT_SECONDS,
+    max_line_count_file_bytes: int = MAX_LINE_COUNT_FILE_BYTES,
 ) -> dict:
     root = Path(base["scan_root"])
     selected = [Path(path) for path in base.get("code_scan_paths") or [root]]
+    base = {k: v for k, v in base.items() if k not in {"total_lines", "line_counted_files", "line_count_status"}}
     base = {**base, "code_scan_paths": [str(path) for path in selected],
             "code_scan_path_kinds": {str(path): "directory" if path.is_dir() else "file" for path in selected},
             "inventory_policy_version": INVENTORY_POLICY_VERSION}
     excluded_set = set(excluded)
     entries = [{"path": ".", "kind": "directory"}]
+    file_paths: list[Path] = []
     issues: list[dict] = []
     issue_count = 0
     deadline = time.monotonic() + timeout_seconds
@@ -107,6 +174,8 @@ def collect_file_inventory(
                     return False
                 entries.append({"path": key, "kind": entry_kind})
                 known.add(key)
+                if entry_kind == "file":
+                    file_paths.append(path)
         return True
     # The selected roots may contain files. Structural ancestors are never walked.
     for path in sorted(set(selected), key=lambda value: len(value.parts)):
@@ -169,8 +238,35 @@ def collect_file_inventory(
         except OSError:
             issue(directory.relative_to(root).as_posix(), "unreadable")
     cancelled = cancelled or stop_event.is_set() or cancel_event.is_set()
+    line_stats: dict[str, Any] = {}
+    if not cancelled:
+        total_lines = 0
+        line_counted_files = 0
+        line_count_partial = False
+        line_deadline = min(deadline, time.monotonic() + line_count_timeout_seconds)
+        for file_path in file_paths:
+            if stop_event.is_set() or cancel_event.is_set():
+                cancelled = True
+                break
+            if time.monotonic() >= line_deadline:
+                line_count_partial = True
+                break
+            count, line_status = _count_file_lines(file_path, max_bytes=max_line_count_file_bytes)
+            if line_status == "counted" and count is not None:
+                total_lines += count
+                line_counted_files += 1
+            elif line_status in {"skipped_large", "unreadable"}:
+                line_count_partial = True
+        if not cancelled:
+            line_stats = {
+                "total_lines": total_lines,
+                "line_counted_files": line_counted_files,
+                "line_count_status": "partial" if line_count_partial else "complete",
+            }
     return {
-        **base, "status": "cancelled" if cancelled else "partial" if issue_count else "complete",
+        **base,
+        **line_stats,
+        "status": "cancelled" if cancelled else "partial" if issue_count else "complete",
         "entries": sorted(entries, key=lambda item: item["path"]),
         "issues": issues, "issue_count": issue_count,
         "excluded_paths": [path.relative_to(root).as_posix() for path in excluded if path.is_relative_to(root)],
@@ -186,7 +282,7 @@ def _save(path: Path, snapshot: dict) -> None:
 
 def _load(path: Path, project: Path, root: Path, code_scan_paths=None) -> dict | None:
     try:
-        data = ScanFileInventory.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json")
+        data = ScanFileInventory.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json", exclude_none=True)
         return data if _reusable(data, project, root, code_scan_paths) else None
     except (OSError, ValueError):
         return None
@@ -229,7 +325,7 @@ async def prepare_coverage_inventory(
                 project, scan_root, code_scan_paths,
             )
         if isinstance(value, dict):
-            parsed = ScanFileInventory.model_validate(value).model_dump(mode="json")
+            parsed = ScanFileInventory.model_validate(value).model_dump(mode="json", exclude_none=True)
             if inventory_scope_key(parsed) != inventory_scope_key(fallback):
                 raise ValueError("扫描文件清单范围与本次扫描不一致")
             snapshot = parsed

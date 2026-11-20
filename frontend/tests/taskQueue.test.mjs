@@ -914,7 +914,9 @@ test("task queue displays start/end columns, Fresh Session retry badge, refreshe
   assert.deepEqual(headers, ["状态", "任务", "模型", "开始时间", "结束时间"]);
   assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t1Start));
   assert.equal(text(rows(root)[0].findAllByType("td")[4]), "-");
-  assert.match(text(rows(root)[0].findAllByType("td")[1]), /ses_attempt_1/);
+  const initialTaskCell = text(rows(root)[0].findAllByType("td")[1]);
+  assert.doesNotMatch(initialTaskCell, /ses_attempt_1|Session：/);
+  assert.equal(initialTaskCell.includes("s"), false);
 
   detailPayload = {
     ...detailPayload,
@@ -947,13 +949,16 @@ test("task queue displays start/end columns, Fresh Session retry badge, refreshe
       session_attempts: 3,
     }),
   })));
-  assert.match(text(rows(root)[0].findAllByType("td")[1]), /Fresh Session 第 2\/3 次/);
-  assert.match(text(rows(root)[0].findAllByType("td")[1]), /ses_attempt_2/);
+  const retryTaskCell = text(rows(root)[0].findAllByType("td")[1]);
+  assert.match(retryTaskCell, /Fresh Session 第 2\/3 次/);
+  assert.doesNotMatch(retryTaskCell, /ses_attempt_2|Session：/);
   assert.equal(text(rows(root)[0].findAllByType("td")[3]), formatDateTime(t2Start));
   assert.equal(text(rows(root)[0].findAllByType("td")[4]), "-");
 
   await act(async () => rows(root)[0].props.onClick());
   const expandedText = text(root.toJSON());
+  assert.ok(expandedText.includes("ses_attempt_1"));
+  assert.ok(expandedText.includes("ses_attempt_2"));
   assert.ok(expandedText.includes(`开始：${formatDateTime(t1Start)}`));
   assert.ok(expandedText.includes(`结束：${formatDateTime(t1End)}`));
   assert.ok(expandedText.includes(`开始：${formatDateTime(t2Start)}`));

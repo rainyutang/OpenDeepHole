@@ -25,7 +25,7 @@ class ScanFileInventoriesMixin:
 
     def replace_file_inventory(self, scan_id: str, report: FileInventoryUpload) -> bool:
         """Accept current execution reports even after analysis/scan completion."""
-        inventory = report.inventory.model_dump(mode="json")
+        inventory = report.inventory.model_dump(mode="json", exclude_none=True)
         serialized = json.dumps(inventory, ensure_ascii=False)
         with self._lock:
             suffix = " FOR UPDATE" if getattr(self, "distributed", False) else ""

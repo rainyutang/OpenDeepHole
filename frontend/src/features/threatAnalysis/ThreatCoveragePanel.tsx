@@ -140,6 +140,24 @@ export function ThreatCoverageView({ data, tree, loading, error, refresh, issues
   const root = tree?.root;
   const view = tree ? tree.byPath.get(history[history.length - 1]) ?? tree.root : null;
   const detail = tree ? tree.byPath.get(selected) ?? tree.root : null;
+  const hasLineCount = inventory?.line_count_status !== "unavailable"
+    && typeof inventory?.total_lines === "number"
+    && Number.isFinite(inventory.total_lines)
+    && inventory.total_lines >= 0;
+  const lineCountedFiles = typeof inventory?.line_counted_files === "number"
+    && Number.isFinite(inventory.line_counted_files)
+    && inventory.line_counted_files >= 0
+    ? inventory.line_counted_files
+    : null;
+  const lineCountCaption = !hasLineCount
+    ? "历史清单未采集"
+    : inventory?.line_count_status === "partial"
+      ? (lineCountedFiles !== null ? `已统计 ${lineCountedFiles.toLocaleString()} 个文件（部分跳过）` : "部分文件未统计行数")
+      : inventory?.status !== "complete"
+        ? "已采集文本文件行数"
+        : lineCountedFiles !== null && root && lineCountedFiles < root.files
+          ? `已统计 ${lineCountedFiles.toLocaleString()} 个文本文件`
+          : "扫描范围代码总行数";
   const percent = (count: number) => data?.analysis_ready && inventory?.status === "complete" ? coveragePercent(count, root?.files ?? 0) : "—";
   const open = (path: string) => {
     if (path !== history[history.length - 1]) setHistory([...history, path]);
@@ -178,6 +196,7 @@ export function ThreatCoverageView({ data, tree, loading, error, refresh, issues
       {inventory.status !== "complete" && <p className="coverage-warning" role="status">文件清单不完整：仅展示已采集范围，暂不计算全量覆盖率。{inventory.issue_count > 0 ? ` ${inventory.issue_count} 处路径未完整采集。` : ""}</p>}
       <div className="coverage-stats">
         <div><span>扫描文件</span><strong>{root.files.toLocaleString()}</strong><small>{inventory.status === "complete" ? "完整文件清单" : "已采集文件"}</small></div>
+        <div><span>模块行数</span><strong>{hasLineCount ? inventory.total_lines!.toLocaleString() : "—"}</strong><small>{lineCountCaption}</small></div>
         <div><span>高风险范围</span><strong>{data.analysis_ready ? root.highRisk.toLocaleString() : "—"}<em>{percent(root.highRisk)}</em></strong><small>高风险模块涉及的去重文件</small></div>
         <div><span>攻击模式关联</span><strong>{data.analysis_ready ? root.covered.toLocaleString() : "—"}<em>{percent(root.covered)}</em></strong><small>关联攻击模式的去重文件</small></div>
         <div><span>模块 / 攻击模式</span><strong>{data.analysis_ready ? `${data.modules.length} / ${patterns.length}` : "—"}</strong><small>{data.analysis_ready ? `${data.targets.length} 个模块 × 模式关联` : "等待分析产物"}</small></div>

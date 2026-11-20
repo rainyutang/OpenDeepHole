@@ -623,3 +623,39 @@ for (const kind of ["integration", "shared"]) {
     assert.equal(calls[0].params.token, "token");
   });
 }
+
+test("coverage stats displays total module lines right after scanned files without per-directory line counts", async () => {
+  let data = fixture();
+  installApi(() => data);
+  const root = await mount();
+  const statCards = () => root.root.findByProps({ className: "coverage-stats" }).children;
+  const labels = () => statCards().map((card) => text(card.findByType("span")));
+  assert.deepEqual(labels(), ["扫描文件", "模块行数", "高风险范围", "攻击模式关联", "模块 / 攻击模式"]);
+  assert.equal(text(statCards()[1].findByType("strong")), "—");
+  assert.equal(text(statCards()[1].findByType("small")), "历史清单未采集");
+
+  data = fixture();
+  data.inventory.total_lines = 12345;
+  data.inventory.line_counted_files = 4;
+  data.inventory.line_count_status = "complete";
+  await act(async () => root.update(component("s", 1)));
+  assert.equal(text(statCards()[1].findByType("strong")), (12345).toLocaleString());
+  assert.equal(text(statCards()[1].findByType("small")), "扫描范围代码总行数");
+  assert.doesNotMatch(text(section(root, "路径覆盖详情")), /12,345 行|行 ·/);
+
+  data = fixture();
+  data.inventory.total_lines = 890;
+  data.inventory.line_counted_files = 3;
+  data.inventory.line_count_status = "complete";
+  await act(async () => root.update(component("s", 2)));
+  assert.equal(text(statCards()[1].findByType("strong")), (890).toLocaleString());
+  assert.equal(text(statCards()[1].findByType("small")), "已统计 3 个文本文件");
+
+  data = fixture();
+  data.inventory.total_lines = 500;
+  data.inventory.line_counted_files = 2;
+  data.inventory.line_count_status = "partial";
+  await act(async () => root.update(component("s", 3)));
+  assert.equal(text(statCards()[1].findByType("strong")), (500).toLocaleString());
+  assert.equal(text(statCards()[1].findByType("small")), "已统计 2 个文件（部分跳过）");
+});

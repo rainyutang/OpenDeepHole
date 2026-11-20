@@ -655,3 +655,58 @@ def test_module_threats_only_coverage_and_stored_bundle_guard(audit_scope):
     assert not scanner._stored_threat_analysis_matches_scope(
         bundle, project_path=audit_scope.project, code_scan_path=audit_scope.root, generate_attack_tree=True,
     )
+
+
+def test_inventory_counts_total_lines_skips_binary_and_keeps_complete_tree_on_partial_lines(tmp_path):
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (root / "src/empty.c").write_bytes(b"")
+    (root / "src/single.c").write_bytes(b"int main(void) { return 0; }")
+    (root / "src/multi.c").write_bytes(b"line1\nline2\r\nline3\n")
+    (root / "src/utf16.h").write_bytes("int a;\nint b;".encode("utf-16"))
+    (root / "src/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    (root / "src/blob.dat").write_bytes(b"header\x00binary\nbytes\n")
+
+    result = collector.collect_file_inventory(
+        inventory(project_path=str(root), scan_root=str(root)),
+        excluded=(), cancel_event=threading.Event(), stop_event=threading.Event(),
+    )
+    validated = ScanFileInventory.model_validate(result)
+    assert validated.status == "complete"
+    assert validated.total_lines == 0 + 1 + 3 + 2
+    assert validated.line_counted_files == 4
+    assert validated.line_count_status == "complete"
+    dumped = validated.model_dump(mode="json", exclude_none=True)
+    assert dumped["total_lines"] == 6
+    assert all("lines" not in entry for entry in dumped["entries"])
+
+    # Oversized text files mark line_count_status as partial without downgrading file inventory status.
+    (root / "src/big.c").write_bytes(b"a\n" * 64)
+    partial_lines = collector.collect_file_inventory(
+        inventory(project_path=str(root), scan_root=str(root)),
+        excluded=(), cancel_event=threading.Event(), stop_event=threading.Event(),
+        max_line_count_file_bytes=64,
+    )
+    validated_partial = ScanFileInventory.model_validate(partial_lines)
+    assert validated_partial.status == "complete"
+    assert validated_partial.line_count_status == "partial"
+    assert validated_partial.total_lines == 6
+    assert validated_partial.line_counted_files == 4
+
+    # Historical snapshots without line counts validate cleanly and omit null fields.
+    legacy = ScanFileInventory.model_validate(inventory()).model_dump(mode="json", exclude_none=True)
+    assert "total_lines" not in legacy and "line_count_status" not in legacy
+
+    # Validation guards reject inconsistent line counts.
+    with pytest.raises(ValidationError):
+        ScanFileInventory.model_validate(inventory(line_count_status="complete"))
+    with pytest.raises(ValidationError):
+        ScanFileInventory.model_validate(inventory(total_lines=10, line_counted_files=99, line_count_status="complete"))
+
+    # Visibility projection clears stale top-level line totals if hidden files are stripped.
+    hidden_snapshot = inventory(
+        total_lines=100, line_counted_files=2, line_count_status="complete",
+        entries=[{"path": ".", "kind": "directory"}, {"path": ".hidden.c", "kind": "file"}, {"path": "visible.c", "kind": "file"}],
+    )
+    projected = build_threat_coverage(hidden_snapshot, None)["inventory"]
+    assert "total_lines" not in projected and "line_count_status" not in projected

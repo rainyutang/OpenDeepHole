@@ -70,7 +70,20 @@ def project_file_inventory(inventory: dict | None) -> dict | None:
         key = resolver.canonical(path)
         return any(scope == "." or key == scope or (scope not in files and key.startswith(scope + "/"))
                    or (entry["kind"] == "directory" and scope.startswith(key + "/")) for scope in selected)
-    return {**inventory, "entries": [entry for entry in inventory.get("entries", []) if visible(entry)]}
+    raw_entries = inventory.get("entries", [])
+    visible_entries = []
+    dropped_files = False
+    for entry in raw_entries:
+        if visible(entry):
+            visible_entries.append(entry)
+        elif entry.get("kind") == "file":
+            dropped_files = True
+    projected = {**inventory, "entries": visible_entries}
+    if dropped_files:
+        projected.pop("total_lines", None)
+        projected.pop("line_counted_files", None)
+        projected.pop("line_count_status", None)
+    return projected
 
 
 class FileInventoryEntry(BaseModel):
@@ -103,6 +116,9 @@ class ScanFileInventory(BaseModel):
     code_scan_path_kinds: dict[str, Literal["file", "directory"]] = Field(default_factory=dict)
     inventory_policy_version: int = Field(default=1, ge=1)
     captured_at: str
+    total_lines: int | None = Field(default=None, ge=0)
+    line_counted_files: int | None = Field(default=None, ge=0)
+    line_count_status: Literal["complete", "partial", "unavailable"] | None = None
     entries: list[FileInventoryEntry] = Field(default_factory=list, max_length=MAX_INVENTORY_ENTRIES)
     issues: list[FileInventoryIssue] = Field(default_factory=list, max_length=100)
     issue_count: int = Field(default=0, ge=0)
@@ -132,6 +148,12 @@ class ScanFileInventory(BaseModel):
                 raise ValueError(f"missing inventory parent: {parent}")
         if self.status == "complete" and (self.issue_count or self.issues):
             raise ValueError("an incomplete inventory cannot be marked complete")
+        if self.line_count_status in {"complete", "partial"} and self.total_lines is None:
+            raise ValueError("line_count_status requires total_lines")
+        if self.line_counted_files is not None:
+            file_count = sum(1 for entry in self.entries if entry.kind == "file")
+            if self.line_counted_files > file_count:
+                raise ValueError("line_counted_files cannot exceed file count")
         return self
 
 

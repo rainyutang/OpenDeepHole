@@ -412,14 +412,6 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                                   <StatusPill label={freshRetryLabel} tone={task.status === "running" ? "cyan" : "amber"} />
                                 )}
                               </div>
-                              {!isExpanded && task.status === "running" && sessionId && (
-                                <div className="mt-1 break-all font-mono text-[11px] text-cyan-300">
-                                  Session：{sessionId}
-                                </div>
-                              )}
-                              {task.scopeId && (
-                                <div className="mt-1 font-mono text-[11px] text-slate-600">{task.scopeId}</div>
-                              )}
                             </div>
                           </div>
                         </td>

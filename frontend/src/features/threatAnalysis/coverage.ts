@@ -4,6 +4,9 @@ export interface CoverageInventory {
   project_path: string;
   scan_root: string;
   captured_at: string;
+  total_lines?: number | null;
+  line_counted_files?: number | null;
+  line_count_status?: "complete" | "partial" | "unavailable" | null;
   entries: Array<{ path: string; kind: "file" | "directory" }>;
   issues: Array<{ path: string; reason: string }>;
   issue_count: number;
