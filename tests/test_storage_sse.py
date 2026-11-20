@@ -84,3 +84,25 @@ def test_distributed_event_is_not_visible_before_durable_commit():
     finally:
         sse.configure_distributed_sse(None, "")
         sse.unsubscribe("storage-sse", queue)
+
+
+def test_pool_notifications_preserve_retry_mode_for_live_tasks():
+    queued = {
+        "task_id": "queued-same", "request_id": "queued-same", "revision": 1,
+        "session_attempt": 2, "session_attempts": 3, "retry_mode": "same_session",
+        "serve_session_id": "ses_shared", "prompt": "secret" * 1000,
+        "session_events": [{"sequence": 1, "phase": "business"}],
+    }
+    active = {**queued, "task_id": "running-same"}
+    event, data = sse.storage_notification("scan_status", {
+        "opencode_pool": {
+            "queued_tasks": [queued],
+            "models": [{"id": "m2", "active_tasks": [active]}],
+        },
+    })
+    assert event == "scan_status"
+    pool = data["opencode_pool"]
+    assert pool["queued_tasks"][0]["retry_mode"] == "same_session"
+    assert pool["models"][0]["active_tasks"][0]["retry_mode"] == "same_session"
+    assert "prompt" not in pool["queued_tasks"][0]
+    assert "session_events" not in pool["models"][0]["active_tasks"][0]

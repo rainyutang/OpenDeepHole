@@ -155,7 +155,13 @@ export function IterativeAuditTaskDetail({
   const sessionAttempts = Math.max(0, Number(record?.session_attempts) || 0);
   const retryBadge = sessionAttempt > 1
     ? scanQueueFreshSessionRetryLabel({
+        ...(loadedBody?.task ?? {}),
         ...(record ?? {}),
+        ...(String(record?.retry_mode || "").trim()
+          ? {}
+          : String(loadedBody?.task?.retry_mode || "").trim()
+            ? { retry_mode: loadedBody?.task?.retry_mode }
+            : {}),
         session_attempt: sessionAttempt,
         session_attempts: sessionAttempts,
       })

@@ -96,6 +96,11 @@ class ReportExportTests(unittest.TestCase):
     ) -> Response:
         user = User(user_id="owner", username="owner", role="user")
         store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
+        async def fake_runner(_store, operation, *args, **kwargs):
+            if getattr(operation, "__wrapped__", operation) is report_service._scan_fp_result_map:
+                return fp_map or {}
+            return operation(*args, **kwargs)
+
         with (
             patch.object(report_service, '_check_scan_owner', new=AsyncMock()),
             patch.object(report_service, 'get_scan_status',
@@ -103,7 +108,7 @@ class ReportExportTests(unittest.TestCase):
             ),
             patch.object(application, 'default_store_factory', return_value=store),
             patch.object(application, 'default_store_runner',
-                new=AsyncMock(return_value=fp_map or {}),
+                new=AsyncMock(side_effect=fake_runner),
             ),
             patch.object(report_service, '_fp_review_stage_titles', return_value=[]),
         ):
@@ -117,6 +122,12 @@ class ReportExportTests(unittest.TestCase):
     ) -> Response:
         user = User(user_id="owner", username="owner", role="user")
         store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
+
+        async def fake_runner(_store, operation, *args, **kwargs):
+            if getattr(operation, "__wrapped__", operation) is report_service._scan_fp_result_map:
+                return fp_map or {}
+            return operation(*args, **kwargs)
+
         with (
             patch.object(report_service, '_check_scan_owner', new=AsyncMock()),
             patch.object(report_service, 'get_scan_status',
@@ -124,7 +135,7 @@ class ReportExportTests(unittest.TestCase):
             ),
             patch.object(application, 'default_store_factory', return_value=store),
             patch.object(application, 'default_store_runner',
-                new=AsyncMock(return_value=fp_map or {}),
+                new=AsyncMock(side_effect=fake_runner),
             ),
             patch.object(report_service, '_fp_review_stage_titles', return_value=[]),
         ):

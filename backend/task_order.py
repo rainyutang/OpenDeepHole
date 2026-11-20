@@ -41,7 +41,13 @@ def task_sort_time(finished_at: object, started_at: object = None) -> str:
 
 def task_sort_time_sql(*, postgres: bool) -> str:
     if not postgres:
-        return "task_sort_time(json_extract(v.metadata_json, '$.finished_at'), json_extract(v.metadata_json, '$.started_at'))"
+        return (
+            "COALESCE("
+            "NULLIF(json_extract(v.metadata_json, '$.sort_time'), ''), "
+            "task_sort_time(json_extract(v.metadata_json, '$.finished_at'), "
+            "json_extract(v.metadata_json, '$.started_at'))"
+            ")"
+        )
     times = []
     for field in ("finished_at", "started_at"):
         value = f"(CAST(v.metadata_json AS jsonb) ->> '{field}')"

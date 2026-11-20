@@ -115,7 +115,7 @@ def _merge_completed_opencode_tasks(
                     )
                 ):
                     item["session_events"] = previous_events
-                preserved_fields = ["serve_session_id"]
+                preserved_fields = ["serve_session_id", "retry_mode"]
                 if item.get("outcome") != "success":
                     preserved_fields.extend(("failure_kind", "failure_reason"))
                 for field in preserved_fields:

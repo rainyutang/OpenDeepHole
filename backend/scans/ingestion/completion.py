@@ -521,9 +521,13 @@ async def _start_completion_review(
 ) -> None:
     from backend.scans.fp_review_policy import _scan_fp_review_settings
     from backend.scans.fp_review import _start_fp_review
-    auto_fp_review, _fp_review_method = _scan_fp_review_settings(scan_id, scan)
-
     store = get_scan_store()
+    auto_fp_review, _fp_review_method = await run_store_call(
+        store,
+        _scan_fp_review_settings,
+        scan_id,
+        scan,
+    )
     if hasattr(store, "get_scan_auto_resume"):
         reservation = await run_store_call(store, "get_scan_auto_resume", scan_id)
         if reservation is not None and reservation.get("lease_until", 0) > time.time():

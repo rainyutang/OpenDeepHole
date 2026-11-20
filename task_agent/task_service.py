@@ -2148,6 +2148,7 @@ class OpenCodeTaskService:
                         token_usage=task_token_usage,
                         quota_wait_budget=quota_wait_budget,
                         session_events=session_events,
+                        retry_mode=attempt_retry_mode,
                     )
                 except asyncio.CancelledError:
                     if record.requeue_requested:
@@ -2333,6 +2334,7 @@ class OpenCodeTaskService:
         token_usage: OpenCodeTokenUsage | None,
         quota_wait_budget: ModelQuotaWaitBudget,
         session_events: list[dict[str, Any]],
+        retry_mode: str = "",
     ) -> _StructuredRecoveryOutcome:
         """Run one low-capability formatter Session, then original-Session retries."""
         started_at = _execution_time(record)
@@ -2370,6 +2372,7 @@ class OpenCodeTaskService:
                 session_attempt=session_attempt,
                 total_session_attempts=total_session_attempts,
                 session_events=session_events,
+                retry_mode=retry_mode,
             )
             value["task_phase"] = phase
             if phase == "json_correction" and session_id:

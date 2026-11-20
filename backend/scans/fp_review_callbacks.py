@@ -183,7 +183,13 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
             error_message="",
         )
         logger.info("FP review %s resumed from Agent stage output", body.review_id)
-    if body.stage not in _fp_review_stage_keys_for_scan(scan_id, job.method):
+    stage_keys = await run_store_call(
+        store,
+        _fp_review_stage_keys_for_scan,
+        scan_id,
+        job.method,
+    )
+    if body.stage not in stage_keys:
         raise ApplicationError(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
     await run_store_call(

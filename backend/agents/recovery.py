@@ -82,6 +82,17 @@ def _agent_disconnect_grace_elapsed() -> bool:
     ).total_seconds() >= constants._AGENT_DISCONNECT_GRACE_SECONDS
 
 
+def _persist_offline_agent_cancellation(scan_id: str) -> None:
+    store = get_scan_store()
+    store.update_scan_progress(
+        scan_id,
+        status=ScanItemStatus.CANCELLED,
+        error_message=AGENT_DISCONNECT_ERROR,
+        clear_current_candidate=True,
+    )
+    store.mark_fp_reviews_for_scan_error(scan_id, AGENT_DISCONNECT_ERROR)
+
+
 def _cancel_scan_if_agent_offline(
     scan_id: str,
     agent_name: str,
@@ -103,14 +114,29 @@ def _cancel_scan_if_agent_offline(
     if not _agent_disconnect_grace_elapsed():
         return agent_online, False
 
+    _persist_offline_agent_cancellation(scan_id)
+    get_runtime().scans.running_scans.pop(scan_id, None)
+    get_runtime().scans.scan_owners.pop(scan_id, None)
+    logger.info("Scan %s cancelled because agent %s is offline", scan_id, agent_name)
+    return agent_online, True
+
+
+async def _cancel_scan_if_agent_offline_async(
+    scan_id: str,
+    agent_name: str,
+    status: ScanItemStatus,
+) -> tuple[bool, bool]:
+    from backend.agents.directory import is_agent_name_online
     store = get_scan_store()
-    store.update_scan_progress(
-        scan_id,
-        status=ScanItemStatus.CANCELLED,
-        error_message=AGENT_DISCONNECT_ERROR,
-        clear_current_candidate=True,
-    )
-    store.mark_fp_reviews_for_scan_error(scan_id, AGENT_DISCONNECT_ERROR)
+    if getattr(store, "distributed", False):
+        return False, False
+    agent_online = is_agent_name_online(agent_name)
+    if agent_online or status not in _RUNNING_SCAN_STATUSES:
+        return agent_online, False
+    if not _agent_disconnect_grace_elapsed():
+        return agent_online, False
+
+    await run_store_call(store, _persist_offline_agent_cancellation, scan_id)
     get_runtime().scans.running_scans.pop(scan_id, None)
     get_runtime().scans.scan_owners.pop(scan_id, None)
     logger.info("Scan %s cancelled because agent %s is offline", scan_id, agent_name)
@@ -140,6 +166,45 @@ def reconcile_offline_agent_summary_state(summary: ScanSummary) -> ScanSummary:
         return summary
 
     agent_online, cancelled = _cancel_scan_if_agent_offline(
+        summary.scan_id, summary.agent_name, summary.status
+    )
+    summary.agent_online = agent_online
+    if cancelled:
+        summary.status = ScanItemStatus.CANCELLED
+    return summary
+
+
+_DEFAULT_RECONCILE_OFFLINE_AGENT_SCAN_STATE = reconcile_offline_agent_scan_state
+_DEFAULT_RECONCILE_OFFLINE_AGENT_SUMMARY_STATE = reconcile_offline_agent_summary_state
+
+
+async def reconcile_offline_agent_scan_state_async(scan_id: str, scan: ScanStatus) -> ScanStatus:
+    """Async variant that routes offline-cancellation writes through run_store_call."""
+    if reconcile_offline_agent_scan_state is not _DEFAULT_RECONCILE_OFFLINE_AGENT_SCAN_STATE:
+        return reconcile_offline_agent_scan_state(scan_id, scan)
+    if not scan.agent_name:
+        return scan
+
+    agent_online, cancelled = await _cancel_scan_if_agent_offline_async(
+        scan_id, scan.agent_name, scan.status
+    )
+    scan.agent_online = agent_online
+    if cancelled:
+        scan.status = ScanItemStatus.CANCELLED
+        scan.error_message = AGENT_DISCONNECT_ERROR
+        scan.current_candidate = None
+        scan.opencode_pool = _terminal_opencode_pool_status(scan.opencode_pool)
+    return scan
+
+
+async def reconcile_offline_agent_summary_state_async(summary: ScanSummary) -> ScanSummary:
+    """Async summary-level variant that routes offline-cancellation writes through run_store_call."""
+    if reconcile_offline_agent_summary_state is not _DEFAULT_RECONCILE_OFFLINE_AGENT_SUMMARY_STATE:
+        return reconcile_offline_agent_summary_state(summary)
+    if not summary.agent_name:
+        return summary
+
+    agent_online, cancelled = await _cancel_scan_if_agent_offline_async(
         summary.scan_id, summary.agent_name, summary.status
     )
     summary.agent_online = agent_online
@@ -617,7 +682,7 @@ async def _resume_final_callback_downstream(
         if explicitly_stopped:
             continue
 
-        auto_fp_review, _method = _scan_fp_review_settings(scan_id, scan)
+        auto_fp_review, _method = await run_store_call(store, _scan_fp_review_settings, scan_id, scan)
         if auto_fp_review:
             try:
                 await _start_fp_review(

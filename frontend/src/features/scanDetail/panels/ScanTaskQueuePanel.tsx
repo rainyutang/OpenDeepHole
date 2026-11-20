@@ -339,7 +339,16 @@ function ScanTaskQueueContent({ scanId, pool, taskKind, focusFilter, onTaskKindC
                   const taskKey = scanQueueTaskKey(task);
                   const isExpanded = expandedTaskId === taskKey;
                   const detailKey = cacheKey(task);
-                  const detail = { ...details[detailKey], ...task.task };
+                  const cachedDetail = details[detailKey];
+                  const detail: Record<string, unknown> = {
+                    ...cachedDetail,
+                    ...task.task,
+                    ...(String(task.task.retry_mode || "").trim()
+                      ? {}
+                      : String(cachedDetail?.retry_mode || "").trim()
+                        ? { retry_mode: cachedDetail?.retry_mode }
+                        : {}),
+                  };
                   const prompt = scanQueueTaskPrompt(task.task) || scanQueueTaskPrompt(details[detailKey] ?? {});
                   const promptLength = scanQueueTaskPromptLength(detail, prompt);
                   const failureReason = typeof detail.failure_reason === "string"

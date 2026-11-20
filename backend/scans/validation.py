@@ -160,6 +160,7 @@ async def _trigger_vulnerability_validation(
         )
 
     fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
+    stage_titles = await run_store_call(store, _fp_review_stage_titles, scan_id)
     ok = await send_agent_command(agent_id, {
         "type": "vulnerability_validation",
         "scan_id": scan_id,
@@ -178,7 +179,7 @@ async def _trigger_vulnerability_validation(
             idx,
             vuln,
             fp_map.get(idx),
-            fp_review_stage_titles=_fp_review_stage_titles(scan_id),
+            fp_review_stage_titles=stage_titles,
         ),
         "code_graph_mcp_revision": meta.code_graph_mcp_revision,
         "code_graph_mcp": (

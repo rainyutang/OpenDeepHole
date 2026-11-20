@@ -254,17 +254,27 @@ async def agent_report_vulnerability(
             from backend.scans.report_records import _fp_review_stage_titles, _scan_fp_result_map
             from backend.scans.reporting import _vuln_report_markdown
 
+            fp_result_map = await run_store_call(
+                store,
+                _scan_fp_result_map,
+                scan_id,
+            )
+            stage_titles = await run_store_call(
+                store,
+                _fp_review_stage_titles,
+                scan_id,
+            )
             report_markdown = _vuln_report_markdown(
                 vuln_index,
                 vuln,
-                _scan_fp_result_map(scan_id).get(vuln_index),
-                fp_review_stage_titles=_fp_review_stage_titles(scan_id),
+                fp_result_map.get(vuln_index),
+                fp_review_stage_titles=stage_titles,
             )
-            auto_fp_review, fp_review_method = (
-                _scan_fp_review_settings(
-                    scan_id,
-                    scan,
-                )
+            auto_fp_review, fp_review_method = await run_store_call(
+                store,
+                _scan_fp_review_settings,
+                scan_id,
+                scan,
             )
             reported_session_id = reported_execution_session_id
             scan_session_id = str(
@@ -400,8 +410,8 @@ async def agent_reconcile_vulnerabilities(scan_id: str, body: AgentVulnerability
     from backend.scans.reporting import _vuln_report_markdown
     from backend.application import publish
 
-    fp_map = _scan_fp_result_map(scan_id)
-    stage_titles = _fp_review_stage_titles(scan_id)
+    fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
+    stage_titles = await run_store_call(store, _fp_review_stage_titles, scan_id)
     items = []
     for vuln_index, vuln in reconciled:
         try:

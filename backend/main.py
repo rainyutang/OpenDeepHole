@@ -99,7 +99,7 @@ async def _application_lifespan(app: FastAPI):
 
     from backend.validation_catalog import refresh_validation_catalog
 
-    refresh_validation_catalog()
+    await run_store_call(store, refresh_validation_catalog)
 
     from backend.agents.runtime_updates import run_agent_runtime_update_scheduler
 

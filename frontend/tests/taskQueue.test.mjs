@@ -1037,3 +1037,73 @@ test("same-session model-switch retries display distinct labels from Fresh Sessi
   assert.equal(scanQueueSessionEventLabel(events[0]), "业务 Session #1");
   assert.equal(scanQueueSessionEventLabel(events[1]), "同 Session 换模重试 #2");
 });
+
+test("completed same-session retry keeps consistent badge before and after expanding detail", async () => {
+  const t1Start = "2026-11-20T01:00:00Z";
+  const t1End = "2026-11-20T01:01:00Z";
+  const t2Start = "2026-11-20T01:01:05Z";
+  const t2End = "2026-11-20T01:05:00Z";
+  let summaryItem = task("same-ok", t2End, {
+    started_at: t2Start,
+    serve_session_id: "ses_shared",
+    session_attempt: 2,
+    session_attempts: 3,
+    retry_mode: "same_session",
+    outcome: "success",
+  });
+  const detailPayload = {
+    ...summaryItem,
+    prompt: "audit prompt",
+    session_events: [
+      {
+        sequence: 1,
+        phase: "business",
+        session_id: "ses_shared",
+        session_attempt: 1,
+        outcome: "failure",
+        failure_kind: "provider_error",
+        started_at: t1Start,
+        finished_at: t1End,
+      },
+      {
+        sequence: 2,
+        phase: "business",
+        session_id: "ses_shared",
+        session_attempt: 2,
+        retry_mode: "same_session",
+        outcome: "success",
+        started_at: t2Start,
+        finished_at: t2End,
+      },
+    ],
+  };
+  client.api.defaults.adapter = async (config) => {
+    if (config.url.endsWith("/tasks")) {
+      return response(config, { items: [summaryItem], next_cursor: null });
+    }
+    if (config.url.endsWith("/tasks/same-ok")) {
+      return response(config, detailPayload);
+    }
+    throw new Error(`unexpected ${config.url}`);
+  };
+  const root = await mount(pool({ completed_task_count: 1, total_tasks: 1 }));
+  await settleHistory();
+  // Before expanding: summary already carries retry_mode="same_session", so no Fresh Session flash.
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /同 Session 换模第 2\/3 次/);
+  assert.doesNotMatch(text(rows(root)[0].findAllByType("td")[1]), /Fresh Session/);
+
+  // Click to expand: badge remains identical.
+  await act(async () => rows(root)[0].props.onClick());
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /同 Session 换模第 2\/3 次/);
+  assert.match(text(root.toJSON()), /同 Session 换模重试 #2/);
+
+  // Subsequent summary refresh carrying blank retry_mode must not clobber cached detail retry_mode.
+  summaryItem = { ...summaryItem, retry_mode: "" };
+  await act(async () => root.update(createElement(ScanTaskQueuePanel, {
+    scanId: "s",
+    pool: pool({ completed_task_count: 1, total_tasks: 1 }),
+    refreshRevision: 1,
+  })));
+  await settleHistory();
+  assert.match(text(rows(root)[0].findAllByType("td")[1]), /同 Session 换模第 2\/3 次/);
+});

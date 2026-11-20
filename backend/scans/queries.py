@@ -35,7 +35,10 @@ async def _enrich_scan_summaries(
     summaries: list[ScanSummary],
 ) -> list[ScanSummary]:
     """Add live state and effective issue metrics without blocking the loop."""
-    from backend.agents.recovery import reconcile_offline_agent_scan_state, reconcile_offline_agent_summary_state
+    from backend.agents.recovery import (
+        reconcile_offline_agent_scan_state_async,
+        reconcile_offline_agent_summary_state_async,
+    )
 
     store = get_scan_store()
     distributed = bool(getattr(store, "distributed", False))
@@ -78,7 +81,7 @@ async def _enrich_scan_summaries(
             live = get_runtime().scans.running_scans[s.scan_id]
             live.agent_name = s.agent_name or live.agent_name
             vulnerabilities = live.vulnerabilities
-            live = reconcile_offline_agent_scan_state(s.scan_id, live)
+            live = await reconcile_offline_agent_scan_state_async(s.scan_id, live)
             s.status = live.status
             s.progress = live.progress
             s.total_candidates = live.total_candidates
@@ -95,7 +98,7 @@ async def _enrich_scan_summaries(
                     else False
                 )
             else:
-                s = reconcile_offline_agent_summary_state(s)
+                s = await reconcile_offline_agent_summary_state_async(s)
             vulnerabilities = vuln_stats.get(s.scan_id, [])
             candidate_count = (
                 max(s.total_candidates - s.processed_candidates, 0)
@@ -192,7 +195,7 @@ async def get_scan_status(
     current_user: User = None,
 ) -> ScanStatus:
     """Get the current status and results of a scan."""
-    from backend.agents.recovery import reconcile_offline_agent_scan_state
+    from backend.agents.recovery import reconcile_offline_agent_scan_state_async
 
     await _check_scan_owner_v2(scan_id, current_user)
     store = get_scan_store()
@@ -222,7 +225,7 @@ async def get_scan_status(
         )
         scan.agent_online = session is not None
     else:
-        scan = reconcile_offline_agent_scan_state(scan_id, scan)
+        scan = await reconcile_offline_agent_scan_state_async(scan_id, scan)
     _apply_candidate_audit_progress(scan)
     scan.retryable_candidates_count = _retry_incomplete_count(scan)
     _apply_task_progress(scan)
@@ -259,7 +262,7 @@ async def get_scan_overview_v2(
     current_user: User = None,
 ) -> ScanOverview:
     """Return frequently refreshed state without large result collections."""
-    from backend.agents.recovery import reconcile_offline_agent_scan_state
+    from backend.agents.recovery import reconcile_offline_agent_scan_state_async
 
     store = get_scan_store()
     distributed = bool(getattr(store, "distributed", False))
@@ -400,7 +403,7 @@ async def get_scan_overview_v2(
         )
         scan.agent_online = session is not None
     else:
-        scan = reconcile_offline_agent_scan_state(scan_id, scan)
+        scan = await reconcile_offline_agent_scan_state_async(scan_id, scan)
     _apply_task_progress(scan)
     _apply_continue_capability(
         scan,

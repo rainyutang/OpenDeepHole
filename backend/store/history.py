@@ -84,8 +84,58 @@ TASK_METADATA_FIELDS = frozenset({
     "candidate_index", "vuln_index", "task_key", "attempt", "label",
     "token_category", "token_category_label", "mining_engine_id", "mining_engine_label",
     "execution_kind", "execution_id", "execution_revision", "agent_session_id",
-    "session_attempt", "session_attempts", "retry_ordinal", "task_phase", "json_format_session_id",
+    "session_attempt", "session_attempts", "retry_ordinal", "retry_mode",
+    "task_phase", "json_format_session_id",
 })
+_VALID_RETRY_MODES = frozenset({"same_session", "fresh_session"})
+
+
+def _task_retry_mode(task: dict, session_events: object = None) -> str:
+    """Resolve explicit or event-inferred retry mode for retried attempts."""
+    try:
+        attempt = max(1, int(task.get("session_attempt") or 1))
+    except (TypeError, ValueError):
+        attempt = 1
+    if attempt <= 1:
+        return ""
+    explicit = str(task.get("retry_mode") or "").strip()
+    if explicit in _VALID_RETRY_MODES:
+        return explicit
+    events = task.get("session_events") if session_events is None else session_events
+    if not isinstance(events, list):
+        return ""
+    prior_sessions: set[str] = set()
+    attempt_events: list[dict] = []
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("phase") or "business") != "business":
+            continue
+        try:
+            event_attempt = max(1, int(raw.get("session_attempt") or 1))
+        except (TypeError, ValueError):
+            event_attempt = 1
+        session_id = str(raw.get("session_id") or "").strip()
+        if event_attempt < attempt:
+            if session_id:
+                prior_sessions.add(session_id)
+        elif event_attempt == attempt:
+            attempt_events.append(raw)
+    matched_same_session = False
+    for event in attempt_events:
+        mode = str(event.get("retry_mode") or "").strip()
+        if mode == "same_session":
+            return "same_session"
+        if mode == "fresh_session":
+            return "fresh_session"
+        session_id = str(event.get("session_id") or "").strip()
+        if session_id and session_id in prior_sessions:
+            matched_same_session = True
+    if matched_same_session:
+        return "same_session"
+    if attempt_events:
+        return "fresh_session"
+    return ""
 
 
 def canonical_json(value: object) -> str:
@@ -233,7 +283,18 @@ class ScanHistoryMixin:
             canonical_json([scan_id, task_id, revision, serialized]).encode()
         ).hexdigest()
         metadata = {key: value for key, value in task.items() if key in TASK_METADATA_FIELDS}
-        metadata.update(task_projection(task), task_id=task_id, revision=revision, record_id=record_id)
+        resolved_retry_mode = _task_retry_mode(task)
+        if resolved_retry_mode:
+            metadata["retry_mode"] = resolved_retry_mode
+        else:
+            metadata.pop("retry_mode", None)
+        metadata.update(
+            task_projection(task),
+            task_id=task_id,
+            revision=revision,
+            record_id=record_id,
+            sort_time=task_sort_time(task.get("finished_at"), task.get("started_at")),
+        )
         self._conn.execute(
             "INSERT INTO scan_task_versions "
             "(record_id, scan_id, task_id, revision, metadata_json, task_json, created_at) "
@@ -593,8 +654,14 @@ class ScanHistoryMixin:
                     continue
                 if task_kind is not None and projection["task_kind"] != task_kind:
                     continue
-                tasks.append({**{k: v for k, v in task.items() if k in TASK_METADATA_FIELDS},
-                              **projection, "task_id": key, "revision": revision, "sort_time": sort_time})
+                entry = {**{k: v for k, v in task.items() if k in TASK_METADATA_FIELDS},
+                         **projection, "task_id": key, "revision": revision, "sort_time": sort_time}
+                resolved_retry_mode = _task_retry_mode(task)
+                if resolved_retry_mode:
+                    entry["retry_mode"] = resolved_retry_mode
+                else:
+                    entry.pop("retry_mode", None)
+                tasks.append(entry)
             return sorted(tasks, key=lambda item: (item["sort_time"], item["task_id"]), reverse=True)[:max(1, min(101, limit))]
         name_filter = ""
         params: list[object] = [scan_id]
@@ -615,12 +682,33 @@ class ScanHistoryMixin:
             params.extend((before_sort_time, before_task_id))
         params.append(max(1, min(101, limit)))
         collation = '"C"' if postgres else "BINARY"
+        if postgres:
+            attempt_expr = (
+                "CASE WHEN (CAST(page.metadata_json AS jsonb) ->> 'session_attempt') ~ '^[0-9]+$' "
+                "THEN CAST(CAST(page.metadata_json AS jsonb) ->> 'session_attempt' AS INTEGER) ELSE 1 END"
+            )
+            missing_meta_mode = "NULLIF(btrim(COALESCE(CAST(page.metadata_json AS jsonb) ->> 'retry_mode', '')), '') IS NULL"
+            body_mode_expr = "CAST(v.task_json AS jsonb) ->> 'retry_mode'"
+            missing_body_mode = f"NULLIF(btrim(COALESCE({body_mode_expr}, '')), '') IS NULL"
+            body_events_expr = "CAST(v.task_json AS jsonb) ->> 'session_events'"
+        else:
+            attempt_expr = "CAST(COALESCE(json_extract(page.metadata_json, '$.session_attempt'), 1) AS INTEGER)"
+            missing_meta_mode = "NULLIF(trim(COALESCE(json_extract(page.metadata_json, '$.retry_mode'), '')), '') IS NULL"
+            body_mode_expr = "json_extract(v.task_json, '$.retry_mode')"
+            missing_body_mode = f"NULLIF(trim(COALESCE({body_mode_expr}, '')), '') IS NULL"
+            body_events_expr = "json_extract(v.task_json, '$.session_events')"
+        retry_mode_fallback_sql = (
+            f"CASE WHEN {attempt_expr} > 1 AND {missing_meta_mode} THEN {body_mode_expr} ELSE NULL END AS body_retry_mode, "
+            f"CASE WHEN {attempt_expr} > 1 AND {missing_meta_mode} AND {missing_body_mode} "
+            f"THEN {body_events_expr} ELSE NULL END AS body_session_events"
+        )
         # Resolve compatibility fields only after LIMIT. Older records may need
         # their large body for context, which must never slow unfiltered sorts.
         rows = self._conn.execute(
             "SELECT page.metadata_json, page.sort_time, "
             f"{task_field_sql('task_type', postgres=postgres)} AS task_type, "
-            f"{task_field_sql('task_name', postgres=postgres)} AS task_name FROM ("
+            f"{task_field_sql('task_name', postgres=postgres)} AS task_name, "
+            f"{retry_mode_fallback_sql} FROM ("
             "SELECT metadata_json, record_id, task_id, sort_time FROM ("
             f"SELECT v.metadata_json, v.record_id, c.task_id COLLATE {collation} AS task_id, "
             f"{task_sort_time_sql(postgres=postgres)} COLLATE {collation} AS sort_time "
@@ -632,8 +720,28 @@ class ScanHistoryMixin:
             "ORDER BY page.sort_time DESC, page.task_id DESC",
             params,
         ).fetchall()
-        return [{**json.loads(row["metadata_json"]), "sort_time": row["sort_time"],
-                 "task_type": row["task_type"], "task_name": row["task_name"]} for row in rows]
+        items: list[dict] = []
+        for row in rows:
+            item = {
+                **json.loads(row["metadata_json"]),
+                "sort_time": row["sort_time"],
+                "task_type": row["task_type"],
+                "task_name": row["task_name"],
+            }
+            if not str(item.get("retry_mode") or "").strip():
+                item.pop("retry_mode", None)
+                body_mode = str(row["body_retry_mode"] or "").strip()
+                if body_mode in _VALID_RETRY_MODES:
+                    item["retry_mode"] = body_mode
+                elif row["body_session_events"]:
+                    try:
+                        inferred = _task_retry_mode(item, json.loads(row["body_session_events"]))
+                    except (TypeError, ValueError):
+                        inferred = ""
+                    if inferred:
+                        item["retry_mode"] = inferred
+            items.append(item)
+        return items
 
     def _legacy_pool(self, scan_id: str):
         row = self._conn.execute("SELECT opencode_pool FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()

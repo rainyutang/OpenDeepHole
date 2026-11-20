@@ -90,12 +90,13 @@ async def download_vulnerability_report(
     )
     resolved_fp_result = group.fp_result if group is not None else fp_map.get(idx)
     resolved_vuln = _resolved_report_vulnerability(vuln, resolved_fp_result)
+    stage_titles = await run_store_call(get_scan_store(), _fp_review_stage_titles, scan_id)
     markdown = _vuln_report_markdown(
         idx,
         vuln,
         resolved_fp_result,
         group.validation if group is not None else validation_map.get(idx),
-        _fp_review_stage_titles(scan_id),
+        stage_titles,
     )
     fname = (
         f"vuln-{idx}-"
@@ -138,7 +139,7 @@ async def download_report_zip(
                 f"共 {len(problems)} 个去误报最终确认问题：",
                 "",
             ]
-            fp_review_stage_titles = _fp_review_stage_titles(scan_id)
+            fp_review_stage_titles = await run_store_call(store, _fp_review_stage_titles, scan_id)
             for group in problems:
                 i = group.index
                 v = _resolved_report_vulnerability(group.vulnerability, group.fp_result)

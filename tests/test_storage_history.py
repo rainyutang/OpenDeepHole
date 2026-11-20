@@ -291,3 +291,99 @@ def test_old_context_task_name_and_kind_filters_agree(tmp_path, legacy, direct_n
         assert store.list_task_page("s", task_kind="candidate_audit", task_name="  ") == []
     finally:
         store.close()
+
+
+def test_list_task_page_preserves_and_infers_retry_mode_for_new_and_legacy_rows(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        explicit_same = {
+            **task(1),
+            "task_id": "t-explicit-same",
+            "finished_at": "2026-11-20T01:00:05Z",
+            "session_attempt": 2,
+            "session_attempts": 3,
+            "retry_mode": "same_session",
+            "serve_session_id": "ses_shared",
+            "session_events": [
+                {"sequence": 1, "phase": "business", "session_id": "ses_shared", "session_attempt": 1, "outcome": "failure"},
+                {"sequence": 2, "phase": "business", "session_id": "ses_shared", "session_attempt": 2, "retry_mode": "same_session", "outcome": "success"},
+            ],
+        }
+        inferred_same = {
+            **task(2),
+            "task_id": "t-inferred-same",
+            "finished_at": "2026-11-20T01:00:04Z",
+            "session_attempt": 2,
+            "session_attempts": 3,
+            "serve_session_id": "ses_recover",
+            "session_events": [
+                {"sequence": 1, "phase": "business", "session_id": "ses_recover", "session_attempt": 1, "outcome": "failure"},
+                {"sequence": 2, "phase": "business", "session_id": "ses_recover", "session_attempt": 2, "outcome": "invalid_output"},
+                {"sequence": 3, "phase": "json_format", "session_id": "ses_fmt", "session_attempt": 2, "outcome": "success"},
+            ],
+        }
+        fresh_retry = {
+            **task(3),
+            "task_id": "t-fresh",
+            "finished_at": "2026-11-20T01:00:03Z",
+            "session_attempt": 2,
+            "session_attempts": 3,
+            "serve_session_id": "ses_2",
+            "session_events": [
+                {"sequence": 1, "phase": "business", "session_id": "ses_1", "session_attempt": 1, "outcome": "timeout"},
+                {"sequence": 2, "phase": "business", "session_id": "ses_2", "session_attempt": 2, "outcome": "success"},
+            ],
+        }
+        old_explicit = {
+            **task(4),
+            "task_id": "t-old-explicit",
+            "finished_at": "2026-11-20T01:00:02Z",
+            "session_attempt": 2,
+            "session_attempts": 3,
+            "retry_mode": "same_session",
+            "serve_session_id": "ses_old_1",
+        }
+        old_events_only = {
+            **task(5),
+            "task_id": "t-old-events-only",
+            "finished_at": "2026-11-20T01:00:01Z",
+            "session_attempt": 2,
+            "session_attempts": 3,
+            "serve_session_id": "ses_old_2",
+            "session_events": [
+                {"sequence": 1, "phase": "business", "session_id": "ses_old_2", "session_attempt": 1, "outcome": "failure"},
+                {"sequence": 2, "phase": "business", "session_id": "ses_old_2", "session_attempt": 2, "outcome": "success"},
+            ],
+        }
+        for value in (explicit_same, inferred_same, fresh_retry, old_explicit, old_events_only):
+            store._store_task_version_locked("s", value)
+        # Simulate historical rows persisted before retry_mode/sort_time projection.
+        for tid in ("t-old-explicit", "t-old-events-only"):
+            row = store._conn.execute(
+                "SELECT record_id, metadata_json FROM scan_task_versions WHERE scan_id = 's' AND task_id = ?",
+                (tid,),
+            ).fetchone()
+            meta = json.loads(row["metadata_json"])
+            meta.pop("retry_mode", None)
+            meta.pop("sort_time", None)
+            store._conn.execute(
+                "UPDATE scan_task_versions SET metadata_json = ? WHERE record_id = ?",
+                (json.dumps(meta), row["record_id"]),
+            )
+        store._conn.commit()
+
+        page = {item["task_id"]: item for item in store.list_task_page("s")}
+        assert page["t-explicit-same"]["retry_mode"] == "same_session"
+        assert page["t-inferred-same"]["retry_mode"] == "same_session"
+        assert page["t-fresh"]["retry_mode"] == "fresh_session"
+        assert page["t-old-explicit"]["retry_mode"] == "same_session"
+        assert page["t-old-events-only"]["retry_mode"] == "same_session"
+        assert all("prompt" not in item and "session_events" not in item for item in page.values())
+        # New rows pre-project sort_time into metadata_json to avoid SQLite UDF on hot path.
+        stored_meta = json.loads(store._conn.execute(
+            "SELECT metadata_json FROM scan_task_versions WHERE scan_id = 's' AND task_id = 't-explicit-same'"
+        ).fetchone()["metadata_json"])
+        assert stored_meta["sort_time"] == "2026-11-20T01:00:05.000000Z"
+        assert stored_meta["retry_mode"] == "same_session"
+    finally:
+        store.close()

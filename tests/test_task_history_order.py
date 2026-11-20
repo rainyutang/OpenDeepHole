@@ -170,3 +170,71 @@ def test_unprojected_context_history_kind_filters_match_returned_metadata(histor
     assert [row["task_id"] for row in store.list_task_page(
         scan_id, task_kind="candidate_audit", task_name="candidate-context-blank",
     )] == ["old-8"]
+
+
+def test_sqlite_concurrent_list_task_page_udf_and_direct_reads_do_not_deadlock(tmp_path):
+    """Concurrent SQLite UDF list_task_page + reads/writes must not hit GIL<->db->mutex deadlock."""
+    import threading
+
+    store = make_store(tmp_path)
+    try:
+        now = datetime(2026, 11, 20, tzinfo=timezone.utc)
+        values = [
+            {
+                "task_id": f"task-{index:03}",
+                "revision": 1,
+                "finished_at": (now + timedelta(seconds=index)).isoformat(),
+                "task_type": "vulnerability_mining",
+                "task_name": f"candidate-audit-{index}",
+                "outcome": "success",
+                "session_attempt": 2 if index % 2 == 0 else 1,
+                "retry_mode": "same_session" if index % 2 == 0 else "",
+            }
+            for index in range(150)
+        ]
+        store.update_opencode_pool_status("s", OpenCodePoolStatus(scope_id="s", completed_tasks=values))
+        # Strip projected sort_time so list_task_page is forced to invoke the Python task_sort_time UDF.
+        rows = store._conn.execute("SELECT record_id, metadata_json FROM scan_task_versions WHERE scan_id = 's'").fetchall()
+        with store._lock:
+            for row in rows:
+                meta = json.loads(row["metadata_json"])
+                meta.pop("sort_time", None)
+                store._conn.execute(
+                    "UPDATE scan_task_versions SET metadata_json = ? WHERE record_id = ?",
+                    (json.dumps(meta), row["record_id"]),
+                )
+            store._conn.commit()
+
+        errors: list[BaseException] = []
+
+        def list_worker() -> None:
+            try:
+                for _ in range(40):
+                    page = store.list_task_page("s", limit=50)
+                    assert len(page) == 50
+            except BaseException as exc:
+                errors.append(exc)
+
+        def detail_and_meta_worker() -> None:
+            try:
+                for i in range(80):
+                    detail = store.get_task_detail("s", f"task-{i % 150:03}")
+                    assert detail is not None
+                    meta = store.get_scan_meta("s")
+                    assert meta is not None
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=list_worker),
+            threading.Thread(target=detail_and_meta_worker),
+            threading.Thread(target=detail_and_meta_worker),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+            assert not t.is_alive(), "SQLite concurrent UDF + reads deadlocked"
+        assert not errors, errors
+    finally:
+        store.close()

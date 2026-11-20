@@ -5649,3 +5649,84 @@ def test_503_entry_in_cooldown_opens_circuit_pauses_other_tasks_and_recovers_in_
         assert "Provider cooldown error status=503 code=entry_in_cooldown retry_after=backoff" in caplog.text
 
     asyncio.run(run())
+
+
+def test_same_session_retry_preserves_retry_mode_across_structured_recovery(tmp_path: Path) -> None:
+    from task_agent.serve_client import SAME_SESSION_RETRY_CLEAN_REVERTED, mark_same_session_retry
+
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str | None, str]] = []
+
+        async def acquire(*_args, **kwargs):
+            model_name = "provider/model-b" if kwargs.get("avoid_model_identities") else "provider/model-a"
+            lease = _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
+            option = dataclasses.replace(lease.option, id=model_name, model=model_name)
+            return dataclasses.replace(
+                lease,
+                option=option,
+                health_identity=(model_name, False, "opencode", "opencode"),
+            )
+
+        async def runtime_for_task(_record, lease, *, session_attempt):
+            src = OutputSource(backend="opencode", tool="opencode", model_id=lease.option.id, model=lease.option.model)
+            return _runtime(tmp_path), lease.option.model, src
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or f"ses_{len(calls) + 1}"
+            calls.append((kwargs["session_id"], kwargs["model"]))
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            if len(calls) == 1:
+                await _notify_model_request_failure(kwargs, "failure")
+                raise mark_same_session_retry(
+                    RuntimeError("APIError: busy"),
+                    SAME_SESSION_RETRY_CLEAN_REVERTED,
+                )
+            if len(calls) == 2:
+                return OpenCodePromptResult(
+                    session_id=session_id,
+                    message_id="msg_unformatted",
+                    lines=["answer is 42 (not json)"],
+                    text="answer is 42 (not json)",
+                    model=kwargs["model"],
+                )
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_fmt",
+                lines=['{"answer": 42}'],
+                text='{"answer": 42}',
+                model=kwargs["model"],
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            acquire_mock.side_effect = acquire
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="same-session-json-recovery",
+                    prompt="audit",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_1"
+        assert result.structured == {"answer": 42}
+        # The independent formatter lease launched during attempt 2 must retain retry_mode="same_session".
+        formatter_ctx = acquire_mock.await_args_list[2].kwargs["task_context"]
+        assert formatter_ctx["task_phase"] == "json_format"
+        assert formatter_ctx["retry_mode"] == "same_session"
+
+    asyncio.run(run())

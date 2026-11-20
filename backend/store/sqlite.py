@@ -1034,12 +1034,203 @@ _SCHEMA += AUTO_RESUME_SCHEMA
 _SCHEMA += USER_MANAGEMENT_SCHEMA
 
 
+_NO_SQL_PARAMS = object()
+
+
+class _GuardedSqliteCursor:
+    """Serialize SQLite cursor operations and cleanup under the store RLock."""
+
+    __slots__ = ("_cursor", "_mutex", "_closed", "_rowcount", "_lastrowid", "_description")
+
+    def __init__(self, cursor: sqlite3.Cursor, mutex: threading.RLock) -> None:
+        self._cursor = cursor
+        self._mutex = mutex
+        self._closed = False
+        self._rowcount = cursor.rowcount
+        self._lastrowid = cursor.lastrowid
+        self._description = cursor.description
+
+    def _sync_metadata_locked(self) -> None:
+        self._rowcount = self._cursor.rowcount
+        self._lastrowid = self._cursor.lastrowid
+        self._description = self._cursor.description
+
+    def _close_locked(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._sync_metadata_locked()
+        except Exception:
+            pass
+        try:
+            self._cursor.close()
+        except Exception:
+            pass
+
+    @property
+    def rowcount(self) -> int:
+        with self._mutex:
+            if not self._closed:
+                self._rowcount = self._cursor.rowcount
+            return self._rowcount
+
+    @property
+    def lastrowid(self):
+        with self._mutex:
+            if not self._closed:
+                self._lastrowid = self._cursor.lastrowid
+            return self._lastrowid
+
+    @property
+    def description(self):
+        with self._mutex:
+            if not self._closed:
+                self._description = self._cursor.description
+            return self._description
+
+    def fetchone(self):
+        with self._mutex:
+            if self._closed:
+                return None
+            row = self._cursor.fetchone()
+            if row is None:
+                self._close_locked()
+            return row
+
+    def fetchall(self):
+        with self._mutex:
+            if self._closed:
+                return []
+            try:
+                return self._cursor.fetchall()
+            finally:
+                self._close_locked()
+
+    def fetchmany(self, size: int | None = None):
+        with self._mutex:
+            if self._closed:
+                return []
+            rows = (
+                self._cursor.fetchmany()
+                if size is None
+                else self._cursor.fetchmany(size)
+            )
+            if not rows:
+                self._close_locked()
+            return rows
+
+    def __iter__(self):
+        while True:
+            row = self.fetchone()
+            if row is None:
+                return
+            yield row
+
+    def close(self) -> None:
+        with self._mutex:
+            self._close_locked()
+
+    def __del__(self) -> None:
+        cursor = getattr(self, "_cursor", None)
+        mutex = getattr(self, "_mutex", None)
+        if cursor is None or mutex is None or getattr(self, "_closed", True):
+            return
+        try:
+            with mutex:
+                self._close_locked()
+        except Exception:
+            pass
+
+
+class _GuardedSqliteConnection:
+    """Serialize all access to one shared SQLite connection via Python RLock.
+
+    Prevents CPython GIL <-> sqlite3 db->mutex ABBA deadlocks when a SQLite
+    Python UDF executes while another thread touches the same connection.
+    """
+
+    def __init__(self, connection: sqlite3.Connection, mutex: threading.RLock) -> None:
+        self._raw = connection
+        self._mutex = mutex
+
+    def execute(self, sql: str, parameters=_NO_SQL_PARAMS):
+        with self._mutex:
+            cursor = (
+                self._raw.execute(sql)
+                if parameters is _NO_SQL_PARAMS
+                else self._raw.execute(sql, parameters)
+            )
+            return _GuardedSqliteCursor(cursor, self._mutex)
+
+    def executemany(self, sql: str, seq_of_parameters):
+        with self._mutex:
+            cursor = self._raw.executemany(sql, seq_of_parameters)
+            return _GuardedSqliteCursor(cursor, self._mutex)
+
+    def executescript(self, sql_script: str):
+        with self._mutex:
+            cursor = self._raw.executescript(sql_script)
+            return _GuardedSqliteCursor(cursor, self._mutex)
+
+    def commit(self) -> None:
+        with self._mutex:
+            self._raw.commit()
+
+    def rollback(self) -> None:
+        with self._mutex:
+            self._raw.rollback()
+
+    def close(self) -> None:
+        with self._mutex:
+            self._raw.close()
+
+    def create_function(self, *args, **kwargs):
+        with self._mutex:
+            return self._raw.create_function(*args, **kwargs)
+
+    def set_trace_callback(self, *args, **kwargs):
+        with self._mutex:
+            return self._raw.set_trace_callback(*args, **kwargs)
+
+    def set_authorizer(self, *args, **kwargs):
+        with self._mutex:
+            return self._raw.set_authorizer(*args, **kwargs)
+
+    def set_progress_handler(self, *args, **kwargs):
+        with self._mutex:
+            return self._raw.set_progress_handler(*args, **kwargs)
+
+    @property
+    def in_transaction(self) -> bool:
+        with self._mutex:
+            return self._raw.in_transaction
+
+    @property
+    def total_changes(self) -> int:
+        with self._mutex:
+            return self._raw.total_changes
+
+    @property
+    def row_factory(self):
+        with self._mutex:
+            return self._raw.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value) -> None:
+        with self._mutex:
+            self._raw.row_factory = value
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw, name)
+
+
 class _SqliteTransactionLock:
     """Roll back failed compound writes before another request can commit them."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, mutex: threading.RLock | None = None):
         self._connection = connection
-        self._mutex = threading.Lock()
+        self._mutex = mutex if mutex is not None else threading.RLock()
 
     def __enter__(self):
         self._mutex.acquire()
@@ -1059,15 +1250,20 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
         if not readonly:
             db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
+        raw_conn = sqlite3.connect(
             db_path.resolve().as_uri() + "?mode=ro" if readonly else str(db_path),
-            check_same_thread=False, uri=readonly,
+            timeout=30.0,
+            check_same_thread=False,
+            uri=readonly,
         )
-        # 统一在此设置一次 Row 工厂；连接被多线程共享，
-        # 各读方法中反复赋值属于对共享状态的无锁突变。
-        self._conn.row_factory = sqlite3.Row
-        self._conn.create_function("task_sort_time", 2, task_sort_time, deterministic=True)
-        self._lock = _SqliteTransactionLock(self._conn)
+        # 统一在此设置一次 Row 工厂；连接通过 RLock 串行化，
+        # 防止 SQLite Python UDF 与跨线程访问触发 GIL <-> db->mutex 死锁。
+        raw_conn.row_factory = sqlite3.Row
+        raw_conn.create_function("task_sort_time", 2, task_sort_time, deterministic=True)
+        mutex = threading.RLock()
+        self._conn = _GuardedSqliteConnection(raw_conn, mutex)
+        self._lock = _SqliteTransactionLock(self._conn, mutex=mutex)
+        self._conn.execute("PRAGMA busy_timeout = 30000")
         if not readonly:
             self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")

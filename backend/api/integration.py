@@ -451,9 +451,14 @@ async def get_public_scan_progress(
     current_user: User = Depends(_public_user_dependency),
 ) -> PublicScanProgress:
     scan = await scan_queries.get_scan_status(scan_id, current_user)
+    fp_results = await run_store_call(
+        get_scan_store(),
+        scan_fp_review_policy._latest_fp_review_result_map,
+        scan_id,
+    )
     metrics = calculate_issue_metrics(
         scan.vulnerabilities,
-        scan_fp_review_policy._latest_fp_review_result_map(scan_id),
+        fp_results,
     )
     token = request.query_params.get("token", "")
     return PublicScanProgress(
