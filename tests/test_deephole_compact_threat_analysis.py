@@ -799,3 +799,27 @@ def test_validate_module_threats_enforces_schema_and_57_pattern_catalog(tmp_path
     }
     envelope_file.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
     assert tree_validator.validate_file(envelope_file, schemas.FINAL_ATTACK_TREE_SCHEMA) == envelope
+
+
+def test_compact_merge_prompt_and_skill_guide_small_module_merging_without_path_loss(
+    tmp_path,
+    compact_native,
+):
+    stages = importlib.import_module(compact_native.__name__ + ".stages.high_risk_modules")
+    layout = compact_native.ThreatAnalysisLayout(tmp_path / "artifacts")
+    stage = stages.HighRiskModuleStage(submit_tasks=lambda *a, **kw: [], layout=layout)
+    merge_task = stage.build_merge_task(candidate_files=[tmp_path / "cand-1.json"])
+    prompt = merge_task["runtime_prompt"]
+    assert "2,000~5,000 行" in prompt
+    assert "普遍过小" in prompt
+    assert "不得丢失路径" in prompt
+    assert not any(forbidden in prompt for forbidden in ("[]", "空数组", "聊天回复", "宿主"))
+
+    merge_skill = (
+        COMPACT_ROOT
+        / "skills/high-risk-modules/deephole-compact-high-risk-module-merge/SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "2,000~5,000 行" in merge_skill
+    assert "严禁丢失路径" in merge_skill
+    assert "输出前核对所有候选有效路径均已被覆盖" in merge_skill
+    assert "常规已达 2,000~5,000 行以上的独立模块保持原样，不强行合并" in merge_skill
