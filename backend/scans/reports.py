@@ -1,6 +1,6 @@
 """Scan reports services."""
 
-import csv
+import asyncio
 import io
 import zipfile
 from backend.application import ApplicationError, DownloadArtifact, get_scan_store, run_store_call
@@ -18,36 +18,37 @@ from backend.scans.reporting import (
     _vuln_report_markdown,
     _vulnerability_at_index,
 )
+from backend.xlsx_export import XLSX_MEDIA_TYPE, XlsxColumn, build_xlsx_workbook
+
+_SCAN_REPORT_COLUMNS = (
+    XlsxColumn("文件", width=36),
+    XlsxColumn("行号", width=10, is_integer=True),
+    XlsxColumn("函数", width=26),
+    XlsxColumn("问题类型", width=22),
+    XlsxColumn("问题描述", width=64, wrap_text=True),
+    XlsxColumn("人工反馈", width=14),
+    XlsxColumn("ZIP中的问题报告", width=34),
+)
 
 
 async def download_report(
     scan_id: str,
     current_user: User = None,
 ) -> DownloadArtifact:
-    """Download current FP-review-confirmed issues as a CSV report."""
+    """Download current FP-review-confirmed issues as an Excel (.xlsx) report."""
     await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
-    writer.writerow([
-        "文件",
-        "行号",
-        "函数",
-        "问题类型",
-        "问题描述",
-        "人工反馈",
-        "ZIP中的问题报告",
-    ])
     report_groups = _exportable_problem_groups(
         scan.vulnerabilities,
         fp_map,
         validation_map,
     )
+    rows: list[tuple[object, ...]] = []
     for group in report_groups:
         v = _resolved_report_vulnerability(group.vulnerability, group.fp_result)
-        writer.writerow([
+        rows.append((
             v.file,
             v.line,
             v.function,
@@ -55,11 +56,17 @@ async def download_report(
             v.description,
             _USER_FEEDBACK_LABELS.get(v.user_verdict, "未标记"),
             _problem_report_filename(group),
-        ])
+        ))
+    payload = await asyncio.to_thread(
+        build_xlsx_workbook,
+        sheet_name="问题列表",
+        columns=_SCAN_REPORT_COLUMNS,
+        rows=rows,
+    )
     return DownloadArtifact(
-        content="﻿" + buf.getvalue(),
-        media_type="text/csv; charset=utf-8-sig",
-        headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.csv"'},
+        content=payload,
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.xlsx"'},
     )
 
 

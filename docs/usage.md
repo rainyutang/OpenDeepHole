@@ -118,15 +118,16 @@ Agent WebSocket 重连会携带仍活跃的扫描、复核与验证身份，服�
 
 ## 导出、分享与统计
 
-扫描详情的 ZIP 和 CSV 导出同一批具有有效 AI 复核 TP 最终结论的问题。单个问题也可导出 Markdown，其中包含所选复核方法的阶段证据。
+扫描详情的 ZIP 和 Excel 导出同一批具有有效 AI 复核 TP 最终结论的问题。单个问题也可导出 Markdown，其中包含所选复核方法的阶段证据。管理员还可在「结果看板」与「用户管理」页按时间范围、用户名或工号筛选导出全平台问题的 Excel 表格（含发现用户名、工号、发现时间、产品、所属扫描及所属扫描分享链接）。
 
 | 格式 | API |
 | --- | --- |
 | 单项 Markdown | `GET /api/scan/{id}/vulnerability/{idx}/report` |
-| CSV | `GET /api/scan/{id}/report` |
+| 单扫描 Excel | `GET /api/scan/{id}/report` |
 | ZIP | `GET /api/scan/{id}/report.zip` |
+| 管理员全量 Excel | `GET /api/admin/issues/export` |
 
-CSV 包含“文件、行号、函数、问题类型、问题描述、人工反馈、ZIP中的问题报告”七列，最后一列与 ZIP 内的 Markdown 文件对应。尚未完成复核或只做人工确认的项目，不因此自动满足 TP 导出条件。
+单扫描 Excel 包含“文件、行号、函数、问题类型、问题描述、人工反馈、ZIP中的问题报告”七列，最后一列与 ZIP 内的 Markdown 文件对应。尚未完成复核或只做人工确认的项目，不因此自动满足 TP 导出条件。
 
 分享链接和撤销机制见[扫描分享](scan-sharing.md)。所有登录用户均可查看「结果看板」；管理员统计全部扫描，普通用户统计自己创建的扫描。顶部 Token 总计按权限范围汇总并按 Agent 分组，不受产品筛选影响；单次扫描的任务和模型明细见[Token 分类统计](scan-token-categories.md)。
 

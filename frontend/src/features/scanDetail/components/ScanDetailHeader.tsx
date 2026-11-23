@@ -139,8 +139,8 @@ export function ScanDetailHeader({
             >
               {exportingReport === "zip"
                 ? "压缩包导出中..."
-                : exportingReport === "csv"
-                  ? "CSV 导出中..."
+                : exportingReport === "xlsx"
+                  ? "Excel 导出中..."
                   : "导出报告"}
               {!exportingReport && (
                 <svg
@@ -171,10 +171,10 @@ export function ScanDetailHeader({
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={() => { void handleExportReport("csv"); }}
+                  onClick={() => { void handleExportReport("xlsx"); }}
                   className="block w-full border-t border-slate-700 px-3 py-2 text-left text-sm font-medium text-slate-100 transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
                 >
-                  CSV
+                  Excel
                 </button>
               </div>
             )}

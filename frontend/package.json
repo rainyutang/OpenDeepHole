@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:routing": "node tests/routing.test.mjs",
     "test:user-management": "node tests/userManagement.test.mjs",
+    "test:admin-issue-export": "node tests/adminIssueExport.test.mjs",
     "test:announcements": "node tests/announcements.test.mjs",
     "test:scan-paths": "node tests/scanPathValidation.test.mjs",
     "test:scan-copy": "node tests/scanCopy.test.mjs",

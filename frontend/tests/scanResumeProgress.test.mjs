@@ -345,7 +345,7 @@ test("report export is removed from task progress while the export menu remains 
   const exportButton = root.root.findAllByType("button").find((node) => text(node) === "导出报告");
   assert.ok(exportButton);
   await act(async () => exportButton.props.onClick());
-  assert.deepEqual(root.root.findAllByProps({ role: "menuitem" }).map(text), ["ZIP", "CSV"]);
+  assert.deepEqual(root.root.findAllByProps({ role: "menuitem" }).map(text), ["ZIP", "Excel"]);
 });
 
 test("completed scan resumes and both flow views advance despite pool and old execution events", async () => {

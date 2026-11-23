@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
 import PageHeader from "./PageHeader";
+import AdminIssueExportModal from "../features/adminExport/AdminIssueExportModal";
 
 interface Props {
   onBack: () => void;
@@ -35,6 +36,7 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
   const [error, setError] = useState("");
   const [activeChecker, setActiveChecker] = useState<string | null>(null);
   const [productFilter, setProductFilter] = useState("");
+  const [exportOpen, setExportOpen] = useState(false);
 
   const refresh = async (nextProduct = productFilter) => {
     setLoading(true);
@@ -66,6 +68,12 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      {user.role === "admin" && (
+        <AdminIssueExportModal
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
       <PageHeader
         title="结果看板"
         onBack={onBack}
@@ -86,6 +94,15 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
               </option>
             ))}
           </select>
+          {user.role === "admin" && (
+            <button
+              type="button"
+              onClick={() => setExportOpen(true)}
+              className="whitespace-nowrap px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+            >
+              导出问题
+            </button>
+          )}
           <button
             onClick={() => refresh()}
             className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"

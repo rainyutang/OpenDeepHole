@@ -153,11 +153,11 @@ export function useScanActions(
         blob,
         format === "zip"
           ? `scan-${currentScanId}-report.zip`
-          : `report-${currentScanId}.csv`,
+          : `report-${currentScanId}.xlsx`,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "未知错误";
-      alert(`${format === "zip" ? "导出压缩包" : "导出 CSV"}失败：${msg}`);
+      alert(`${format === "zip" ? "导出压缩包" : "导出 Excel"}失败：${msg}`);
     } finally {
       setExportingReport(null);
     }

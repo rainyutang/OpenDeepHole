@@ -15,7 +15,7 @@ async def download_report(
     scan_id: str,
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    'Download current FP-review-confirmed issues as a CSV report.'
+    'Download current FP-review-confirmed issues as an Excel (.xlsx) report.'
     artifact = await service.download_report(scan_id=scan_id, current_user=current_user)
     return Response(content=artifact.content, media_type=artifact.media_type, headers=artifact.headers)
 

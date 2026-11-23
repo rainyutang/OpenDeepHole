@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 
+from backend.application import ApplicationError
 from backend.auth import get_current_user, require_admin
+from backend.scans import admin_export as admin_export_service
 from backend.models import (
     CheckerDashboardAgentTokenUsage,
     CheckerDashboardResponse,
@@ -115,6 +118,51 @@ async def get_runtime_metrics(
 ) -> dict:
     """Return per-worker request, event-loop, and database queue metrics."""
     return runtime_metrics.snapshot()
+
+
+def _request_fallback_base_url(request: Request) -> str:
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip()
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    if forwarded_host and "/" not in forwarded_host and "@" not in forwarded_host:
+        scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme
+        if scheme in {"http", "https"}:
+            return f"{scheme}://{forwarded_host}"
+    return str(request.base_url).rstrip("/")
+
+
+@router.get("/api/admin/issues/export")
+async def export_admin_issues(
+    request: Request,
+    start_time: str | None = Query(None, max_length=64),
+    end_time: str | None = Query(None, max_length=64),
+    username: str | None = Query(None, max_length=128),
+    employee_id: str | None = Query(None, max_length=64),
+    tz_offset_minutes: int | None = Query(None, ge=-720, le=840),
+    share_origin: str | None = Query(None, max_length=256),
+    _current_user: User = Depends(require_admin),
+) -> Response:
+    """Export all matching FP-review-confirmed issues across scans as an Excel (.xlsx) workbook."""
+    try:
+        artifact = await admin_export_service.export_admin_issues_excel(
+            start_time=start_time,
+            end_time=end_time,
+            username=username,
+            employee_id=employee_id,
+            tz_offset_minutes=tz_offset_minutes,
+            share_origin=share_origin,
+            fallback_base_url=_request_fallback_base_url(request),
+        )
+    except ApplicationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers,
+        ) from exc
+    return Response(
+        content=artifact.content,
+        media_type=artifact.media_type,
+        headers=artifact.headers,
+    )
 
 
 @dataclass

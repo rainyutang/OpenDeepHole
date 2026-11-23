@@ -3,15 +3,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import asyncio
-import csv
 import io
 import json
+import openpyxl
 import unittest
 import zipfile
 import backend.api.scan_routes.reports as backend_api_scan_routes_reports
 import backend.application as application
 import backend.scans.reports as report_service
 from backend.api import integration as integration_api
+from backend.xlsx_export import XLSX_MEDIA_TYPE
 from backend.models import (
     FpReviewResult,
     ScanItemStatus,
@@ -148,11 +149,25 @@ class ReportExportTests(unittest.TestCase):
             )
 
     @staticmethod
-    def _rows(response: Response) -> tuple[list[str], list[dict[str, str]]]:
-        reader = csv.DictReader(io.StringIO(response.body.decode("utf-8-sig")))
-        return list(reader.fieldnames or []), list(reader)
+    def _rows(response: Response) -> tuple[list[str], list[dict[str, object]]]:
+        wb = openpyxl.load_workbook(io.BytesIO(response.body))
+        try:
+            ws = wb.active
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                return [], []
+            headers = [str(cell or "") for cell in all_rows[0]]
+            records: list[dict[str, object]] = []
+            for values in all_rows[1:]:
+                record: dict[str, object] = {}
+                for header, cell in zip(headers, values):
+                    record[header] = "" if cell is None else cell
+                records.append(record)
+            return headers, records
+        finally:
+            wb.close()
 
-    def test_csv_and_zip_export_the_same_final_tp_reports(self) -> None:
+    def test_excel_and_zip_export_the_same_final_tp_reports(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             status=ScanItemStatus.COMPLETE,
@@ -175,7 +190,10 @@ class ReportExportTests(unittest.TestCase):
             3: _fp_result(3, "tp"),
             4: _fp_result(4, "uncertain"),
         }
-        fieldnames, rows = self._rows(self._download(scan, fp_map))
+        response = self._download(scan, fp_map)
+        self.assertEqual(response.media_type, XLSX_MEDIA_TYPE)
+        self.assertIn('filename="report-scan-1.xlsx"', response.headers["Content-Disposition"])
+        fieldnames, rows = self._rows(response)
 
         self.assertEqual(
             fieldnames,
@@ -194,7 +212,7 @@ class ReportExportTests(unittest.TestCase):
             rows[0],
             {
                 "文件": "src/tp-first.c",
-                "行号": "10",
+                "行号": 10,
                 "函数": "tp-first",
                 "问题类型": "out_of_bounds",
                 "问题描述": "tp-first issue",
@@ -472,9 +490,13 @@ class ReportExportTests(unittest.TestCase):
         )
         self.assertIn("- Entry: handle_request", markdown)
 
-    def test_public_csv_route_forwards_fixed_export(self) -> None:
+    def test_public_excel_route_forwards_fixed_export(self) -> None:
         user = User(user_id="owner", username="owner", role="user")
-        expected = application.DownloadArtifact(content="ok", media_type="text/csv", headers={"X-Report": "fixed"})
+        expected = application.DownloadArtifact(
+            content=b"ok",
+            media_type=XLSX_MEDIA_TYPE,
+            headers={"X-Report": "fixed"},
+        )
         download = AsyncMock(return_value=expected)
         with patch.object(integration_api.scan_reports, "download_report", new=download):
             response = asyncio.run(integration_api.download_public_report(
@@ -484,7 +506,7 @@ class ReportExportTests(unittest.TestCase):
 
         self.assertEqual(response.body, b"ok")
         self.assertEqual(response.headers["X-Report"], "fixed")
-        self.assertEqual(response.media_type, "text/csv")
+        self.assertEqual(response.media_type, XLSX_MEDIA_TYPE)
         download.assert_awaited_once_with("scan-1", user)
 
     def test_final_tp_regenerated_report_overrides_erroneous_mining_report_in_exports(self) -> None:
@@ -512,10 +534,10 @@ class ReportExportTests(unittest.TestCase):
         _, rows = self._rows(self._download(scan, fp_map))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["文件"], "src/proto/parser.c")
-        self.assertEqual(rows[0]["行号"], "44")
+        self.assertEqual(rows[0]["行号"], 44)
         self.assertEqual(rows[0]["函数"], "CopyPayload")
         self.assertEqual(rows[0]["问题类型"], "缓冲区越界写")
-        self.assertIn("CopyPayload()", rows[0]["问题描述"])
+        self.assertIn("CopyPayload()", str(rows[0]["问题描述"]))
         self.assertEqual(rows[0]["ZIP中的问题报告"], "vuln-0-src_proto_parser.c_44.md")
 
         single_response = self._download_single(scan, 0, fp_map)

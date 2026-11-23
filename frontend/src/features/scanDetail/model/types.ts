@@ -14,7 +14,7 @@ export type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validati
 
 export type FlowNodeStatus = "pending" | "queued" | "running" | "done" | "warning" | "incomplete" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
 
-export type ReportExportFormat = "zip" | "csv";
+export type ReportExportFormat = "zip" | "xlsx";
 
 export type CheckerDisplayMetadata = Pick<CheckerInfo, "name" | "label">;
 

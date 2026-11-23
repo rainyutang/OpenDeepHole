@@ -9,6 +9,7 @@ import DepartmentPoolModal, {
   type DepartmentPoolMutation,
 } from "../features/userManagement/DepartmentPoolModal";
 import EditUserProfileModal from "../features/userManagement/EditUserProfileModal";
+import AdminIssueExportModal from "../features/adminExport/AdminIssueExportModal";
 import {
   ALL_DEPARTMENTS_FILTER,
   UNASSIGNED_DEPARTMENT_FILTER,
@@ -77,6 +78,7 @@ export default function UserManagement({ onBack, user }: Props) {
   const [createLoading, setCreateLoading] = useState(false);
 
   const [showDepartmentPool, setShowDepartmentPool] = useState(false);
+  const [showExportIssues, setShowExportIssues] = useState(false);
   const [editTarget, setEditTarget] = useState<AdminUserSummary | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
@@ -319,6 +321,13 @@ export default function UserManagement({ onBack, user }: Props) {
         onMutated={handleDepartmentMutated}
       />
 
+      {/* Admin issue export modal */}
+      <AdminIssueExportModal
+        open={showExportIssues}
+        onClose={() => setShowExportIssues(false)}
+        users={users}
+      />
+
       <PageHeader
         title="用户管理"
         onBack={onBack}
@@ -334,6 +343,13 @@ export default function UserManagement({ onBack, user }: Props) {
               {refreshing ? "刷新中..." : "刷新"}
             </button>
             <ThemeToggle />
+            <button
+              type="button"
+              onClick={() => setShowExportIssues(true)}
+              className="whitespace-nowrap rounded-lg border border-slate-600 bg-slate-800 px-3.5 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-700"
+            >
+              导出问题
+            </button>
             <button
               type="button"
               onClick={() => setShowDepartmentPool(true)}

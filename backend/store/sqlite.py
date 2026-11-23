@@ -102,6 +102,7 @@ from .user_management import (
     UserManagementStoreMixin,
     normalize_employee_id,
 )
+from .admin_export import AdminExportStoreMixin
 
 STORAGE_COLUMNS = {
     **HISTORY_COLUMNS,
@@ -1244,7 +1245,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:

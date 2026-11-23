@@ -97,6 +97,26 @@ class ScanStoreBase(ABC):
         """Revoke the current share without changing scan execution."""
         raise NotImplementedError
 
+    def ensure_scan_shares(self, scan_ids: list[str]) -> dict[str, str]:
+        """Return active share tokens for scans, batch-creating only missing rows."""
+        raise NotImplementedError
+
+    def list_admin_export_candidate_scans(
+        self,
+        *,
+        username: str | None = None,
+        employee_id: str | None = None,
+    ) -> list[dict]:
+        """Return lightweight metadata for non-deleted scans with >= 1 final-TP issue."""
+        raise NotImplementedError
+
+    def load_admin_export_scan_chunk(
+        self,
+        scan_ids: list[str],
+    ) -> dict[str, tuple[list[Vulnerability], dict[int, FpReviewResult]]]:
+        """Load only final-TP vulnerabilities & effective FP results for one scan batch."""
+        raise NotImplementedError
+
     # -- Scan lifecycle --
 
     @abstractmethod

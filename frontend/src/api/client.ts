@@ -103,8 +103,17 @@ export {
   batchUnmarkVulnerabilities,
   saveFalsePositive,
 } from "./issues";
-export { downloadScanReport, downloadVulnerabilityReport, downloadScanReportZip } from "./reports";
-export type { ReportFpReviewState } from "./reports";
+export {
+  downloadScanReport,
+  downloadVulnerabilityReport,
+  downloadScanReportZip,
+  exportAdminIssuesExcel,
+} from "./reports";
+export type {
+  AdminIssueExportParams,
+  AdminIssueExportResult,
+  ReportFpReviewState,
+} from "./reports";
 export { listFeedback, createFeedback, updateFeedback, deleteFeedback, updateScanFeedback } from "./feedback";
 export { getReviewNotes, saveReviewNote, deleteReviewNote, getScanReviewNotes, updateScanReviewNotes } from "./reviewNotes";
 export {

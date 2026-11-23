@@ -2,12 +2,12 @@
 
 from backend.application import get_runtime
 import asyncio
-import csv
 import io
 import os
 import uuid
 import zipfile
 import httpx
+import openpyxl
 import pytest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -24,6 +24,17 @@ from backend.models import (
     Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
+
+
+def _excel_rows(content: bytes) -> list[dict[str, object]]:
+    wb = openpyxl.load_workbook(io.BytesIO(content))
+    try:
+        ws = wb.active
+        sheet_rows = list(ws.iter_rows(values_only=True))
+        headers = [str(cell or "") for cell in sheet_rows[0]]
+        return [dict(zip(headers, values)) for values in sheet_rows[1:]]
+    finally:
+        wb.close()
 
 
 async def direct_store_call(store, operation, *args, **kwargs):
@@ -283,10 +294,10 @@ def test_share_reads_and_downloads_real_report_content(environment):
             assert result.json()["next_cursor"] == 0
             second = await client.get(base + "/vulnerabilities", params={**params, "limit": 1, "after": 0})
             assert second.json()["items"][0]["index"] == 1
-            csv_response = await client.get(base + "/report", params=params)
-            assert csv_response.status_code == 200
-            assert f"report-{env.scan_id}.csv" in csv_response.headers["content-disposition"]
-            rows = list(csv.DictReader(io.StringIO(csv_response.content.decode("utf-8-sig"))))
+            excel_response = await client.get(base + "/report", params=params)
+            assert excel_response.status_code == 200
+            assert f"report-{env.scan_id}.xlsx" in excel_response.headers["content-disposition"]
+            rows = _excel_rows(excel_response.content)
             assert len(rows) == 2 and rows[1]["文件"] == "src/issue-1.c"
             single = await client.get(base + "/vulnerability/1/report", params=params)
             assert single.status_code == 200 and "问题报告 1" in single.text and "已确认" in single.text
@@ -296,7 +307,7 @@ def test_share_reads_and_downloads_real_report_content(environment):
             with zipfile.ZipFile(io.BytesIO(zipped.content)) as archive:
                 assert all(row["ZIP中的问题报告"] in archive.namelist() for row in rows)
                 assert "问题报告 1" in archive.read(rows[1]["ZIP中的问题报告"]).decode()
-            for response in (csv_response, single, zipped):
+            for response in (excel_response, single, zipped):
                 assert response.headers["cache-control"] == "no-store"
             assert (await client.get(base + "/skill/unselected", params=params)).status_code == 404
     asyncio.run(run())
@@ -430,7 +441,7 @@ def test_sparse_problem_indices_can_be_marked_and_downloaded(environment):
             report = await client.get(base + "/vulnerability/52/report", params=params)
             assert report.status_code == 200 and "问题报告 1" in report.text and "保留原问题编号" in report.text
             exported = await client.get(base + "/report", params=params)
-            assert len(list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))) == 2
+            assert len(_excel_rows(exported.content)) == 2
             assert (await client.post(base + "/unmark", params=params, json={"index": 52})).status_code == 200
             # An array position must not address a different persisted problem.
             assert (await client.post(base + "/mark", params=params, json={"index": 1, "verdict": "confirmed"})).status_code == 400
