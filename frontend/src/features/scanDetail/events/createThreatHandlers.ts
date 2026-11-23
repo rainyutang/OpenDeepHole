@@ -55,6 +55,7 @@ export function createThreatHandlers({ state, resources, analysis }: ScanEventCo
         ...prev,
         mining_engine_runs: data.runs,
       } : prev);
+      scheduleOverviewSummaryRefresh();
     }
   };
 }

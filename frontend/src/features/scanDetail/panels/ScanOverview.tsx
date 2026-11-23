@@ -7,6 +7,8 @@ import {
   THREAT_AUDIT_ENGINE_LABEL,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   canonicalMiningEngineLabel,
+  isPatternAuditEngine,
+  threatPatternAuditFlowDetail,
 } from "../../../miningEngines";
 import { hasActiveScanProgress } from "../../../scanProgress";
 import { staticAnalysisFailures, staticCandidateAuditFlowStatus } from "../../../staticAudit";
@@ -16,7 +18,7 @@ import type { Vulnerability } from "../../../types/issues";
 import { isThreatAnalysisResultReady } from "../../threatAnalysis/analysisModel";
 import { OverviewMetric } from "../components/OverviewMetric";
 import { MiniMetric, StatusPill, TaskSummaryRow } from "../components/taskUi";
-import { flowStatusLabel, flowStatusTone } from "../model/processFlow";
+import { flowStatusLabel, flowStatusTone, patternAuditEngineCounts } from "../model/processFlow";
 import {
   currentThreatAuditTasks,
   effectiveMiningEngines,
@@ -243,13 +245,19 @@ export function ScanOverview({
                   status={flowStatusLabel(status)}
                   tone={flowStatusTone(status, "green")}
                   progress={engine.engine_id === STATIC_ENGINE_ID && scan.total_candidates ? pct : undefined}
-                  detail={run?.error_message || (
-                    engine.engine_id === STATIC_ENGINE_ID
-                      ? scan.total_candidates
-                        ? `${scan.processed_candidates}/${scan.total_candidates} 候选点已审计`
-                        : "等待静态分析候选点"
-                      : `引擎 ID：${engine.engine_id}`
-                  )}
+                  detail={isPatternAuditEngine(engine.engine_id)
+                    ? threatPatternAuditFlowDetail(
+                      run,
+                      Boolean(scan.threat_analysis),
+                      patternAuditEngineCounts(scan, engine.engine_id),
+                    )
+                    : run?.error_message || (
+                      engine.engine_id === STATIC_ENGINE_ID
+                        ? scan.total_candidates
+                          ? `${scan.processed_candidates}/${scan.total_candidates} 候选点已审计`
+                          : "等待静态分析候选点"
+                        : `引擎 ID：${engine.engine_id}`
+                    )}
                 />
               );
             })}

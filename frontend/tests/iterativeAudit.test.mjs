@@ -10,6 +10,7 @@ const client = await server.ssrLoadModule("/src/api/client.ts");
 const runtime = await server.ssrLoadModule("/src/scanRuntime.ts");
 const engines = await server.ssrLoadModule("/src/miningEngines.ts");
 const navigation = await server.ssrLoadModule("/src/auditNavigation.ts");
+const { buildProcessFlowModel } = await server.ssrLoadModule("/src/features/scanDetail/model/processFlow.ts");
 const { ThreatAuditPanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const engineId = engines.THREAT_PATTERN_ITERATIVE_ENGINE_ID;
 const originalAdapter = client.api.defaults.adapter;
@@ -329,4 +330,74 @@ test("iterative audit detail shows Fresh Session retry badge and refreshed start
   assert.match(rendered, /Fresh Session 第 2\/3 次/);
   assert.match(rendered, /ses-fresh-2/);
   assert.match(rendered, /2026-11-17T04:00:05Z/);
+});
+
+test("process flow node counts stay aligned with iterative panel counts even when mining_engine_runs lags", () => {
+  const value = scan([], {
+    status: "auditing",
+    mining_engines: [{ engine_id: engineId, engine_label: "迭代引擎", enabled: true }],
+    mining_engine_runs: [{ engine_id: engineId, status: "running", total_candidates: 10, processed_candidates: 2 }],
+    detail_counts: {
+      threat_pattern_audit_tasks: 15,
+      threat_pattern_audit_current: 14,
+      threat_pattern_audit_by_engine: {
+        [engineId]: {
+          tasks: 15, current: 14, pending: 0, queued: 0, running: 0,
+          completed: 9, failed: 2, cancelled: 3, superseded: 1,
+        },
+      },
+    },
+  });
+  const model = buildProcessFlowModel({
+    scan: value,
+    indexProgress: { current: 0, total: 0, done: false, running: false, failed: false, skipped: true },
+    fpReview: null,
+    activeTab: "overview",
+    activeEngineId: "",
+    engineCatalog: [],
+    threatAnalysisLoading: false,
+    isDone: false,
+    isFpReviewing: false,
+  });
+  assert.equal(model.miningEntries[0].node.detail, "9/14 已审计 · 2 未成功");
+
+  const noFailureModel = buildProcessFlowModel({
+    scan: {
+      ...value,
+      detail_counts: {
+        ...value.detail_counts,
+        threat_pattern_audit_by_engine: {
+          [engineId]: {
+            tasks: 15, current: 14, pending: 5, queued: 0, running: 0,
+            completed: 9, failed: 0, cancelled: 0, superseded: 1,
+          },
+        },
+      },
+    },
+    indexProgress: { current: 0, total: 0, done: false, running: false, failed: false, skipped: true },
+    fpReview: null,
+    activeTab: "overview",
+    activeEngineId: "",
+    engineCatalog: [],
+    threatAnalysisLoading: false,
+    isDone: false,
+    isFpReviewing: false,
+  });
+  assert.equal(noFailureModel.miningEntries[0].node.detail, "9/14 已审计");
+
+  const legacyFallbackModel = buildProcessFlowModel({
+    scan: {
+      ...value,
+      detail_counts: { threat_pattern_audit_tasks: 0, threat_pattern_audit_by_engine: {} },
+    },
+    indexProgress: { current: 0, total: 0, done: false, running: false, failed: false, skipped: true },
+    fpReview: null,
+    activeTab: "overview",
+    activeEngineId: "",
+    engineCatalog: [],
+    threatAnalysisLoading: false,
+    isDone: false,
+    isFpReviewing: false,
+  });
+  assert.equal(legacyFallbackModel.miningEntries[0].node.detail, "2/10 已审计");
 });

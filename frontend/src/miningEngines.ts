@@ -65,13 +65,43 @@ export function formatMiningEngineAuditProgress(run: {
   return `${processed}/${total} 已审计`;
 }
 
+export interface PatternAuditEngineCounts {
+  tasks?: number;
+  current: number;
+  completed: number;
+  failed?: number;
+  cancelled?: number;
+  pending?: number;
+  queued?: number;
+  running?: number;
+  superseded?: number;
+}
+
+export function formatPatternAuditTaskProgress(
+  counts: PatternAuditEngineCounts | null | undefined,
+): string | null {
+  if (!counts) return null;
+  const rawTasks = counts.tasks ?? counts.current;
+  if (typeof rawTasks !== "number" || !Number.isFinite(rawTasks) || rawTasks <= 0) {
+    return null;
+  }
+  const total = Math.max(0, Math.trunc(counts.current));
+  const completed = Math.min(total, Math.max(0, Math.trunc(counts.completed)));
+  const failed = Math.max(0, Math.trunc(counts.failed ?? 0));
+  return failed > 0
+    ? `${completed}/${total} 已审计 · ${failed} 未成功`
+    : `${completed}/${total} 已审计`;
+}
+
 export function threatPatternAuditFlowDetail(run: {
   status?: string;
   error_message?: string;
   started_at?: string;
   total_candidates?: number | null;
   processed_candidates?: number | null;
-} | null | undefined, threatAnalysisReady: boolean): string {
+} | null | undefined, threatAnalysisReady: boolean, taskCounts?: PatternAuditEngineCounts | null): string {
+  const taskProgress = formatPatternAuditTaskProgress(taskCounts);
+  if (taskProgress) return taskProgress;
   const progress = formatMiningEngineAuditProgress(run);
   if (progress) return progress;
   if (run?.error_message) return run.error_message;

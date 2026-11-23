@@ -322,3 +322,43 @@ def test_old_pattern_table_migrates_without_losing_history_and_uses_indexes(envi
         migrated._conn.commit()
     finally:
         migrated.close()
+
+
+def test_overview_and_status_reconcile_pattern_engine_runs_from_persisted_tasks(environment):
+    from backend.models import MiningEngineRunStatus
+    from backend.scans import queries
+
+    env = environment
+    env.store.update_mining_engine_run(env.scan_id, MiningEngineRunStatus(
+        engine_id=ITERATIVE, engine_label="Iterative", status="running",
+        total_candidates=2, processed_candidates=0,
+    ))
+    env.store.update_mining_engine_run(env.scan_id, MiningEngineRunStatus(
+        engine_id="threat_pattern_audit", engine_label="Legacy Pattern", status="success",
+        total_candidates=10, processed_candidates=10,
+    ))
+    task(env, "c1", engine_id=ITERATIVE, status="completed")
+    task(env, "c2", engine_id=ITERATIVE, status="completed")
+    task(env, "c3", engine_id=ITERATIVE, status="completed")
+    task(env, "f1", engine_id=ITERATIVE, status="timeout")
+    task(env, "x1", engine_id=ITERATIVE, status="cancelled")
+    task(env, "s1", engine_id=ITERATIVE, status="superseded")
+
+    user = User(user_id="owner", username="owner", role="user")
+    overview = asyncio.run(queries.get_scan_overview_v2(env.scan_id, current_user=user))
+    by_id = {item.engine_id: item for item in overview.mining_engine_runs}
+    assert overview.detail_counts.threat_pattern_audit_by_engine[ITERATIVE]["current"] == 5
+    assert overview.detail_counts.threat_pattern_audit_by_engine[ITERATIVE]["completed"] == 3
+    assert overview.detail_counts.threat_pattern_audit_by_engine[ITERATIVE]["failed"] == 1
+    assert by_id[ITERATIVE].total_candidates == 5
+    assert by_id[ITERATIVE].processed_candidates == 3
+    # Legacy pattern engine without persisted task rows preserves its run snapshot.
+    assert by_id["threat_pattern_audit"].total_candidates == 10
+    assert by_id["threat_pattern_audit"].processed_candidates == 10
+
+    full = asyncio.run(queries.get_scan_status(env.scan_id, current_user=user))
+    full_by_id = {item.engine_id: item for item in full.mining_engine_runs}
+    assert full_by_id[ITERATIVE].total_candidates == 5
+    assert full_by_id[ITERATIVE].processed_candidates == 3
+    assert full_by_id["threat_pattern_audit"].total_candidates == 10
+    assert full_by_id["threat_pattern_audit"].processed_candidates == 10

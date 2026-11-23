@@ -321,6 +321,48 @@ test("formats bounded attack-pattern audit progress", () => {
     miningEngines.threatPatternAuditFlowDetail({ status: "pending" }, false),
     "等待威胁分析完成",
   );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail(
+      { status: "running", processed_candidates: 1, total_candidates: 10 },
+      true,
+      { tasks: 12, current: 12, completed: 8, failed: 0 },
+    ),
+    "8/12 已审计",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail(
+      { status: "error", processed_candidates: 10, total_candidates: 10 },
+      true,
+      { tasks: 12, current: 12, completed: 8, failed: 2 },
+    ),
+    "8/12 已审计 · 2 未成功",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail(
+      { status: "success", processed_candidates: 4, total_candidates: 4 },
+      true,
+      { tasks: 0, current: 0, completed: 0, failed: 0 },
+    ),
+    "4/4 已审计",
+  );
+});
+
+test("late overview does not roll back mining_engine_runs updated via SSE while in flight", () => {
+  const initialRuns = [{ engine_id: "threat_pattern_iterative_audit", status: "running", total_candidates: 10, processed_candidates: 3 }];
+  const liveRuns = [{ engine_id: "threat_pattern_iterative_audit", status: "running", total_candidates: 12, processed_candidates: 6 }];
+  const requested = {
+    scan_id: "s", execution_revision: 2, status: "auditing", progress: 0,
+    processed_candidates: 0, total_candidates: 0, opencode_pool: null,
+    mining_engine_runs: initialRuns,
+  };
+  const current = { ...requested, mining_engine_runs: liveRuns };
+  const merged = runtime.mergeScanOverview(current, { ...requested, mining_engine_runs: [...initialRuns] }, requested);
+  assert.deepEqual(merged.mining_engine_runs, liveRuns);
+
+  const nextRevision = runtime.mergeScanOverview(current, {
+    ...requested, execution_revision: 3, mining_engine_runs: [{ engine_id: "threat_pattern_iterative_audit", status: "pending", total_candidates: null, processed_candidates: null }],
+  }, requested);
+  assert.equal(nextRevision.mining_engine_runs[0].status, "pending");
 });
 
 test("preserves completed task session traces during pool normalization", () => {

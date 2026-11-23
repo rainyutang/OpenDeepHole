@@ -1,11 +1,13 @@
 import {
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
+  THREAT_PATTERN_AUDIT_ENGINE_ID,
   canonicalMiningEngineLabel,
   isPatternAuditEngine,
   miningEngineRequiresCodeIndex,
   threatPatternAuditFlowDetail,
 } from "../../../miningEngines";
+import type { PatternAuditEngineCounts } from "../../../miningEngines";
 import { staticAnalysisFailures, staticCandidateAuditFlowStatus } from "../../../staticAudit";
 import type { FpReviewJob } from "../../../types/fpReview";
 import type { MiningEngineCatalogItem, MiningEngineSelection } from "../../../types/mining";
@@ -67,6 +69,71 @@ function processFlowEngineLabel(engineId: string, label: string): string {
     return "DeepHole基于代码风险点的问题识别引擎";
   }
   return canonicalMiningEngineLabel(engineId, label);
+}
+
+export function patternAuditEngineCounts(
+  scan: ScanStatusType,
+  engineId: string,
+): PatternAuditEngineCounts | null {
+  const byEngine = scan.detail_counts?.threat_pattern_audit_by_engine;
+  const direct = byEngine?.[engineId];
+  if (direct && (direct.tasks ?? direct.current) > 0) return direct;
+  if (
+    engineId === THREAT_PATTERN_AUDIT_ENGINE_ID
+    && scan.detail_counts
+    && !byEngine
+    && (scan.detail_counts.threat_pattern_audit_tasks ?? 0) > 0
+  ) {
+    return {
+      tasks: scan.detail_counts.threat_pattern_audit_tasks,
+      current: scan.detail_counts.threat_pattern_audit_current ?? 0,
+      completed: scan.detail_counts.threat_pattern_audit_completed ?? 0,
+      failed: scan.detail_counts.threat_pattern_audit_failed ?? 0,
+      cancelled: scan.detail_counts.threat_pattern_audit_cancelled ?? 0,
+      pending: scan.detail_counts.threat_pattern_audit_pending ?? 0,
+      queued: scan.detail_counts.threat_pattern_audit_queued ?? 0,
+      running: scan.detail_counts.threat_pattern_audit_running ?? 0,
+      superseded: scan.detail_counts.threat_pattern_audit_superseded ?? 0,
+    };
+  }
+  if (scan.detail_counts) return null;
+  const matching = (scan.threat_pattern_audit_tasks ?? []).filter(
+    (task) => (task.engine_id || THREAT_PATTERN_AUDIT_ENGINE_ID) === engineId,
+  );
+  if (matching.length === 0) return null;
+  let current = 0;
+  let completed = 0;
+  let failed = 0;
+  let cancelled = 0;
+  let pending = 0;
+  let queued = 0;
+  let running = 0;
+  let superseded = 0;
+  for (const task of matching) {
+    const status = String(task.status || "pending").toLowerCase();
+    if (status === "superseded") {
+      superseded += 1;
+      continue;
+    }
+    current += 1;
+    if (status === "completed") completed += 1;
+    else if (["failed", "failure", "error", "timeout", "no_result"].includes(status)) failed += 1;
+    else if (status === "cancelled") cancelled += 1;
+    else if (["running", "analyzing", "auditing"].includes(status)) running += 1;
+    else if (status === "queued") queued += 1;
+    else if (status === "pending") pending += 1;
+  }
+  return {
+    tasks: matching.length,
+    current,
+    completed,
+    failed,
+    cancelled,
+    pending,
+    queued,
+    running,
+    superseded,
+  };
 }
 
 export function buildProcessFlowModel({
@@ -275,7 +342,11 @@ export function buildProcessFlowModel({
             ? "等待创建审计任务"
             : "等待威胁分析完成"
       : isPatternAuditEngine(engine.engine_id)
-        ? threatPatternAuditFlowDetail(run, Boolean(scan.threat_analysis))
+        ? threatPatternAuditFlowDetail(
+          run,
+          Boolean(scan.threat_analysis),
+          patternAuditEngineCounts(scan, engine.engine_id),
+        )
         : run?.error_message
         || (engine.engine_id === STATIC_ENGINE_ID && staticRunning
           ? `静态分析 ${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`

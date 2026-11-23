@@ -95,6 +95,11 @@ export function mergeScanSnapshot(
     || scanExecutionRevision(requestedFrom) !== scanExecutionRevision(previous)
     || progressFields.some((key) => previous[key] !== requestedFrom?.[key])
   );
+  const engineRunsUpdatedDuringRequest = requestedFrom !== undefined && !newerExecution && (
+    requestedFrom?.scan_id !== previous.scan_id
+    || scanExecutionRevision(requestedFrom) !== scanExecutionRevision(previous)
+    || previous.mining_engine_runs !== requestedFrom?.mining_engine_runs
+  );
   const runtime = updatedDuringRequest ? previous : incoming;
   return mergeScanCodeGraph(previous, mergeScanMetadata(previous, {
     ...incoming,
@@ -105,6 +110,9 @@ export function mergeScanSnapshot(
     progress: runtime.total_candidates > 0
       ? Math.min(1, Math.max(0, runtime.processed_candidates / runtime.total_candidates))
       : runtime.progress,
+    ...(engineRunsUpdatedDuringRequest ? {
+      mining_engine_runs: previous.mining_engine_runs,
+    } : {}),
     ...(updatedDuringRequest ? {
       detail_counts: previous.detail_counts,
       retryable_candidates_count: previous.retryable_candidates_count,

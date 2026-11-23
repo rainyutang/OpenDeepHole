@@ -460,3 +460,206 @@ def test_iterative_audit_preserves_invocation_metadata_when_failure_has_empty_ou
     assert failed_updates[0].output_source.serve_session_id == "ses-failed-1"
     assert failed_updates[0].output_source.model == "p/m1"
     assert failed_updates[0].started_at == "2026-11-18T02:00:00+00:00"
+
+
+def test_resume_prescans_cached_rounds_before_blocking_workers_and_reports_exact_counts(harness, monkeypatch):
+    h = harness
+    tree = json.loads(h.tree.read_text())
+    tree["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({
+        "pattern_id": "SECOND-PATTERN", "pattern_name": "另一个攻击模式"})
+    h.tree.write_text(json.dumps(tree))
+
+    first_target = original._build_targets(
+        json.loads(h.tree.read_text()), json.loads(h.modules.read_text()),
+        fallback_code_path=h.kwargs["project_path"],
+    )[0]
+    first_r1_id = engine._task_id("iterative", first_target, 1)
+
+    # Run 1: target 1 fails round 1 (timeout); target 2 completes all 3 rounds.
+    invoke = engine.run_opencode_task
+    async def run1_invoke(**values):
+        if values["task_name"] == first_r1_id:
+            h.calls.append(values)
+            await values["lease_state_callback"]("running")
+            return OpenCodeResult(
+                status="timeout", text="timed out", structured=None,
+                model="test/model", session_id="ses-timeout", output_source={"model": "test/model"},
+            )
+        return await invoke(**values)
+
+    monkeypatch.setattr(engine, "run_opencode_task", run1_invoke)
+    first_outcome = asyncio.run(engine.run(**h.kwargs))
+    assert first_outcome["status"] == "error"
+    # 4 non-superseded tasks (1 failed + 3 completed); only completed tasks count in processed_candidates.
+    assert first_outcome["total_candidates"] == 4
+    assert first_outcome["processed_candidates"] == 3
+    assert len(h.calls) == 4
+
+    # Run 2 (resume): target 1 blocks in worker; before target 1 even starts LLM,
+    # target 2's 3 cached rounds must already be reconciled into progress & history without re-auditing.
+    h.events.clear()
+    observed_before_first_model_call = []
+
+    async def run2_invoke(**values):
+        assert values["task_name"] == first_r1_id, f"cached target should not be re-audited: {values['task_name']}"
+        progress_events = [
+            (item["data"]["current"], item["data"]["total"], item["data"].get("authoritative"))
+            for item in h.events if "current" in item["data"]
+        ]
+        observed_before_first_model_call.append((
+            list(progress_events),
+            len(json.loads((h.work / "previous-findings.json").read_text())),
+        ))
+        h.calls.append(values)
+        await values["lease_state_callback"]("running")
+        path = h.work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps([finding(1, more=False, clues="")], ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        return OpenCodeResult(
+            status="success", text="done", structured=None,
+            model="test/model", session_id="ses-retry-1", output_source={"model": "test/model"},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", run2_invoke)
+    second_outcome = asyncio.run(engine.run(is_resume=True, **h.kwargs))
+    assert second_outcome == {
+        "status": "success", "error_message": "",
+        "total_candidates": 4, "processed_candidates": 4,
+    }
+    assert len(h.calls) == 5  # Only target 1 round 1 ran; target 2's 3 rounds were never re-audited.
+    assert observed_before_first_model_call == [([(3, 4, True)], 3)]
+
+
+def test_resume_cancel_retains_persisted_completed_and_followup_counts(harness):
+    h = harness
+    tree = json.loads(h.tree.read_text())
+    tree["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({
+        "pattern_id": "SECOND-PATTERN", "pattern_name": "另一个攻击模式"})
+    h.tree.write_text(json.dumps(tree))
+
+    # Run 1: target 1 completes 3 rounds, target 2 completes round 1 and fails round 2 -> 5 tasks, 4 completed.
+    targets = original._build_targets(
+        json.loads(h.tree.read_text()), json.loads(h.modules.read_text()),
+        fallback_code_path=h.kwargs["project_path"],
+    )
+    second_r2_id = engine._task_id("iterative", targets[1], 2)
+    invoke = engine.run_opencode_task
+
+    async def fail_second_r2(**values):
+        if values["task_name"] == second_r2_id:
+            h.calls.append(values)
+            await values["lease_state_callback"]("running")
+            return OpenCodeResult(
+                status="timeout", text="r2 timeout", structured=None,
+                model="test/model", session_id="ses-t2-r2", output_source={"model": "test/model"},
+            )
+        return await invoke(**values)
+
+    h.kwargs_orig = engine.run_opencode_task
+    engine.run_opencode_task = fail_second_r2
+    try:
+        run1 = asyncio.run(engine.run(**h.kwargs))
+    finally:
+        engine.run_opencode_task = h.kwargs_orig
+    assert run1["status"] == "error"
+    assert run1["total_candidates"] == 5 and run1["processed_candidates"] == 4
+
+    # Run 2 (resume): cancel on the very first cached report before reaching target 2.
+    report = h.kwargs["report_vulnerabilities"]
+    async def cancel_immediately(values):
+        res = await report(values)
+        h.cancel.set()
+        return res
+
+    h.kwargs["report_vulnerabilities"] = cancel_immediately
+    run2 = asyncio.run(engine.run(is_resume=True, **h.kwargs))
+    assert run2["status"] == "cancelled"
+    # Unvisited persisted rounds from target 2 must still be counted in total and completed.
+    assert run2["total_candidates"] == 5
+    assert run2["processed_candidates"] == 4
+
+
+def test_scanner_authoritative_progress_allows_superseded_total_reduction(tmp_path):
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock, patch
+    from deephole_client import scanner
+    from deephole_client.config import AgentConfig
+
+    reporter = SimpleNamespace(
+        send_event=AsyncMock(),
+        send_index_status=AsyncMock(),
+        publish_opencode_pool_until=AsyncMock(),
+        send_static_progress=AsyncMock(),
+        report_mining_engine_run=AsyncMock(),
+        report_threat_analysis_run=AsyncMock(),
+        report_vulnerability=AsyncMock(return_value={"ok": True, "index": 0}),
+        finish_scan=AsyncMock(),
+        get_vulnerability_dedup_context=AsyncMock(return_value=[]),
+        push_file_inventory=AsyncMock(),
+        get_file_inventory=AsyncMock(return_value=None),
+        send_opencode_pool=AsyncMock(),
+    )
+    manifest = SimpleNamespace(
+        engine_id="authoritative_iterative",
+        label="Iterative",
+        fp_review=False,
+        requires_codex=False,
+    )
+    loaded = SimpleNamespace(manifest=manifest)
+    registry = SimpleNamespace(
+        errors=[],
+        manifests=lambda: [manifest],
+        get=lambda engine_id: loaded if engine_id == manifest.engine_id else None,
+    )
+
+    async def fake_run_engine(_engine, **engine_kwargs):
+        await engine_kwargs["output"]({
+            "process": manifest.engine_id,
+            "kind": "progress",
+            "message": "攻击模式迭代审计进度",
+            "data": {"current": 2, "total": 3, "authoritative": True},
+        })
+        await engine_kwargs["output"]({
+            "process": manifest.engine_id,
+            "kind": "progress",
+            "message": "攻击模式迭代审计进度",
+            "data": {"current": 2, "total": 2, "authoritative": True},
+        })
+        return {"status": "success", "error_message": "", "total_candidates": 2, "processed_candidates": 2}
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "a.c").write_text("int main(){return 0;}\n")
+    with (
+        patch.object(scanner.Path, "home", return_value=tmp_path),
+        patch.object(scanner, "configure_platform_runtime"),
+        patch.object(scanner, "opencode_task_context", return_value=nullcontext()),
+        patch.object(scanner, "load_mining_engines", return_value=registry),
+        patch.object(scanner, "run_mining_engine", new=fake_run_engine),
+    ):
+        asyncio.run(scanner.run_scan(
+            config=AgentConfig(),
+            project_path=project,
+            code_scan_path=project,
+            reporter=reporter,
+            scan_name="auth",
+            product="",
+            validation_environment="",
+            checker_names=[],
+            scan_id="scan-auth-progress",
+            scan_mode="custom",
+            threat_analysis_enabled=False,
+            cancel_event=threading.Event(),
+            mining_engines=[{"engine_id": manifest.engine_id, "engine_label": "Iterative", "enabled": True}],
+        ))
+    published = [
+        (call.args[1]["status"], call.args[1]["processed_candidates"], call.args[1]["total_candidates"])
+        for call in reporter.report_mining_engine_run.await_args_list
+        if call.args[1]["engine_id"] == manifest.engine_id
+    ]
+    assert published == [
+        ("running", None, None),
+        ("running", 2, 3),
+        ("running", 2, 2),
+        ("success", 2, 2),
+    ]

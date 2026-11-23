@@ -266,7 +266,7 @@ class PatternAuditStoreMixin:
             ), 0))
             amount = int(row["n"])
             counts["tasks"] += amount
-            status = row["status"]
+            status = str(row["status"] or "").strip().lower()
             if status != "superseded":
                 counts["current"] += amount
             state = {"analyzing": "running", "auditing": "running", "timeout": "failed", "no_result": "failed", "error": "failed", "failure": "failed"}.get(status, status)

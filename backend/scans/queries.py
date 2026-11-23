@@ -31,6 +31,48 @@ from backend.scans.resume_policy import (
 from backend.store.summaries import metrics_from_totals
 
 
+_PATTERN_AUDIT_ENGINE_IDS = frozenset({
+    "threat_pattern_audit",
+    "threat_pattern_iterative_audit",
+})
+
+
+def _pattern_counts_from_tasks(tasks) -> dict[str, dict[str, int]]:
+    result: dict[str, dict[str, int]] = {}
+    for task in tasks or ():
+        engine_id = str(getattr(task, "engine_id", "") or "threat_pattern_audit")
+        counts = result.setdefault(engine_id, {"tasks": 0, "current": 0, "completed": 0})
+        counts["tasks"] += 1
+        status = str(getattr(task, "status", "") or "").strip().lower()
+        if status != "superseded":
+            counts["current"] += 1
+        if status == "completed":
+            counts["completed"] += 1
+    return result
+
+
+def _reconcile_pattern_engine_runs(runs, by_engine: dict[str, dict[str, int]]):
+    if not runs or not by_engine:
+        return runs
+    reconciled = []
+    for run in runs:
+        engine_counts = (
+            by_engine.get(run.engine_id)
+            if run.engine_id in _PATTERN_AUDIT_ENGINE_IDS
+            else None
+        )
+        if engine_counts and int(engine_counts.get("tasks", 0) or 0) > 0:
+            total = max(0, int(engine_counts.get("current", 0) or 0))
+            completed = min(total, max(0, int(engine_counts.get("completed", 0) or 0)))
+            reconciled.append(run.model_copy(update={
+                "total_candidates": total,
+                "processed_candidates": completed,
+            }))
+        else:
+            reconciled.append(run)
+    return reconciled
+
+
 async def _enrich_scan_summaries(
     summaries: list[ScanSummary],
 ) -> list[ScanSummary]:
@@ -251,8 +293,14 @@ async def get_scan_status(
     if meta is not None:
         _apply_scan_metadata(scan, meta)
     # This permission belongs to the requesting user, never to the cached scan.
+    by_engine = (
+        await run_store_call(store, "get_threat_pattern_audit_counts_by_engine", scan_id)
+        if hasattr(store, "get_threat_pattern_audit_counts_by_engine")
+        else {}
+    ) or _pattern_counts_from_tasks(scan.threat_pattern_audit_tasks)
     return scan.model_copy(update={
         "can_copy_scan": bool(meta and meta.user_id and meta.user_id == current_user.user_id),
+        "mining_engine_runs": _reconcile_pattern_engine_runs(scan.mining_engine_runs, by_engine),
         "progress_estimate": await _scan_progress_estimate(store, scan),
     })
 
@@ -414,8 +462,13 @@ async def get_scan_overview_v2(
     _hydrate_fp_review_method_selection(scan)
     _apply_scan_metadata(scan, meta)
     payload = scan.model_dump(mode="python")
+    reconciled_engine_runs = _reconcile_pattern_engine_runs(
+        scan.mining_engine_runs,
+        counts.get("threat_pattern_audit_by_engine") or {},
+    )
     payload.update({
         "can_copy_scan": bool(meta.user_id and meta.user_id == current_user.user_id),
+        "mining_engine_runs": [run.model_dump(mode="python") for run in reconciled_engine_runs],
         "progress_estimate": await _scan_progress_estimate(store, scan, counts),
         "candidates": [],
         "vulnerabilities": [],

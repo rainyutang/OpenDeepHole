@@ -1448,8 +1448,10 @@ async def _run_scan_pipeline(
             engine_label=selection.engine_label,
         )
         progress_lock = asyncio.Lock()
+        saw_authoritative_progress = False
 
         async def process_engine_output(event: dict[str, Any]) -> None:
+            nonlocal saw_authoritative_progress
             await process_output(event)
             if str(event.get("process") or "") == "static_analysis":
                 async with progress_lock:
@@ -1462,12 +1464,19 @@ async def _run_scan_pipeline(
             if counts is None:
                 return
             current, total = counts
+            data = event.get("data")
+            authoritative = isinstance(data, dict) and data.get("authoritative") is True
             async with progress_lock:
-                next_total = max(run.total_candidates or 0, total)
-                next_processed = min(
-                    next_total,
-                    max(run.processed_candidates or 0, current),
-                )
+                if authoritative:
+                    saw_authoritative_progress = True
+                    next_total = total
+                    next_processed = min(next_total, current)
+                else:
+                    next_total = max(run.total_candidates or 0, total)
+                    next_processed = min(
+                        next_total,
+                        max(run.processed_candidates or 0, current),
+                    )
                 if (
                     run.total_candidates == next_total
                     and run.processed_candidates == next_processed
@@ -1654,17 +1663,24 @@ async def _run_scan_pipeline(
             output = await run_mining_engine(loaded, **engine_kwargs)
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
-            run.total_candidates = max(
-                run.total_candidates or 0,
-                int(output["total_candidates"]),
-            )
-            run.processed_candidates = min(
-                run.total_candidates,
-                max(
-                    run.processed_candidates or 0,
+            if saw_authoritative_progress:
+                run.total_candidates = int(output["total_candidates"])
+                run.processed_candidates = min(
+                    run.total_candidates,
                     int(output["processed_candidates"]),
-                ),
-            )
+                )
+            else:
+                run.total_candidates = max(
+                    run.total_candidates or 0,
+                    int(output["total_candidates"]),
+                )
+                run.processed_candidates = min(
+                    run.total_candidates,
+                    max(
+                        run.processed_candidates or 0,
+                        int(output["processed_candidates"]),
+                    ),
+                )
             return run, output
         except asyncio.CancelledError:
             run.status = "cancelled"
