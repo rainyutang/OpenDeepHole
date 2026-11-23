@@ -15,11 +15,17 @@ from backend.agents.schemas import _RuntimeDownload
 import asyncio
 import hashlib
 import io
+import os
 import secrets
+import threading
 import time
 import zipfile
 from backend.logger import get_logger
 logger = get_logger(__name__)
+
+_RUNTIME_HASH_CACHE_LOCK = threading.Lock()
+_CACHED_RUNTIME_HASH: str = ""
+_CACHED_RUNTIME_STAT_SIGNATURE: tuple[tuple[str, int, int], ...] | None = None
 
 
 def _purge_expired_runtime_downloads() -> None:
@@ -78,6 +84,64 @@ def _agent_runtime_hash() -> str:
     return digest.hexdigest()
 
 
+_ORIGINAL_AGENT_RUNTIME_HASH = _agent_runtime_hash
+
+
+def _agent_runtime_stat_signature() -> tuple[tuple[str, int, int], ...]:
+    """Capture lightweight stat metadata without reading or hashing file contents."""
+    entries: list[tuple[str, int, int]] = []
+    for arcname, file_path in _iter_agent_runtime_files():
+        try:
+            st = os.stat(file_path)
+            entries.append((arcname, int(st.st_size), int(st.st_mtime_ns)))
+        except OSError:
+            entries.append((arcname, -1, -1))
+    return tuple(entries)
+
+
+def invalidate_agent_runtime_hash_cache() -> None:
+    global _CACHED_RUNTIME_HASH, _CACHED_RUNTIME_STAT_SIGNATURE
+    with _RUNTIME_HASH_CACHE_LOCK:
+        _CACHED_RUNTIME_HASH = ""
+        _CACHED_RUNTIME_STAT_SIGNATURE = None
+
+
+def _update_agent_runtime_hash_cache(
+    runtime_hash: str,
+    stat_signature: tuple[tuple[str, int, int], ...] | None = None,
+) -> None:
+    global _CACHED_RUNTIME_HASH, _CACHED_RUNTIME_STAT_SIGNATURE
+    if not runtime_hash or _agent_runtime_hash is not _ORIGINAL_AGENT_RUNTIME_HASH:
+        return
+    with _RUNTIME_HASH_CACHE_LOCK:
+        _CACHED_RUNTIME_HASH = runtime_hash
+        if stat_signature is not None:
+            _CACHED_RUNTIME_STAT_SIGNATURE = stat_signature
+
+
+def get_cached_agent_runtime_hash(*, check_stat: bool = False) -> str:
+    """Return the server Agent runtime hash without periodic full-file SHA-256 reads.
+
+    - ``check_stat=False`` returns the in-memory cached hash in O(1) after startup.
+    - ``check_stat=True`` compares lightweight ``os.stat`` metadata first and only
+      re-reads/re-hashes files when the stat signature actually changes.
+    - Respects unit tests that monkeypatch ``_agent_runtime_hash``.
+    """
+    if _agent_runtime_hash is not _ORIGINAL_AGENT_RUNTIME_HASH:
+        return _agent_runtime_hash()
+    with _RUNTIME_HASH_CACHE_LOCK:
+        cached = _CACHED_RUNTIME_HASH
+        cached_sig = _CACHED_RUNTIME_STAT_SIGNATURE
+    if cached and not check_stat:
+        return cached
+    current_sig = _agent_runtime_stat_signature()
+    if cached and cached_sig == current_sig:
+        return cached
+    computed = _agent_runtime_hash()
+    _update_agent_runtime_hash_cache(computed, current_sig)
+    return computed
+
+
 def _agent_runtime_hash_for_files(files: list[tuple[str, bytes]]) -> str:
     digest = hashlib.sha256()
     for arcname, content in files:
@@ -120,9 +184,11 @@ def _build_agent_runtime_zip_from_files(files: list[tuple[str, bytes]]) -> bytes
 
 def _build_agent_runtime_download() -> _RuntimeDownload:
     from backend.agents.schemas import _RuntimeDownload
+    stat_sig = _agent_runtime_stat_signature()
     files = _read_agent_runtime_files()
     data = _build_agent_runtime_zip_from_files(files)
     runtime_hash = _agent_runtime_hash_for_files(files)
+    _update_agent_runtime_hash_cache(runtime_hash, stat_sig)
     manifest = _agent_runtime_manifest_for_files(files)
     manifest["runtime_hash"] = runtime_hash
     return _RuntimeDownload(
@@ -240,8 +306,10 @@ async def agent_download(server_url: str, current_user: User=None) -> Response:
 async def agent_runtime_manifest() -> dict:
     """Return the current server-side Agent runtime hash."""
     def build_manifest() -> dict:
+        stat_sig = _agent_runtime_stat_signature()
         files = _read_agent_runtime_files()
         runtime_hash = _agent_runtime_hash_for_files(files)
+        _update_agent_runtime_hash_cache(runtime_hash, stat_sig)
         manifest = _agent_runtime_manifest_for_files(files)
         manifest["runtime_hash"] = runtime_hash
         return {

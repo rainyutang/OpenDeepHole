@@ -43,6 +43,8 @@ def _agent_info_from_shared_session(session: dict) -> AgentInfo:
         protocol_version=int(session["protocol_version"] or 1),
         scan_code_graph_updates=bool(session.get("scan_code_graph_updates", 0)),
         scan_paths_probe=bool(session.get("scan_paths_probe", 0)),
+        graceful_runtime_update=bool(session.get("graceful_runtime_update", 0)),
+        server_url=str(session.get("server_url") or ""),
         llm_api_test=session.get("llm_api_test"),
     )
 

@@ -2739,6 +2739,50 @@ class Reporter:
         except Exception as e:
             print(f"Warning: failed to signal FP review finish: {e}")
 
+    async def flush_for_restart(self, timeout: float = 30.0) -> bool:
+        """Flush buffered reports and wait for unblocked outbox rows before exec restart."""
+        if self.dry_run:
+            return True
+        if self._model_pool_sink_bound:
+            from task_agent.model_pool import drain_completed_task_reports
+
+            if not await drain_completed_task_reports(timeout=min(10.0, max(1.0, float(timeout)))):
+                logger.warning("OpenCode completion reports were not fully persisted before restart")
+
+        scan_ids = sorted({
+            *self._event_buffers.keys(),
+            *self._processed_buffers.keys(),
+            *self._event_flush_tasks.keys(),
+            *self._processed_flush_tasks.keys(),
+        })
+        for scan_id in scan_ids:
+            try:
+                await self._flush_scan_batches(scan_id)
+            except Exception as exc:
+                logger.warning("Failed to flush buffered reports for scan %s before restart: %s", scan_id, exc)
+
+        if self._outbox is None:
+            return True
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.5, float(timeout))
+        while True:
+            self._wake_outbox()
+            remaining = await asyncio.to_thread(
+                self._outbox.unblocked_pending_count,
+                self.server_url,
+            )
+            if remaining == 0:
+                return True
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Outbox still has %d unblocked pending report(s) after %.1fs before restart",
+                    remaining,
+                    timeout,
+                )
+                return False
+            await asyncio.sleep(min(0.15, max(0.02, deadline - loop.time())))
+
     async def close(self) -> None:
         if self._model_pool_sink_bound:
             from task_agent.model_pool import drain_completed_task_reports

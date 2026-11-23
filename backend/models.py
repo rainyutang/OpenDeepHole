@@ -1240,6 +1240,8 @@ class AgentInfo(BaseModel):
     llm_api_test: bool | None = None
     scan_code_graph_updates: bool = False
     scan_paths_probe: bool = False
+    graceful_runtime_update: bool = False
+    server_url: str = ""
 
 
 class AgentOpenCodeModelConfig(BaseModel):

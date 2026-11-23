@@ -101,7 +101,14 @@ async def _application_lifespan(app: FastAPI):
 
     await run_store_call(store, refresh_validation_catalog)
 
+    from backend.agents.artifacts import get_cached_agent_runtime_hash
     from backend.agents.runtime_updates import run_agent_runtime_update_scheduler
+
+    try:
+        runtime_hash = await asyncio.to_thread(get_cached_agent_runtime_hash)
+        logger.info("Cached server Agent runtime hash: %s", runtime_hash[:12])
+    except Exception:
+        logger.exception("Failed to precompute Agent runtime hash on startup")
 
     runtime_update_task = (
         asyncio.create_task(run_agent_runtime_update_scheduler())

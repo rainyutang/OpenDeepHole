@@ -864,8 +864,15 @@ async def _run_fp_review_worker(review_id: str) -> None:
                         )
                         concurrency = base_concurrency + min(base_concurrency, extra_allowance)
 
+                from task_agent.config_reload import get_config_reload_coordinator
+
+                reload_coordinator = get_config_reload_coordinator()
                 launched: list[_FpReviewQueueItem] = []
-                while queue and len(in_flight) < concurrency:
+                while (
+                    queue
+                    and len(in_flight) < concurrency
+                    and not reload_coordinator.has_admission_hold("runtime_update")
+                ):
                     item = queue.popleft()
                     launched.append(item)
                     launch_sequence += 1
@@ -889,6 +896,17 @@ async def _run_fp_review_worker(review_id: str) -> None:
                         processed_offset_initialized = True
 
             if not in_flight:
+                from task_agent.config_reload import get_config_reload_coordinator
+
+                reload_coordinator = get_config_reload_coordinator()
+                if (
+                    _fp_review_queues.get(review_id)
+                    and reload_coordinator.has_admission_hold("runtime_update")
+                ):
+                    await reload_coordinator.wait_for_admission_open(
+                        "runtime_update",
+                        cancel_event=_fp_review_cancel_events.get(review_id),
+                    )
                 continue
 
             queue_wakeup: asyncio.Task | None = None
@@ -898,9 +916,14 @@ async def _run_fp_review_worker(review_id: str) -> None:
                 review_id,
                 asyncio.Event(),
             )
+            from task_agent.config_reload import get_config_reload_coordinator
+
+            update_paused = get_config_reload_coordinator().has_admission_hold(
+                "runtime_update"
+            )
             if len(in_flight) < concurrency:
                 queue_event.clear()
-                if _fp_review_queues.get(review_id):
+                if not update_paused and _fp_review_queues.get(review_id):
                     continue
                 queue_wakeup = asyncio.create_task(queue_event.wait())
                 wait_set.add(queue_wakeup)
@@ -1179,6 +1202,8 @@ async def _run_single_fp_review_item(
         )
 
     if result.get("status") == "success":
+        from task_agent.config_reload import get_config_reload_coordinator
+
         verdict_value = str(result.get("verdict") or "")
         verdict = "fp" if verdict_value == "false_positive" else "tp"
         source = OutputSource(**dict(result.get("output_source") or {}))
@@ -1189,24 +1214,25 @@ async def _run_single_fp_review_item(
             ).items()
             if isinstance(raw_source, dict)
         }
-        await item.reporter.push_fp_result(
-            item.scan_id,
-            item.review_id,
-            vuln_index,
-            verdict,
-            str(result.get("revised_severity") or item.vulnerability.get("severity") or "unknown"),
-            str(result.get("reason") or ""),
-            str(
-                result.get("vulnerability_report")
-                or item.vulnerability.get("vulnerability_report")
-                or ""
-            ),
-            stage_outputs=dict(result.get("stage_outputs") or {}),
-            match_reference=str(result.get("match_reference") or ""),
-            match_type=str(result.get("match_type") or ""),
-            stage_output_sources=stage_sources,
-            output_source=source,
-        )
+        with get_config_reload_coordinator().track_local_work("fp_review_settlement"):
+            await item.reporter.push_fp_result(
+                item.scan_id,
+                item.review_id,
+                vuln_index,
+                verdict,
+                str(result.get("revised_severity") or item.vulnerability.get("severity") or "unknown"),
+                str(result.get("reason") or ""),
+                str(
+                    result.get("vulnerability_report")
+                    or item.vulnerability.get("vulnerability_report")
+                    or ""
+                ),
+                stage_outputs=dict(result.get("stage_outputs") or {}),
+                match_reference=str(result.get("match_reference") or ""),
+                match_type=str(result.get("match_type") or ""),
+                stage_output_sources=stage_sources,
+                output_source=source,
+            )
     return result
 
 
@@ -1380,6 +1406,10 @@ def _validation_environment_capacity(item: _ValidationQueueItem) -> int:
 
 
 def _pump_validation_environment(environment_key: str) -> None:
+    from task_agent.config_reload import get_config_reload_coordinator
+
+    if get_config_reload_coordinator().has_admission_hold("runtime_update"):
+        return
     queue = _validation_queues.get(environment_key)
     workers = _validation_workers.setdefault(environment_key, set())
     workers.difference_update(task for task in workers if task.done())
@@ -1573,22 +1603,27 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
 
         project = Path(item.project_path).expanduser().resolve()
         validation_work_dir = work_root / "validation" / f"vuln-{item.vuln_index}"
-        with opencode_task_context(
-            scan_id=item.scan_id,
-            execution_kind="vulnerability_validation",
-            execution_id=f"{item.scan_id}:{item.vuln_index}",
-            project_dir=project,
-            work_dir=validation_work_dir,
-            code_graph_mcp=item.code_graph_mcp,
-            knowledge_base_mcp=item.knowledge_base_mcp,
-            task_metadata={
-                "validation_model_policy": copy.deepcopy(model_policy),
-                "scan_mode": item.scan_mode,
-                "execution_revision": item.execution_revision,
-                "agent_session_id": getattr(item.reporter, "agent_session_id", ""),
-                "vuln_index": item.vuln_index,
-            },
-            cancel_event=item.cancel_event,
+        from task_agent.config_reload import get_config_reload_coordinator
+
+        with (
+            get_config_reload_coordinator().track_local_work("vulnerability_validation"),
+            opencode_task_context(
+                scan_id=item.scan_id,
+                execution_kind="vulnerability_validation",
+                execution_id=f"{item.scan_id}:{item.vuln_index}",
+                project_dir=project,
+                work_dir=validation_work_dir,
+                code_graph_mcp=item.code_graph_mcp,
+                knowledge_base_mcp=item.knowledge_base_mcp,
+                task_metadata={
+                    "validation_model_policy": copy.deepcopy(model_policy),
+                    "scan_mode": item.scan_mode,
+                    "execution_revision": item.execution_revision,
+                    "agent_session_id": getattr(item.reporter, "agent_session_id", ""),
+                    "vuln_index": item.vuln_index,
+                },
+                cancel_event=item.cancel_event,
+            ),
         ):
             result = await run_vulnerability_validation(
                 scan_mode=item.scan_mode,
@@ -1609,11 +1644,11 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                 output=process_output,
                 cancel_event=item.cancel_event,
             )
-        for raw_validation in result.get("validations") or []:
-            await item.reporter.report_vulnerability_validation(
-                item.scan_id,
-                VulnerabilityValidation(**raw_validation),
-            )
+            for raw_validation in result.get("validations") or []:
+                await item.reporter.report_vulnerability_validation(
+                    item.scan_id,
+                    VulnerabilityValidation(**raw_validation),
+                )
     except Exception as exc:
         print(f"[validation] Unhandled error in validation {item.scan_id}#{item.vuln_index}: {exc}")
         from backend.models import VulnerabilityValidation
@@ -1935,10 +1970,17 @@ async def _run_skill_creator(
         "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
         + json.dumps(output_schema, ensure_ascii=False, indent=2)
     )
-    with opencode_task_context(
-        project_dir=request_dir,
-        work_dir=request_dir,
-        output=on_output,
+    from task_agent.config_reload import get_config_reload_coordinator
+
+    reload_coordinator = get_config_reload_coordinator()
+    await reload_coordinator.wait_for_admission_open("runtime_update")
+    with (
+        reload_coordinator.track_local_work("skill_create"),
+        opencode_task_context(
+            project_dir=request_dir,
+            work_dir=request_dir,
+            output=on_output,
+        ),
     ):
         result = await run_opencode_task(
             task_name="skill_create",

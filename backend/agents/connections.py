@@ -90,6 +90,10 @@ async def agent_websocket(websocket: WebSocket) -> None:
         )
         stable_key = str(record["agent_key"])
         reported_runtime_hash = str(msg.get("runtime_hash") or "")
+        graceful_runtime_update = (
+            reported_capabilities.get(constants._GRACEFUL_RUNTIME_UPDATE_CAPABILITY) is True
+        )
+        ws_server_url = _websocket_server_url(websocket)
         store = get_scan_store()
 
         agent_info = AgentInfo(
@@ -108,10 +112,14 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 record.get("runtime_update_target_hash") or ""
             ),
             runtime_update_error=str(record.get("runtime_update_error") or ""),
-            accepting_tasks=_runtime_update_status(record) != constants._RUNTIME_UPDATE_UPDATING,
+            accepting_tasks=(
+                _runtime_update_status(record) not in constants._RUNTIME_UPDATE_BLOCKING_STATUSES
+            ),
             protocol_version=protocol_version,
             scan_code_graph_updates=reported_capabilities.get("scan_code_graph_updates") is True,
             scan_paths_probe=reported_capabilities.get("scan_paths_probe") is True,
+            graceful_runtime_update=graceful_runtime_update,
+            server_url=ws_server_url,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
             llm_api_test=reported_capabilities.get("llm_api_test") is True,
         )
@@ -131,7 +139,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         reconnect = await _prepare_reconnect(
             agent_id, agent_info, msg, final_callbacks=final_vulnerability_callbacks,
         )
-        await _send_agent_json(agent_id, {
+        welcome_payload = {
             "type": "welcome",
             "agent_id": agent_id,
             "agent_key": stable_key,
@@ -152,8 +160,19 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 "server_owned_pattern_task_settlement": reported_capabilities.get(
                     "server_owned_pattern_task_settlement"
                 ) is True,
+                constants._GRACEFUL_RUNTIME_UPDATE_CAPABILITY: graceful_runtime_update,
             },
-        })
+        }
+        if graceful_runtime_update:
+            from backend.agents.runtime_updates import get_server_runtime_hash_async
+
+            try:
+                welcome_payload["server_runtime_hash"] = await get_server_runtime_hash_async(
+                    check_stat=False,
+                )
+            except Exception:
+                logger.exception("Failed to resolve server runtime hash for welcome")
+        await _send_agent_json(agent_id, welcome_payload)
         for command in reconnect.pending_scan_stops:
             await send_agent_command(agent_id, command)
         for command in reconnect.pending_validation_stops:
@@ -162,7 +181,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         # received while recovery awaits them.
         recovery_task = asyncio.create_task(_recover_after_welcome(
             agent_id, agent_info, msg, reconnect, final_vulnerability_callbacks,
-            _websocket_server_url(websocket),
+            ws_server_url,
         ))
 
         logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
@@ -373,8 +392,19 @@ async def _recover_after_welcome(
     final_callbacks: bool, server_url: str,
 ) -> None:
     from backend.agents.recovery import _recover_missing_agent_work, _resume_final_callback_downstream
+    from backend.agents.runtime_updates import (
+        maybe_auto_trigger_agent_runtime_update_on_connect,
+    )
 
     try:
+        updating = await maybe_auto_trigger_agent_runtime_update_on_connect(
+            agent_id,
+            agent_info,
+            msg,
+            server_url=server_url,
+        )
+        if updating:
+            return
         await _recover_missing_agent_work(agent_id, agent_info, msg, server_url=server_url)
         if final_callbacks:
             await _resume_final_callback_downstream(
@@ -411,6 +441,11 @@ async def _receive_messages(websocket: WebSocket, agent_id: str, agent_info: Age
 
                 await accept_code_graph_result(incoming, agent_info)
             await _complete_agent_response(incoming, response_waiters)
+            continue
+        if isinstance(incoming, dict) and incoming.get("type") == "runtime_update_status":
+            from backend.agents.runtime_updates import handle_agent_runtime_update_status
+
+            await handle_agent_runtime_update_status(agent_info, incoming)
             continue
         if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
             from backend.skill_creation import handle_skill_create_result

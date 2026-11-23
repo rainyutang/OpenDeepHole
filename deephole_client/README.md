@@ -38,8 +38,12 @@ FP review 原子分配或复用 revision 并随响应返回。扫描结束的幂
 取代的旧报告收到 409 后会记录报告身份、session 和 revision，再直接从 outbox 删除。该握手不新增客户端数据库表、恢复记录或历史
 副本，只读取 `pending_reports` 中本来就存在的未确认行，因此不会增加持久存储规模。
 
-后端重启或 WebSocket 重连本身不会要求客户端进程重启。代码内会替换进程的路径只有 Agent
-运行时包更新；若扫描、去误报或验证仍在本地执行，更新会记录
+后端重启或 WebSocket 重连本身不会无故要求客户端进程重启。代码内会替换进程的路径只有 Agent
+运行时包更新：当后端运行包哈希变更（或手动触发更新）且客户端声明 `graceful_runtime_update`
+能力时，客户端会立即暂停新 OpenCode 会话及新本地阶段准入、在一次性下载令牌有效期内预下载并校验
+更新包，等待当前在途任务及结果结算全部完成并刷出 SQLite outbox 后优雅关闭 OpenCode Serve
+并 `os.execv` 重启；新进程重连后由后端断点恢复机制自动续跑所有原在途扫描、去误报和验证（空闲
+客户端也会自动直接更新）。对旧版客户端或普通任务指令附带的同步更新，若本地仍有活跃工作仍记录
 `RUNTIME_UPDATE_DEFERRED reason=local_work_active` 并延后。运行时更新触发的替换会记录
 `RESTART_REQUESTED` 和下一进程的 `PROCESS_RESTARTED reason=runtime_update`；没有内部原因标记的
 启动记录为 `PROCESS_STARTED reason=initial_or_external_supervisor`，用于识别服务管理器或容器的

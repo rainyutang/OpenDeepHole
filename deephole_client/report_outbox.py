@@ -400,6 +400,20 @@ class ReportOutbox:
                 ).fetchone()
         return int(row[0] if row else 0)
 
+    def unblocked_pending_count(self, target_url: str | None = None) -> int:
+        """Count deliverable rows so restart flush never blocks on permanent errors."""
+        with self._lock:
+            if target_url is None:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM pending_reports WHERE blocked = 0"
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM pending_reports WHERE target_url = ? AND blocked = 0",
+                    (target_url.rstrip("/"),),
+                ).fetchone()
+        return int(row[0] if row else 0)
+
     def pending_dedupe_keys(self, target_url: str) -> list[str]:
         """Return unblocked report identities for reconnect reconciliation."""
         with self._lock:

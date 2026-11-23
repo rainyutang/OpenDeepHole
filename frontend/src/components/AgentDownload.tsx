@@ -118,10 +118,10 @@ export default function AgentDownload({ onBack }: Props) {
         <div className="mb-5 rounded-xl border border-slate-700 bg-slate-800/60 p-5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
             <h2 className="font-semibold text-white">2. 更新已安装的 Agent</h2>
-            <span className="text-xs text-slate-500">更新不会中断正在执行的任务</span>
+            <span className="text-xs text-slate-500">更新不会中断正在执行的会话</span>
           </div>
           <p className="mb-4 text-sm leading-6 text-slate-400">
-            点击后会登记更新请求。当前及后来提交的扫描继续执行，Agent 第一次完全空闲时自动更新并重连。
+            后端更新或手动点击更新后，在线 Agent 会暂停创建新会话，等待当前在途任务全部完成并上报后自动更新重连，随后自动从断点继续原有扫描（空闲 Agent 直接更新）。
           </p>
 
           {updateMessage && (
@@ -151,6 +151,7 @@ export default function AgentDownload({ onBack }: Props) {
                 );
                 const status = agent.runtime_update_status || "";
                 const isPending = status === "pending";
+                const isDraining = status === "draining";
                 const isUpdating = status === "updating";
                 const isFailed = status === "failed";
                 const supportsOnlineUpdate = Boolean(agent.agent_key);
@@ -161,6 +162,7 @@ export default function AgentDownload({ onBack }: Props) {
                   || !supportsOnlineUpdate
                   || isLatest
                   || isPending
+                  || isDraining
                   || isUpdating
                 );
                 const statusLabel = !supportsOnlineUpdate
@@ -169,13 +171,15 @@ export default function AgentDownload({ onBack }: Props) {
                   ? "已是最新"
                   : isUpdating
                     ? "正在更新"
-                    : isPending
-                      ? "等待空闲"
-                      : isFailed
-                        ? "更新失败"
-                        : agent.online
-                          ? "可更新"
-                          : "离线";
+                    : isDraining
+                      ? "等待当前任务完成"
+                      : isPending
+                        ? "等待空闲"
+                        : isFailed
+                          ? "更新失败"
+                          : agent.online
+                            ? "可更新"
+                            : "离线";
                 const buttonLabel = submitting
                   ? "提交中…"
                   : !supportsOnlineUpdate
@@ -184,13 +188,15 @@ export default function AgentDownload({ onBack }: Props) {
                     ? "已是最新"
                     : isUpdating
                       ? "正在更新…"
-                      : isPending
-                        ? "等待空闲更新"
-                        : isFailed
-                          ? "重试更新"
-                          : agent.online
-                            ? "更新 Agent"
-                            : "Agent 离线";
+                      : isDraining
+                        ? "等待当前任务完成…"
+                        : isPending
+                          ? "等待空闲更新"
+                          : isFailed
+                            ? "重试更新"
+                            : agent.online
+                              ? "更新 Agent"
+                              : "Agent 离线";
 
                 return (
                   <div key={agent.agent_key || agent.agent_id} className="rounded-lg border border-slate-700 bg-slate-950/50 p-4">
@@ -205,7 +211,7 @@ export default function AgentDownload({ onBack }: Props) {
                               ? "border-green-500/30 bg-green-500/10 text-green-300"
                               : isFailed
                                 ? "border-red-500/30 bg-red-500/10 text-red-300"
-                                : isPending || isUpdating
+                                : isPending || isDraining || isUpdating
                                   ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
                                   : agent.online
                                     ? "border-blue-500/30 bg-blue-500/10 text-blue-300"

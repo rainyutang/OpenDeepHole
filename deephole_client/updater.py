@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +214,81 @@ def load_pending_commands(*, clear: bool) -> list[dict[str, Any]]:
     return result
 
 
+@dataclass
+class StagedRuntimeUpdate:
+    """Verified runtime archive ready to install once active work drains."""
+
+    target_hash: str
+    tmp_dir: Path
+    archive_paths: list[str]
+
+    def cleanup(self) -> None:
+        if self.tmp_dir.exists():
+            shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+
+async def stage_runtime_update(
+    update: dict[str, Any] | None,
+    *,
+    fallback_server_url: str = "",
+) -> StagedRuntimeUpdate | None:
+    """Download and verify a runtime archive immediately while its token is fresh."""
+    if not update:
+        return None
+
+    expected_hash = str(update.get("hash") or "").strip()
+    if not expected_hash or expected_hash == compute_runtime_hash():
+        return None
+
+    try:
+        archive = await _download_update(update, fallback_server_url=fallback_server_url)
+    except Exception as e:
+        raise RuntimeError(f"runtime update download failed: {e}") from e
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="opendeephole-agent-staged-"))
+    try:
+        archive_paths = _extract_and_verify_archive(
+            archive,
+            tmp_root,
+            expected_hash,
+            update.get("manifest"),
+        )
+    except BaseException:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        raise
+
+    return StagedRuntimeUpdate(
+        target_hash=expected_hash,
+        tmp_dir=tmp_root,
+        archive_paths=archive_paths,
+    )
+
+
+def install_staged_runtime_update(staged: StagedRuntimeUpdate) -> None:
+    """Install a pre-verified staged runtime update without restarting yet."""
+    root = runtime_root()
+    requirements_path = root / "requirements-agent.txt"
+    previous_requirements = (
+        requirements_path.read_bytes() if requirements_path.is_file() else None
+    )
+    try:
+        _install_update_files(staged.tmp_dir, root, staged.archive_paths)
+    finally:
+        staged.cleanup()
+
+    current_requirements = (
+        requirements_path.read_bytes() if requirements_path.is_file() else None
+    )
+    if current_requirements is not None and current_requirements != previous_requirements:
+        _install_requirements_if_needed()
+
+
+def apply_staged_runtime_update(staged: StagedRuntimeUpdate) -> None:
+    """Install a pre-verified staged runtime update and restart this process."""
+    install_staged_runtime_update(staged)
+    _restart_process(reason="runtime_update")
+
+
 async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[str, Any]) -> bool:
     """Install the server runtime update and restart this process when needed."""
     if not update:
@@ -234,8 +310,14 @@ async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[st
     return True
 
 
-async def _download_update(update: dict[str, Any]) -> bytes:
-    download_url = str(update.get("download_url") or "")
+async def _download_update(
+    update: dict[str, Any],
+    *,
+    fallback_server_url: str = "",
+) -> bytes:
+    download_url = str(update.get("download_url") or "").strip()
+    if download_url.startswith("/") and fallback_server_url:
+        download_url = f"{fallback_server_url.rstrip('/')}{download_url}"
     token = str(update.get("token") or "")
     expected_archive_hash = str(update.get("archive_sha256") or "")
     if not download_url:
@@ -255,6 +337,34 @@ async def _download_update(update: dict[str, Any]) -> bytes:
     return data
 
 
+def _extract_and_verify_archive(
+    archive: bytes,
+    tmp_root: Path,
+    expected_hash: str,
+    manifest: dict[str, Any] | None = None,
+) -> list[str]:
+    archive_files: dict[str, bytes] = {}
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            member = Path(info.filename)
+            if member.is_absolute() or ".." in member.parts:
+                raise RuntimeError(f"Unsafe runtime update path: {info.filename}")
+            arcname = member.as_posix()
+            if arcname in archive_files:
+                raise RuntimeError(f"Duplicate runtime update path: {arcname}")
+            content = zf.read(info)
+            archive_files[arcname] = content
+            dest = (tmp_root / member).resolve()
+            dest.relative_to(tmp_root.resolve())
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content)
+
+    _verify_update_contents(tmp_root, archive_files, expected_hash, manifest)
+    return sorted(archive_files)
+
+
 def _install_update_archive(
     archive: bytes,
     expected_hash: str,
@@ -263,27 +373,13 @@ def _install_update_archive(
     root = runtime_root()
     with tempfile.TemporaryDirectory(prefix="opendeephole-agent-update-") as tmp:
         tmp_root = Path(tmp)
-        archive_files: dict[str, bytes] = {}
-        with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                member = Path(info.filename)
-                if member.is_absolute() or ".." in member.parts:
-                    raise RuntimeError(f"Unsafe runtime update path: {info.filename}")
-                arcname = member.as_posix()
-                if arcname in archive_files:
-                    raise RuntimeError(f"Duplicate runtime update path: {arcname}")
-                content = zf.read(info)
-                archive_files[arcname] = content
-                dest = (tmp_root / member).resolve()
-                dest.relative_to(tmp_root.resolve())
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(content)
-
-        _verify_update_contents(tmp_root, archive_files, expected_hash, manifest)
-
-        _install_update_files(tmp_root, root, sorted(archive_files))
+        archive_paths = _extract_and_verify_archive(
+            archive,
+            tmp_root,
+            expected_hash,
+            manifest,
+        )
+        _install_update_files(tmp_root, root, archive_paths)
 
 
 def _verify_update_contents(

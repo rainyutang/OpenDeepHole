@@ -1707,6 +1707,14 @@ async def acquire_model_lease(
     context.setdefault("required_capability", required)
     context.setdefault("priority", normalize_priority(priority))
     context.setdefault("revision", max(1, int(revision or 1)))
+    suspended_local_work: Any = None
+
+    def _release_suspended_local_work() -> None:
+        nonlocal suspended_local_work
+        if suspended_local_work is not None:
+            cm = suspended_local_work
+            suspended_local_work = None
+            cm.__exit__(None, None, None)
 
     try:
         while True:
@@ -1862,6 +1870,15 @@ async def acquire_model_lease(
                             _remove_pending_request_locked(request)
                             return _grant_lease_locked(request, option, all_options)
                     changed = _register_change_waiter_locked()
+            if not admission_open:
+                if suspended_local_work is None:
+                    from .config_reload import get_config_reload_coordinator
+
+                    cm = get_config_reload_coordinator().suspend_local_work_while_waiting()
+                    cm.__enter__()
+                    suspended_local_work = cm
+            else:
+                _release_suspended_local_work()
             if not notify_queued:
                 await _wait_for_pool_change(changed, 0.2)
             if notify_queued and on_queued is not None:
@@ -1869,6 +1886,7 @@ async def acquire_model_lease(
                 if inspect.isawaitable(notified):
                     await notified
     finally:
+        _release_suspended_local_work()
         if request is not None:
             # No pool critical section awaits I/O or another task. Withdrawal
             # therefore cannot wait behind a cancelled condition waiter.
@@ -2442,7 +2460,17 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
             active_options,
             required_capability=request.required_capability,
         )
-        if not all_options:
+        if request.admission_allowed is not None and not request.admission_allowed():
+            from .config_reload import get_config_reload_coordinator
+
+            coordinator = get_config_reload_coordinator()
+            if coordinator.has_admission_hold("runtime_update"):
+                blocked_reason = "检测到服务端已更新，等待当前在途任务完成后更新 Agent，暂不创建新会话。"
+            elif coordinator.status().get("state") != "active":
+                blocked_reason = "等待 OpenCode 配置生效，暂不创建新会话。"
+            else:
+                blocked_reason = "等待共享 OpenCode Serve 准备就绪。"
+        elif not all_options:
             blocked_reason = NO_AVAILABLE_MODEL_MESSAGE
         elif not eligible:
             blocked_reason = (

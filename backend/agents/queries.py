@@ -297,7 +297,7 @@ async def list_agents(current_user: User=None) -> list:
             ),
             "runtime_update_error": str(record.get("runtime_update_error") or ""),
             "accepting_tasks": (
-                _runtime_update_status(record) != constants._RUNTIME_UPDATE_UPDATING
+                _runtime_update_status(record) not in constants._RUNTIME_UPDATE_BLOCKING_STATUSES
             ),
             "has_explicit_model": agent_config_has_explicit_model(
                 _stored_agent_config(record)

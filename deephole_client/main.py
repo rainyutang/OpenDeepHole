@@ -114,7 +114,7 @@ async def _run_command_worker(command_queue, ws, ws_send_lock, config, task_mana
                 await ordinary_commands.put(None)
                 await ordinary_task
                 return
-            if msg.get("type") == "opencode_api_test":
+            if msg.get("type") in {"opencode_api_test", "runtime_update"}:
                 task = asyncio.create_task(execute(msg))
                 probes.add(task)
                 task.add_done_callback(probes.discard)
@@ -619,6 +619,16 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=str(msg.get("request_id") or ""),
             target=str(msg.get("target") or ""),
         )
+    elif cmd_type == "runtime_update":
+        from deephole_client.runtime_update_coordinator import (
+            get_runtime_update_coordinator,
+        )
+
+        get_runtime_update_coordinator().stage_update(
+            msg.get("agent_runtime_update"),
+            server_url=str(getattr(config, "server_url", "") or ""),
+        )
+        return None
     elif cmd_type == "skill_create":
         await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         return await agent_server.handle_skill_create(
@@ -725,6 +735,10 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 validator_result = await run_vulnerability_validation(
                     operation="catalog",
                 )
+                from deephole_client.runtime_update_coordinator import (
+                    get_runtime_update_coordinator,
+                )
+                runtime_update_coordinator = get_runtime_update_coordinator()
                 hello_msg = {
                     "type": "hello",
                     "protocol_versions": [2, 1],
@@ -737,12 +751,14 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "server_owned_pattern_task_settlement": True,
                         "scan_code_graph_updates": True,
                         "scan_paths_probe": True,
+                        "graceful_runtime_update": True,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
                     "validator_catalog": validator_result["catalog"],
                     "runtime_hash": compute_runtime_hash(),
+                    "runtime_update_state": runtime_update_coordinator.status(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
                     "active_fp_reviews": (
@@ -852,6 +868,20 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                             await ws.close(code=4001, reason="agent heartbeat watchdog timeout")
                             return
 
+                async def _send_runtime_update_status(payload: dict) -> None:
+                    await _send_ws_json(ws, ws_send_lock, payload)
+
+                runtime_update_coordinator.bind_connection(
+                    send_status=_send_runtime_update_status,
+                    reporter=reporter,
+                    config=config,
+                    task_manager=task_manager,
+                )
+                if welcome.get("server_runtime_hash"):
+                    runtime_update_coordinator.handle_server_runtime_hash(
+                        str(welcome.get("server_runtime_hash") or ""),
+                    )
+
                 pool_status_stop = asyncio.Event()
                 heartbeat_task = asyncio.create_task(_heartbeat())
                 watchdog_task = asyncio.create_task(_watchdog())
@@ -877,6 +907,9 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                             continue
                         await command_queue.put(msg)
                 finally:
+                    runtime_update_coordinator.unbind_connection(
+                        _send_runtime_update_status,
+                    )
                     pool_status_stop.set()
                     heartbeat_task.cancel()
                     watchdog_task.cancel()
@@ -987,6 +1020,10 @@ async def _main() -> None:
         await _ws_loop(config, task_manager, reporter)
     finally:
         try:
+            from deephole_client.runtime_update_coordinator import (
+                get_runtime_update_coordinator,
+            )
+            await get_runtime_update_coordinator().shutdown()
             from task_agent.config_reload import get_config_reload_coordinator
             await get_config_reload_coordinator().shutdown()
             from task_agent import shutdown_opencode

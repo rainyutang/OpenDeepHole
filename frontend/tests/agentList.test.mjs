@@ -191,3 +191,31 @@ test("new scan identifies same-name Agents by owner and submits the selected sta
   assert.equal(submitted.length, 1);
   assert.equal(submitted[0].agent_key, "second");
 });
+
+test("draining Agent shows waiting-for-active-tasks label in download and new scan views", async () => {
+  const draining = agent("first", "alice", {
+    runtime_update_status: "draining",
+    runtime_update_target_hash: "new",
+    accepting_tasks: false,
+  });
+  mockApi((request) => {
+    if (request.url === "/api/agents") return [draining];
+    if (request.url === "/api/agent/runtime/manifest") return { hash: "new" };
+    if (request.url === "/api/mining-engines") return { engines: [{ engine_id: "threat_pattern_audit", label: "攻击模式审计" }] };
+    if (request.url === "/api/threat-analysis-methods") return { methods: [{ method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" }] };
+    if (request.url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
+    if (request.url.endsWith("/validator-catalog")) return { methods: [], errors: [] };
+    if (request.url.includes("/config-memory/")) return { knowledge_base: null, validation_by_product: {} };
+    assert.fail("Unexpected request: " + request.url);
+  });
+  const downloadRoot = await mount(AgentDownload);
+  const updateButton = downloadRoot.root.findAllByType("button").find((node) => text(node).includes("等待当前任务完成"));
+  assert.ok(updateButton);
+  assert.equal(updateButton.props.disabled, true);
+  assert.ok(text(downloadRoot.toJSON()).includes("等待当前任务完成"));
+
+  const newScanRoot = await mount(NewScanForm);
+  assert.ok(text(newScanRoot.toJSON()).includes("等待更新"));
+  const radio = newScanRoot.root.findAllByType("input").find((node) => node.props.type === "radio");
+  assert.equal(radio.props.disabled, true);
+});

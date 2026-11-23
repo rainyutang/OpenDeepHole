@@ -13,7 +13,7 @@ export interface AgentInfo {
   online: boolean;
   agent_session_id?: string;
   runtime_hash?: string;
-  runtime_update_status?: "" | "pending" | "updating" | "failed";
+  runtime_update_status?: "" | "pending" | "draining" | "updating" | "failed";
   runtime_update_target_hash?: string;
   runtime_update_error?: string;
   accepting_tasks?: boolean;
@@ -25,7 +25,7 @@ export interface AgentRuntimeManifest {
 }
 
 export interface AgentRuntimeUpdateResponse {
-  status: "up_to_date" | "pending" | "updating" | "failed";
+  status: "up_to_date" | "pending" | "draining" | "updating" | "failed";
   target_hash: string;
   message: string;
 }

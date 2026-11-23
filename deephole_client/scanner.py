@@ -1006,16 +1006,21 @@ async def _run_scan_pipeline(
 
     index_path = scan_root / "code_index.db"
     if running_static_analysis:
+        from task_agent.config_reload import get_config_reload_coordinator
+
+        reload_coordinator = get_config_reload_coordinator()
+        await reload_coordinator.wait_for_admission_open("runtime_update", cancel_event)
         try:
-            graph_result = await run_code_graph_build(
-                scan_mode=runtime_scan_mode,
-                project_path=project,
-                code_scan_path=scan_root,
-                work_dir=scan_dir / "code_graph_build",
-                reuse_cache=True,
-                output=process_output,
-                cancel_event=cancel_event,
-            )
+            with reload_coordinator.track_local_work("code_graph_build"):
+                graph_result = await run_code_graph_build(
+                    scan_mode=runtime_scan_mode,
+                    project_path=project,
+                    code_scan_path=scan_root,
+                    work_dir=scan_dir / "code_graph_build",
+                    reuse_cache=True,
+                    output=process_output,
+                    cancel_event=cancel_event,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1288,7 +1293,12 @@ async def _run_scan_pipeline(
                 raise RuntimeError(
                     "Codex has no configured default model"
                 )
-            return await invoke()
+            from task_agent.config_reload import get_config_reload_coordinator
+
+            reload_coordinator = get_config_reload_coordinator()
+            await reload_coordinator.wait_for_admission_open("runtime_update", cancel_event)
+            with reload_coordinator.track_local_work("codex_threat_analysis"):
+                return await invoke()
 
         def require_success(value: dict[str, Any]) -> None:
             if value.get("result") is not True:
@@ -1401,26 +1411,34 @@ async def _run_scan_pipeline(
                             f"{fallback_reason}"
                         ) from exc
             else:
+                native_resume = (
+                    allow_local_completed_reuse
+                    if threat_analysis_method_id == DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID
+                    else False
+                )
                 result = await run_method_attempt(
                     threat_analysis_method_id,
-                    resume=False,
+                    resume=native_resume,
                 )
                 require_success(result)
                 artifact_bundle = collect_json_artifacts(
                     result,
                     output_root=output_path,
                 )
-            artifact_bundle["scan_scope"] = _threat_analysis_scan_scope(
-                project,
-                scan_root,
-                code_scan_paths,
-                generate_attack_tree=(
-                    bool(threat_analysis_generate_attack_tree)
-                    if threat_analysis_method_id == DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID
-                    else True
-                ),
-            )
-            await reporter.push_threat_analysis(scan_id, artifact_bundle)
+            from task_agent.config_reload import get_config_reload_coordinator
+
+            with get_config_reload_coordinator().track_local_work("threat_analysis_settlement"):
+                artifact_bundle["scan_scope"] = _threat_analysis_scan_scope(
+                    project,
+                    scan_root,
+                    code_scan_paths,
+                    generate_attack_tree=(
+                        bool(threat_analysis_generate_attack_tree)
+                        if threat_analysis_method_id == DEEPHOLE_COMPACT_THREAT_ANALYSIS_METHOD_ID
+                        else True
+                    ),
+                )
+                await reporter.push_threat_analysis(scan_id, artifact_bundle)
             run.status = "success"
             return run, result
         except asyncio.CancelledError:
@@ -1660,7 +1678,15 @@ async def _run_scan_pipeline(
             engine_kwargs["codex_command"] = codex_command
             engine_kwargs["codex_models"] = codex_models or []
         try:
-            output = await run_mining_engine(loaded, **engine_kwargs)
+            if codex_command is not None:
+                from task_agent.config_reload import get_config_reload_coordinator
+
+                reload_coordinator = get_config_reload_coordinator()
+                await reload_coordinator.wait_for_admission_open("runtime_update", cancel_event)
+                with reload_coordinator.track_local_work("codex_mining_engine"):
+                    output = await run_mining_engine(loaded, **engine_kwargs)
+            else:
+                output = await run_mining_engine(loaded, **engine_kwargs)
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
             if saw_authoritative_progress:

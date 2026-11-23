@@ -49,6 +49,12 @@ reconnection. Provider changes drain existing logical tasks, publish the latest
 configuration, restart Serve and check health/model visibility before admitting
 new work. Running logical tasks retain their configuration through internal
 retries. CodeGraph changes similarly apply at future task-start boundaries.
+Backend runtime updates use a startup-cached hash (with low-frequency stat-only
+change checks) and automatically trigger graceful drain-and-update on online
+Agents advertising `graceful_runtime_update`: the Agent pauses new session
+admission, pre-downloads and verifies the archive, drains active tasks and
+flushes the report outbox, restarts into the new runtime, and lets reconnect
+recovery automatically continue all in-flight scans, FP reviews and validations.
 
 Authoritative reports use `~/.opendeephole/report_outbox.sqlite3` until backend
 acknowledgement. Progress/logs are best effort. Preserve execution identity and
