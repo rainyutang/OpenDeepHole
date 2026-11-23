@@ -24,7 +24,7 @@ compatibility: opencode
 漏洞类型（`vuln_type`）：漏洞所属类型。
 漏洞位置（`file`、`line`）：文件路径:行号，文件和行号仍分别填写，必须指向实际漏洞触发点，文件路径使用相对项目根目录的真实路径。
 漏洞函数（`function`）：漏洞实际发生位置所在的函数名。
-问题（`description`）：简述漏洞成因、触发条件及影响。
+问题（`description`）：简述漏洞核心成因、必要触发条件及直接安全影响（控制在 200 字以内，单段叙述、不分点）。仅聚焦漏洞点本身，不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程（调用链与数据流分别写入 `call_chain` 和 `vulnerable_code`）。
 
 调用链（`call_chain`）：
 从入口到问题发生点，以树形结构列出相关函数、文件路径和行号；存在多条独立调用链时分别展示。
@@ -70,7 +70,7 @@ func1: xxx.c:22
   "file": "src/proto/parser.c",
   "line": 44,
   "function": "CopyPayload",
-  "description": "外部报文的两字节长度字段被解析为 `len`。`ParseCommand()` 只验证 `len <= available - 2`，未校验目标缓冲区的 64 字节容量，就将 `payload` 和 `len` 传给 `CopyPayload()`。当 `64 < len <= available - 2` 时，`memcpy()` 会越界写入 `buf`，可能破坏相邻内存或导致进程崩溃。",
+  "description": "外部报文的两字节长度字段被解析为 `len`，程序仅验证了 `len <= available - 2`，未校验其是否超过 64 字节目标栈缓冲区容量即执行 `memcpy()` 拷贝。当 `64 < len <= available - 2` 时会越界写入 `buf`，可能破坏相邻内存或导致进程崩溃。",
   "call_chain": "```text\nHandlePacket: src/proto/handler.c:22\n└── ParseCommand: src/proto/parser.c:38\n    └── CopyPayload: src/proto/parser.c:44\n```",
   "vulnerable_code": "`src/proto/handler.c:13-23`\n\n```c\n13 | void HandlePacket(int fd)\n14 | {\n15 |     unsigned char packet[512];\n16 |     ssize_t received = recv(fd, packet, sizeof(packet), 0); //[deephole] SOURCE：从外部连接读取原始报文到 packet，received 是实际收到的字节数。\n17 |     if (received < 2) { //[deephole] 校验：至少收到两字节长度字段，接收失败或报文过短时返回。\n18 |         return;\n19 |     }\n20 |     const unsigned char *data = packet; //[deephole] FLOW：data 指向原始报文，内容来自 recv。\n21 |     size_t available = (size_t)received; //[deephole] FLOW：将已验证为正的实际接收长度转换为 size_t。\n22 |     ParseCommand(data, available); //[deephole] FLOW：实参 data、available 分别进入 ParseCommand 的同名形参。\n23 | }\n```\n\n`src/proto/parser.c:30-39`\n\n```c\n30 | void ParseCommand(const unsigned char *data, size_t available)\n31 | {\n32 |     size_t len = ((size_t)data[0] << 8) | (size_t)data[1]; //[deephole] FLOW：将外部报文前两字节转换为攻击者可控的负载长度 len。\n33 |     const unsigned char *payload = data + 2; //[deephole] FLOW：跳过长度字段，使 payload 指向报文负载。\n34 |     if (len > available - 2) { //[deephole] 校验：只检查负载未超出实际收到的报文，仍允许 len 超过 64。\n35 |         return;\n36 |     }\n37 |     char buf[64];\n38 |     CopyPayload(buf, payload, len); //[deephole] 缺失校验：未检查 len <= sizeof(buf)；buf、payload、len 分别传给 dst、src、len。\n39 | }\n```\n\n`src/proto/parser.c:42-45`\n\n```c\n42 | void CopyPayload(char *dst, const unsigned char *src, size_t len)\n43 | {\n44 |     memcpy(dst, src, len); //[deephole] SINK：将外部负载按攻击者控制的 len 写入 dst，len > 64 时越界写入调用方的 buf。\n45 | }\n```",
   "remediation": "在 `CopyPayload()` 调用前校验 `len <= sizeof(buf)`，超限时拒绝处理，并保留实际接收长度检查；向复制函数显式传入目标容量并校验，确保检查对应实际写入的缓冲区。"

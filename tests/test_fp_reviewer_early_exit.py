@@ -264,6 +264,33 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stage_markdown", final_schema["properties"])
         self.assertNotIn("reason", final_schema["properties"])
         self.assertNotIn("report", final_schema["properties"])
+        description_guidance = final_schema["properties"]["description"]["description"]
+        for phrase in (
+            "200 字以内",
+            "不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程",
+            "call_chain",
+            "vulnerable_code",
+            "false_positive 时指出有效校验、不可满足约束或预期设计依据所在函数与行号",
+        ):
+            self.assertIn(phrase, description_guidance)
+
+        skill_path = (
+            Path(__file__).resolve().parents[1]
+            / "deephole_client"
+            / "fp_review"
+            / "methods"
+            / "adversarial"
+            / "skills"
+            / "final-judge"
+            / "SKILL.md"
+        )
+        skill_text = skill_path.read_text(encoding="utf-8")
+        for phrase in (
+            "200 字以内",
+            "不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程",
+            "调用链与数据流分别写入 `call_chain` 和 `vulnerable_code`",
+        ):
+            self.assertIn(phrase, skill_text)
 
         tp_payload = _final_tp_payload()
         self.assertEqual(
