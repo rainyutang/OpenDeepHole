@@ -1591,19 +1591,16 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
             initial_announcements = (
                 (
                     "release-2026-07-29-mining-engines",
-                    "漏洞挖掘支持多引擎",
                     "新建扫描可按需选择漏洞挖掘引擎，扫描结果会展示来源引擎，单个引擎失败不会影响其它引擎继续运行。",
                     "2026-07-29T00:00:00+00:00",
                 ),
                 (
                     "release-2026-07-28-opencode-runtime",
-                    "客户端配置更清晰",
                     "客户端配置整合为基础配置与高级配置，模型池与常用参数集中展示。",
                     "2026-07-28T00:00:00+00:00",
                 ),
                 (
                     "release-2026-07-27-token-usage",
-                    "Token 用量统计上线",
                     "扫描详情和结果看板提供 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
                     "2026-07-27T00:00:00+00:00",
                 ),
@@ -1612,11 +1609,11 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
                 """\
                 INSERT INTO announcements
                     (announcement_id, title, content, published, published_at, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?, ?)
+                VALUES (?, '', ?, 1, ?, ?, ?)
                 """,
                 [
-                    (announcement_id, title, content, published_at, published_at, published_at)
-                    for announcement_id, title, content, published_at in initial_announcements
+                    (announcement_id, content, published_at, published_at, published_at)
+                    for announcement_id, content, published_at in initial_announcements
                 ],
             )
         self._conn.execute(
@@ -6709,7 +6706,6 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
     def _row_to_announcement(row: sqlite3.Row) -> Announcement:
         return Announcement(
             announcement_id=row["announcement_id"],
-            title=row["title"],
             content=row["content"],
             published=bool(row["published"]),
             published_at=row["published_at"] or "",
@@ -6751,11 +6747,10 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
                 """\
                 INSERT INTO announcements
                     (announcement_id, title, content, published, published_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, '', ?, ?, ?, ?, ?)
                 """,
                 (
                     announcement.announcement_id,
-                    announcement.title,
                     announcement.content,
                     int(announcement.published),
                     announcement.published_at,
@@ -6770,11 +6765,10 @@ class SqliteScanStore(UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGra
             cur = self._conn.execute(
                 """\
                 UPDATE announcements
-                SET title = ?, content = ?, published = ?, published_at = ?, updated_at = ?
+                SET title = '', content = ?, published = ?, published_at = ?, updated_at = ?
                 WHERE announcement_id = ?
                 """,
                 (
-                    announcement.title,
                     announcement.content,
                     int(announcement.published),
                     announcement.published_at,

@@ -27,14 +27,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _announcement_text(title: str, content: str) -> tuple[str, str]:
-    normalized_title = title.strip()
+def _announcement_content(content: str) -> str:
     normalized_content = content.strip()
-    if not normalized_title:
-        raise HTTPException(status_code=400, detail="公告标题不能为空")
     if not normalized_content:
-        raise HTTPException(status_code=400, detail="公告正文不能为空")
-    return normalized_title, normalized_content
+        raise HTTPException(status_code=400, detail="公告内容不能为空")
+    return normalized_content
 
 
 @router.get("/api/announcements", response_model=list[Announcement])
@@ -62,11 +59,10 @@ async def create_announcement(
     body: AnnouncementCreateRequest,
     current_user: User = Depends(require_admin),
 ) -> Announcement:
-    title, content = _announcement_text(body.title, body.content)
+    content = _announcement_content(body.content)
     now = _now_iso()
     announcement = Announcement(
         announcement_id=uuid.uuid4().hex,
-        title=title,
         content=content,
         published=body.published,
         published_at=now if body.published else "",
@@ -98,7 +94,7 @@ async def update_announcement(
     if existing is None:
         raise HTTPException(status_code=404, detail="公告不存在")
 
-    title, content = _announcement_text(body.title, body.content)
+    content = _announcement_content(body.content)
     now = _now_iso()
     published_at = existing.published_at
     if body.published and not existing.published:
@@ -107,7 +103,6 @@ async def update_announcement(
         published_at = ""
     announcement = existing.model_copy(
         update={
-            "title": title,
             "content": content,
             "published": body.published,
             "published_at": published_at,

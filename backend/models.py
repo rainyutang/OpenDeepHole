@@ -149,7 +149,6 @@ class ChangePasswordRequest(BaseModel):
 
 class Announcement(BaseModel):
     announcement_id: str
-    title: str
     content: str
     published: bool = False
     published_at: str = ""
@@ -158,7 +157,6 @@ class Announcement(BaseModel):
 
 
 class AnnouncementCreateRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=4000)
     published: bool = False
 

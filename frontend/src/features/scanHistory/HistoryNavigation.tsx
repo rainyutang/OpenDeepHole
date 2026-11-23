@@ -14,13 +14,13 @@ function NavButton({
   description,
   onClick,
   variant = "default",
-  unread = false,
+  expanded,
 }: {
   label: string;
   description: string;
   onClick: () => void;
   variant?: NavButtonVariant;
-  unread?: boolean;
+  expanded?: boolean;
 }) {
   return (
     <div className="relative group">
@@ -28,17 +28,12 @@ function NavButton({
 
         onClick={onClick}
 
-        aria-label={`${label}：${description}${unread ? "，有未读更新" : ""}`}
+        aria-label={`${label}：${description}`}
+        aria-expanded={expanded}
 
         className={`relative px-3 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${NAV_BUTTON_STYLES[variant]}`}
       >
         {label}
-        {unread && (
-          <span
-            aria-hidden="true"
-            className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-red-500"
-          />
-        )}
       </button>
       <div
 
@@ -64,8 +59,8 @@ export function HistoryNavigation({
   onCheckerCatalog,
   onReviewNotes,
   openAnnouncements,
-  hasUnreadAnnouncement,
-}: Omit<ScanHistoryProps, 'onViewScan'> & { openAnnouncements: () => void; hasUnreadAnnouncement: boolean }) {
+  announcementOpen,
+}: Omit<ScanHistoryProps, 'onViewScan'> & { openAnnouncements: () => void; announcementOpen: boolean }) {
   return <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
     <div className="mx-auto flex max-w-[100rem] flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
       <div className="shrink-0">
@@ -144,7 +139,7 @@ export function HistoryNavigation({
 
           onClick={openAnnouncements}
 
-          unread={hasUnreadAnnouncement}
+          expanded={announcementOpen}
         />
         <ThemeToggle />
         <button

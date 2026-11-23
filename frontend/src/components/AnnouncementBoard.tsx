@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createAnnouncement,
   deleteAnnouncement,
@@ -9,13 +9,26 @@ import {
 import type { Announcement, User } from "../types";
 
 
-function announcementDate(value: string) {
+export function announcementDate(value: string) {
   if (!value) return "";
-  try {
-    return new Date(value).toLocaleDateString();
-  } catch {
-    return value;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+
+export function groupAnnouncementsByDate(announcements: Announcement[]) {
+  const groups = new Map<string, Announcement[]>();
+  for (const announcement of announcements) {
+    const date = announcementDate(announcement.published_at || announcement.created_at) || "未注明日期";
+    const bucket = groups.get(date);
+    if (bucket) bucket.push(announcement);
+    else groups.set(date, [announcement]);
   }
+  return Array.from(groups, ([date, items]) => ({ date, items }));
 }
 
 
@@ -24,6 +37,13 @@ function latestPublishedVersion(announcements: Announcement[]) {
     (latest, announcement) => announcement.updated_at > latest ? announcement.updated_at : latest,
     "",
   );
+}
+
+
+function announcementPreview(content: string) {
+  const normalized = content.trim().replace(/\s+/g, " ");
+  if (normalized.length <= 30) return normalized;
+  return `${normalized.slice(0, 30)}…`;
 }
 
 
@@ -38,27 +58,37 @@ export default function AnnouncementBoard({
   open: boolean;
   onClose: () => void;
   refreshKey: number;
-  onPublishedVersionChange: (version: string) => void;
+  onPublishedVersionChange: (
+    version: string,
+    options?: { allowAutoOpen?: boolean },
+  ) => void;
 }) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [managing, setManaging] = useState(false);
   const [adminAnnouncements, setAdminAnnouncements] = useState<Announcement[]>([]);
   const [adminLoading, setAdminLoading] = useState(false);
   const [editingId, setEditingId] = useState("");
-  const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [published, setPublished] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const publishedRequestId = useRef(0);
+  const managingRef = useRef(managing);
+  managingRef.current = managing;
 
-  const loadPublished = useCallback(async () => {
+  const groupedAnnouncements = useMemo(
+    () => groupAnnouncementsByDate(announcements),
+    [announcements],
+  );
+
+  const loadPublished = useCallback(async (options?: { allowAutoOpen?: boolean }) => {
     const requestId = ++publishedRequestId.current;
     try {
       const nextAnnouncements = await getAnnouncements();
       if (requestId !== publishedRequestId.current) return;
       setAnnouncements(nextAnnouncements);
-      onPublishedVersionChange(latestPublishedVersion(nextAnnouncements));
+      const allowAutoOpen = options?.allowAutoOpen ?? !managingRef.current;
+      onPublishedVersionChange(latestPublishedVersion(nextAnnouncements), { allowAutoOpen });
     } catch {
       // Preserve the last successful feed and version on transient failures.
     }
@@ -83,9 +113,24 @@ export default function AnnouncementBoard({
     };
   }, [loadPublished, refreshKey, user.user_id]);
 
+  useEffect(() => {
+    if ((!open && !managing) || typeof window === "undefined") return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (managing) {
+        setManaging(false);
+        return;
+      }
+      if (open) {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [managing, onClose, open]);
+
   const resetForm = () => {
     setEditingId("");
-    setTitle("");
     setContent("");
     setPublished(true);
     setError("");
@@ -100,7 +145,6 @@ export default function AnnouncementBoard({
 
   const editAnnouncement = (announcement: Announcement) => {
     setEditingId(announcement.announcement_id);
-    setTitle(announcement.title);
     setContent(announcement.content);
     setPublished(announcement.published);
     setError("");
@@ -112,12 +156,12 @@ export default function AnnouncementBoard({
     setError("");
     try {
       if (editingId) {
-        await updateAnnouncement(editingId, title, content, published);
+        await updateAnnouncement(editingId, content, published);
       } else {
-        await createAnnouncement(title, content, published);
+        await createAnnouncement(content, published);
       }
       resetForm();
-      await Promise.all([loadAdmin(), loadPublished()]);
+      await Promise.all([loadAdmin(), loadPublished({ allowAutoOpen: false })]);
     } catch (err: any) {
       setError(err?.response?.data?.detail || "保存公告失败");
     } finally {
@@ -130,23 +174,22 @@ export default function AnnouncementBoard({
     try {
       await updateAnnouncement(
         announcement.announcement_id,
-        announcement.title,
         announcement.content,
         !announcement.published,
       );
-      await Promise.all([loadAdmin(), loadPublished()]);
+      await Promise.all([loadAdmin(), loadPublished({ allowAutoOpen: false })]);
     } catch (err: any) {
       setError(err?.response?.data?.detail || "更新发布状态失败");
     }
   };
 
   const removeAnnouncement = async (announcement: Announcement) => {
-    if (!window.confirm(`确定删除公告“${announcement.title}”吗？`)) return;
+    if (!window.confirm(`确定删除公告“${announcementPreview(announcement.content)}”吗？`)) return;
     setError("");
     try {
       await deleteAnnouncement(announcement.announcement_id);
       if (editingId === announcement.announcement_id) resetForm();
-      await Promise.all([loadAdmin(), loadPublished()]);
+      await Promise.all([loadAdmin(), loadPublished({ allowAutoOpen: false })]);
     } catch (err: any) {
       setError(err?.response?.data?.detail || "删除公告失败");
     }
@@ -155,57 +198,66 @@ export default function AnnouncementBoard({
   return (
     <>
       {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="announcement-viewer-title"
-            className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 shadow-2xl"
-          >
-            <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 bg-slate-900 px-5 py-4">
-              <div className="flex items-center gap-2">
-                <span aria-hidden="true" className="text-blue-300">◈</span>
-                <h2 id="announcement-viewer-title" className="font-semibold text-white">更新公告</h2>
-              </div>
-              <div className="flex items-center gap-2">
-                {user.role === "admin" && (
-                  <button
-                    type="button"
-                    onClick={openManager}
-                    className="rounded-md border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs font-medium text-blue-200 transition-colors hover:bg-blue-500/20"
-                  >
-                    管理公告
-                  </button>
-                )}
+        <section
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="announcement-viewer-title"
+          className="fixed right-4 top-20 z-40 flex max-h-[min(36rem,calc(100vh-6rem))] w-[min(28rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-xl border border-slate-600/80 bg-slate-900 shadow-2xl sm:right-6"
+        >
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-700 bg-slate-900 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span aria-hidden="true" className="text-blue-300">◈</span>
+              <h2 id="announcement-viewer-title" className="text-sm font-semibold text-white">更新公告</h2>
+            </div>
+            <div className="flex items-center gap-2">
+              {user.role === "admin" && (
                 <button
                   type="button"
-                  onClick={onClose}
-                  className="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
-                  aria-label="关闭公告"
+                  onClick={openManager}
+                  className="rounded-md border border-blue-400/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-200 transition-colors hover:bg-blue-500/20"
                 >
-                  ✕
+                  管理公告
                 </button>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                aria-label="关闭公告"
+              >
+                ✕
+              </button>
             </div>
-            {announcements.length === 0 ? (
-              <p className="px-5 py-8 text-center text-sm text-slate-500">暂无已发布公告。</p>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {groupedAnnouncements.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">暂无已发布公告。</p>
             ) : (
-              <div className="divide-y divide-slate-700/70">
-                {announcements.map((announcement) => (
-                  <article key={announcement.announcement_id} className="grid gap-1 px-5 py-4 md:grid-cols-[10rem_1fr] md:gap-4">
-                    <div>
-                      <p className="text-sm font-medium text-slate-100">{announcement.title}</p>
-                      <time className="text-xs text-slate-500">
-                        {announcementDate(announcement.published_at)}
+              <div className="divide-y divide-slate-700">
+                {groupedAnnouncements.map((group) => (
+                  <section key={group.date} aria-label={group.date} className="px-4 py-3.5">
+                    <div className="mb-2.5 flex items-center gap-2">
+                      <time className="text-xs font-semibold tracking-wide text-blue-300">
+                        {group.date}
                       </time>
+                      <span aria-hidden="true" className="flex-1 border-t border-slate-700" />
                     </div>
-                    <p className="whitespace-pre-wrap text-sm leading-6 text-slate-300">{announcement.content}</p>
-                  </article>
+                    <ul className="space-y-2.5">
+                      {group.items.map((announcement) => (
+                        <li key={announcement.announcement_id} className="flex items-start gap-2.5">
+                          <span aria-hidden="true" className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
+                          <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">
+                            {announcement.content}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 ))}
               </div>
             )}
-          </section>
-        </div>
+          </div>
+        </section>
       )}
 
       {managing && (
@@ -239,23 +291,15 @@ export default function AnnouncementBoard({
                   )}
                 </div>
                 <label className="mb-3 block">
-                  <span className="mb-1 block text-xs font-medium text-slate-400">标题</span>
-                  <input
-                    value={title}
-                    onChange={(event) => setTitle(event.target.value)}
-                    maxLength={120}
-                    required
-                    className="w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-blue-500"
-                  />
-                </label>
-                <label className="mb-3 block">
-                  <span className="mb-1 block text-xs font-medium text-slate-400">正文</span>
+                  <span className="mb-1 block text-xs font-medium text-slate-400">公告内容</span>
                   <textarea
+                    aria-label="公告内容"
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     maxLength={4000}
                     required
                     rows={7}
+                    placeholder="请输入公告内容"
                     className="w-full resize-y rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm leading-6 text-white outline-none focus:border-blue-500"
                   />
                 </label>
@@ -292,15 +336,12 @@ export default function AnnouncementBoard({
                   <div className="space-y-3">
                     {adminAnnouncements.map((announcement) => (
                       <article key={announcement.announcement_id} className="rounded-xl border border-slate-700 bg-slate-800/60 p-4">
-                        <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <h5 className="text-sm font-medium text-white">{announcement.title}</h5>
-                            <p className="mt-0.5 text-xs text-slate-500">
-                              {announcement.published
-                                ? `已发布 · ${announcementDate(announcement.published_at)}`
-                                : "草稿"}
-                            </p>
-                          </div>
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs text-slate-500">
+                            {announcement.published
+                              ? `已发布 · ${announcementDate(announcement.published_at)}`
+                              : "草稿"}
+                          </p>
                           <span className={`rounded border px-2 py-0.5 text-xs ${
                             announcement.published
                               ? "border-green-500/30 bg-green-500/10 text-green-300"
@@ -309,7 +350,7 @@ export default function AnnouncementBoard({
                             {announcement.published ? "已发布" : "草稿"}
                           </span>
                         </div>
-                        <p className="mb-3 whitespace-pre-wrap text-xs leading-5 text-slate-400">{announcement.content}</p>
+                        <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">{announcement.content}</p>
                         <div className="flex flex-wrap gap-2">
                           <button type="button" onClick={() => editAnnouncement(announcement)} className="rounded bg-slate-700 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-600">
                             编辑

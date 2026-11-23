@@ -26,11 +26,10 @@ export default function ScanHistory({
 }: Props) {
   const {
     announcementOpen,
-    setAnnouncementOpen,
+    closeAnnouncements,
     announcementRefreshKey,
-    setAnnouncementVersion,
-    hasUnreadAnnouncement,
-    openAnnouncements,
+    handlePublishedVersionChange,
+    toggleAnnouncements,
     refreshAnnouncements,
   } = useAnnouncementUnread(user.user_id);
   const {
@@ -111,8 +110,8 @@ export default function ScanHistory({
         onCheckerDashboard={onCheckerDashboard}
         onCheckerCatalog={onCheckerCatalog}
         onReviewNotes={onReviewNotes}
-        openAnnouncements={openAnnouncements}
-        hasUnreadAnnouncement={hasUnreadAnnouncement} />
+        openAnnouncements={toggleAnnouncements}
+        announcementOpen={announcementOpen} />
 
       <AnnouncementBoard
 
@@ -120,11 +119,11 @@ export default function ScanHistory({
 
         open={announcementOpen}
 
-        onClose={() => setAnnouncementOpen(false)}
+        onClose={closeAnnouncements}
 
         refreshKey={announcementRefreshKey}
 
-        onPublishedVersionChange={setAnnouncementVersion}
+        onPublishedVersionChange={handlePublishedVersionChange}
       />
 
       {/* Content */}

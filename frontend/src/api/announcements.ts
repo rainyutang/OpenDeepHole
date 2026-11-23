@@ -12,12 +12,10 @@ export async function getAdminAnnouncements(): Promise<Announcement[]> {
 }
 
 export async function createAnnouncement(
-  title: string,
   content: string,
   published: boolean,
 ): Promise<Announcement> {
   const { data } = await api.post<Announcement>("/api/admin/announcements", {
-    title,
     content,
     published,
   });
@@ -26,13 +24,12 @@ export async function createAnnouncement(
 
 export async function updateAnnouncement(
   announcementId: string,
-  title: string,
   content: string,
   published: boolean,
 ): Promise<Announcement> {
   const { data } = await api.put<Announcement>(
     `/api/admin/announcements/${announcementId}`,
-    { title, content, published },
+    { content, published },
   );
   return data;
 }
