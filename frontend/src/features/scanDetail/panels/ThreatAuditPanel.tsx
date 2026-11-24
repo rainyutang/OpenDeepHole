@@ -28,15 +28,20 @@ import {
   ThreatAuditResults,
 } from "../../threatAudit/ThreatAuditResults";
 import { useListFocus } from "../../../auditNavigation";
+import { MultiFilterSelect } from "../components/MultiFilterSelect";
 import { TaskPanel, MiniMetric, StatusPill, EventList } from "../components/taskUi";
 import { flowStatusLabel, flowStatusTone } from "../model/processFlow";
+import { ALL_STATIC_FILTER } from "../model/staticCandidates";
 import { StaticFilterSelect } from "./StaticCandidateDetail";
 import { ThreatAuditTaskDetail } from "./ThreatAuditTaskDetail";
 import {
   effectiveThreatAuditTaskStatus,
+  filterThreatAuditTasks,
+  threatAuditModuleOptions,
   threatAuditStatusOptions,
   threatAuditStatusLabel,
   threatAuditStatusTone,
+  threatAuditTypeOptions,
 } from "../model/threatAudit";
 
 export function ThreatAuditPanel({
@@ -60,10 +65,14 @@ export function ThreatAuditPanel({
   focusRequest?: ListFocusRequest<string>;
   onOpenIssue: (index: number) => void;
 }) {
-  const [statusFilter, setStatusFilter] = useState("__all__");
+  const [statusFilter, setStatusFilter] = useState(ALL_STATIC_FILTER);
+  const [moduleFilter, setModuleFilter] = useState<string[]>([]);
+  const [typeFilter, setTypeFilter] = useState<string[]>([]);
+  const [openFilter, setOpenFilter] = useState<"module" | "type" | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusRequest?.key ?? null);
   const [page, setPage] = useState(1);
   const adjacentFocus = useRef<string | null>(null);
+  const prevScopeRef = useRef(`${scan.scan_id}\0${engineId}`);
   const iterative = engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID;
   const [detailCache] = useState(createIterativeAuditDetailCache);
   const iterativePages = useIterativeAuditTasks(scan.scan_id, engineId,
@@ -95,13 +104,29 @@ export function ThreatAuditPanel({
     }
     return result;
   }, [queueTasks]);
-  const visibleTasks = useMemo(
-    () => tasks.filter((task) => (
-      statusFilter === "__all__"
-      || effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id)) === statusFilter
-    )),
-    [tasks, runtimeByTaskId, statusFilter],
+  const moduleOptions = useMemo(
+    () => threatAuditModuleOptions(tasks, patternMode),
+    [tasks, patternMode],
   );
+  const typeOptions = useMemo(
+    () => threatAuditTypeOptions(tasks),
+    [tasks],
+  );
+  const statusOptions = useMemo(
+    () => threatAuditStatusOptions(tasks, runtimeByTaskId),
+    [tasks, runtimeByTaskId],
+  );
+  const visibleTasks = useMemo(
+    () => filterThreatAuditTasks(tasks, runtimeByTaskId, {
+      status: statusFilter,
+      modules: moduleFilter,
+      types: typeFilter,
+    }),
+    [tasks, runtimeByTaskId, statusFilter, moduleFilter, typeFilter],
+  );
+  const hasActiveFilters = statusFilter !== ALL_STATIC_FILTER
+    || moduleFilter.length > 0
+    || typeFilter.length > 0;
   const totalPages = Math.max(1, Math.ceil(visibleTasks.length / THREAT_AUDIT_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pagedTasks = visibleTasks.slice(
@@ -149,9 +174,23 @@ export function ThreatAuditPanel({
   const cancelledTaskCount = engineCounts?.cancelled ?? aggregate?.[`${prefix}_cancelled`]
     ?? statusCounts.get("cancelled") ?? 0;
 
+  const resetAllFilters = () => {
+    setStatusFilter(ALL_STATIC_FILTER);
+    setModuleFilter((previous) => (previous.length === 0 ? previous : []));
+    setTypeFilter((previous) => (previous.length === 0 ? previous : []));
+    setOpenFilter(null);
+  };
+
+  useEffect(() => {
+    const scope = `${scan.scan_id}\0${engineId}`;
+    if (prevScopeRef.current === scope) return;
+    prevScopeRef.current = scope;
+    resetAllFilters();
+  }, [scan.scan_id, engineId]);
+
   useEffect(() => {
     setPage(1);
-  }, [statusFilter]);
+  }, [statusFilter, moduleFilter, typeFilter]);
 
   useEffect(() => {
     if (!adjacentFocus.current) return;
@@ -161,8 +200,14 @@ export function ThreatAuditPanel({
     adjacentFocus.current = null;
   }, [visibleTasks, selectedTaskId]);
 
-  const listFocus = useListFocus(focusRequest, visibleTasks.map((task) => task.task_id), THREAT_AUDIT_PAGE_SIZE,
-    setSelectedTaskId, setPage, () => setStatusFilter("__all__"));
+  const listFocus = useListFocus(
+    focusRequest,
+    visibleTasks.map((task) => task.task_id),
+    THREAT_AUDIT_PAGE_SIZE,
+    setSelectedTaskId,
+    setPage,
+    resetAllFilters,
+  );
 
   useEffect(() => {
     if (listFocus.pinned !== null || listFocus.pending) return;
@@ -201,9 +246,42 @@ export function ThreatAuditPanel({
         <StaticFilterSelect
           label="状态"
           value={statusFilter}
-          options={threatAuditStatusOptions(tasks, runtimeByTaskId)}
+          options={statusOptions}
           onChange={(value) => { listFocus.release(); setStatusFilter(value); }}
         />
+        <MultiFilterSelect
+          label="模块"
+          values={moduleFilter}
+          options={moduleOptions}
+          open={openFilter === "module"}
+          onOpenChange={(open) => setOpenFilter(open ? "module" : null)}
+          onChange={(values) => { listFocus.release(); setModuleFilter(values); }}
+        />
+        <MultiFilterSelect
+          label="类型"
+          values={typeFilter}
+          options={typeOptions}
+          open={openFilter === "type"}
+          onOpenChange={(open) => setOpenFilter(open ? "type" : null)}
+          onChange={(values) => { listFocus.release(); setTypeFilter(values); }}
+        />
+        {hasActiveFilters && (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                listFocus.release();
+                resetAllFilters();
+              }}
+              className="rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:bg-slate-800"
+            >
+              重置筛选
+            </button>
+            <span className="text-xs text-slate-400">
+              匹配 {visibleTasks.length} / {tasks.length} 条
+            </span>
+          </>
+        )}
         {iterative && (iterativePages.cursor || iterativePages.error) && <button type="button"
           disabled={iterativePages.loading} onClick={() => void iterativePages.loadMore()}
           className="rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 disabled:opacity-40">
@@ -319,7 +397,7 @@ export function ThreatAuditPanel({
                 onSelectTask={(id, loaded) => {
                   listFocus.release();
                   adjacentFocus.current = id;
-                  setStatusFilter("__all__");
+                  resetAllFilters();
                   if (loaded) iterativePages.addTask(loaded);
                   setSelectedTaskId(id);
                 }}
