@@ -413,6 +413,9 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "不要扩展去寻找代码中的其他无关问题",
                 "影响不一致时的处理",
                 "合理的问题级别建议",
+                "敏感信息类问题的处理",
+                "会留存在内存中",
+                "通过日志打印",
             ),
             "prove-fp": (
                 "判断真实问题而非报告对错",
@@ -420,6 +423,9 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "不要扩展去寻找代码中的其他无关问题",
                 "影响不一致不等于误报",
                 "不得仅因“与报告描述的影响不一致”就判为 `false_positive`",
+                "敏感信息类问题不因不可触发判误报",
+                "会留存在内存中",
+                "通过日志打印",
             ),
             "final-judge": (
                 "判断真实问题而非报告对错",
@@ -428,6 +434,9 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "影响不一致时的处理",
                 "变更 `severity`（问题级别）并重写 `description`（问题描述）",
                 "critical` / `high` / `medium` / `low",
+                "敏感信息类问题的裁决",
+                "会留存在内存中",
+                "通过日志打印",
             ),
         }
         for skill_name, phrases in expected_phrases.items():
