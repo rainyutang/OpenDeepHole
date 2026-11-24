@@ -110,6 +110,8 @@ def _cleanup_agent_globals() -> None:
     get_runtime().agents.agent_ws.clear()
     get_runtime().agents.agent_ws_locks.clear()
     get_runtime().agents.agent_opencode_pool_latest.clear()
+    get_runtime().agents.legacy_runtime_update_attempts.clear()
+    get_runtime().agents.legacy_stop_settle_until.clear()
 
 
 def test_manual_runtime_update_request_is_persisted(tmp_path: Path) -> None:
@@ -399,4 +401,344 @@ def test_ordinary_task_keeps_automatic_runtime_sync_without_manual_request(
         assert payload == expected
         create_payload.assert_called_once_with("http://server.example")
     finally:
+        store.close()
+
+
+def test_legacy_updating_agent_redispatches_after_unconsumed_deferral(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-1"
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payloads = [
+        {"hash": "new-runtime", "token": "tok-1"},
+        {"hash": "new-runtime", "token": "tok-2"},
+        {"hash": "new-runtime", "token": "tok-3"},
+    ]
+    clock = [100.0]
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
+                side_effect=payloads,
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=send),
+            patch("backend.agents.runtime_updates.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            # Initial idle dispatch moves status to updating and syncs live state.
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 1
+            live_agent = get_runtime().agents.registered_agents["live-agent"]
+            assert live_agent.runtime_update_status == "updating"
+            assert live_agent.accepting_tasks is False
+
+            # Before 4s backoff expires, no duplicate send occurs.
+            clock[0] = 102.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 1
+
+            # After 4s with token still unconsumed (Agent deferred due to local_work_active),
+            # backend re-dispatches with a fresh token.
+            clock[0] = 104.5
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+            assert send.await_args_list[1].args[1]["agent_runtime_update"]["token"] == "tok-2"
+
+            # Second retry backs off to 8s.
+            clock[0] = 110.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+
+            clock[0] = 113.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 3
+            assert send.await_args_list[2].args[1]["agent_runtime_update"]["token"] == "tok-3"
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_legacy_updating_agent_pauses_retries_after_download_and_fails_if_restart_never_happens(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-1"
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payloads = [
+        {"hash": "new-runtime", "token": "tok-1"},
+        {"hash": "new-runtime", "token": "tok-2"},
+    ]
+    clock = [200.0]
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
+                side_effect=payloads,
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=send),
+            patch("backend.agents.runtime_updates.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 1
+
+            # Legacy Agent downloads the archive; retries pause for 180s to allow pip install.
+            clock[0] = 201.0
+            backend_agents_runtime_updates.record_runtime_update_download_consumed("tok-1")
+            clock[0] = 260.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 1
+
+            # After 180s still on the same old session, backend performs one post-download retry.
+            clock[0] = 382.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+
+            # After another 180s still stuck on the same session, mark failed instead of hanging 15m.
+            clock[0] = 563.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+            record = store.get_agent_record("stable-agent")
+            assert record["runtime_update_status"] == "failed"
+            assert "未完成重启" in record["runtime_update_error"]
+            assert get_runtime().agents.registered_agents["live-agent"].accepting_tasks is True
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_legacy_updating_agent_handles_new_session_reconnect_with_or_without_download(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-old"
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payloads = [
+        {"hash": "new-runtime", "token": "tok-1"},
+        {"hash": "new-runtime", "token": "tok-2"},
+    ]
+    clock = [300.0]
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
+                side_effect=payloads,
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=send),
+            patch("backend.agents.runtime_updates.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 1
+
+            # Case 1: User restarted the legacy Agent before any download happened ->
+            # backend immediately re-dispatches without waiting for backoff.
+            get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-restarted-1"
+            clock[0] = 301.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+
+            # Case 2: Agent downloaded tok-2, restarted into sess-restarted-2, still reports old hash ->
+            # backend marks failed immediately to avoid restart loops.
+            backend_agents_runtime_updates.record_runtime_update_download_consumed("tok-2")
+            get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-restarted-2"
+            clock[0] = 302.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert send.await_count == 2
+            record = store.get_agent_record("stable-agent")
+            assert record["runtime_update_status"] == "failed"
+            assert "运行版本仍未变为目标版本" in record["runtime_update_error"]
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_legacy_pending_update_waits_for_post_stop_settle_window(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payload = {"hash": "new-runtime", "token": "tok-settle"}
+    clock = [500.0]
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
+                return_value=payload,
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=send),
+            patch("backend.agents.runtime_updates.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            backend_agents_runtime_updates.note_agent_stop_dispatched(
+                "stable-agent",
+                settle_seconds=3.0,
+            )
+            clock[0] = 501.5
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            send.assert_not_awaited()
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "pending"
+
+            clock[0] = 503.5
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            send.assert_awaited_once()
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "updating"
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_stop_scan_with_fp_review_arms_settle_and_download_tracks_token_consumption(
+    tmp_path: Path,
+) -> None:
+    import backend.scans.lifecycle as scan_lifecycle
+
+    store, user = _store_with_agent(tmp_path)
+    _connect_agent()
+    get_runtime().agents.registered_agents["live-agent"].agent_session_id = "sess-legacy"
+    _save_agent_scan(store, "scan-with-fp", ScanItemStatus.AUDITING)
+    store.create_fp_review_job(
+        "review-1",
+        "scan-with-fp",
+        2,
+        "2026-11-24T00:00:00+00:00",
+        method="adversarial",
+    )
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+
+    sent_commands: list[tuple[str, dict]] = []
+
+    async def fake_send(agent_id: str, command: dict) -> bool:
+        sent_commands.append((agent_id, command))
+        return True
+
+    clock = [700.0]
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch(
+                "backend.agents.gateway.request_agent_scan_stop",
+                new=AsyncMock(return_value={"found": True, "still_active": False, "error": ""}),
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=fake_send),
+            patch(
+                "backend.agents.artifacts._read_agent_runtime_files",
+                return_value=[("deephole_client/main.py", b"print('v2')\n")],
+            ),
+            patch("backend.agents.runtime_updates.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            stop_result = asyncio.run(scan_lifecycle.stop_scan("scan-with-fp", user))
+            assert stop_result["fp_review_ids"] == ["review-1"]
+            assert any(cmd["type"] == "fp_review_stop" for _, cmd in sent_commands)
+
+            # Right after stop_scan sent fire-and-forget fp_review_stop, legacy update waits in pending.
+            clock[0] = 701.0
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            assert not any(cmd.get("runtime_update_only") for _, cmd in sent_commands)
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "pending"
+
+            # After the 3s settle window, legacy update dispatches with a real download token.
+            clock[0] = 703.5
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            update_cmds = [cmd for _, cmd in sent_commands if cmd.get("runtime_update_only")]
+            assert len(update_cmds) == 1
+            token = update_cmds[0]["agent_runtime_update"]["token"]
+
+            # Consuming the archive through agent_runtime_download marks downloaded_at.
+            clock[0] = 704.0
+            response = asyncio.run(backend_agents_artifacts.agent_runtime_download(token))
+            assert response.media_type == "application/zip"
+            attempt = get_runtime().agents.legacy_runtime_update_attempts["stable-agent"]
+            assert attempt.downloaded_at == 704.0
+            assert attempt.download_count == 1
+    finally:
+        get_runtime().agents.runtime_download_tokens.clear()
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_stop_scan_confirmed_without_fp_review_clears_settle_immediately(
+    tmp_path: Path,
+) -> None:
+    import backend.scans.lifecycle as scan_lifecycle
+
+    store, user = _store_with_agent(tmp_path)
+    _connect_agent()
+    _save_agent_scan(store, "scan-no-fp", ScanItemStatus.AUDITING)
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payload = {"hash": "new-runtime", "token": "tok-immediate"}
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch(
+                "backend.agents.gateway.request_agent_scan_stop",
+                new=AsyncMock(return_value={"found": True, "still_active": False, "error": ""}),
+            ),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.agents.artifacts.create_agent_runtime_update_payload",
+                return_value=payload,
+            ),
+            patch("backend.agents.gateway.send_agent_command", new=send),
+        ):
+            stop_result = asyncio.run(scan_lifecycle.stop_scan("scan-no-fp", user))
+            assert stop_result["agent_stop_state"] == "confirmed"
+            assert stop_result["fp_review_ids"] == []
+            assert "stable-agent" not in get_runtime().agents.legacy_stop_settle_until
+
+            asyncio.run(backend_agents_runtime_updates._process_agent_runtime_updates())
+            send.assert_awaited_once()
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "updating"
+    finally:
+        _cleanup_agent_globals()
         store.close()

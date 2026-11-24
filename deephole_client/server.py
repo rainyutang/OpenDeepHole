@@ -1074,13 +1074,16 @@ async def _run_fp_review_worker(review_id: str) -> None:
             queue.clear()
         reporter = last_reporter or _reporter
         if reporter is not None and scan_id and (attempts > 0 or had_work):
+            from task_agent.config_reload import get_config_reload_coordinator
+
             try:
-                await reporter.finish_fp_review(
-                    scan_id,
-                    review_id,
-                    terminal_status,
-                    terminal_error,
-                )
+                with get_config_reload_coordinator().track_local_work("fp_review_finish"):
+                    await reporter.finish_fp_review(
+                        scan_id,
+                        review_id,
+                        terminal_status,
+                        terminal_error,
+                    )
             except Exception:
                 pass
         pool_stop.set()
@@ -1238,6 +1241,8 @@ async def _run_single_fp_review_item(
 
 async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:
     """Handle an 'fp_review_stop' command — cancel a running FP review."""
+    from task_agent import cancel_opencode_execution
+
     cancel_event = _fp_review_cancel_events.get(review_id)
     if cancel_event is not None:
         cancel_event.set()
@@ -1246,10 +1251,34 @@ async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:
     if task is not None and not task.done():
         task.cancel()
         print(f"Cancelling FP review task {review_id} for scan {scan_id}")
-        return
-    if cancel_event is not None:
-        return
-    print(f"Warning: FP review {review_id} not found for stop")
+
+    cancellation_matched = 0
+    try:
+        cancellation = await cancel_opencode_execution(
+            "fp_review",
+            review_id,
+            timeout_seconds=5.0,
+        )
+        cancellation_matched = int(cancellation.get("matched_tasks") or 0)
+    except Exception as exc:
+        print(
+            f"Warning: failed to cancel Task Agent work for FP review "
+            f"{review_id}: {type(exc).__name__}: {exc}"
+        )
+
+    if task is not None and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        except Exception:
+            pass
+
+    if cancel_event is None and task is None and cancellation_matched <= 0:
+        print(f"Warning: FP review {review_id} not found for stop")
 
 
 async def handle_vulnerability_validation(
@@ -1682,18 +1711,45 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
 
 async def handle_vulnerability_validation_stop(scan_id: str, vuln_index: int) -> None:
     """Handle a 'vulnerability_validation_stop' command."""
+    from task_agent import cancel_opencode_execution
+
     task_key = (scan_id, vuln_index)
     cancel_event = _validation_cancel_events.get(task_key)
+    task = _validation_tasks.get(task_key)
     if cancel_event is not None:
         cancel_event.set()
         print(f"Stopping vulnerability validation {scan_id}#{vuln_index}")
-        return
-    task = _validation_tasks.get(task_key)
-    if task is not None and not task.done():
+    elif task is not None and not task.done():
         task.cancel()
         print(f"Cancelling validation task {scan_id}#{vuln_index}")
-        return
-    print(f"Warning: validation {scan_id}#{vuln_index} not found for stop")
+
+    cancellation_matched = 0
+    try:
+        cancellation = await cancel_opencode_execution(
+            "vulnerability_validation",
+            f"{scan_id}:{vuln_index}",
+            timeout_seconds=5.0,
+        )
+        cancellation_matched = int(cancellation.get("matched_tasks") or 0)
+    except Exception as exc:
+        print(
+            f"Warning: failed to cancel Task Agent work for validation "
+            f"{scan_id}#{vuln_index}: {type(exc).__name__}: {exc}"
+        )
+
+    if task is not None and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+        except Exception:
+            pass
+
+    if cancel_event is None and task is None and cancellation_matched <= 0:
+        print(f"Warning: validation {scan_id}#{vuln_index} not found for stop")
 
 
 async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:

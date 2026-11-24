@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import os
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,121 @@ from backend.models import AgentInfo, User
 logger = get_logger(__name__)
 
 _LAST_STAT_CHECK_MONOTONIC: float = 0.0
+
+
+@dataclass
+class _LegacyRuntimeUpdateAttempt:
+    agent_id: str
+    agent_session_id: str
+    target_hash: str
+    dispatched_at: float
+    retry_count: int = 0
+    tokens: list[str] = field(default_factory=list)
+    downloaded_at: float | None = None
+    download_count: int = 0
+
+
+def note_agent_stop_dispatched(
+    agent_key: str,
+    *,
+    settle_seconds: float = constants._LEGACY_STOP_SETTLE_SECONDS,
+    replace: bool = False,
+) -> None:
+    """Delay legacy idle-boundary update dispatch briefly after sending stop commands."""
+    normalized = str(agent_key or "").strip()
+    if not normalized:
+        return
+    duration = max(0.0, float(settle_seconds))
+    if duration <= 0.0:
+        clear_agent_stop_settle(normalized)
+        return
+    deadline = time.monotonic() + duration
+    deadlines = get_runtime().agents.legacy_stop_settle_until
+    if replace:
+        deadlines[normalized] = deadline
+    else:
+        deadlines[normalized] = max(deadlines.get(normalized, 0.0), deadline)
+
+
+def clear_agent_stop_settle(agent_key: str) -> None:
+    normalized = str(agent_key or "").strip()
+    if not normalized:
+        return
+    get_runtime().agents.legacy_stop_settle_until.pop(normalized, None)
+
+
+def _is_in_legacy_stop_settle(agent_key: str) -> bool:
+    normalized = str(agent_key or "").strip()
+    if not normalized:
+        return False
+    deadlines = get_runtime().agents.legacy_stop_settle_until
+    deadline = deadlines.get(normalized)
+    if deadline is None:
+        return False
+    if time.monotonic() < deadline:
+        return True
+    deadlines.pop(normalized, None)
+    return False
+
+
+def _clear_legacy_runtime_update_tracking(agent_key: str) -> None:
+    normalized = str(agent_key or "").strip()
+    if not normalized:
+        return
+    get_runtime().agents.legacy_runtime_update_attempts.pop(normalized, None)
+    get_runtime().agents.legacy_stop_settle_until.pop(normalized, None)
+
+
+def record_runtime_update_download_consumed(token: str) -> None:
+    """Mark a legacy update attempt as downloaded once the Agent fetches its archive."""
+    normalized = str(token or "").strip()
+    if not normalized:
+        return
+    now_mono = time.monotonic()
+    for attempt in get_runtime().agents.legacy_runtime_update_attempts.values():
+        if normalized in attempt.tokens:
+            attempt.downloaded_at = now_mono
+            attempt.download_count += 1
+            return
+
+
+def _record_legacy_runtime_update_dispatch(
+    agent_key: str,
+    agent_id: str,
+    agent: AgentInfo,
+    target_hash: str,
+    update_payload: dict,
+    *,
+    existing: _LegacyRuntimeUpdateAttempt | None = None,
+) -> _LegacyRuntimeUpdateAttempt:
+    now_mono = time.monotonic()
+    token = str(update_payload.get("token") or "").strip()
+    session_id = str(agent.agent_session_id or "")
+    if (
+        existing is not None
+        and existing.target_hash == target_hash
+        and existing.agent_session_id == session_id
+        and (session_id or existing.agent_id == agent_id)
+    ):
+        existing.agent_id = agent_id
+        existing.dispatched_at = now_mono
+        existing.retry_count += 1
+        if token:
+            existing.tokens.append(token)
+            if len(existing.tokens) > 8:
+                del existing.tokens[:-8]
+        attempt = existing
+    else:
+        attempt = _LegacyRuntimeUpdateAttempt(
+            agent_id=agent_id,
+            agent_session_id=session_id,
+            target_hash=target_hash,
+            dispatched_at=now_mono,
+            retry_count=0,
+            tokens=[token] if token else [],
+        )
+    get_runtime().agents.legacy_runtime_update_attempts[agent_key] = attempt
+    return attempt
 
 
 def _runtime_update_status(record: dict | None) -> str:
@@ -161,6 +277,7 @@ async def _clear_agent_runtime_update(agent_key: str) -> None:
         agent_key,
         status="",
     )
+    _clear_legacy_runtime_update_tracking(agent_key)
     _sync_live_agent_update_state(agent_key, status="")
 
 
@@ -198,9 +315,14 @@ async def handle_agent_runtime_update_status(
 
     effective_target = reported_target or current_target
     if state == constants._RUNTIME_UPDATE_DRAINING:
+        try:
+            reported_active = int(payload.get("active_tasks") or 0)
+        except (TypeError, ValueError):
+            reported_active = 0
         if (
             current_status == constants._RUNTIME_UPDATE_UPDATING
             and current_target == effective_target
+            and reported_active <= 0
         ):
             return
         await run_store_call(
@@ -411,13 +533,11 @@ async def maybe_auto_trigger_agent_runtime_update_on_connect(
     *,
     server_url: str,
 ) -> bool:
-    """Auto-trigger drain-and-update on WebSocket hello when backend runtime changed.
+    """Reconcile or auto-trigger drain-and-update on WebSocket hello.
 
     Returns True when an update is already draining or just dispatched so the
     caller can defer orphaned-work recovery until the updated Agent reconnects.
     """
-    if not auto_runtime_update_enabled():
-        return False
     if not agent.graceful_runtime_update or not agent.agent_key or not agent.runtime_hash:
         return False
 
@@ -507,6 +627,10 @@ async def maybe_auto_trigger_agent_runtime_update_on_connect(
         )
         return False
 
+    is_manual_pending = current_status == constants._RUNTIME_UPDATE_PENDING
+    if not is_manual_pending and not auto_runtime_update_enabled():
+        return False
+
     has_local_work = bool(
         hello_msg.get("active_scans")
         or hello_msg.get("active_fp_reviews")
@@ -520,9 +644,183 @@ async def maybe_auto_trigger_agent_runtime_update_on_connect(
         target_hash=target_hash,
         record=record,
         active_work_hint=has_local_work,
-        is_manual=current_status == constants._RUNTIME_UPDATE_PENDING,
+        is_manual=is_manual_pending,
     )
     return dispatched in constants._RUNTIME_UPDATE_BLOCKING_STATUSES
+
+
+async def _maybe_retry_legacy_updating_agent(
+    store,
+    *,
+    agent_key: str,
+    record: dict,
+    target_hash: str,
+    age: float | None,
+    agent_id: str,
+    agent: AgentInfo,
+) -> None:
+    """Self-heal legacy Agents that deferred runtime_update_only while local work wound down."""
+    from backend.agents.artifacts import (
+        _agent_runtime_hash,
+        create_agent_runtime_update_payload,
+    )
+    from backend.agents.gateway import send_agent_command
+
+    if agent_id not in get_runtime().agents.agent_ws:
+        return
+
+    server_url = str(
+        record.get("runtime_update_server_url") or agent.server_url or ""
+    ).strip()
+    requested_at = str(record.get("runtime_update_requested_at") or "")
+    started_at = str(record.get("runtime_update_started_at") or "")
+
+    async def _mark_failed(error: str) -> None:
+        await run_store_call(
+            store,
+            "set_agent_runtime_update_record",
+            agent_key,
+            status=constants._RUNTIME_UPDATE_FAILED,
+            target_hash=target_hash,
+            server_url=server_url,
+            requested_at=requested_at,
+            started_at=started_at,
+            error=error,
+        )
+        _clear_legacy_runtime_update_tracking(agent_key)
+        _sync_live_agent_update_state(
+            agent_key,
+            status=constants._RUNTIME_UPDATE_FAILED,
+            target_hash=target_hash,
+            error=error,
+        )
+
+    attempts = get_runtime().agents.legacy_runtime_update_attempts
+    attempt: _LegacyRuntimeUpdateAttempt | None = attempts.get(agent_key)
+    now_mono = time.monotonic()
+    fresh_session_reconnected = False
+
+    if attempt is not None:
+        if target_hash and attempt.target_hash and attempt.target_hash != target_hash:
+            attempts.pop(agent_key, None)
+            attempt = None
+        elif (
+            attempt.agent_session_id
+            and agent.agent_session_id
+            and attempt.agent_session_id != agent.agent_session_id
+        ):
+            if attempt.downloaded_at is not None:
+                error = (
+                    "Agent 重启后运行版本仍未变为目标版本，已暂停自动重试；"
+                    "请检查客户端目录权限或点击重试更新"
+                )
+                await _mark_failed(error)
+                logger.warning(
+                    "Legacy Agent reconnected after downloading update with mismatched hash "
+                    "(expected=%s actual=%s): agent_key=%s",
+                    target_hash[:12],
+                    agent.runtime_hash[:12],
+                    agent_key,
+                )
+                return
+            attempts.pop(agent_key, None)
+            attempt = None
+            fresh_session_reconnected = True
+        elif attempt.downloaded_at is not None:
+            last_activity = max(attempt.dispatched_at, attempt.downloaded_at)
+            if (
+                now_mono - last_activity
+                < constants._LEGACY_RUNTIME_UPDATE_POST_DOWNLOAD_RETRY_SECONDS
+            ):
+                return
+            if (
+                attempt.download_count >= constants._LEGACY_RUNTIME_UPDATE_MAX_POST_DOWNLOAD_ATTEMPTS
+                or attempt.dispatched_at > attempt.downloaded_at
+            ):
+                error = "旧版 Agent 已下载更新包但未完成重启，请检查客户端控制台日志或点击重试更新"
+                await _mark_failed(error)
+                logger.warning(
+                    "Legacy Agent downloaded runtime update without restarting: agent_key=%s target=%s",
+                    agent_key,
+                    target_hash[:12],
+                )
+                return
+        else:
+            delay = min(
+                constants._LEGACY_RUNTIME_UPDATE_REDISPATCH_MAX_SECONDS,
+                constants._LEGACY_RUNTIME_UPDATE_REDISPATCH_INITIAL_SECONDS
+                * (2 ** min(attempt.retry_count, 3)),
+            )
+            if now_mono - attempt.dispatched_at < delay:
+                return
+
+    if attempt is None and not fresh_session_reconnected:
+        if age is None or age < constants._LEGACY_RUNTIME_UPDATE_REDISPATCH_INITIAL_SECONDS:
+            return
+
+    if _is_in_legacy_stop_settle(agent_key):
+        return
+    if await _agent_has_active_work(agent_key, agent_id):
+        return
+    if not server_url:
+        return
+
+    try:
+        latest_hash = await asyncio.to_thread(_agent_runtime_hash)
+        if agent.runtime_hash and agent.runtime_hash == latest_hash:
+            await _clear_agent_runtime_update(agent_key)
+            return
+        update_payload = await asyncio.to_thread(
+            create_agent_runtime_update_payload,
+            server_url,
+        )
+        effective_target = str(update_payload.get("hash") or latest_hash or target_hash)
+        if effective_target and effective_target != target_hash:
+            now = datetime.now(timezone.utc).isoformat()
+            await run_store_call(
+                store,
+                "set_agent_runtime_update_record",
+                agent_key,
+                status=constants._RUNTIME_UPDATE_UPDATING,
+                target_hash=effective_target,
+                server_url=server_url,
+                requested_at=requested_at or now,
+                started_at=started_at or now,
+            )
+            _sync_live_agent_update_state(
+                agent_key,
+                status=constants._RUNTIME_UPDATE_UPDATING,
+                target_hash=effective_target,
+            )
+        sent = await send_agent_command(
+            agent_id,
+            {
+                "type": "task",
+                "runtime_update_only": True,
+                "agent_runtime_update": update_payload,
+            },
+        )
+        if sent:
+            recorded = _record_legacy_runtime_update_dispatch(
+                agent_key,
+                agent_id,
+                agent,
+                effective_target,
+                update_payload,
+                existing=attempt,
+            )
+            logger.info(
+                "Re-dispatched legacy Agent runtime update: agent_key=%s target=%s retry=%d downloaded=%s",
+                agent_key,
+                effective_target[:12],
+                recorded.retry_count,
+                recorded.downloaded_at is not None,
+            )
+    except Exception:
+        logger.exception(
+            "Failed to re-dispatch legacy Agent runtime update for %s",
+            agent_key,
+        )
 
 
 async def _process_agent_runtime_updates() -> None:
@@ -594,6 +892,7 @@ async def _process_agent_runtime_updates() -> None:
                         started_at=str(record.get("runtime_update_started_at") or ""),
                         error="Agent 更新后未在规定时间内以目标版本重连",
                     )
+                    _clear_legacy_runtime_update_tracking(agent_key)
                     _sync_live_agent_update_state(
                         agent_key,
                         status=constants._RUNTIME_UPDATE_FAILED,
@@ -604,6 +903,17 @@ async def _process_agent_runtime_updates() -> None:
                         "Agent runtime update timed out: agent_key=%s target=%s",
                         agent_key,
                         target_hash[:12],
+                    )
+                    continue
+                if live is not None and not live[1].graceful_runtime_update:
+                    await _maybe_retry_legacy_updating_agent(
+                        store,
+                        agent_key=agent_key,
+                        record=record,
+                        target_hash=target_hash,
+                        age=age,
+                        agent_id=live[0],
+                        agent=live[1],
                     )
                 continue
 
@@ -666,6 +976,8 @@ async def _process_agent_runtime_updates() -> None:
                 continue
 
             # Legacy Agent without graceful drain support: wait until fully idle.
+            if _is_in_legacy_stop_settle(agent_key):
+                continue
             if await _agent_has_active_work(agent_key, agent_id):
                 continue
 
@@ -678,6 +990,13 @@ async def _process_agent_runtime_updates() -> None:
                     status=constants._RUNTIME_UPDATE_FAILED,
                     target_hash=target_hash,
                     requested_at=str(record.get("runtime_update_requested_at") or ""),
+                    error="更新请求缺少服务端地址，请重新点击更新",
+                )
+                _clear_legacy_runtime_update_tracking(agent_key)
+                _sync_live_agent_update_state(
+                    agent_key,
+                    status=constants._RUNTIME_UPDATE_FAILED,
+                    target_hash=target_hash,
                     error="更新请求缺少服务端地址，请重新点击更新",
                 )
                 continue
@@ -698,6 +1017,11 @@ async def _process_agent_runtime_updates() -> None:
                     requested_at=str(record.get("runtime_update_requested_at") or now),
                     started_at=now,
                 )
+                _sync_live_agent_update_state(
+                    agent_key,
+                    status=constants._RUNTIME_UPDATE_UPDATING,
+                    target_hash=target_hash,
+                )
 
                 # Let concurrent task-creation requests observe the updating state,
                 # then recheck in case one was already committed before the handoff.
@@ -713,8 +1037,13 @@ async def _process_agent_runtime_updates() -> None:
                         server_url=server_url,
                         requested_at=str(record.get("runtime_update_requested_at") or now),
                     )
+                    _sync_live_agent_update_state(
+                        agent_key,
+                        status=constants._RUNTIME_UPDATE_PENDING,
+                        target_hash=target_hash,
+                    )
                     continue
-                agent_id, _agent = live
+                agent_id, latest_agent = live
                 if await _agent_has_active_work(agent_key, agent_id):
                     await run_store_call(
                         store,
@@ -724,6 +1053,11 @@ async def _process_agent_runtime_updates() -> None:
                         target_hash=target_hash,
                         server_url=server_url,
                         requested_at=str(record.get("runtime_update_requested_at") or now),
+                    )
+                    _sync_live_agent_update_state(
+                        agent_key,
+                        status=constants._RUNTIME_UPDATE_PENDING,
+                        target_hash=target_hash,
                     )
                     continue
 
@@ -749,7 +1083,19 @@ async def _process_agent_runtime_updates() -> None:
                         server_url=server_url,
                         requested_at=str(record.get("runtime_update_requested_at") or now),
                     )
+                    _sync_live_agent_update_state(
+                        agent_key,
+                        status=constants._RUNTIME_UPDATE_PENDING,
+                        target_hash=target_hash,
+                    )
                     continue
+                _record_legacy_runtime_update_dispatch(
+                    agent_key,
+                    agent_id,
+                    latest_agent,
+                    str(update_payload.get("hash") or target_hash),
+                    update_payload,
+                )
                 logger.info(
                     "Agent runtime update dispatched at idle boundary: agent_key=%s target=%s",
                     agent_key,
@@ -768,6 +1114,13 @@ async def _process_agent_runtime_updates() -> None:
                     target_hash=target_hash,
                     server_url=server_url,
                     requested_at=str(record.get("runtime_update_requested_at") or ""),
+                    error=f"下发 Agent 更新失败：{exc}",
+                )
+                _clear_legacy_runtime_update_tracking(agent_key)
+                _sync_live_agent_update_state(
+                    agent_key,
+                    status=constants._RUNTIME_UPDATE_FAILED,
+                    target_hash=target_hash,
                     error=f"下发 Agent 更新失败：{exc}",
                 )
             continue
@@ -864,6 +1217,12 @@ async def request_stable_agent_runtime_update(
         target_hash=target_hash,
         server_url=server_url,
         requested_at=now,
+    )
+    get_runtime().agents.legacy_runtime_update_attempts.pop(agent_key, None)
+    _sync_live_agent_update_state(
+        agent_key,
+        status=constants._RUNTIME_UPDATE_PENDING,
+        target_hash=target_hash,
     )
     logger.info(
         "Agent runtime update requested: agent_key=%s user=%s target=%s graceful=%s",

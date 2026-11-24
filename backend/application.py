@@ -100,6 +100,8 @@ class AgentRuntimeState:
     agent_configs: dict[str, AgentRemoteConfig] = field(default_factory=dict)
     agent_opencode_pool_latest: dict[str, OpenCodePoolStatus] = field(default_factory=dict)
     runtime_download_tokens: dict[str, Any] = field(default_factory=dict)
+    legacy_runtime_update_attempts: dict[str, Any] = field(default_factory=dict)
+    legacy_stop_settle_until: dict[str, float] = field(default_factory=dict)
     opencode_model_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
     opencode_config_status_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
     opencode_config_apply_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
@@ -154,6 +156,8 @@ class BackendRuntime:
             waiters.clear()
         self.agents.agent_disconnect_tasks.clear()
         self.agents.agent_touch_tasks.clear()
+        self.agents.legacy_runtime_update_attempts.clear()
+        self.agents.legacy_stop_settle_until.clear()
         self.scans.resume_heartbeats.clear()
 
 

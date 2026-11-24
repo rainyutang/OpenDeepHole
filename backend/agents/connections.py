@@ -283,7 +283,10 @@ async def _persist_registration(
     catalog: AgentValidatorCatalog,
     initial_config: AgentRemoteConfig,
 ) -> tuple[dict, AgentRemoteConfig]:
-    from backend.agents.runtime_updates import _runtime_update_status
+    from backend.agents.runtime_updates import (
+        _clear_legacy_runtime_update_tracking,
+        _runtime_update_status,
+    )
     from backend.agents.configuration import _stored_agent_config
     store = get_scan_store()
     existing = await run_store_call(
@@ -326,6 +329,7 @@ async def _persist_registration(
             stable_key,
             status="",
         )
+        _clear_legacy_runtime_update_tracking(stable_key)
         record = (
             await run_store_call(store, "get_agent_record", stable_key)
             or record

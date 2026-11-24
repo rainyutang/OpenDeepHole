@@ -331,6 +331,9 @@ async def agent_runtime_download(token: str) -> Response:
     if time.time() > download.expires_at:
         raise HTTPException(status_code=403, detail="Runtime update token expired")
 
+    from backend.agents.runtime_updates import record_runtime_update_download_consumed
+
+    record_runtime_update_download_consumed(token)
     return Response(
         content=download.data,
         media_type="application/zip",

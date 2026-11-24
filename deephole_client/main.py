@@ -289,6 +289,21 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     cmd_type = msg.get("type")
 
     if cmd_type == "task":
+        if (
+            msg.get("runtime_update_only")
+            and not isinstance(msg.get("post_update_command"), dict)
+            and msg.get("agent_runtime_update")
+            and agent_server.has_active_local_work()
+        ):
+            from deephole_client.runtime_update_coordinator import (
+                get_runtime_update_coordinator,
+            )
+
+            get_runtime_update_coordinator().stage_update(
+                msg.get("agent_runtime_update"),
+                server_url=str(getattr(config, "server_url", "") or ""),
+            )
+            return None
         if not msg.get("runtime_update_only") and agent_server.scan_command_is_obsolete(
             msg["scan_id"], int(msg.get("execution_revision") or 0),
         ):

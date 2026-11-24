@@ -186,6 +186,8 @@ def _cleanup_agent_globals() -> None:
     get_runtime().agents.agent_ws.clear()
     get_runtime().agents.agent_ws_locks.clear()
     get_runtime().agents.agent_opencode_pool_latest.clear()
+    get_runtime().agents.legacy_runtime_update_attempts.clear()
+    get_runtime().agents.legacy_stop_settle_until.clear()
     backend_agents_runtime_updates.reset_runtime_update_stat_check_clock()
 
 
@@ -831,3 +833,130 @@ def test_compact_threat_analysis_passes_local_resume_flag_on_scan_resume(tmp_pat
 
     asyncio.run(run())
     assert observed_calls == [("deephole_compact_threat_analysis", True)]
+
+
+def test_draining_status_with_active_tasks_overrides_optimistic_updating(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path, graceful=True, runtime_hash="old-runtime")
+    agent = get_runtime().agents.registered_agents["live-agent"]
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="updating",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+        started_at="2026-11-24T00:00:00+00:00",
+    )
+    try:
+        with patch("backend.application.default_store_factory", return_value=store):
+            # active_tasks=0 does not flicker optimistic updating back to draining.
+            asyncio.run(
+                backend_agents_runtime_updates.handle_agent_runtime_update_status(
+                    agent,
+                    {"state": "draining", "target_hash": "new-runtime", "active_tasks": 0},
+                )
+            )
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "updating"
+
+            # active_tasks>0 reflects actual local drain work on the Agent.
+            asyncio.run(
+                backend_agents_runtime_updates.handle_agent_runtime_update_status(
+                    agent,
+                    {"state": "draining", "target_hash": "new-runtime", "active_tasks": 2},
+                )
+            )
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "draining"
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_reconnect_reconciles_manual_update_even_when_auto_update_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENDEEPHOLE_AUTO_AGENT_UPDATE", "0")
+    store, _user = _store_with_agent(tmp_path, graceful=True, runtime_hash="old-runtime")
+    agent = get_runtime().agents.registered_agents["live-agent"]
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="updating",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-11-24T00:00:00+00:00",
+        started_at="2026-11-24T00:00:00+00:00",
+    )
+    try:
+        with (
+            patch("backend.application.default_store_factory", return_value=store),
+            patch("backend.agents.artifacts._agent_runtime_hash", return_value="new-runtime"),
+        ):
+            # Reconnecting while still draining keeps recovery deferred.
+            defer = asyncio.run(
+                backend_agents_runtime_updates.maybe_auto_trigger_agent_runtime_update_on_connect(
+                    "live-agent",
+                    agent,
+                    {"runtime_update_state": {"state": "draining", "target_hash": "new-runtime"}},
+                    server_url="http://server.example",
+                )
+            )
+            assert defer is True
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "draining"
+
+            # Reconnecting fresh with idle state after updating still marks failed.
+            store.set_agent_runtime_update_record(
+                "stable-agent",
+                status="updating",
+                target_hash="new-runtime",
+                server_url="http://server.example",
+                requested_at="2026-11-24T00:00:00+00:00",
+                started_at="2026-11-24T00:00:00+00:00",
+            )
+            defer = asyncio.run(
+                backend_agents_runtime_updates.maybe_auto_trigger_agent_runtime_update_on_connect(
+                    "live-agent",
+                    agent,
+                    {"runtime_update_state": {"state": "idle", "target_hash": ""}},
+                    server_url="http://server.example",
+                )
+            )
+            assert defer is False
+            assert store.get_agent_record("stable-agent")["runtime_update_status"] == "failed"
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_standalone_runtime_update_only_stages_coordinator_when_local_work_active() -> None:
+    import deephole_client.main as agent_main
+
+    staged_calls: list[tuple[dict, str]] = []
+    fake_coordinator = SimpleNamespace(
+        stage_update=lambda update, *, server_url="": staged_calls.append((update, server_url)) or True,
+    )
+    config = SimpleNamespace(server_url="http://server.example")
+    with (
+        patch("deephole_client.server.has_active_local_work", return_value=True),
+        patch(
+            "deephole_client.runtime_update_coordinator.get_runtime_update_coordinator",
+            return_value=fake_coordinator,
+        ),
+        patch("deephole_client.updater.ensure_runtime_updated", new=AsyncMock()) as legacy_update,
+    ):
+        result = asyncio.run(
+            agent_main._handle_command(
+                {
+                    "type": "task",
+                    "runtime_update_only": True,
+                    "agent_runtime_update": {"hash": "hash-v2"},
+                },
+                config,
+                None,
+                None,
+            )
+        )
+
+    assert result is None
+    legacy_update.assert_not_awaited()
+    assert staged_calls == [({"hash": "hash-v2"}, "http://server.example")]

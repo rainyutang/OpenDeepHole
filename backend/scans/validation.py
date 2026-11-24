@@ -236,8 +236,15 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
     if existing is None:
         raise ApplicationError(status_code=404, detail="Validation not found")
 
+    from backend.agents.runtime_updates import (
+        clear_agent_stop_settle,
+        note_agent_stop_dispatched,
+    )
+
     active = existing.running or existing.status in {"pending", "queued", "running"}
     if active:
+        if meta.agent_key:
+            note_agent_stop_dispatched(meta.agent_key)
         now = _now_iso()
         validation = await run_store_call(
             store,
@@ -261,6 +268,8 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
 
     agent_id = await _resolve_scan_agent_id(meta)
     if active and agent_id is not None:
+        if meta.agent_key:
+            note_agent_stop_dispatched(meta.agent_key, replace=True)
         if agent_id != meta.agent_id:
             await run_store_call(
                 store,
@@ -275,6 +284,8 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
             "scan_id": scan_id,
             "vuln_index": idx,
         })
+    elif active and meta.agent_key:
+        clear_agent_stop_settle(meta.agent_key)
 
     logger.info("Vulnerability validation for scan %s idx %d cancelled by user", scan_id, idx)
     return {"ok": True, "vuln_index": idx, "status": validation.status}

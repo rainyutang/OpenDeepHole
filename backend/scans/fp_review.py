@@ -326,6 +326,13 @@ async def stop_fp_review(
     if meta is None:
         raise ApplicationError(status_code=404, detail="Scan not found")
 
+    from backend.agents.runtime_updates import (
+        clear_agent_stop_settle,
+        note_agent_stop_dispatched,
+    )
+
+    if meta.agent_key:
+        note_agent_stop_dispatched(meta.agent_key)
     cancelled_review_ids = await run_store_call(
         store,
         "cancel_active_fp_reviews_for_scan",
@@ -334,7 +341,9 @@ async def stop_fp_review(
     )
 
     agent_id = await _resolve_scan_agent_id(meta)
-    if agent_id is not None:
+    if agent_id is not None and cancelled_review_ids:
+        if meta.agent_key:
+            note_agent_stop_dispatched(meta.agent_key, replace=True)
         for review_id in cancelled_review_ids:
             try:
                 await send_agent_command(agent_id, {
@@ -349,6 +358,8 @@ async def stop_fp_review(
                     review_id,
                     exc,
                 )
+    elif meta.agent_key:
+        clear_agent_stop_settle(meta.agent_key)
 
     logger.info(
         "FP reviews %s for scan %s cancelled by user",

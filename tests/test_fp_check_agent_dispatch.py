@@ -784,3 +784,51 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
 
         reporter.push_fp_stage_output.assert_awaited_once()
+
+    async def test_fp_review_stop_cancels_opencode_execution_and_waits_for_cleanup(self) -> None:
+        reporter = SimpleNamespace(
+            push_fp_progress=AsyncMock(),
+            finish_fp_review=AsyncMock(),
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def run_item(_item):
+            started.set()
+            await release.wait()
+            return {"status": "success", "verdict": "true_positive"}
+
+        cancel_opencode = AsyncMock(
+            return_value={"matched_tasks": 1, "cancelled_tasks": 1, "active_tasks": 0}
+        )
+        with (
+            patch("deephole_client.server._run_single_fp_review_item", new=run_item),
+            patch("task_agent.cancel_opencode_execution", new=cancel_opencode),
+        ):
+            queued = await server.enqueue_fp_review(
+                config=SimpleNamespace(),
+                reporter=reporter,
+                scan_id="scan-stop-sync",
+                review_id="review-stop-sync",
+                method="adversarial",
+                project_path="/repo",
+                code_scan_path="/repo/src",
+                vulnerability={"index": 0},
+            )
+            self.assertTrue(queued)
+            task = server._fp_review_tasks["review-stop-sync"]
+            await started.wait()
+
+            await server.handle_fp_review_stop("scan-stop-sync", "review-stop-sync")
+
+            self.assertTrue(task.done())
+            self.assertNotIn("review-stop-sync", server._fp_review_tasks)
+            self.assertFalse(server.has_active_local_work())
+            cancel_opencode.assert_awaited_once_with(
+                "fp_review",
+                "review-stop-sync",
+                timeout_seconds=5.0,
+            )
+            reporter.finish_fp_review.assert_awaited_once()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
