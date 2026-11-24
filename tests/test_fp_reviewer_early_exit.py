@@ -396,3 +396,88 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("legacy-history-pattern", invoke.await_args.kwargs["prompt"])
         self.assertEqual(result["verdict"], "false_positive")
         self.assertEqual(result["revised_severity"], "low")
+
+    def test_adversarial_skills_define_scope_and_impact_revision_rules(self) -> None:
+        skills_dir = (
+            Path(__file__).resolve().parents[1]
+            / "deephole_client"
+            / "fp_review"
+            / "methods"
+            / "adversarial"
+            / "skills"
+        )
+        expected_phrases = {
+            "prove-bug": (
+                "判断真实问题而非报告对错",
+                "只排查报告中描述的问题",
+                "不要扩展去寻找代码中的其他无关问题",
+                "影响不一致时的处理",
+                "合理的问题级别建议",
+            ),
+            "prove-fp": (
+                "判断真实问题而非报告对错",
+                "只排查报告中描述的问题",
+                "不要扩展去寻找代码中的其他无关问题",
+                "影响不一致不等于误报",
+                "不得仅因“与报告描述的影响不一致”就判为 `false_positive`",
+            ),
+            "final-judge": (
+                "判断真实问题而非报告对错",
+                "只排查报告中描述的问题",
+                "不要扩展去寻找其他无关问题",
+                "影响不一致时的处理",
+                "变更 `severity`（问题级别）并重写 `description`（问题描述）",
+                "critical` / `high` / `medium` / `low",
+            ),
+        }
+        for skill_name, phrases in expected_phrases.items():
+            text = (skills_dir / skill_name / "SKILL.md").read_text(encoding="utf-8")
+            self.assertNotIn("保持不变", text, skill_name)
+            for phrase in phrases:
+                self.assertIn(phrase, text, f"{skill_name}: missing {phrase!r}")
+
+    async def test_final_judge_revises_severity_and_description_for_impact_mismatch(self) -> None:
+        revised_description = (
+            "外部可控长度未校验目标缓冲区边界，但仅触发受控进程崩溃而非原报告声称的任意代码执行，"
+            "按拒绝服务影响调整为一般严重程度。"
+        )
+        invoke = AsyncMock(side_effect=[
+            _debate_result(
+                "true_positive",
+                reason="缺陷真实存在，但实际影响为拒绝服务而非任意代码执行",
+                evidence="- 实际仅导致进程崩溃，建议下调问题级别。",
+            ),
+            _debate_result(
+                "true_positive",
+                reason="原报告夸大为任意代码执行，但拒绝服务缺陷仍可外部触发且违反安全边界",
+                evidence="- 建议降级为 medium 并重写描述。",
+            ),
+            _final_result(
+                "true_positive",
+                severity="medium",
+                description=revised_description,
+            ),
+        ])
+        vulnerability = _vulnerability()
+        vulnerability["severity"] = "critical"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "task_agent.run_opencode_task",
+            new=invoke,
+        ):
+            result = await run_fp_review(
+                method_id="adversarial",
+                project_path=tmp,
+                code_scan_path=tmp,
+                work_dir=Path(tmp) / "work",
+                scan_id="scan-1",
+                review_id="review-impact-mismatch",
+                vuln_index=3,
+                vulnerability=vulnerability,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(result["revised_severity"], "medium")
+        self.assertEqual(result["reason"], revised_description)
+        self.assertIn("**严重程度**：一般（medium）", result["vulnerability_report"])
+        self.assertIn(f"**问题**：{revised_description}", result["vulnerability_report"])
