@@ -3,7 +3,10 @@ from types import SimpleNamespace
 from deephole_client import scanner
 from deephole_client.scan_modes import (
     BUILTIN_PROFILE_ENGINE_IDS,
+    QUICK_PROFILE_ENGINE_IDS,
+    STANDARD_PROFILE_ENGINE_IDS,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
+    builtin_profile_engine_ids,
 )
 
 
@@ -19,5 +22,12 @@ def test_iterative_engine_is_opt_in_for_legacy_agent_callers(monkeypatch):
     )
     assert explicit[0].engine_id == "threat_pattern_iterative_audit"
     assert explicit[0].enabled
-    assert BUILTIN_PROFILE_ENGINE_IDS == ("static_candidate", "threat_pattern_audit")
+    assert QUICK_PROFILE_ENGINE_IDS == ("static_candidate", "threat_pattern_audit")
+    assert BUILTIN_PROFILE_ENGINE_IDS == QUICK_PROFILE_ENGINE_IDS
+    assert STANDARD_PROFILE_ENGINE_IDS == (
+        "static_candidate",
+        "threat_pattern_iterative_audit",
+    )
+    assert builtin_profile_engine_ids("quick") == QUICK_PROFILE_ENGINE_IDS
+    assert builtin_profile_engine_ids("standard") == STANDARD_PROFILE_ENGINE_IDS
     assert explicit[0].engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS

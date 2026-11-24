@@ -368,6 +368,10 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
     assert standard_default.threat_analysis_method == "deephole_compact_threat_analysis"
     assert standard_default.threat_analysis_generate_attack_tree is False
     assert standard_default.threat_analysis_method_selection.generate_attack_tree is False
+    assert [item.engine_id for item in standard_default.mining_engine_selections] == [
+        "static_candidate",
+        "threat_pattern_iterative_audit",
+    ]
 
     custom_default_engines = resolve_creation_configuration(
         CreateScanRequest(

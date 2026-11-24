@@ -372,10 +372,15 @@ def test_fixed_modes_snapshot_pipeline_defaults(
     assert scan.threat_analysis_method_selection.generate_attack_tree is expected_generate_tree
     assert meta.threat_analysis_method_selection == scan.threat_analysis_method_selection
     assert scan.auto_fp_review is True
-    assert [item.engine_id for item in scan.mining_engines] == [
-        "static_candidate",
-        "threat_pattern_audit",
-    ]
+    expected_engines = (
+        ["static_candidate", "threat_pattern_iterative_audit"]
+        if scan_mode == "standard"
+        else ["static_candidate", "threat_pattern_audit"]
+    )
+    assert [item.engine_id for item in scan.mining_engines] == expected_engines
+    assert [item.engine_id for item in meta.mining_engines] == expected_engines
+    assert [item.engine_id for item in scan.mining_engine_runs] == expected_engines
+    assert [item["engine_id"] for item in command["mining_engines"]] == expected_engines
     assert scan.scan_items == meta.scan_items == ["normal"]
     assert command["checkers"] == ["normal"]
     assert command["codex_model_ids"] == ["provider/model"]

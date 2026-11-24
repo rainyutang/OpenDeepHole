@@ -15,7 +15,13 @@ SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
 # Used only when resolving newly created quick/standard scans. Resumes keep the
 # engine selections persisted with the original scan.
-BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
+QUICK_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
+STANDARD_PROFILE_ENGINE_IDS = (
+    "static_candidate",
+    "threat_pattern_iterative_audit",
+)
+# Retained for quick-profile callers and backward-compatible imports.
+BUILTIN_PROFILE_ENGINE_IDS = QUICK_PROFILE_ENGINE_IDS
 # New optional workflows must not silently join legacy callers' default scans.
 OPT_IN_MINING_ENGINE_IDS = frozenset({"threat_pattern_iterative_audit"})
 STATIC_ANALYSIS_ENGINE_IDS = frozenset({
@@ -58,6 +64,18 @@ def normalize_scan_mode(value: object) -> str:
         return _ALIASES[raw]
     except KeyError as exc:
         raise ValueError(f"Unknown scan mode: {value}") from exc
+
+
+def builtin_profile_engine_ids(scan_mode: str) -> tuple[str, ...]:
+    """Return the fixed mining-engine IDs for newly created quick/standard scans."""
+    normalized = normalize_scan_mode(scan_mode)
+    if normalized == SCAN_MODE_STANDARD:
+        return STANDARD_PROFILE_ENGINE_IDS
+    if normalized == SCAN_MODE_QUICK:
+        return QUICK_PROFILE_ENGINE_IDS
+    raise ValueError(
+        f"Scan mode {scan_mode!r} does not define fixed builtin engines"
+    )
 
 
 def component_scan_mode(value: object) -> str:

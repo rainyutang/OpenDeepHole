@@ -1,7 +1,6 @@
 """Scan configuration services."""
 
 from deephole_client.scan_modes import (
-    BUILTIN_PROFILE_ENGINE_IDS,
     OPT_IN_MINING_ENGINE_IDS,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
@@ -9,6 +8,7 @@ from deephole_client.scan_modes import (
     SCAN_MODE_STANDARD,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
+    builtin_profile_engine_ids,
     component_scan_mode,
     normalize_scan_mode,
 )
@@ -318,9 +318,10 @@ def _resolve_scan_mining_engines(
         )]
 
     if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
+        profile_engine_ids = builtin_profile_engine_ids(scan_mode)
         missing = [
             engine_id
-            for engine_id in BUILTIN_PROFILE_ENGINE_IDS
+            for engine_id in profile_engine_ids
             if engine_id not in available
         ]
         if missing:
@@ -333,7 +334,7 @@ def _resolve_scan_mining_engines(
             )
         requested_ids = [item.engine_id.strip() for item in requested or []]
         if requested is not None and set(requested_ids) != set(
-            BUILTIN_PROFILE_ENGINE_IDS
+            profile_engine_ids
         ):
             raise ApplicationError(
                 status_code=422,
@@ -345,7 +346,7 @@ def _resolve_scan_mining_engines(
                 engine_label=available[engine_id].label,
                 enabled=True,
             )
-            for engine_id in BUILTIN_PROFILE_ENGINE_IDS
+            for engine_id in profile_engine_ids
         ]
 
     # Keep old callers that only supplied scan_mode working exactly as before.
