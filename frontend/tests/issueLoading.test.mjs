@@ -113,7 +113,8 @@ function fixture(count = 105, scanId = "s") {
   }));
   const results = vulnerabilities.map((v, ordinal) => ({
     vuln_index: v.vuln_index, verdict: ordinal < 50 ? "fp" : "tp", severity: "high",
-    reason: `有效结论 ${ordinal}`, vulnerability_report: `# 复核报告 ${ordinal}`,
+    reason: `有效结论 ${ordinal}`,
+    vulnerability_report: `**漏洞类型**：${v.vuln_type}\n\n**漏洞位置**：\`${v.file}:${v.line}\`\n\n**漏洞函数**：\`${v.function}\`\n\n**问题**：复核报告 ${ordinal}`,
   }));
   return {
     scanId, vulnerabilities, results,

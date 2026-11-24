@@ -16,7 +16,7 @@ from deephole_client.fp_review.prompts import (
     stage_markdown_report,
 )
 from deephole_client.vulnerability_mining.engine_report import (
-    build_engine_vulnerability_report,
+    compact_vulnerability_report,
 )
 from deephole_client.vulnerability_mining.report_schema import (
     AUDIT_JSON_REPAIR_OUTPUT_PROMPT,
@@ -184,7 +184,7 @@ def _build_final_vulnerability_report(
         "confirmed": True,
         "vulnerability_report": "",
     }
-    report = build_engine_vulnerability_report(report_record).strip()
+    report = compact_vulnerability_report(report_record).strip()
     version_locations = [
         item
         for item in (vulnerability.get("version_locations") or [])

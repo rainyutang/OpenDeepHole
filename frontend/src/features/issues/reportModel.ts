@@ -12,6 +12,10 @@ const COMPACT_TYPE_RE = /^\*\*漏洞类型\*\*：(.+)$/m;
 const COMPACT_LOCATION_RE = /^\*\*漏洞位置\*\*：`([^`\n]+):([^`\n]+)`$/m;
 const COMPACT_FUNCTION_RE = /^\*\*漏洞函数\*\*：`([^`\n]+)`$/m;
 
+export function isCompactVulnerabilityReport(report?: string | null): boolean {
+  return Boolean(report && report.trim().startsWith("**漏洞类型**："));
+}
+
 function hasSourceMetadata(source?: OutputSource | null): boolean {
   return Boolean(
     source && (
@@ -24,12 +28,16 @@ function hasSourceMetadata(source?: OutputSource | null): boolean {
 export function hasRegeneratedFpReport(
   fpReviewResult?: FpReviewResult | null,
 ): fpReviewResult is FpReviewResult {
-  return Boolean(fpReviewResult && isFinalFpProblem(fpReviewResult) && fpReviewResult.vulnerability_report?.trim());
+  return Boolean(
+    fpReviewResult
+    && isFinalFpProblem(fpReviewResult)
+    && isCompactVulnerabilityReport(fpReviewResult.vulnerability_report),
+  );
 }
 
 export function parseCompactReportHeader(report: string): Partial<Pick<Vulnerability, "vuln_type" | "file" | "line" | "function">> {
   const text = report.trim();
-  if (!text.startsWith("**漏洞类型**：")) return {};
+  if (!isCompactVulnerabilityReport(text)) return {};
   const updates: Partial<Pick<Vulnerability, "vuln_type" | "file" | "line" | "function">> = {};
   const typeMatch = COMPACT_TYPE_RE.exec(text);
   const vulnType = typeMatch?.[1]?.trim();

@@ -481,3 +481,35 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], revised_description)
         self.assertIn("**严重程度**：一般（medium）", result["vulnerability_report"])
         self.assertIn(f"**问题**：{revised_description}", result["vulnerability_report"])
+
+    async def test_final_judge_whitespace_remediation_still_renders_compact_report(self) -> None:
+        blank_remediation_result = SimpleNamespace(
+            status="success",
+            text="",
+            structured={**_final_tp_payload(), "remediation": "   "},
+            output_source={"model": "provider/judge", "session_id": "ses-judge"},
+        )
+        invoke = AsyncMock(side_effect=[
+            _debate_result("true_positive"),
+            _debate_result("uncertain"),
+            blank_remediation_result,
+        ])
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "task_agent.run_opencode_task",
+            new=invoke,
+        ):
+            result = await run_fp_review(
+                method_id="adversarial",
+                project_path=tmp,
+                code_scan_path=tmp,
+                work_dir=Path(tmp) / "work",
+                scan_id="scan-1",
+                review_id="review-blank-remediation",
+                vuln_index=3,
+                vulnerability=_vulnerability(),
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertTrue(result["vulnerability_report"].startswith("**漏洞类型**："))
+        self.assertNotIn("# 漏洞报告", result["vulnerability_report"])

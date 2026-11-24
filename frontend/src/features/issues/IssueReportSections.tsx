@@ -30,7 +30,11 @@ export function IssueReportSections({
     : readyStageKeys[0] ?? activeFpStage;
   const activeStageOutput = fpStageOutputs[effectiveFpStage] ?? "";
   const activeStageOutputSource = fpStageOutputSources[effectiveFpStage];
-  const vulnerabilityReport = vulnerabilityReportContent(vuln, finalTpOnly, fpReviewResult);
+  const vulnerabilityReport = vulnerabilityReportContent(
+    vuln,
+    finalTpOnly,
+    finalTpOnly ? fpReviewResult : null,
+  );
 
   const dialogueEvents = events.filter(
     (e) => e.phase === "opencode_output" && e.candidate_index === index,

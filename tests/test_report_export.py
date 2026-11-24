@@ -120,6 +120,7 @@ class ReportExportTests(unittest.TestCase):
         scan: ScanStatus,
         index: int,
         fp_map: dict[int, FpReviewResult] | None = None,
+        stage_titles: list[tuple[str, str]] | None = None,
     ) -> Response:
         user = User(user_id="owner", username="owner", role="user")
         store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
@@ -138,7 +139,11 @@ class ReportExportTests(unittest.TestCase):
             patch.object(application, 'default_store_runner',
                 new=AsyncMock(side_effect=fake_runner),
             ),
-            patch.object(report_service, '_fp_review_stage_titles', return_value=[]),
+            patch.object(
+                report_service,
+                '_fp_review_stage_titles',
+                return_value=list(stage_titles or []),
+            ),
         ):
             return asyncio.run(
                 backend_api_scan_routes_reports.download_vulnerability_report(
@@ -546,6 +551,58 @@ class ReportExportTests(unittest.TestCase):
         self.assertTrue(single_md.startswith(regenerated_md.strip()))
         self.assertNotIn("挖掘阶段错误描述", single_md)
         self.assertIn("**验证入口函数**：HandlePacket", single_md)
+
+    def test_legacy_english_fp_report_does_not_override_compact_mining_report(self) -> None:
+        examples = Path(__file__).resolve().parents[1] / "docs" / "examples"
+        compact_mining_md = (examples / "vulnerability-report.md").read_text(encoding="utf-8")
+        legacy_fp_md = (
+            "# Vulnerability Report: oob CopyPayload\n\n"
+            "## Summary\nLegacy English summary.\n\n"
+            "## Root Cause\nLegacy root cause.\n\n"
+            "## Why It is Reachable\nLegacy reachability.\n"
+        )
+        mining_vuln = _vulnerability("CopyPayload", vuln_type="缓冲区越界写")
+        mining_vuln.file = "src/proto/parser.c"
+        mining_vuln.line = 44
+        mining_vuln.description = "挖掘阶段新版精简中文描述"
+        mining_vuln.vulnerability_report = compact_mining_md
+        scan = ScanStatus(
+            scan_id="scan-legacy-fp",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[mining_vuln],
+        )
+        fp_map = {
+            0: _fp_result(0, "tp", reason="旧版 final-judge 确认问题").model_copy(
+                update={
+                    "vulnerability_report": legacy_fp_md,
+                    "stage_outputs": {"final_judge": legacy_fp_md},
+                },
+            ),
+        }
+
+        _, rows = self._rows(self._download(scan, fp_map))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["问题描述"], "挖掘阶段新版精简中文描述")
+
+        single_md = self._download_single(
+            scan,
+            0,
+            fp_map,
+            stage_titles=[("final_judge", "最终裁定")],
+        ).body.decode("utf-8")
+        self.assertTrue(single_md.startswith(compact_mining_md.strip()))
+        main_section, _, fp_section = single_md.partition("## 去误报复核")
+        self.assertNotIn("Why It is Reachable", main_section)
+        self.assertNotIn("Root Cause", main_section)
+        self.assertIn("Why It is Reachable", fp_section)
+
+        zip_response = self._download_zip(scan, fp_map)
+        with zipfile.ZipFile(io.BytesIO(zip_response.body)) as archive:
+            entry_md = archive.read(rows[0]["ZIP中的问题报告"]).decode("utf-8")
+            self.assertTrue(entry_md.startswith(compact_mining_md.strip()))
 
 
 if __name__ == "__main__":

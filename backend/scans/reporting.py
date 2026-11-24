@@ -140,10 +140,15 @@ _COMPACT_CALL_CHAIN_RE = re.compile(
 )
 
 
+def _is_compact_vulnerability_report(report: object) -> bool:
+    """Return True when a report uses the canonical compact Chinese format."""
+    return str(report or "").strip().startswith("**漏洞类型**：")
+
+
 def _parse_compact_report_fields(report: str) -> dict[str, object]:
     """Extract structured header fields when a report uses the compact mining format."""
     text = str(report or "").strip()
-    if not text.startswith("**漏洞类型**："):
+    if not _is_compact_vulnerability_report(text):
         return {}
     updates: dict[str, object] = {}
     type_match = _COMPACT_TYPE_RE.search(text)
@@ -185,7 +190,7 @@ def _resolved_report_vulnerability(
     ):
         return vuln
     regenerated = str(fp_result.vulnerability_report or "").strip()
-    if not regenerated:
+    if not _is_compact_vulnerability_report(regenerated):
         return vuln
     updates = _parse_compact_report_fields(regenerated)
     updates["vulnerability_report"] = regenerated
