@@ -105,7 +105,7 @@ def test_three_rounds_are_distinct_clue_guided_and_resume_without_model_calls(ha
     assert len(json.loads((h.work / "previous-findings.json").read_text())) == 3
     assert len(list((h.work / ".completed-task-results").glob("*.json"))) == 3
     assert [(item["data"]["current"], item["data"]["total"]) for item in h.events if "current" in item["data"]] == [
-        (0, 1), (1, 1), (1, 2), (2, 2), (2, 3), (3, 3)]
+        (0, 1), (1, 2), (2, 3), (3, 3)]
     snapshots = {key: task.model_dump() for key, task in h.reporter.tasks.items()}
     previous_updates = len(h.reporter.updates)
     resumed = asyncio.run(engine.run(is_resume=True, **h.kwargs))
@@ -663,3 +663,268 @@ def test_scanner_authoritative_progress_allows_superseded_total_reduction(tmp_pa
         ("running", 2, 2),
         ("success", 2, 2),
     ]
+
+
+def _setup_multi_module_iterative(tmp_path, module_patterns: list[tuple[str, list[str]]]):
+    modules = []
+    module_threats = []
+    for idx, (name, patterns) in enumerate(module_patterns):
+        subdir = f"src/mod_{idx}"
+        (tmp_path / subdir).mkdir(parents=True, exist_ok=True)
+        (tmp_path / subdir / "entry.c").write_text("void entry(void) {}\n", encoding="utf-8")
+        modules.append({"模块名称": name, "代码目录": subdir})
+        module_threats.append({
+            "module_name": name,
+            "attack_patterns": [{"pattern_id": pid, "pattern_name": pid} for pid in patterns],
+        })
+    tree_path = tmp_path / "attack-trees.json"
+    modules_path = tmp_path / "high-risk-modules.json"
+    tree_path.write_text(json.dumps({"attack_trees": [], "module_threats": module_threats}, ensure_ascii=False), encoding="utf-8")
+    modules_path.write_text(json.dumps(modules, ensure_ascii=False), encoding="utf-8")
+    return tree_path, modules_path
+
+
+def test_iterative_audit_interleaves_modules_and_requeues_followups_to_tail(tmp_path, monkeypatch):
+    tree_path, modules_path = _setup_multi_module_iterative(tmp_path, [
+        ("模块A", ["P1", "P2"]),
+        ("模块B", ["P1", "P2"]),
+    ])
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    executed: list[tuple[str, str, int]] = []
+    line_counter = 10
+
+    async def invoke(**values):
+        nonlocal line_counter
+        task = reporter.tasks[values["task_name"]]
+        executed.append((task.module_name, task.pattern_id, task.iteration))
+        line_counter += 1
+        rel_file = f"src/mod_{0 if task.module_name == '模块A' else 1}/entry.c"
+        has_more = task.pattern_id == "P1" and task.iteration < 3
+        payload = [{
+            **finding(task.iteration, more=has_more, clues=f"{task.module_name} clue {task.iteration}" if has_more else ""),
+            "file": rel_file,
+            "line": line_counter,
+            "description": f"{task.module_name}-{task.pattern_id}-r{task.iteration}",
+        }]
+        path = work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        return OpenCodeResult(
+            status="success", text="done", structured=None, model="test/model",
+            session_id=f"s-{len(executed)}", output_source={"model": "test/model"},
+        )
+
+    async def report(values):
+        return [(values[0], {"index": line_counter})]
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(
+        engine_id=engine.ENGINE_ID,
+        scan_id="iter-order",
+        project_path=tmp_path,
+        code_scan_path=tmp_path,
+        work_dir=work,
+        reporter=reporter,
+        cancel_event=threading.Event(),
+        config=SimpleNamespace(opencode_concurrency=1),
+        report_vulnerabilities=report,
+        threat_analysis_result={
+            "result": True,
+            "attack_tree_path": str(tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    ))
+
+    expected = [
+        ("模块A", "P1", 1),
+        ("模块B", "P1", 1),
+        ("模块A", "P2", 1),
+        ("模块B", "P2", 1),
+        ("模块A", "P1", 2),
+        ("模块B", "P1", 2),
+        ("模块A", "P1", 3),
+        ("模块B", "P1", 3),
+    ]
+    assert result == {"status": "success", "error_message": "", "total_candidates": 8, "processed_candidates": 8}
+    assert executed == expected
+    ordered_tasks = sorted(reporter.tasks.values(), key=lambda item: (item.created_at, item.task_id))
+    assert [(item.module_name, item.pattern_id, item.iteration) for item in ordered_tasks] == expected
+    created_values = [item.created_at for item in ordered_tasks]
+    assert all(earlier < later for earlier, later in zip(created_values, created_values[1:]))
+
+
+def test_iterative_resume_orders_pending_rounds_by_iteration_then_module(tmp_path, monkeypatch):
+    tree_path, modules_path = _setup_multi_module_iterative(tmp_path, [
+        ("模块A", ["P1", "P2"]),
+        ("模块B", ["P1", "P2"]),
+        ("模块C", ["P1"]),
+    ])
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    cancel = threading.Event()
+    run1_executed: list[tuple[str, str, int]] = []
+    run2_executed: list[tuple[str, str, int]] = []
+    line_counter = 20
+
+    def _file_for(module_name: str) -> str:
+        idx = {"模块A": 0, "模块B": 1, "模块C": 2}[module_name]
+        return f"src/mod_{idx}/entry.c"
+
+    async def invoke_run1(**values):
+        nonlocal line_counter
+        task = reporter.tasks[values["task_name"]]
+        run1_executed.append((task.module_name, task.pattern_id, task.iteration))
+        line_counter += 1
+        # Complete 模块A/P1 r1 and 模块B/P1 r1 with clues, then cancel right before 模块C/P1 r1 starts.
+        if (task.module_name, task.pattern_id, task.iteration) == ("模块C", "P1", 1):
+            cancel.set()
+            return OpenCodeResult(status="cancelled", text="", structured=None, model="test/model", session_id="s-cancel")
+        payload = [{
+            **finding(1, more=True, clues=f"{task.module_name} clue 1"),
+            "file": _file_for(task.module_name),
+            "line": line_counter,
+            "description": f"{task.module_name}-r1",
+        }]
+        path = work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        return OpenCodeResult(
+            status="success", text="done", structured=None, model="test/model",
+            session_id=f"s1-{len(run1_executed)}", output_source={"model": "test/model"},
+        )
+
+    async def report(values):
+        return [(values[0], {"index": line_counter})]
+
+    base_kwargs = dict(
+        engine_id=engine.ENGINE_ID,
+        scan_id="iter-resume-order",
+        project_path=tmp_path,
+        code_scan_path=tmp_path,
+        work_dir=work,
+        reporter=reporter,
+        cancel_event=cancel,
+        config=SimpleNamespace(opencode_concurrency=1),
+        report_vulnerabilities=report,
+        threat_analysis_result={
+            "result": True,
+            "attack_tree_path": str(tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke_run1)
+    first = asyncio.run(engine.run(**base_kwargs))
+    assert first["status"] == "cancelled"
+    assert run1_executed == [("模块A", "P1", 1), ("模块B", "P1", 1), ("模块C", "P1", 1)]
+
+    # Verify queued Round 2 tasks created in Run 1 were settled as cancelled.
+    for mod in ("模块A", "模块B"):
+        r2_id = engine._task_id("iter-resume-order", {"module_name": mod, "pattern_id": "P1", "pattern_name": "P1"}, 2)
+        assert reporter.tasks[r2_id].status == "cancelled"
+
+    cancel.clear()
+
+    async def invoke_run2(**values):
+        nonlocal line_counter
+        task = reporter.tasks[values["task_name"]]
+        run2_executed.append((task.module_name, task.pattern_id, task.iteration))
+        line_counter += 1
+        has_more = (task.module_name, task.pattern_id, task.iteration) == ("模块C", "P1", 1)
+        payload = [{
+            **finding(task.iteration, more=has_more, clues="模块C clue 1" if has_more else ""),
+            "file": _file_for(task.module_name),
+            "line": line_counter,
+            "description": f"{task.module_name}-{task.pattern_id}-r{task.iteration}",
+        }]
+        path = work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        return OpenCodeResult(
+            status="success", text="done", structured=None, model="test/model",
+            session_id=f"s2-{len(run2_executed)}", output_source={"model": "test/model"},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke_run2)
+    second = asyncio.run(engine.run(is_resume=True, **base_kwargs))
+    assert second == {"status": "success", "error_message": "", "total_candidates": 8, "processed_candidates": 8}
+    assert run2_executed == [
+        ("模块C", "P1", 1),
+        ("模块A", "P2", 1),
+        ("模块B", "P2", 1),
+        ("模块A", "P1", 2),
+        ("模块B", "P1", 2),
+        ("模块C", "P1", 2),
+    ]
+
+
+def test_iterative_dynamic_workers_drain_requeued_rounds_with_concurrency(tmp_path, monkeypatch):
+    tree_path, modules_path = _setup_multi_module_iterative(tmp_path, [
+        ("模块A", ["P1"]),
+        ("模块B", ["P1"]),
+    ])
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    executed: list[tuple[str, int]] = []
+    mod_a_done = asyncio.Event()
+    line_counter = 50
+
+    async def invoke(**values):
+        nonlocal line_counter
+        task = reporter.tasks[values["task_name"]]
+        executed.append((task.module_name, task.iteration))
+        line_counter += 1
+        if task.module_name == "模块A":
+            payload = [{
+                **finding(1, more=False, clues=""),
+                "file": "src/mod_0/entry.c",
+                "line": line_counter,
+                "description": "modA-r1",
+            }]
+        else:
+            if task.iteration == 1:
+                # Let Worker 1 finish 模块A and exit on empty queue before 模块B produces Round 2.
+                await asyncio.wait_for(mod_a_done.wait(), timeout=2.0)
+                await asyncio.sleep(0.02)
+            has_more = task.iteration < 3
+            payload = [{
+                **finding(task.iteration, more=has_more, clues=f"modB clue {task.iteration}" if has_more else ""),
+                "file": "src/mod_1/entry.c",
+                "line": line_counter,
+                "description": f"modB-r{task.iteration}",
+            }]
+        path = work / "task-results" / f"{values['task_name']}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert await values["post_session_validator"]() is None
+        if task.module_name == "模块A":
+            mod_a_done.set()
+        return OpenCodeResult(
+            status="success", text="done", structured=None, model="test/model",
+            session_id=f"s-{len(executed)}", output_source={"model": "test/model"},
+        )
+
+    async def report(values):
+        return [(values[0], {"index": line_counter})]
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(
+        engine_id=engine.ENGINE_ID,
+        scan_id="iter-concurrent-drain",
+        project_path=tmp_path,
+        code_scan_path=tmp_path,
+        work_dir=work,
+        reporter=reporter,
+        cancel_event=threading.Event(),
+        config=SimpleNamespace(opencode_concurrency=2),
+        report_vulnerabilities=report,
+        threat_analysis_result={
+            "result": True,
+            "attack_tree_path": str(tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    ))
+
+    assert result == {"status": "success", "error_message": "", "total_candidates": 4, "processed_candidates": 4}
+    assert set(executed) == {("模块A", 1), ("模块B", 1), ("模块B", 2), ("模块B", 3)}
+    assert [it for mod, it in executed if mod == "模块B"] == [1, 2, 3]

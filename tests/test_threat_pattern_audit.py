@@ -1538,3 +1538,201 @@ def test_dynamic_workers_refill_during_post_lease_dedup_and_extra_allowance() ->
             await clear_planned_tasks("scan-dynamic")
 
     asyncio.run(run())
+
+
+def test_build_targets_interleaves_modules_round_robin_across_ai_and_baselines(tmp_path: Path) -> None:
+    for subdir in ("src/a", "src/b", "src/c"):
+        (tmp_path / subdir).mkdir(parents=True, exist_ok=True)
+    modules = [
+        {"模块名称": "模块A", "代码目录": "src/a"},
+        {"模块名称": "模块B", "代码目录": "src/b"},
+        {"模块名称": "模块C", "代码目录": "src/c"},
+    ]
+    data = {
+        "attack_trees": [{
+            "attack_paths": [{
+                "related_high_risk_modules": [{"module_name": "模块A"}],
+                "attack_patterns": [
+                    {"pattern_id": "AI-1", "pattern_name": "AI模式1"},
+                    {"pattern_id": "AI-2", "pattern_name": "AI模式2"},
+                ],
+            }],
+            "module_pattern_baselines": [
+                _module_baseline("模块A", "BASE-1", "BASE-2"),
+            ],
+        }],
+        "module_threats": [{
+            "module_name": "模块B",
+            "attack_patterns": [
+                {"pattern_id": "AI-1", "pattern_name": "AI模式1"},
+            ],
+        }],
+        "unassigned_module_pattern_baselines": [
+            _module_baseline("模块B", "BASE-1", "BASE-2"),
+            _module_baseline("模块C", "BASE-1", "BASE-2"),
+        ],
+    }
+
+    targets = engine._build_targets(data, modules, fallback_code_path=tmp_path)
+    pairs = [(item["module_name"], item["pattern_id"]) for item in targets]
+    expected = [
+        ("模块A", "AI-1"),
+        ("模块B", "AI-1"),
+        ("模块C", "BASE-1"),
+        ("模块A", "AI-2"),
+        ("模块B", "BASE-1"),
+        ("模块C", "BASE-2"),
+        ("模块A", "BASE-1"),
+        ("模块B", "BASE-2"),
+        ("模块A", "BASE-2"),
+    ]
+    assert pairs == expected
+    assert engine._interleave_by_module(targets) == targets
+
+
+def test_engine_executes_and_registers_tasks_interleaved_across_modules(tmp_path: Path, monkeypatch) -> None:
+    for subdir in ("src/a", "src/b", "src/c"):
+        (tmp_path / subdir).mkdir(parents=True, exist_ok=True)
+    modules_path = tmp_path / "high-risk-modules.json"
+    tree_path = tmp_path / "attack-trees.json"
+    modules = [
+        {"模块名称": "模块A", "代码目录": "src/a"},
+        {"模块名称": "模块B", "代码目录": "src/b"},
+        {"模块名称": "模块C", "代码目录": "src/c"},
+    ]
+    tree = {
+        "attack_trees": [],
+        "module_threats": [
+            {
+                "module_name": name,
+                "attack_patterns": [
+                    {"pattern_id": "P1", "pattern_name": "模式1"},
+                    {"pattern_id": "P2", "pattern_name": "模式2"},
+                ],
+            }
+            for name in ("模块A", "模块B", "模块C")
+        ],
+    }
+    modules_path.write_text(json.dumps(modules, ensure_ascii=False), encoding="utf-8")
+    tree_path.write_text(json.dumps(tree, ensure_ascii=False), encoding="utf-8")
+    work = tmp_path / "work"
+    reporter = TaskReporter()
+    executed: list[tuple[str, str]] = []
+
+    async def invoke(**values):
+        task = reporter.tasks[values["task_name"]]
+        executed.append((task.module_name, task.pattern_id))
+        await _write_task_result(work, values, [])
+        return OpenCodeResult(
+            status="success", text="[]", session_id=f"s-{len(executed)}",
+            structured=None, model="test/model", output_source={"model": "test/model"},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(
+        engine_id="threat_pattern_audit",
+        scan_id="interleaved-scan",
+        project_path=tmp_path,
+        code_scan_path=tmp_path,
+        work_dir=work,
+        reporter=reporter,
+        cancel_event=threading.Event(),
+        config=SimpleNamespace(opencode_concurrency=1),
+        report_vulnerabilities=AsyncMock(return_value=[]),
+        threat_analysis_result={
+            "result": True,
+            "attack_tree_path": str(tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    ))
+
+    expected = [
+        ("模块A", "P1"), ("模块B", "P1"), ("模块C", "P1"),
+        ("模块A", "P2"), ("模块B", "P2"), ("模块C", "P2"),
+    ]
+    assert result["status"] == "success"
+    assert executed == expected
+    ordered_tasks = sorted(reporter.tasks.values(), key=lambda item: (item.created_at, item.task_id))
+    assert [(item.module_name, item.pattern_id) for item in ordered_tasks] == expected
+    created_values = [item.created_at for item in ordered_tasks]
+    assert all(earlier < later for earlier, later in zip(created_values, created_values[1:]))
+
+
+def test_resume_reinterleaves_remaining_pending_targets_across_modules(tmp_path: Path, monkeypatch) -> None:
+    for subdir in ("src/a", "src/b"):
+        (tmp_path / subdir).mkdir(parents=True, exist_ok=True)
+    modules_path = tmp_path / "high-risk-modules.json"
+    tree_path = tmp_path / "attack-trees.json"
+    modules = [
+        {"模块名称": "模块A", "代码目录": "src/a"},
+        {"模块名称": "模块B", "代码目录": "src/b"},
+    ]
+    tree = {
+        "attack_trees": [],
+        "module_threats": [
+            {
+                "module_name": name,
+                "attack_patterns": [
+                    {"pattern_id": pid, "pattern_name": pid}
+                    for pid in ("P1", "P2", "P3")
+                ],
+            }
+            for name in ("模块A", "模块B")
+        ],
+    }
+    modules_path.write_text(json.dumps(modules, ensure_ascii=False), encoding="utf-8")
+    tree_path.write_text(json.dumps(tree, ensure_ascii=False), encoding="utf-8")
+    work = tmp_path / "work"
+    results_dir = work / "task-results"
+    completion_dir = work / ".completed-task-results"
+    results_dir.mkdir(parents=True)
+    completion_dir.mkdir(parents=True)
+
+    # Pre-seed 模块A's first two patterns as already completed (simulating uneven progress).
+    for pid in ("P1", "P2"):
+        task_id = engine._task_id("resume-interleave", {
+            "module_name": "模块A", "pattern_id": pid, "pattern_name": pid,
+        })
+        result_path = results_dir / f"{task_id}.json"
+        result_path.write_text("[]", encoding="utf-8")
+        engine._write_completion_marker(completion_dir / f"{task_id}.json", result_path)
+
+    reporter = TaskReporter()
+    executed: list[tuple[str, str]] = []
+
+    async def invoke(**values):
+        task = reporter.tasks[values["task_name"]]
+        executed.append((task.module_name, task.pattern_id))
+        await _write_task_result(work, values, [])
+        return OpenCodeResult(
+            status="success", text="[]", session_id=f"s-{len(executed)}",
+            structured=None, model="test/model", output_source={"model": "test/model"},
+        )
+
+    monkeypatch.setattr(engine, "run_opencode_task", invoke)
+    result = asyncio.run(engine.run(
+        engine_id="threat_pattern_audit",
+        scan_id="resume-interleave",
+        project_path=tmp_path,
+        code_scan_path=tmp_path,
+        work_dir=work,
+        reporter=reporter,
+        cancel_event=threading.Event(),
+        config=SimpleNamespace(opencode_concurrency=1),
+        is_resume=True,
+        report_vulnerabilities=AsyncMock(return_value=[]),
+        threat_analysis_result={
+            "result": True,
+            "attack_tree_path": str(tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    ))
+
+    assert result["status"] == "success"
+    assert result["processed_candidates"] == 6
+    assert executed == [
+        ("模块B", "P1"),
+        ("模块A", "P3"),
+        ("模块B", "P2"),
+        ("模块B", "P3"),
+    ]
