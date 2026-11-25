@@ -1,6 +1,7 @@
 """Explicit scan deletion, with a durable tombstone and bounded child removal."""
 
 from .history import utc_now
+from .javelin import JAVELIN_SCAN_CHILDREN
 
 
 DELETION_SCHEMA = """
@@ -22,6 +23,7 @@ SCAN_CHILDREN = (
     "scan_auto_resume",
     "scan_shares",
     "scan_review_notes",
+    *JAVELIN_SCAN_CHILDREN,
     "validation_output_chunks", "validation_update_receipts", "scan_task_current", "opencode_task_reports", "scan_task_versions",
     "scan_candidates", "vulnerabilities", "vulnerability_validations",
     "events", "processed_keys", "agent_resume_manifests", "skill_reports",

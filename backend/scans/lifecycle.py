@@ -21,6 +21,10 @@ async def stop_scan(
     if loaded is None:
         raise ApplicationError(status_code=404, detail="Scan not found")
     stored_scan, meta = loaded
+    from backend.models import has_javelin_engine
+    if has_javelin_engine(meta):
+        from backend.scans.javelin_lifecycle import stop_javelin_scan
+        return await stop_javelin_scan(scan_id, current_user)
     # Persist cancellation before touching the Agent, including the terminal
     # window between two automatic rounds. A reserved dispatcher is fenced too.
     from backend.scans.auto_resume import pause_auto_resume

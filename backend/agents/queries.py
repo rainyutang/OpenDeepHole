@@ -249,6 +249,11 @@ async def list_agents(current_user: User=None) -> list:
         "list_agent_records",
         None if current_user.role == "admin" else current_user.user_id,
     )
+    javelin_meta_by_key = await run_store_call(
+        store,
+        "get_agents_javelin_metadata_batch",
+        [str(r.get("agent_key") or "") for r in records],
+    )
     shared_by_key: dict[str, tuple[str, AgentInfo]] = {}
     if getattr(store, "distributed", False):
         sessions = await run_store_call(
@@ -302,6 +307,16 @@ async def list_agents(current_user: User=None) -> list:
             "has_explicit_model": agent_config_has_explicit_model(
                 _stored_agent_config(record)
             ),
+            "javelin": (
+                agent.javelin.model_dump(mode="json")
+                if (agent and agent.javelin is not None)
+                else (
+                    javelin_meta_by_key[agent_key]["capability"].model_dump(mode="json")
+                    if javelin_meta_by_key.get(agent_key, {}).get("capability") is not None
+                    else None
+                )
+            ),
+            "decommissioned_at": javelin_meta_by_key.get(agent_key, {}).get("decommissioned_at", ""),
         })
     # Keep legacy HTTP agents visible until they migrate to the stable catalog.
     for agent in list(get_runtime().agents.registered_agents.values()):

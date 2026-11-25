@@ -14,6 +14,8 @@ export function useScanDraft() {
       });
     };
     return {
+      setLanguage: field('language'),
+      setJavelinConfig: field('javelinConfig'),
       setSelectedAgent: field('selectedAgent'),
       setScanName: field('scanName'),
       setProjectPath: field('projectPath'),

@@ -225,12 +225,29 @@ class FpReviewConfig(BaseModel):
     auto_on_complete: bool = True
 
 
+class JavelinIntegrationConfig(BaseModel):
+    """Javelin (Java multi-agent audit) feature gate, quotas, and caches."""
+
+    enabled: bool = False
+    max_events_per_scan: int = Field(default=200_000, ge=100)
+    hard_quota_events_per_scan: int = Field(default=500_000, ge=100)
+    max_findings_per_scan: int = Field(default=50_000, ge=10)
+    max_tasks_per_scan: int = Field(default=20_000, ge=10)
+    max_report_bytes_per_scan: int = Field(default=2 * 1024 * 1024 * 1024, ge=1024 * 1024)
+    quota_retry_after_ms: int = Field(default=5000, ge=100)
+    coverage_cache_entries: int = Field(default=8, ge=1, le=128)
+    coverage_cache_max_bytes: int = Field(default=256 * 1024 * 1024, ge=1024 * 1024)
+    upload_staging_ttl_seconds: int = Field(default=72 * 3600, ge=60)
+    blob_gc_grace_seconds: int = Field(default=3600, ge=1)
+
+
 class AppConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
     server: ServerConfig = ServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
     fp_review: FpReviewConfig = FpReviewConfig()
+    javelin: JavelinIntegrationConfig = JavelinIntegrationConfig()
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
@@ -288,6 +305,12 @@ def load_config(config_path: str | None = None) -> AppConfig:
         raw.setdefault("storage", {})["postgres_pool_min_size"] = pool_min
     if pool_max := os.environ.get("OPENDEEPHOLE_POSTGRES_POOL_MAX_SIZE"):
         raw.setdefault("storage", {})["postgres_pool_max_size"] = pool_max
+    if (javelin_enabled := os.environ.get("OPENDEEPHOLE_JAVELIN_ENABLED")) is not None:
+        normalized_flag = javelin_enabled.strip().lower()
+        if normalized_flag in {"1", "true", "yes", "on"}:
+            raw.setdefault("javelin", {})["enabled"] = True
+        elif normalized_flag in {"0", "false", "no", "off"}:
+            raw.setdefault("javelin", {})["enabled"] = False
 
     return AppConfig(**raw)
 
@@ -363,3 +386,50 @@ def get_auth_secret_key() -> str:
         key = get_config().auth.secret_key
         _auth_secret = key if key else secrets.token_hex(32)
     return _auth_secret
+
+
+def has_explicit_secret_key(config: AppConfig | None = None) -> bool:
+    """Return True when a stable secret key is explicitly configured."""
+    if str(os.environ.get("OPENDEEPHOLE_SECRET_KEY") or "").strip():
+        return True
+    cfg = config or get_config()
+    return bool(str(cfg.auth.secret_key or "").strip())
+
+
+def validate_javelin_startup_security(
+    config: AppConfig | None = None,
+    *,
+    distributed: bool = False,
+) -> None:
+    """Reject PostgreSQL multi-worker startup if Javelin is enabled without a fixed secret key."""
+    cfg = config or get_config()
+    if distributed and cfg.javelin.enabled and not has_explicit_secret_key(cfg):
+        raise RuntimeError(
+            "PostgreSQL distributed mode with javelin.enabled=true requires an explicit "
+            "OPENDEEPHOLE_SECRET_KEY or auth.secret_key configuration."
+        )
+
+
+def get_javelin_secret_box_key(
+    config: AppConfig | None = None,
+    *,
+    distributed: bool = False,
+) -> bytes:
+    """Derive a 32-byte AES-256-GCM key via HKDF-SHA256 for transient secret_context."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    cfg = config or get_config()
+    validate_javelin_startup_security(cfg, distributed=distributed)
+    raw_secret = (
+        str(os.environ.get("OPENDEEPHOLE_SECRET_KEY") or "").strip()
+        or str(cfg.auth.secret_key or "").strip()
+        or get_auth_secret_key()
+    )
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"opendeephole-javelin-secret-box-v1",
+        info=b"javelin-secret-context-aes256gcm",
+    )
+    return hkdf.derive(raw_secret.encode("utf-8"))

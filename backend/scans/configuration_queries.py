@@ -68,6 +68,11 @@ async def get_scan_copy_config(
     if not meta.user_id or meta.user_id != current_user.user_id:
         raise ApplicationError(status_code=403, detail="只能复制自己的扫描")
 
+    from backend.models import has_javelin_engine
+    if has_javelin_engine(meta):
+        from backend.scans.javelin_lifecycle import build_javelin_copy_config
+        return build_javelin_copy_config(meta)
+
     missing = []
     for value, label in (
         (meta.agent_key, "客户端标识"),

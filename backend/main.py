@@ -4,8 +4,11 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from backend.api import (
     admin,
     agent,
@@ -19,6 +22,8 @@ from backend.api import (
     sharing,
     skills,
 )
+from backend.api.agent_routes import javelin as javelin_agent_routes
+from backend.api.scan_routes import javelin as javelin_scan_routes
 from backend.application import (
     BackendRuntime,
     get_config,
@@ -28,7 +33,8 @@ from backend.application import (
     use_runtime,
 )
 from backend.auth import hash_password
-from backend.config import apply_no_proxy
+from backend.config import apply_no_proxy, validate_javelin_startup_security
+from backend.scans.javelin_sanitizer import sanitize_validation_errors
 from backend.frontend import FrontendStaticFiles
 from backend.logger import get_logger
 from backend.registry import get_registry
@@ -53,6 +59,7 @@ async def _application_lifespan(app: FastAPI):
     # Initialize scan store and recover from unclean shutdown
     store = get_scan_store()
     distributed = bool(getattr(store, "distributed", False))
+    validate_javelin_startup_security(config, distributed=distributed)
     is_leader = (
         await run_store_call(store, "try_advisory_lock", _LEADER_LOCK_KEY)
         if distributed
@@ -192,6 +199,23 @@ app.include_router(review_notes.router)
 app.include_router(announcements.router)
 app.include_router(agent.router)
 app.include_router(agent.public_router)
+app.include_router(javelin_scan_routes.router)
+app.include_router(javelin_agent_routes.router)
+
+
+@app.exception_handler(RequestValidationError)
+async def _sanitized_request_validation_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    path = request.url.path or ""
+    if "/javelin/" in path or path == "/api/scan":
+        return JSONResponse(
+            status_code=422,
+            content={"detail": sanitize_validation_errors(exc.errors())},
+        )
+    return await request_validation_exception_handler(request, exc)
+
 
 # Serve frontend static files (built by Vite)
 static_dir = Path(__file__).parent / "static"

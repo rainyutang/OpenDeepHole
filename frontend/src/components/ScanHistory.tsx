@@ -4,7 +4,8 @@ import { autoResumeActive, autoResumeLabel } from "../scanAutoResume";
 import AnnouncementBoard from "./AnnouncementBoard";
 
 import ScanShareButton from "./ScanShareButton";
-import { STATUS_STYLES, isRunning, projectName, formatTime } from '../features/scanHistory/historyModel';
+import { hasJavelinEngine } from "../miningEngines";
+import { STATUS_STYLES, isRunning, javelinStaleBadge, javelinStatusPresentation, projectName, formatTime } from '../features/scanHistory/historyModel';
 import type { ScanHistoryProps as Props } from '../features/scanHistory/historyModel';
 import { useAnnouncementUnread } from '../features/scanHistory/useAnnouncementUnread';
 import { useScanHistoryData } from '../features/scanHistory/useScanHistoryData';
@@ -43,6 +44,7 @@ export default function ScanHistory({
     handleLoadMore,
     handleContinue,
     handleStop,
+    handleJavelinAction,
     handleDeleteConfirm,
     deleteTargetName,
   } = useScanHistoryData(onViewScan, refreshAnnouncements);
@@ -212,14 +214,21 @@ export default function ScanHistory({
                 </thead>
                 <tbody>
                   {filteredScans.map((scan) => {
-                    const coreRunning = isRunning(scan.status);
-                    const automaticResume = autoResumeActive(scan);
+                    const isJavelin = hasJavelinEngine(scan);
+                    const jBrief = scan.javelin_summary;
+                    const jPres = isJavelin ? javelinStatusPresentation(jBrief, scan.status) : null;
+                    const jStale = isJavelin ? javelinStaleBadge(jBrief?.stale_level) : null;
+                    const jAllowed = new Set(jBrief?.allowed_actions || []);
+                    const coreRunning = isJavelin ? Boolean(jPres?.active) : isRunning(scan.status);
+                    const automaticResume = !isJavelin && autoResumeActive(scan);
                     const running = coreRunning || scan.fp_review_running || automaticResume;
-                    const st = scan.status === "complete" && (scan.fp_review_running || automaticResume)
-                      ? { ...STATUS_STYLES.pending, label: "进行中" }
-                      : STATUS_STYLES[scan.status];
-                    const canContinue = !running && !!scan.can_continue;
-                    const canDelete = !running;
+                    const st = jPres
+                      ? { label: jPres.label, cls: jPres.cls }
+                      : scan.status === "complete" && (scan.fp_review_running || automaticResume)
+                        ? { ...STATUS_STYLES.pending, label: "进行中" }
+                        : STATUS_STYLES[scan.status];
+                    const canContinue = isJavelin ? jAllowed.has("recover") : (!running && !!scan.can_continue);
+                    const canDelete = isJavelin ? !coreRunning && jBrief?.status !== "paused" : !running;
                     const isLoading = actionLoading === scan.scan_id;
                     const displayProjectName = projectName(scan);
 
@@ -232,6 +241,11 @@ export default function ScanHistory({
                       >
                         <td className="px-4 py-3">
                           <span className="text-sm text-slate-200">{scan.product || "未配置"}</span>
+                          {isJavelin && (
+                            <span className="mt-1 inline-flex items-center rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                              Java · Javelin{jBrief?.execution_revision && jBrief.execution_revision > 1 ? ` · R${jBrief.execution_revision}` : ""}
+                            </span>
+                          )}
                           {scan.vulnerability_validation_enabled && (
                             <span className="mt-1 block max-w-[10rem] truncate text-xs text-blue-300" title={scan.validation_method_label || scan.validation_method_id}>
                               验证：{scan.validation_method_label || scan.validation_method_id}
@@ -260,6 +274,8 @@ export default function ScanHistory({
                             )}
                           </span>
                           {scan.auto_resume_enabled && <span className="mt-1 block text-xs text-amber-300" title={scan.auto_resume_reason || undefined}>{autoResumeLabel(scan)}</span>}
+                          {isJavelin && jBrief?.stage && <span className="mt-1 block max-w-[11rem] truncate text-xs text-slate-400" title={jBrief.stage}>{jBrief.stage}</span>}
+                          {isJavelin && jStale && <span className={`mt-0.5 block text-xs ${jStale.cls}`}>{jStale.label}</span>}
                         </td>
                         <td className="px-4 py-3 text-sm text-slate-300">
                           {scan.suspected_issue_count}
@@ -288,31 +304,67 @@ export default function ScanHistory({
                               查看
                             </a>
                             <ScanShareButton scanId={scan.scan_id} compact />
-                            {running && (
-                              <button
-
-                                onClick={() => handleStop(scan.scan_id)}
-
-                                disabled={isLoading}
-
-                                className="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
-                              >
-                                {isLoading ? "..." : "停止"}
-                              </button>
-                            )}
-                            {canContinue && (
-                              <button
-
-                                onClick={() => handleContinue(scan.scan_id)}
-
-                                disabled={isLoading || !scan.agent_online}
-
-                                title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${scan.continuable_task_count ?? 0} 个任务`}
-
-                                className="text-xs px-2 py-1 rounded text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
-                              >
-                                {isLoading ? "..." : "续扫"}
-                              </button>
+                            {isJavelin ? (
+                              <>
+                                {jAllowed.has("pause") && (
+                                  <button
+                                    onClick={() => handleJavelinAction(scan.scan_id, "pause")}
+                                    disabled={isLoading}
+                                    className="text-xs px-2 py-1 rounded text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "暂停"}
+                                  </button>
+                                )}
+                                {jAllowed.has("resume") && (
+                                  <button
+                                    onClick={() => handleJavelinAction(scan.scan_id, "resume")}
+                                    disabled={isLoading}
+                                    className="text-xs px-2 py-1 rounded text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "继续"}
+                                  </button>
+                                )}
+                                {jAllowed.has("cancel") && (
+                                  <button
+                                    onClick={() => handleJavelinAction(scan.scan_id, "cancel")}
+                                    disabled={isLoading}
+                                    className="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "取消"}
+                                  </button>
+                                )}
+                                {jAllowed.has("recover") && (
+                                  <button
+                                    onClick={() => handleJavelinAction(scan.scan_id, "recover")}
+                                    disabled={isLoading}
+                                    className="text-xs px-2 py-1 rounded text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "断点恢复"}
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                {running && (
+                                  <button
+                                    onClick={() => handleStop(scan.scan_id)}
+                                    disabled={isLoading}
+                                    className="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "停止"}
+                                  </button>
+                                )}
+                                {canContinue && (
+                                  <button
+                                    onClick={() => handleContinue(scan.scan_id)}
+                                    disabled={isLoading || !scan.agent_online}
+                                    title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${scan.continuable_task_count ?? 0} 个任务`}
+                                    className="text-xs px-2 py-1 rounded text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+                                  >
+                                    {isLoading ? "..." : "续扫"}
+                                  </button>
+                                )}
+                              </>
                             )}
                             {canDelete && (
                               <button

@@ -1,5 +1,16 @@
 import type { AgentModelTimeWindow } from "./modelPool";
 
+export interface JavelinAgentCapability {
+  supported: boolean;
+  ready: boolean;
+  contract_version: number;
+  submodule_commit?: string;
+  node_version?: string;
+  esm_deps_ok?: boolean;
+  opencode_ok?: boolean;
+  blockers?: string[];
+}
+
 export interface AgentInfo {
   agent_id: string;
   agent_key: string;
@@ -18,6 +29,8 @@ export interface AgentInfo {
   runtime_update_error?: string;
   accepting_tasks?: boolean;
   has_explicit_model: boolean;
+  javelin?: JavelinAgentCapability | null;
+  decommissioned_at?: string;
 }
 
 export interface AgentRuntimeManifest {

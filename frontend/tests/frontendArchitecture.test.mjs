@@ -71,7 +71,7 @@ const compatibilityEntries = new Set([
 ]);
 const implementationRoots = [
   "api/", "types/", "scanRuntime/", "hooks/scanSSE/",
-  ...["scanDetail", "issues", "modelPool", "newScan", "agentConfig", "scanHistory", "threatAnalysis", "userManagement", "adminExport"].map((feature) => `features/${feature}/`),
+  ...["scanDetail", "javelinDetail", "issues", "modelPool", "newScan", "agentConfig", "scanHistory", "threatAnalysis", "userManagement", "adminExport"].map((feature) => `features/${feature}/`),
 ];
 
 test("domain implementations import owners instead of compatibility entry points", () => {

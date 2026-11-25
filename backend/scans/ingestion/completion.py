@@ -519,8 +519,11 @@ async def _start_completion_review(
     confirmed: int,
     server_url: str,
 ) -> None:
+    from backend.models import has_javelin_engine
     from backend.scans.fp_review_policy import _scan_fp_review_settings
     from backend.scans.fp_review import _start_fp_review
+    if has_javelin_engine(scan):
+        return
     store = get_scan_store()
     auto_fp_review, _fp_review_method = await run_store_call(
         store,

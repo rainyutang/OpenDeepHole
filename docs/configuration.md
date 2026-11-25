@@ -40,6 +40,8 @@ logging:
 | `OPENDEEPHOLE_POSTGRES_POOL_MIN_SIZE` / `OPENDEEPHOLE_POSTGRES_POOL_MAX_SIZE` | 每 Worker 的数据库连接池范围 |
 | `OPENDEEPHOLE_SERVER_WORKERS` | `start.sh` 使用的 Worker 数；多 Worker 要求 PostgreSQL 环境连接串 |
 | `OPENDEEPHOLE_SERVER_WS_PING_INTERVAL` / `OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT` | `start.sh` 的 WebSocket 心跳参数，默认 30/120 秒 |
+| `OPENDEEPHOLE_JAVELIN_ENABLED` | 覆盖服务端 `javelin.enabled` 开关（`1`/`true` 开启 Java Javelin 漏洞挖掘） |
+| `OPENDEEPHOLE_SECRET_KEY` | 显式固定服务端密钥；PostgreSQL 多 Worker 模式下开启 `javelin.enabled` 时必填（也可配置 `auth.secret_key`） |
 | `NO_PROXY` | 覆盖服务端 `no_proxy` 配置 |
 
 `OPENCODE_MODEL` 只覆盖兼容字段 `opencode.model`，不创建 Agent 模型池。`config.yaml` 中仍存在历史配置和注释，是否参与当前扫描以加载和执行代码为准；例如 git 历史挖掘与内存 API 预处理当前未接入扫描链路。

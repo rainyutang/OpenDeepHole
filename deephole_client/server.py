@@ -126,12 +126,14 @@ _SKILL_CREATOR_JSON_REPAIR_OUTPUT_PROMPT = (
 
 def has_active_local_work() -> bool:
     """Return whether replacing this process would discard in-memory work."""
+    from deephole_client.javelin_runtime.runner import has_active_javelin_work
+
     scan_active = bool(
         _task_manager is not None and _task_manager.active_snapshots()
     )
     fp_active = any(not task.done() for task in _fp_review_tasks.values())
     validation_active = any(not task.done() for task in _validation_tasks.values())
-    return scan_active or fp_active or validation_active
+    return scan_active or fp_active or validation_active or has_active_javelin_work()
 
 
 async def _run(task, is_resume: bool) -> None:
@@ -160,43 +162,47 @@ async def _run_scan(task, is_resume: bool) -> None:
         except Exception:
             pass
 
+    from deephole_client.javelin_runtime.runner import is_javelin_task, run_javelin_scan
     from deephole_client.scanner import run_scan
     try:
-        await run_scan(
-            config=_config,
-            project_path=task.project_path,
-            code_scan_path=task.code_scan_path,
-            code_scan_paths=getattr(task, "code_scan_paths", None),
-            reporter=_reporter,
-            scan_name=task.scan_name,
-            scan_mode=task.scan_mode,
-            threat_analysis_enabled=task.threat_analysis_enabled,
-            threat_analysis_method=task.threat_analysis_method,
-            threat_analysis_generate_attack_tree=getattr(
-                task, "threat_analysis_generate_attack_tree", True,
-            ),
-            product=task.product,
-            validation_environment=task.validation_environment,
-            vulnerability_validation=task.vulnerability_validation,
-            checker_names=task.checkers,
-            scan_id=task.scan_id,
-            cancel_event=task.cancel_event,
-            feedback_entries=task.feedback_entries,
-            checker_packages=task.checker_packages,
-            refresh_skill_packages=getattr(task, "refresh_skill_packages", not is_resume),
-            is_resume=is_resume,
-            retry_candidates=task.retry_candidates,
-            retry_total_candidates=task.retry_total_candidates,
-            retry_processed_offset=task.retry_processed_offset,
-            resume_threat_analysis=task.resume_threat_analysis,
-            retry_mining_engine_ids=task.retry_mining_engine_ids,
-            retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
-            code_graph_mcp=task.code_graph_mcp,
-            knowledge_base_mcp=task.knowledge_base_mcp,
-            mining_engines=task.mining_engines,
-            codex_model_ids=task.codex_model_ids,
-            multi_versions=task.multi_versions,
-        )
+        if is_javelin_task(task):
+            await run_javelin_scan(config=_config, task=task, reporter=_reporter)
+        else:
+            await run_scan(
+                config=_config,
+                project_path=task.project_path,
+                code_scan_path=task.code_scan_path,
+                code_scan_paths=getattr(task, "code_scan_paths", None),
+                reporter=_reporter,
+                scan_name=task.scan_name,
+                scan_mode=task.scan_mode,
+                threat_analysis_enabled=task.threat_analysis_enabled,
+                threat_analysis_method=task.threat_analysis_method,
+                threat_analysis_generate_attack_tree=getattr(
+                    task, "threat_analysis_generate_attack_tree", True,
+                ),
+                product=task.product,
+                validation_environment=task.validation_environment,
+                vulnerability_validation=task.vulnerability_validation,
+                checker_names=task.checkers,
+                scan_id=task.scan_id,
+                cancel_event=task.cancel_event,
+                feedback_entries=task.feedback_entries,
+                checker_packages=task.checker_packages,
+                refresh_skill_packages=getattr(task, "refresh_skill_packages", not is_resume),
+                is_resume=is_resume,
+                retry_candidates=task.retry_candidates,
+                retry_total_candidates=task.retry_total_candidates,
+                retry_processed_offset=task.retry_processed_offset,
+                resume_threat_analysis=task.resume_threat_analysis,
+                retry_mining_engine_ids=task.retry_mining_engine_ids,
+                retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
+                code_graph_mcp=task.code_graph_mcp,
+                knowledge_base_mcp=task.knowledge_base_mcp,
+                mining_engines=task.mining_engines,
+                codex_model_ids=task.codex_model_ids,
+                multi_versions=task.multi_versions,
+            )
     finally:
         _task_manager.remove(task.scan_id, task)
 
@@ -223,6 +229,11 @@ async def handle_task(
     mining_engines: list[dict] | None = None,
     codex_model_ids: list[str] | None = None,
     code_scan_paths: list[str] | None = None,
+    language: str = "c_cpp",
+    javelin_audit_id: str = "",
+    javelin_config: dict | None = None,
+    has_secret_context: bool = False,
+    javelin_contract_version: int = 1,
 ) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
@@ -256,9 +267,31 @@ async def handle_task(
         checker_packages=checker_packages,
         mining_engines=mining_engines,
         codex_model_ids=codex_model_ids,
+        language=language,
+        javelin_audit_id=javelin_audit_id,
+        javelin_config=javelin_config,
+        has_secret_context=has_secret_context,
+        javelin_contract_version=javelin_contract_version,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
     print(f"Started task {scan_id}")
+
+
+async def handle_javelin_action(
+    msg: dict[str, Any],
+    *,
+    config: Any = None,
+    task_manager: Any = None,
+    reporter: Any = None,
+) -> dict[str, Any]:
+    from deephole_client.javelin_runtime.runner import handle_javelin_action_command
+
+    return await handle_javelin_action_command(
+        msg,
+        config=config if config is not None else _config,
+        task_manager=task_manager if task_manager is not None else _task_manager,
+        reporter=reporter if reporter is not None else _reporter,
+    )
 
 
 async def handle_stop(

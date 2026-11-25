@@ -82,6 +82,13 @@ export {
 export type { CreateScanInput, ScanCopyConfig } from "./scans";
 export { getScanStatus, getScanStatusRequest, getScanOverview, getScanOverviewRequest } from "./scanSnapshots";
 export type { ScanSnapshotRequest } from "./scanSnapshots";
+export {
+  javelinScanApiBase,
+  controlJavelinScan,
+  getJavelinFileCoverage,
+  decommissionAgent,
+} from "./javelin";
+export type { JavelinCoverageFileItem, JavelinFileCoverageResponse } from "./javelin";
 export { getScanTasksPage, getScanTaskDetail, getScanCandidatesPage, getScanEventsPage, getScanDetailItem } from "./scanDetails";
 export {
   getScanThreatAuditResults,

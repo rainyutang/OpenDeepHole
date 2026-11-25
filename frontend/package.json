@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "sync:javelin-assets": "node scripts/sync-javelin-assets.mjs",
+    "dev": "node scripts/sync-javelin-assets.mjs && vite",
+    "build": "node scripts/sync-javelin-assets.mjs && tsc -b && vite build",
     "test:routing": "node tests/routing.test.mjs",
     "test:user-management": "node tests/userManagement.test.mjs",
     "test:admin-issue-export": "node tests/adminIssueExport.test.mjs",
@@ -45,6 +46,8 @@
     "test:issue-focus": "node tests/issueFocus.test.mjs",
     "test:architecture": "node tests/frontendArchitecture.test.mjs",
     "test:scan-history-state": "node tests/scanHistoryState.test.mjs",
+    "test:javelin-contract": "node tests/javelinHostContract.test.mjs",
+    "test:javelin-ui": "node tests/javelinUi.test.mjs",
     "benchmark:frontend-refactor": "node scripts/benchmarkFrontendRefactor.mjs",
     "test:issue-selectors": "node tests/issueSelectors.test.mjs",
     "test:markdown-render": "node tests/markdownRender.test.mjs"

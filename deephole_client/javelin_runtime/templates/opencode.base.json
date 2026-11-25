@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {},
+  "permission": {
+    "read": {
+      "*": "allow"
+    },
+    "list": {
+      "*": "allow"
+    },
+    "glob": {
+      "*": "allow"
+    },
+    "grep": {
+      "*": "allow"
+    },
+    "external_directory": {
+      "*": "allow"
+    },
+    "edit": {
+      "*": "deny"
+    },
+    "bash": {
+      "*": "allow"
+    },
+    "skill": {
+      "*": "allow"
+    },
+    "question": "deny"
+  }
+}

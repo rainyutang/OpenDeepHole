@@ -1,6 +1,6 @@
 # OpenDeepHole
 
-OpenDeepHole（Web 界面名称为 DeepHole 2.0）是基于静态分析和 AI Skill 的 C/C++ 源码白盒审计平台。Web 服务管理扫描与结果，本地 Agent 在代码所在机器执行威胁分析、漏洞挖掘、去误报和漏洞验证。
+OpenDeepHole（Web 界面名称为 DeepHole 2.0）是基于静态分析和 AI Skill 的源码白盒审计平台。Web 服务管理扫描与结果，本地 Agent 在代码所在机器执行威胁分析、漏洞挖掘、去误报和漏洞验证；除默认 C/C++ 全流程能力外，还可选开启基于 `third_party/Javelin` 子模块的 Java/Web 威胁引导漏洞挖掘引擎。
 
 [快速开始](#快速开始) · [文档](docs/README.md) · [开发指南](docs/development.md) · [更新日志](CHANGELOG.md)
 
@@ -12,6 +12,7 @@ OpenDeepHole（Web 界面名称为 DeepHole 2.0）是基于静态分析和 AI Sk
 - **去误报与漏洞验证**：提供对抗式复核、fp-check 复核，以及按产品扩展的验证方法。
 - **任务与结果管理**：支持停止、续扫、人工反馈、扫描分享、Markdown/ZIP/CSV 报告和模型 Token 统计。
 - **可选 MCP 能力**：按扫描配置 CodeGraph 和知识库连接；未启用时使用文件工具。
+- **可选 Java (Javelin) 漏洞挖掘**：当服务端启用 `javelin.enabled: true`（或环境变量 `OPENDEEPHOLE_JAVELIN_ENABLED=1`）且客户端具备 Node.js >= 22.5.0 时，可在新建扫描中选择 Java 项目与 Javelin 策略（Focus Area / 逐接口 API / File Sweep），客户端执行结果与封存报告实时入库，客户端离线后仍可在 Web 端完整查看审计过程、看板、发现与文件覆盖率。
 
 静态命中是待审计的候选点，AI 审计和复核结论仍需结合实际代码与运行环境确认。
 
@@ -34,6 +35,8 @@ Agent 通过 WebSocket 接收任务，通过 HTTP 上报结果；浏览器通过
 ### 1. 启动 Web 服务
 
 ```bash
+git submodule update --init --recursive
+bash scripts/prepare_javelin_runtime_deps.sh
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt

@@ -480,6 +480,16 @@ async def create_agent_scan(
     enforce_agent_owner: bool = True,
 ) -> ScanStartResponse:
     """Resolve, preflight, persist and dispatch one new scan in that order."""
+    from backend.scans.javelin_creation import create_javelin_scan, is_javelin_creation_request
+
+    if is_javelin_creation_request(body):
+        return await create_javelin_scan(
+            body,
+            server_url,
+            current_user,
+            public_access_token=public_access_token,
+            enforce_agent_owner=enforce_agent_owner,
+        )
     selected = await _select_creation_agent(body, current_user, enforce_agent_owner)
     configuration = resolve_creation_configuration(body, selected.managed_config, current_user, checker_names)
     identity = _creation_identity(body, configuration.project_path)

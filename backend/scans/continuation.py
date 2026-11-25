@@ -361,6 +361,11 @@ async def _continue_scan(
         raise ApplicationError(status_code=404, detail="Scan not found")
 
     scan, meta = result
+    from backend.models import has_javelin_engine
+    if has_javelin_engine(meta):
+        from backend.scans.javelin_lifecycle import control_javelin_scan
+        await control_javelin_scan(scan_id, "recover", current_user)
+        return ScanStartResponse(scan_id=scan_id)
     automatic = auto_resume_round is not None
     if automatic and (
         meta.execution_revision != auto_resume_expected_revision

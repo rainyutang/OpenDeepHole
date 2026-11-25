@@ -131,11 +131,17 @@ def _default_scan_name_base(project_path: str) -> str:
 
 
 def _repository_mining_engine_catalog() -> MiningEngineCatalog:
+    from backend.application import get_config
     from deephole_client.vulnerability_mining import build_mining_engine_catalog
 
-    return MiningEngineCatalog.model_validate(
+    catalog = MiningEngineCatalog.model_validate(
         build_mining_engine_catalog()
     )
+    if not get_config().javelin.enabled:
+        catalog.engines = [
+            item for item in catalog.engines if item.engine_id != "javelin"
+        ]
+    return catalog
 
 
 async def get_mining_engine_catalog(
@@ -373,6 +379,7 @@ def _resolve_scan_mining_engines(
             item.engine_id
             for item in catalog.engines
             if item.engine_id not in OPT_IN_MINING_ENGINE_IDS
+            and not getattr(item, "standalone_pipeline", False)
             and (generate_attack_tree or item.engine_id != "threat_audit")
         ]
     else:

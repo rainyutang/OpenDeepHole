@@ -41,17 +41,27 @@ def _purge_expired_runtime_downloads() -> None:
 
 def _agent_runtime_hash_scope() -> dict:
     return {
-        "version": 5,
+        "version": 6,
         "dirs": list(constants._AGENT_RUNTIME_DIRS),
         "tool_dirs": list(constants._AGENT_TOOL_DIRS),
         "root_files": list(constants._AGENT_RUNTIME_ROOT_FILES),
         "skip_dirs": sorted(constants._AGENT_RUNTIME_SKIP_DIRS),
+        "javelin_skip_prefixes": list(constants._AGENT_JAVELIN_SKIP_PREFIXES),
         "skip_suffixes": sorted(constants._AGENT_SKIP_SUFFIXES),
     }
 
 
-def _should_skip_agent_file(path: Path, skip_dirs: set[str]) -> bool:
-    return path.suffix in constants._AGENT_SKIP_SUFFIXES or any(part in skip_dirs for part in path.parts)
+def _should_skip_agent_file(path: Path, skip_dirs: set[str], *, root: Path | None = None) -> bool:
+    rel_path = path.relative_to(root) if root is not None else path
+    rel_posix = rel_path.as_posix()
+    if any(rel_posix == prefix.rstrip("/") or rel_posix.startswith(prefix) for prefix in constants._AGENT_JAVELIN_SKIP_PREFIXES):
+        return True
+    if rel_path.suffix in constants._AGENT_SKIP_SUFFIXES:
+        return True
+    effective_skip_dirs = skip_dirs
+    if rel_posix.startswith("javelin_runtime_deps/"):
+        effective_skip_dirs = skip_dirs - {"static", "system_skills"}
+    return any(part in effective_skip_dirs for part in rel_path.parts)
 
 
 def _iter_agent_runtime_files():
@@ -63,7 +73,11 @@ def _iter_agent_runtime_files():
         # (Windows Path sorting is case-insensitive, Linux is case-sensitive).
         entries = []
         for file_path in dir_path.rglob("*"):
-            if file_path.is_file() and not _should_skip_agent_file(file_path, constants._AGENT_RUNTIME_SKIP_DIRS):
+            if file_path.is_file() and not _should_skip_agent_file(
+                file_path,
+                constants._AGENT_RUNTIME_SKIP_DIRS,
+                root=constants._PROJECT_ROOT,
+            ):
                 arcname = file_path.relative_to(constants._PROJECT_ROOT).as_posix()
                 entries.append((arcname, file_path))
         entries.sort(key=lambda e: e[0])
@@ -71,7 +85,7 @@ def _iter_agent_runtime_files():
     for filename in constants._AGENT_RUNTIME_ROOT_FILES:
         file_path = constants._PROJECT_ROOT / filename
         if file_path.is_file():
-            yield filename, file_path
+            yield Path(filename).as_posix(), file_path
 
 
 def _agent_runtime_hash() -> str:
@@ -254,14 +268,19 @@ def _build_agent_zip(server_url: str='', owner_token: str='') -> bytes:
             if not dir_path.is_dir():
                 continue
             for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and not _should_skip_agent_file(file_path, constants._AGENT_DOWNLOAD_SKIP_DIRS):
-                    arcname = str(file_path.relative_to(constants._PROJECT_ROOT))
+                if file_path.is_file() and not _should_skip_agent_file(
+                    file_path,
+                    constants._AGENT_DOWNLOAD_SKIP_DIRS,
+                    root=constants._PROJECT_ROOT,
+                ):
+                    arcname = file_path.relative_to(constants._PROJECT_ROOT).as_posix()
                     zf.write(file_path, arcname)
 
         for filename in constants._AGENT_ROOT_FILES:
             file_path = constants._PROJECT_ROOT / filename
             if not file_path.is_file():
                 continue
+            arcname = Path(filename).as_posix()
             if filename == "agent.yaml":
                 content = file_path.read_text(encoding="utf-8")
                 if server_url:
@@ -274,9 +293,9 @@ def _build_agent_zip(server_url: str='', owner_token: str='') -> bytes:
                         'owner_token: ""',
                         f'owner_token: "{owner_token}"',
                     )
-                zf.writestr(filename, content.encode("utf-8"))
+                zf.writestr(arcname, content.encode("utf-8"))
             else:
-                zf.write(file_path, filename)
+                zf.write(file_path, arcname)
 
         zf.writestr("README.txt", constants._AGENT_README.encode("utf-8"))
 

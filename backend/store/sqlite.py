@@ -103,6 +103,13 @@ from .user_management import (
     normalize_employee_id,
 )
 from .admin_export import AdminExportStoreMixin
+from .javelin import (
+    JAVELIN_COLUMNS,
+    JAVELIN_SCHEMA,
+    JavelinStoreMixin,
+    parse_javelin_scan_config,
+    row_has_javelin_engine,
+)
 
 STORAGE_COLUMNS = {
     **HISTORY_COLUMNS,
@@ -112,9 +119,14 @@ STORAGE_COLUMNS = {
     **USER_MANAGEMENT_COLUMNS,
 }
 STORAGE_COLUMNS["scan_auto_resume"] = AUTO_RESUME_JOB_COLUMNS
+STORAGE_COLUMNS["agents"] = {
+    **STORAGE_COLUMNS.get("agents", {}),
+    **JAVELIN_COLUMNS["agents"],
+}
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
     **AUTO_RESUME_COLUMNS,
+    **JAVELIN_COLUMNS["scans"],
     "execution_product": "TEXT",
     "code_scan_paths_json": "TEXT NOT NULL DEFAULT '[]'",
     "metadata_revision": "INTEGER NOT NULL DEFAULT 0",
@@ -1033,6 +1045,7 @@ _SCHEMA += PATTERN_AUDIT_SCHEMA
 _SCHEMA += REVIEW_NOTES_SCHEMA
 _SCHEMA += AUTO_RESUME_SCHEMA
 _SCHEMA += USER_MANAGEMENT_SCHEMA
+_SCHEMA += JAVELIN_SCHEMA
 
 
 _NO_SQL_PARAMS = object()
@@ -1245,7 +1258,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(JavelinStoreMixin, AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoResumeMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -1293,6 +1306,15 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                 for column, definition in columns.items():
                     if column not in existing:
                         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            javelin_lang_marker = self._conn.execute(
+                "SELECT status FROM schema_migrations WHERE name = 'javelin-language-backfill-v1'"
+            ).fetchone()
+            if javelin_lang_marker is None or javelin_lang_marker[0] != "complete":
+                self.backfill_javelin_scan_language()
+                self._conn.execute(
+                    "INSERT INTO schema_migrations (name, status) VALUES ('javelin-language-backfill-v1', 'complete') "
+                    "ON CONFLICT(name) DO UPDATE SET status = 'complete'"
+                )
             self._conn.execute(PATTERN_AUDIT_ENGINE_INDEX)
             self._conn.execute(PATTERN_AUDIT_PARENT_INDEX)
             self._conn.execute(USER_DEPARTMENT_INDEX)
@@ -2352,6 +2374,19 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             static_total_files=row["static_total_files"] or 0,
             static_scanned_files=row["static_scanned_files"] or 0,
             static_analysis_done=bool(row["static_analysis_done"]),
+            agent_name=(row["agent_name"] if "agent_name" in row.keys() and row["agent_name"] is not None else ""),
+            agent_key=(row["agent_key"] if "agent_key" in row.keys() and row["agent_key"] is not None else ""),
+            language=(
+                "java"
+                if ("language" in row.keys() and row["language"] == "java")
+                else "c_cpp"
+            ),
+            has_javelin=row_has_javelin_engine(row["mining_engines_json"]),
+            javelin_config=(
+                parse_javelin_scan_config(row["javelin_config_json"])
+                if "javelin_config_json" in row.keys()
+                else None
+            ),
         )
 
     def _row_to_meta(self, row: sqlite3.Row) -> ScanMeta:
@@ -2430,6 +2465,16 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             validation_method_label=row["validation_method_label"] or "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
             public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
+            language=(
+                "java"
+                if ("language" in row.keys() and row["language"] == "java")
+                else "c_cpp"
+            ),
+            javelin_config=(
+                parse_javelin_scan_config(row["javelin_config_json"])
+                if "javelin_config_json" in row.keys()
+                else None
+            ),
             code_graph_mcp=_scan_code_graph_mcp(row["code_graph_mcp_json"]),
             code_graph_mcp_revision=int(row["code_graph_mcp_revision"] or 0),
             code_graph_mcp_applied_revision=int(row["code_graph_mcp_applied_revision"] or 0),
@@ -2478,8 +2523,9 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                      code_graph_mcp_json, knowledge_base_mcp_json,
                      vulnerability_validation_json, mining_engines_json,
                      mining_engine_runs_json, multi_versions_json,
-                     execution_product, metadata_revision, code_graph_mcp_revision, code_graph_mcp_applied_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     execution_product, metadata_revision, code_graph_mcp_revision, code_graph_mcp_applied_revision,
+                     language, javelin_config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2531,7 +2577,9 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     vulnerability_validation_json = excluded.vulnerability_validation_json,
                     mining_engines_json = excluded.mining_engines_json,
                     mining_engine_runs_json = excluded.mining_engine_runs_json,
-                    multi_versions_json = excluded.multi_versions_json
+                    multi_versions_json = excluded.multi_versions_json,
+                    language = excluded.language,
+                    javelin_config_json = excluded.javelin_config_json
                 """,
                 (
                     scan.scan_id,
@@ -2631,6 +2679,12 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     meta.metadata_revision,
                     meta.code_graph_mcp_revision,
                     meta.code_graph_mcp_applied_revision,
+                    "java" if (meta.language == "java" or any(item.engine_id == "javelin" for item in meta.mining_engines)) else "c_cpp",
+                    (
+                        meta.javelin_config.public_copy().model_dump_json()
+                        if meta.javelin_config is not None
+                        else "{}"
+                    ),
                 ),
             )
                 self._store_pool_locked(scan.scan_id, scan.opencode_pool or OpenCodePoolStatus())
@@ -2747,7 +2801,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
     def load_scan_runtime(self, scan_id: str):
         with self._lock:
             row = self._conn.execute(
-                "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+                "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,javelin_config_json,knowledge_base_enabled,knowledge_base_mcp_json,language,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
             ).fetchone()
             return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
 
@@ -2770,7 +2824,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,javelin_config_json,knowledge_base_enabled,knowledge_base_mcp_json,language,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)
@@ -2809,6 +2863,13 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
+            agent_key=(row["agent_key"] if "agent_key" in row.keys() and row["agent_key"] is not None else ""),
+            language=(
+                "java"
+                if ("language" in row.keys() and row["language"] == "java")
+                else "c_cpp"
+            ),
+            has_javelin=row_has_javelin_engine(row["mining_engines_json"]),
             threat_analysis_run=(
                 ThreatAnalysisRunStatus.model_validate_json(
                     row["threat_analysis_run_json"]
@@ -2828,7 +2889,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
         )
 
     def _scan_summary_columns(self) -> str:
-        columns = 's.auto_resume_enabled, s.auto_resume_count, s.auto_resume_state, s.auto_resume_reason, s.agent_name, s.created_at, s.knowledge_base_enabled, s.metadata_revision, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
+        columns = 's.auto_resume_enabled, s.auto_resume_count, s.auto_resume_state, s.auto_resume_reason, s.agent_key, s.agent_name, s.created_at, s.knowledge_base_enabled, s.language, s.metadata_revision, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
         for column, legacy_key in (("total_task_count", "total_tasks"), ("completed_task_count", "completed_task_count")):
             legacy = (
                 f"COALESCE((NULLIF(s.opencode_pool, '')::jsonb ->> '{legacy_key}')::BIGINT, 0)"
@@ -5960,17 +6021,36 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
         if not agent_id:
             return []
         with self._lock:
-            rows = self._conn.execute(
+            candidates = self._conn.execute(
                 """\
+                SELECT scan_id, mining_engines_json, opencode_pool
+                FROM scans
+                WHERE agent_id = ?
+                  AND status IN ('pending', 'analyzing', 'auditing')
+                """,
+                (agent_id,),
+            ).fetchall()
+            eligible = [
+                row for row in candidates
+                if not row_has_javelin_engine(row["mining_engines_json"])
+            ]
+            if not eligible:
+                self._conn.commit()
+                return []
+            placeholders = ", ".join("?" for _ in eligible)
+            eligible_ids = [str(row["scan_id"]) for row in eligible]
+            rows = self._conn.execute(
+                f"""\
                 UPDATE scans
                 SET status = 'cancelled',
                     error_message = ?,
                     current_candidate = NULL
                 WHERE agent_id = ?
                   AND status IN ('pending', 'analyzing', 'auditing')
+                  AND scan_id IN ({placeholders})
                 RETURNING scan_id, opencode_pool
                 """,
-                (error_message, agent_id),
+                (error_message, agent_id, *eligible_ids),
             ).fetchall()
             scan_ids = [str(row["scan_id"]) for row in rows]
             if not scan_ids:

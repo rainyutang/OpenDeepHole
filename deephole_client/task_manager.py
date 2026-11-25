@@ -46,6 +46,11 @@ class ScanTask:
     retry_mining_engine_ids: list[str] | None = None
     retry_threat_audit_task_ids: list[str] | None = None
     execution_revision: int = 0
+    language: str = "c_cpp"
+    javelin_audit_id: str = ""
+    javelin_config: dict | None = None
+    has_secret_context: bool = False
+    javelin_contract_version: int = 1
     cancel_event: ScanCancellationEvent = field(
         default_factory=ScanCancellationEvent,
     )
@@ -91,6 +96,11 @@ class TaskManager:
         retry_threat_audit_task_ids: list[str] | None = None,
         execution_revision: int = 0,
         code_scan_paths: list[str] | None = None,
+        language: str = "c_cpp",
+        javelin_audit_id: str = "",
+        javelin_config: dict | None = None,
+        has_secret_context: bool = False,
+        javelin_contract_version: int = 1,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
@@ -153,6 +163,11 @@ class TaskManager:
             ),
             retry_threat_audit_task_ids=retry_threat_audit_task_ids,
             execution_revision=max(0, int(execution_revision or 0)),
+            language=str(language or "c_cpp").strip() or "c_cpp",
+            javelin_audit_id=str(javelin_audit_id or ""),
+            javelin_config=copy.deepcopy(javelin_config) if isinstance(javelin_config, dict) else None,
+            has_secret_context=bool(has_secret_context),
+            javelin_contract_version=int(javelin_contract_version or 1),
         )
         self._tasks[scan_id] = task
         self._execution_revisions[scan_id] = max(

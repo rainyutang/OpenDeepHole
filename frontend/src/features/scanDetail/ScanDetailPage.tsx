@@ -6,7 +6,8 @@ import EditScanMetadataDialog from "../../components/EditScanMetadataDialog";
 import FeedbackManager from "../../components/FeedbackManager";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import VulnerabilityList from "../issues/VulnerabilityList";
-import { canonicalMiningEngineLabel, isPatternAuditEngine, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
+import JavelinScanDetailPage from "../javelinDetail/JavelinScanDetailPage";
+import { canonicalMiningEngineLabel, hasJavelinEngine, isPatternAuditEngine, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
 import type { ScanNavigation } from "../../routing";
 import { findIndexedVulnerability } from "../../scanRuntime/issues";
 import { mergeScanCodeGraph, mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
@@ -224,6 +225,19 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
           <button type="button" className="mt-3 text-blue-300 underline" onClick={() => setScanLoadAttempt((value) => value + 1)}>重试加载扫描</button>
         </div> : <div role="status" aria-label="加载扫描详情" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />}
       </div>
+    );
+  }
+
+  if (hasJavelinEngine(scan)) {
+    return (
+      <JavelinScanDetailPage
+        scan={scan}
+        scanId={scanId}
+        sharedView={sharedView}
+        navigation={navigation}
+        onHome={onHome}
+        onCopyScan={onCopyScan}
+      />
     );
   }
 

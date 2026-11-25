@@ -6,15 +6,33 @@ export const THREAT_PATTERN_AUDIT_ENGINE_ID = "threat_pattern_audit";
 export const THREAT_PATTERN_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的漏洞挖掘引擎";
 export const THREAT_PATTERN_ITERATIVE_ENGINE_ID = "threat_pattern_iterative_audit";
 export const THREAT_PATTERN_ITERATIVE_ENGINE_LABEL = "DeepHole基于攻击模式的迭代漏洞挖掘引擎";
+export const JAVELIN_ENGINE_ID = "javelin";
+export const JAVELIN_ENGINE_LABEL = "Javelin 威胁引导全视角深度审计 (Java)";
 export function isPatternAuditEngine(engineId: string): boolean {
   return engineId === THREAT_PATTERN_AUDIT_ENGINE_ID || engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID;
 }
 
 export function miningEngineSelectedByDefault(engineId: string): boolean {
-  return engineId !== THREAT_PATTERN_ITERATIVE_ENGINE_ID;
+  return engineId !== THREAT_PATTERN_ITERATIVE_ENGINE_ID && engineId !== JAVELIN_ENGINE_ID;
 }
 export const MULTI_VERSION_ENGINE_ID = "multi_version";
 export const MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎";
+
+export function hasJavelinEngine(scan: {
+  has_javelin?: boolean | null;
+  mining_engines?: Array<{ engine_id?: string; enabled?: boolean }> | null;
+  mining_engine_runs?: Array<{ engine_id?: string }> | null;
+} | null | undefined): boolean {
+  if (!scan) return false;
+  if (scan.has_javelin === true) return true;
+  if (Array.isArray(scan.mining_engines) && scan.mining_engines.some((item) => item?.engine_id === JAVELIN_ENGINE_ID && item.enabled !== false)) {
+    return true;
+  }
+  if (Array.isArray(scan.mining_engine_runs) && scan.mining_engine_runs.some((run) => run?.engine_id === JAVELIN_ENGINE_ID)) {
+    return true;
+  }
+  return false;
+}
 
 export const THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = new Set([
   THREAT_AUDIT_ENGINE_ID,
@@ -32,6 +50,7 @@ const BUILTIN_MINING_ENGINE_LABELS: Record<string, string> = {
   [THREAT_PATTERN_AUDIT_ENGINE_ID]: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
   [THREAT_PATTERN_ITERATIVE_ENGINE_ID]: THREAT_PATTERN_ITERATIVE_ENGINE_LABEL,
   [MULTI_VERSION_ENGINE_ID]: MULTI_VERSION_ENGINE_LABEL,
+  [JAVELIN_ENGINE_ID]: JAVELIN_ENGINE_LABEL,
 };
 
 export function miningEngineRequiresThreatAnalysis(engineId: string): boolean {

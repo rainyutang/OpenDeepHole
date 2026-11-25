@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../../api/scans";
+import { controlJavelinScan } from "../../api/javelin";
 import type { ScanSummary } from "../../types/scans";
 import { mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
 import { autoResumeActive } from "../../scanAutoResume";
@@ -121,6 +122,26 @@ export function useScanHistoryData(onViewScan: (scanId: string) => void, onVisib
     }
   };
 
+  const handleJavelinAction = async (scanId: string, action: "pause" | "resume" | "cancel" | "recover") => {
+    setActionLoading(scanId);
+    try {
+      const res = await controlJavelinScan(scanId, action);
+      if (action === "cancel" && res.queued_offline) {
+        alert("客户端当前离线，已登记待下发取消指令；重连后若仍在运行将自动下发。");
+      } else if (action === "recover") {
+        onViewScan(scanId);
+      }
+      await fetchScans();
+    } catch (err: unknown) {
+      const message = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+        : undefined;
+      alert(`操作失败：${message || "请刷新后重试"}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmId) return;
     const scanId = deleteConfirmId;
@@ -154,6 +175,7 @@ export function useScanHistoryData(onViewScan: (scanId: string) => void, onVisib
     handleLoadMore,
     handleContinue,
     handleStop,
+    handleJavelinAction,
     handleDeleteConfirm,
     deleteTargetName,
   };

@@ -1,11 +1,12 @@
 import type { AgentValidatorField } from "../types/agents";
 import ScanCodeGraphMcpEditor from "./ScanCodeGraphMcpEditor";
 import { ReviewNotesSelector } from "./ReviewNotes";
-import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis } from "../miningEngines";
+import { JAVELIN_ENGINE_ID, THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis } from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
 import PageHeader from "./PageHeader";
 import { agentOwnerLabel } from "../agentPresentation";
 import ScanPathList from "./ScanPathList";
+import JavelinOptionsCard from "../features/newScan/JavelinOptionsCard";
 import { useNewScan } from '../features/newScan/useNewScan';
 import { agentAcceptsTasks } from '../features/newScan/draftModel';
 import type { ScanModeOption } from '../features/newScan/draftModel';
@@ -57,6 +58,11 @@ function DynamicValidationField({ schema, value, onChange }: { schema: AgentVali
 
 export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onConfigureAgent }: Props) {
   const {
+    language,
+    setLanguage,
+    javelinConfig,
+    setJavelinConfig,
+    javelinAvailable,
     setSelectedAgent,
     setScanName,
     setProjectPath,
@@ -134,9 +140,40 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     <main className="mx-auto w-full max-w-5xl px-4 py-6 sm:px-6">
       {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : loadError ? <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">{loadError}<button type="button" onClick={() => setLoadAttempt((value) => value + 1)} className="ml-3 rounded border border-red-400/40 px-3 py-1.5">重试</button></div> : <form onSubmit={handleSubmit} className="space-y-6">
         {sourceScanId && <p className="text-sm text-slate-400">已复制原扫描配置，请填写新扫描的名称。</p>}
+        {sourceScanId && copiedCapabilities.sensitiveStripped && <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-200">原扫描曾启用授权动态验证环境，敏感测试环境凭据已自动剥离，如需动态验证请重新填写。</p>}
         {sourceScanId && !selectedAgentReady && <p role="alert" className="text-sm text-amber-300">原客户端不可用、离线或未配置模型，请检查客户端或重新选择。{!selectedAgentInfo && `（${selectedAgent}）`}</p>}
-        {unavailableMethod && <p role="alert" className="text-sm text-amber-300">原扫描的分析或去误报方法不可用，请重新选择：{threatAnalysisEnabled && !threatMethods.some((method) => method.method_id === threatAnalysisMethod) ? threatAnalysisMethod : ""} {!fpMethods.some((method) => method.method_id === fpReviewMethod) ? fpReviewMethod : ""}</p>}
-        {validationEnabled && !agentConfigLoading && !selectedValidationMethod && <p role="alert" className="text-sm text-amber-300">原验证方法不可用或与当前产品不兼容：{validationMethodId}，请重新选择。</p>}
+        {language !== "java" && unavailableMethod && <p role="alert" className="text-sm text-amber-300">原扫描的分析或去误报方法不可用，请重新选择：{threatAnalysisEnabled && !threatMethods.some((method) => method.method_id === threatAnalysisMethod) ? threatAnalysisMethod : ""} {!fpMethods.some((method) => method.method_id === fpReviewMethod) ? fpReviewMethod : ""}</p>}
+        {language !== "java" && validationEnabled && !agentConfigLoading && !selectedValidationMethod && <p role="alert" className="text-sm text-amber-300">原验证方法不可用或与当前产品不兼容：{validationMethodId}，请重新选择。</p>}
+        {javelinAvailable && (
+          <Card>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-200">项目语言与审计底座</h2>
+                <p className="mt-1 text-xs text-slate-400">C/C++ 项目使用 DeepHole 原生多引擎流水线；Java/Web 项目可选用 Javelin 威胁引导漏洞挖掘引擎。</p>
+              </div>
+              <div className="inline-flex rounded-lg border border-slate-600 bg-slate-900 p-1" role="radiogroup" aria-label="项目语言">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={language === "c_cpp"}
+                  onClick={() => setLanguage("c_cpp")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${language === "c_cpp" ? "bg-blue-600 text-white" : "text-slate-300 hover:text-white"}`}
+                >
+                  C / C++
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={language === "java"}
+                  onClick={() => setLanguage("java")}
+                  className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${language === "java" ? "bg-emerald-600 text-white" : "text-slate-300 hover:text-white"}`}
+                >
+                  Java (Javelin)
+                </button>
+              </div>
+            </div>
+          </Card>
+        )}
         <Card><h2 className="mb-3 text-sm font-medium text-slate-300">选择客户端</h2>{agents.length === 0 ? <p className="text-sm text-slate-500">暂无客户端，请先运行 ./run_agent.sh</p> : <div className="space-y-2">{agents.map((agent) => <label
           key={agent.agent_key || agent.agent_id}
           className={`flex items-center gap-3 rounded-lg border p-3 ${agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${selectedAgent === agent.agent_key ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input
@@ -144,11 +181,47 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
             type="radio"
             checked={selectedAgent === agent.agent_key}
             disabled={!agentAcceptsTasks(agent)}
-            onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="block text-xs text-slate-400">{agent.ip}</span><span className="block truncate text-xs text-slate-400" title={agentOwnerLabel(agent)}>{agentOwnerLabel(agent)}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? (agent.runtime_update_status === "draining" ? "等待更新" : "更新中") : "在线" : "离线"}</span>{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button
+            onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="block text-xs text-slate-400">{agent.ip}</span><span className="block truncate text-xs text-slate-400" title={agentOwnerLabel(agent)}>{agentOwnerLabel(agent)}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? (agent.runtime_update_status === "draining" ? "等待更新" : "更新中") : "在线" : "离线"}</span>{language === "java" && agent.online && (!agent.javelin?.supported || !agent.javelin?.ready) && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">Javelin 未就绪</span>}{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button
               type="button"
               onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)}
-              className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}</Card>
+              className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}{language === "java" && selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && (!selectedAgentInfo.javelin?.supported || !selectedAgentInfo.javelin?.ready) && <div role="alert" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">该客户端 Javelin 环境未就绪：{selectedAgentInfo.javelin?.blockers?.join("；") || "需 Node.js >= 22.5.0、离线 ESM 依赖与 OpenCode 可执行文件"}</div>}</Card>
 
+        {language === "java" ? (
+          <>
+            <Card>
+              <div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div>
+              <div className="grid gap-5">
+                <Field label="扫描名称">
+                  <input
+                    className={input}
+                    aria-label="扫描名称"
+                    required={Boolean(sourceScanId)}
+                    value={scanName}
+                    placeholder="例如 project_audit"
+                    onChange={(event) => setScanName(event.target.value)}
+                  />
+                </Field>
+                <Field label="Java 项目目录路径" hint="客户端上的单目录绝对路径">
+                  <input
+                    className={input}
+                    value={projectPath}
+                    placeholder="/path/to/java-project"
+                    onChange={(event) => setProjectPath(event.target.value)}
+                  />
+                </Field>
+                <Field label="产品" hint="可选，用于归类产品长期记忆">
+                  <input
+                    className={input}
+                    value={product}
+                    placeholder="请输入产品名称"
+                    onChange={(event) => setProduct(event.target.value)}
+                  />
+                </Field>
+              </div>
+            </Card>
+            <JavelinOptionsCard value={javelinConfig} onChange={setJavelinConfig} />
+          </>
+        ) : <>
         <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input
           className={input}
           aria-label="扫描名称"
@@ -261,7 +334,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
                   }}
                   label="生成攻击树" /></div>}</>}</Card>
 
-          <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2>{unavailableEngines.map((id) => <label key={id} className="mt-3 block text-sm text-amber-300"><input type="checkbox" checked onChange={() => setMiningEngines((current) => ({ ...current, [id]: { selected: false } }))} /> {id}（引擎不可用，请取消选择）</label>)}<p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => {
+          <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2>{unavailableEngines.map((id) => <label key={id} className="mt-3 block text-sm text-amber-300"><input type="checkbox" checked onChange={() => setMiningEngines((current) => ({ ...current, [id]: { selected: false } }))} /> {id}（引擎不可用，请取消选择）</label>)}<p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.filter((engine) => engine.engine_id !== JAVELIN_ENGINE_ID && !engine.standalone_pipeline).map((engine) => {
             const enabled = miningEngines[engine.engine_id]?.selected ?? false; return <label
               key={engine.engine_id}
               className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input
@@ -284,11 +357,12 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
           onEnabledChange={setReviewNotesEnabled}
           onSelectionChange={setReviewNoteIds}
           onValidityChange={setReviewNotesReady} />
+        </>}
 
         {error && <div role="alert" className="whitespace-pre-line rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
         <div className="flex flex-col gap-3 sm:flex-row"><button
           type="submit"
-          disabled={submitting || !selectedAgentReady || agentConfigLoading || (reviewNotesEnabled && !reviewNotesReady)}
+          disabled={submitting || !selectedAgentReady || agentConfigLoading || (language !== "java" && reviewNotesEnabled && !reviewNotesReady)}
           className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "检查路径并创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>
       </form>}
     </main>

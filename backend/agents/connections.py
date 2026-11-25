@@ -3,7 +3,13 @@
 from __future__ import annotations
 from backend.agents import constants
 from dataclasses import dataclass
-from backend.models import AgentInfo, AgentRemoteConfig, AgentValidatorCatalog
+from backend.models import (
+    AgentInfo,
+    AgentRemoteConfig,
+    AgentValidatorCatalog,
+    JAVELIN_CONTRACT_VERSION,
+    JavelinAgentCapability,
+)
 from backend.agents.interfaces import AgentConnection as WebSocket
 from starlette.websockets import WebSocketDisconnect
 from backend.agents.schemas import _AgentRegisterBody
@@ -95,6 +101,14 @@ async def agent_websocket(websocket: WebSocket) -> None:
         )
         ws_server_url = _websocket_server_url(websocket)
         store = get_scan_store()
+        javelin_cap = _parse_hello_javelin_capability(reported_capabilities, name)
+        if javelin_cap is not None:
+            await run_store_call(
+                store,
+                "set_agent_javelin_capability",
+                stable_key,
+                javelin_cap,
+            )
 
         agent_info = AgentInfo(
             agent_id=agent_id,
@@ -122,6 +136,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             server_url=ws_server_url,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
             llm_api_test=reported_capabilities.get("llm_api_test") is True,
+            javelin=javelin_cap,
         )
         get_runtime().agents.registered_agents[agent_id] = agent_info
         get_runtime().agents.agent_ws[agent_id] = websocket
@@ -177,6 +192,19 @@ async def agent_websocket(websocket: WebSocket) -> None:
             await send_agent_command(agent_id, command)
         for command in reconnect.pending_validation_stops:
             await send_agent_command(agent_id, command)
+        active_javelin_ids = {
+            str(item.get("scan_id") or "")
+            for item in (msg.get("active_scans") or [])
+            if isinstance(item, dict) and item.get("scan_id")
+        }
+        javelin_pending_cmds = await run_store_call(
+            store,
+            "resolve_javelin_pending_actions_on_reconnect",
+            stable_key,
+            active_javelin_ids,
+        )
+        for jcmd in javelin_pending_cmds:
+            await send_agent_command(agent_id, jcmd)
         # Recovery can issue stop RPCs; their replies and heartbeats must be
         # received while recovery awaits them.
         recovery_task = asyncio.create_task(_recover_after_welcome(
@@ -237,6 +265,34 @@ async def agent_unregister(agent_id: str) -> dict:
     get_runtime().agents.agent_opencode_pool_latest.pop(agent_id, None)
     logger.info("Agent unregistered: %s", agent_id)
     return {"ok": True}
+
+
+def _parse_hello_javelin_capability(
+    reported_capabilities: dict,
+    name: str,
+) -> JavelinAgentCapability | None:
+    raw = reported_capabilities.get("javelin")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        cap = JavelinAgentCapability.model_validate(raw)
+    except Exception as exc:
+        logger.warning("Ignoring invalid javelin capability from agent %s: %s", name, exc)
+        return JavelinAgentCapability(
+            supported=False,
+            ready=False,
+            blockers=[f"invalid_capability: {type(exc).__name__}"],
+        )
+    if cap.supported and cap.contract_version != JAVELIN_CONTRACT_VERSION:
+        reason = (
+            f"Javelin contract_version mismatch: client={cap.contract_version}, "
+            f"server={JAVELIN_CONTRACT_VERSION}"
+        )
+        logger.warning("Agent %s rejected for Javelin tasks: %s", name, reason)
+        cap.ready = False
+        if reason not in cap.blockers:
+            cap.blockers = [*cap.blockers, reason]
+    return cap
 
 
 def _parse_hello_configuration(

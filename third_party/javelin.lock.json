@@ -1,0 +1,7 @@
+{
+  "source_repo": "https://github.com/Bmebme/Javelin.git",
+  "submodule_branch": "feat/deephole-bridge",
+  "submodule_commit": "bbe9ab0a61c345fc93b8e8a2ca8d4c0e297d2412",
+  "javelin_contract_version": 1,
+  "runtime_node_min": "22.5.0"
+}

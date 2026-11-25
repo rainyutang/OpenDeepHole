@@ -15,6 +15,9 @@ frontend/dist/
 
 # Build output
 backend/static/
+frontend/public/javelin-assets/
+/javelin_runtime_deps/
+.build/
 
 # IDE
 .idea/

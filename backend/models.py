@@ -33,13 +33,46 @@ THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID = "threat_pattern_iterative_audit"
 THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的迭代漏洞挖掘引擎"
 MULTI_VERSION_ENGINE_ID = "multi_version"
 MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎"
+JAVELIN_ENGINE_ID = "javelin"
+JAVELIN_ENGINE_LABEL = "Javelin (Java 多 Agent 深度源码审计)"
+JAVELIN_CONTRACT_VERSION = 1
+ProjectLanguage = Literal["c_cpp", "java"]
 BUILTIN_MINING_ENGINE_LABELS = {
     STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_AUDIT_ENGINE_ID: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID: THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL,
     MULTI_VERSION_ENGINE_ID: MULTI_VERSION_ENGINE_LABEL,
+    JAVELIN_ENGINE_ID: JAVELIN_ENGINE_LABEL,
 }
+
+
+def has_javelin_engine(target: Any) -> bool:
+    """Single source of truth for whether a scan or selection list uses Javelin."""
+    if target is None:
+        return False
+    if isinstance(target, (list, tuple, set)):
+        for item in target:
+            if isinstance(item, str) and item.strip() == JAVELIN_ENGINE_ID:
+                return True
+            if isinstance(item, Mapping):
+                if str(item.get("engine_id") or "").strip() == JAVELIN_ENGINE_ID and item.get("enabled", True) is not False:
+                    return True
+            elif getattr(item, "engine_id", None) == JAVELIN_ENGINE_ID and getattr(item, "enabled", True) is not False:
+                return True
+        return False
+    if isinstance(target, Mapping):
+        if target.get("has_javelin") is True:
+            return True
+        if "mining_engines" in target:
+            return has_javelin_engine(target.get("mining_engines"))
+        return str(target.get("engine_id") or "").strip() == JAVELIN_ENGINE_ID
+    if getattr(target, "has_javelin", False) is True:
+        return True
+    engines = getattr(target, "mining_engines", None)
+    if engines is not None:
+        return has_javelin_engine(engines)
+    return False
 
 
 def canonical_mining_engine_label(engine_id: str, label: str = "") -> str:
@@ -395,6 +428,84 @@ class MiningEngineCatalogItem(BaseModel):
     description: str
     fp_review: bool
     requires_codex: bool = False
+    languages: list[ProjectLanguage] = Field(default_factory=lambda: ["c_cpp"])
+    standalone_pipeline: bool = False
+
+
+_JAVELIN_SECRET_BLACKLIST = frozenset({
+    "secret_context_ciphertext",
+    "secret_context_meta_json",
+    "test_environment_context",
+    "ciphertext",
+    "nonce",
+    "nonce_b64",
+})
+
+
+class JavelinRuntimeTestingConfig(BaseModel):
+    enabled: bool = False
+    mode: Literal["INTEGRATED_TESTING", "CONTACT_ONLY", "TARGETED_CONFIRMATION"] = "INTEGRATED_TESTING"
+    budget_minutes: int = Field(default=60, ge=10, le=240)
+    identity_mode: Literal["auto", "anonymous", "shared", "distinct"] = "auto"
+    allowed_actions: list[str] = Field(default_factory=lambda: ["navigate", "normal_interaction"])
+    test_environment_context: str = Field(default="", max_length=24000, exclude=True, repr=False)
+
+
+class JavelinScanConfig(BaseModel):
+    mining_strategy: Literal["focus_area", "api", "file_sweep"] = "focus_area"
+    bac_analysis: Literal["auto", "off"] = "auto"
+    memory_mode: Literal["full", "facts_only", "off", "blind"] = "full"
+    api_inventory: str = Field(default="", max_length=120000)
+    additional_instructions_enabled: bool = False
+    additional_instructions: str = Field(default="", max_length=12000)
+    version_ref: str = Field(default="当前目录快照", max_length=200)
+    runtime_testing: JavelinRuntimeTestingConfig = Field(default_factory=JavelinRuntimeTestingConfig)
+    has_secret_context: bool = False
+
+    def public_copy(self) -> "JavelinScanConfig":
+        """Return a safe copy with all secret-bearing fields stripped."""
+        rt = self.runtime_testing.model_copy(update={"test_environment_context": ""})
+        return self.model_copy(
+            update={
+                "runtime_testing": rt,
+                "has_secret_context": bool(
+                    self.has_secret_context
+                    or (self.runtime_testing.enabled and self.runtime_testing.test_environment_context.strip())
+                ),
+            }
+        )
+
+
+class JavelinAgentCapability(BaseModel):
+    contract_version: int = 0
+    supported: bool = False
+    ready: bool = False
+    node_version: str = ""
+    opencode_available: bool = False
+    esm_deps_ready: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class JavelinScanBrief(BaseModel):
+    audit_id: str = ""
+    status: str = ""
+    stage: str = ""
+    progress: float = 0.0
+    progress_text: str = ""
+    mining_strategy: str = "focus_area"
+    execution_revision: int = 1
+    resumable: bool = False
+    stale_level: Literal["live", "offline", "stale", "abandoned"] = "live"
+    allowed_actions: list[str] = Field(default_factory=list)
+    pending_action: dict[str, Any] | None = None
+    last_synced_at: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_secret_fields(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {k: v for k, v in value.items() if k not in _JAVELIN_SECRET_BLACKLIST}
+        return value
 
 
 class MiningEngineCatalog(BaseModel):
@@ -995,6 +1106,11 @@ class ScanStatus(BaseModel):
     # Agent 信息
     agent_name: str = ""
     agent_online: bool = False
+    agent_key: str = ""
+    language: ProjectLanguage = "c_cpp"
+    has_javelin: bool = False
+    javelin_config: JavelinScanConfig | None = None
+    javelin_summary: JavelinScanBrief | None = None
 
 
 class ScanDetailCounts(BaseModel):
@@ -1242,6 +1358,7 @@ class AgentInfo(BaseModel):
     scan_paths_probe: bool = False
     graceful_runtime_update: bool = False
     server_url: str = ""
+    javelin: JavelinAgentCapability | None = None
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -1934,6 +2051,8 @@ class CreateScanRequest(BaseModel):
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
+    language: ProjectLanguage = "c_cpp"
+    javelin_config: JavelinScanConfig | None = None
 
 
 class ScanCopyConfig(BaseModel):
@@ -1959,6 +2078,10 @@ class ScanCopyConfig(BaseModel):
     auto_resume_enabled: bool = False
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
+    language: ProjectLanguage = "c_cpp"
+    has_javelin: bool = False
+    javelin_config: JavelinScanConfig | None = None
+    sensitive_fields_stripped: bool = False
 
 
 class ReviewNoteRequest(BaseModel):
@@ -2082,6 +2205,8 @@ class ScanMeta(BaseModel):
     validation_method_label: str = ""
     user_id: str = ""
     public_access_token: str = ""
+    language: ProjectLanguage = "c_cpp"
+    javelin_config: JavelinScanConfig | None = None
     # Stored for internal task dispatch only. Public scan responses must never
     # echo connection headers or environment values.
     code_graph_mcp: AgentMcpConfig | None = Field(
@@ -2144,6 +2269,10 @@ class ScanSummary(BaseModel):
     username: str = ""
     agent_name: str = ""
     agent_online: bool = False
+    agent_key: str = ""
+    language: ProjectLanguage = "c_cpp"
+    has_javelin: bool = False
+    javelin_summary: JavelinScanBrief | None = None
     # Internal lifecycle snapshots used to derive continuation capability for
     # list responses.  They are loaded with the summary row but never exposed
     # through the public response model.

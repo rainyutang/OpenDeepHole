@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 MAINTENANCE_SCHEMA = """
@@ -75,6 +78,15 @@ class StorageMaintenanceMixin:
                     self._conn.commit()
                     return {"skipped": "lease_lost"}
                 remove("agent_resume_manifests", "token", "expires_at <= ?", (stamp,))
+                remove(
+                    "javelin_report_blobs",
+                    "blob_sha256",
+                    "last_referenced_at < ? AND NOT EXISTS ("
+                    "SELECT 1 FROM javelin_reports r "
+                    "WHERE r.blob_sha256 = javelin_report_blobs.blob_sha256 "
+                    "OR r.model_blob_sha256 = javelin_report_blobs.blob_sha256)",
+                    (cutoff("javelin_blob_gc_grace_seconds", 3600),),
+                )
                 if getattr(self, "distributed", False):
                     remove("agent_rpc_responses", "request_id", "created_at < ?", (cutoff("rpc_seconds", 86400),))
                     remove("agent_commands", "id", "status = 'delivered' AND delivered_at < ?", (cutoff("delivered_command_seconds", 604800),))
@@ -111,6 +123,15 @@ class StorageMaintenanceMixin:
                     ((now + timedelta(seconds=max(60, int(policy.get("interval_seconds", 60))))).isoformat(), stamp, json.dumps(counts), name, owner),
                 )
                 self._conn.commit()
+            staging_dir = policy.get("javelin_upload_staging_dir")
+            if staging_dir:
+                cleaned_uploads = cleanup_stale_javelin_upload_staging(
+                    Path(str(staging_dir)),
+                    max_age_seconds=max(60, int(policy.get("javelin_upload_ttl_seconds", 72 * 3600))),
+                    now_ts=now.timestamp(),
+                )
+                if cleaned_uploads:
+                    counts["javelin_upload_staging_dirs"] = cleaned_uploads
             return {"counts": counts}
         except BaseException as exc:
             with self._lock:
@@ -121,3 +142,37 @@ class StorageMaintenanceMixin:
                 )
                 self._conn.commit()
             raise
+
+
+def cleanup_stale_javelin_upload_staging(
+    staging_root: Path,
+    *,
+    max_age_seconds: int = 72 * 3600,
+    now_ts: float | None = None,
+) -> int:
+    """Remove unfinished chunked-upload staging directories older than 72 hours (P1 #7)."""
+    if not staging_root.is_dir():
+        return 0
+    current = now_ts if now_ts is not None else time.time()
+    removed = 0
+    for scan_dir in list(staging_root.iterdir()):
+        if not scan_dir.is_dir():
+            continue
+        for sha_dir in list(scan_dir.iterdir()):
+            if not sha_dir.is_dir():
+                continue
+            try:
+                latest_mtime = sha_dir.stat().st_mtime
+                for child in sha_dir.iterdir():
+                    latest_mtime = max(latest_mtime, child.stat().st_mtime)
+                if current - latest_mtime >= max_age_seconds:
+                    shutil.rmtree(sha_dir, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+        try:
+            if not any(scan_dir.iterdir()):
+                scan_dir.rmdir()
+        except OSError:
+            pass
+    return removed

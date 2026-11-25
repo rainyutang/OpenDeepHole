@@ -467,11 +467,16 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "mcp_server",
             "backend",
         ]
-        self.assertEqual(updater.runtime_hash_scope()["version"], 5)
+        self.assertEqual(updater.runtime_hash_scope()["version"], 6)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
         self.assertEqual(
             updater.runtime_hash_scope()["tool_dirs"],
-            ["ctags-p6.2.20260517.0-x64", "ripgrep-x86_64-pc-windows-msvc"],
+            [
+                "ctags-p6.2.20260517.0-x64",
+                "ripgrep-x86_64-pc-windows-msvc",
+                "javelin_runtime_deps",
+                "third_party/Javelin/.opencode",
+            ],
         )
         self.assertEqual(backend_agents_artifacts._agent_runtime_hash_scope(), updater.runtime_hash_scope())
 

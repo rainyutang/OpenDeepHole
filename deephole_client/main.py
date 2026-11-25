@@ -380,6 +380,22 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 else None
             ),
             execution_revision=execution_revision,
+            language=str(msg.get("language") or "c_cpp"),
+            javelin_audit_id=str(msg.get("javelin_audit_id") or ""),
+            javelin_config=(
+                msg.get("javelin_config")
+                if isinstance(msg.get("javelin_config"), dict)
+                else None
+            ),
+            has_secret_context=bool(msg.get("has_secret_context")),
+            javelin_contract_version=int(msg.get("javelin_contract_version") or 1),
+        )
+    elif cmd_type == "javelin_action":
+        await agent_server.handle_javelin_action(
+            msg,
+            config=config,
+            task_manager=task_manager,
+            reporter=reporter,
         )
     elif cmd_type == "stop":
         revision_options = (
@@ -750,10 +766,14 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 validator_result = await run_vulnerability_validation(
                     operation="catalog",
                 )
+                from deephole_client.javelin_runtime.manager import (
+                    probe_javelin_doctor_async,
+                )
                 from deephole_client.runtime_update_coordinator import (
                     get_runtime_update_coordinator,
                 )
                 runtime_update_coordinator = get_runtime_update_coordinator()
+                javelin_capability = await probe_javelin_doctor_async(config)
                 hello_msg = {
                     "type": "hello",
                     "protocol_versions": [2, 1],
@@ -767,6 +787,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "scan_code_graph_updates": True,
                         "scan_paths_probe": True,
                         "graceful_runtime_update": True,
+                        "javelin": javelin_capability,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),

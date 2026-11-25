@@ -1,10 +1,10 @@
 import type { AgentInfo, AgentValidatorMethod, KnowledgeBaseProject } from "../../types/agents";
 import type { FpReviewMethodCatalogItem } from "../../types/fpReview";
 import type { MiningEngineCatalogItem } from "../../types/mining";
-import type { ScanConfigMemory } from "../../types/scans";
+import type { JavelinScanConfig, ProjectLanguage, ScanConfigMemory } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
-import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
+import { JAVELIN_ENGINE_ID, THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
 
 import type { AgentMcpConfig } from "../../types/agents";
 import type { CreateScanInput, ScanCopyConfig } from "../../api/scans";
@@ -37,7 +37,23 @@ export function scanPathError(projectPath: string, codeScanPaths: string[], pref
   return null;
 }
 
+export function defaultJavelinScanConfig(): JavelinScanConfig {
+  return {
+    mining_strategy: "focus_area",
+    api_inventory: "",
+    bac_enabled: true,
+    memory_mode: "full",
+    additional_instructions: "",
+    runtime_testing: {
+      enabled: false,
+      test_environment_context: "",
+    },
+  };
+}
+
 export interface ScanDraft {
+  language: ProjectLanguage;
+  javelinConfig: JavelinScanConfig;
   selectedAgent: string;
   scanName: string;
   projectPath: string;
@@ -64,6 +80,8 @@ export interface ScanDraft {
 
 export function defaultScanDraft(): ScanDraft {
   return {
+    language: "c_cpp",
+    javelinConfig: defaultJavelinScanConfig(),
     miningEngines: {},
     selectedAgent: "",
     scanName: "",
@@ -115,7 +133,9 @@ export function selectScanDraft(draft: ScanDraft, context: ScanDraftContext) {
   } = draft;
   const { agents, validatorMethods, miningEngineCatalog, threatMethods, fpMethods, knowledgeProjects } = context;
   const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
-  const selectedAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
+  const baseAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
+  const javelinEnvReady = draft.language !== "java" || Boolean(selectedAgentInfo?.javelin?.supported && selectedAgentInfo?.javelin?.ready);
+  const selectedAgentReady = baseAgentReady && javelinEnvReady;
   const compatibleMethods = validatorMethods.filter((method) => method.products.includes(product.trim()));
   const selectedValidationMethod = compatibleMethods.find((method) => method.method_id === validationMethodId) || null;
   const enabledEngineCount = miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).length;
@@ -173,6 +193,22 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
   if (sourceScanId && !scanName.trim()) return "请填写新扫描的名称";
   if (!selectedAgent) return "请选择一个客户端";
   if (!selectedAgentInfo || !agentAcceptsTasks(selectedAgentInfo)) return "原客户端不可用或离线，请选择可用客户端后重试";
+  if (!selectedAgentInfo.has_explicit_model) return "所选客户端尚未配置模型，请先前往客户端配置添加并启用模型";
+  if (draft.language === "java") {
+    if (selectedAgentInfo.decommissioned_at) return "所选客户端已报废注销，无法派发新任务";
+    if (!selectedAgentInfo.javelin?.supported) return "所选客户端不支持 Javelin 引擎，请升级客户端";
+    if (!selectedAgentInfo.javelin.ready) {
+      const reason = selectedAgentInfo.javelin.blockers?.join("；") || "Node.js >= 22.5.0 / ESM 依赖 / OpenCode 未就绪";
+      return `所选客户端 Javelin 运行环境未就绪：${reason}`;
+    }
+    if (!projectPath.trim()) return "请输入 Java 项目目录绝对路径";
+    const pathError = scanPathError(projectPath, []);
+    if (pathError) return pathError;
+    if (draft.javelinConfig.mining_strategy === "api" && !draft.javelinConfig.api_inventory.trim()) {
+      return "选择逐接口 API 审查策略时必须填写 API 审查清单";
+    }
+    return null;
+  }
   if (!selectedAgentReady) return "所选客户端尚未配置模型，请先前往客户端配置添加并启用模型";
   if (scanMode === "multi_version") {
     if (multiVersions.length < 2 || multiVersions.length > 5) return "请配置 2 到 5 个版本";
@@ -217,6 +253,29 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
 }
 
 export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: MiningEngineCatalogItem[], selectedKnowledgeProject: KnowledgeBaseProject | null): CreateScanInput {
+  if (draft.language === "java") {
+    const trimmedPath = draft.projectPath.trim();
+    return {
+      agent_key: draft.selectedAgent,
+      scan_name: draft.scanName.trim(),
+      project_path: trimmedPath,
+      code_scan_path: trimmedPath,
+      code_scan_paths: [trimmedPath],
+      product: draft.product.trim(),
+      scan_mode: "custom",
+      language: "java",
+      mining_engines: [{ engine_id: JAVELIN_ENGINE_ID }],
+      javelin_config: {
+        ...draft.javelinConfig,
+        runtime_testing: {
+          enabled: Boolean(draft.javelinConfig.runtime_testing.enabled),
+          test_environment_context: draft.javelinConfig.runtime_testing.enabled
+            ? (draft.javelinConfig.runtime_testing.test_environment_context || "")
+            : "",
+        },
+      },
+    };
+  }
   const {
     selectedAgent,
     scanName,
@@ -287,6 +346,26 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
   next.fpReviewMethod = fpMethods.find((method) => method.default)?.method_id || fpMethods[0]?.method_id || "";
 
   if (copied) {
+    if (copied.language === "java" || copied.has_javelin) {
+      next.language = "java";
+      next.selectedAgent = copied.agent_key;
+      next.scanName = "";
+      next.product = copied.product || "";
+      next.projectPath = copied.project_path;
+      next.codeScanPaths = [copied.project_path];
+      next.scanMode = "custom";
+      next.javelinConfig = copied.javelin_config
+        ? {
+          ...defaultJavelinScanConfig(),
+          ...copied.javelin_config,
+          runtime_testing: {
+            enabled: Boolean(copied.javelin_config.runtime_testing?.enabled),
+            test_environment_context: "",
+          },
+        }
+        : defaultJavelinScanConfig();
+      return next;
+    }
     const mode = copied.scan_mode || "custom";
     if (!["standard", "custom", "multi_version", "quick"].includes(mode)) throw new Error("原扫描模式暂不支持复制");
     next.selectedAgent = copied.agent_key;

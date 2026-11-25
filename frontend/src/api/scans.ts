@@ -4,6 +4,8 @@ import type { MiningEngineCatalog, MiningEngineRequest } from "../types/mining";
 import type {
   HistoryPattern,
   IndexStatus,
+  JavelinScanConfig,
+  ProjectLanguage,
   ScanCodeGraphState,
   ScanMetadata,
   ScanMetadataUpdate,
@@ -74,12 +76,17 @@ export interface CreateScanInput {
     code_scan_path?: string;
     code_scan_paths?: string[];
   }>;
+  language?: ProjectLanguage;
+  javelin_config?: JavelinScanConfig;
 }
 
 type ProfileFields = "threat_analysis_enabled" | "threat_analysis_method" | "threat_analysis_generate_attack_tree" | "mining_engines" | "auto_fp_review" | "fp_review_method";
 
 export type ScanCopyConfig = Omit<CreateScanInput, ProfileFields> & {
   [K in ProfileFields]?: CreateScanInput[K] | null;
+} & {
+  has_javelin?: boolean;
+  sensitive_fields_stripped?: boolean;
 };
 
 export async function getScanCopyConfig(scanId: string, signal?: AbortSignal): Promise<ScanCopyConfig> {

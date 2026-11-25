@@ -1,7 +1,7 @@
-import type { PublicScanAccess } from "./api/client";
+import type { PublicScanAccess } from "./api/accessPolicy";
 import type { ThreatAnalysisResultTab } from "./features/threatAnalysis";
 
-export type ScanTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues" | "review_notes";
+export type ScanTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues" | "review_notes" | "coverage";
 export interface ScanRouteState {
   tab: ScanTab;
   engineId: string;
@@ -18,7 +18,7 @@ export const DEFAULT_SCAN_ROUTE: ScanRouteState = { tab: "overview", engineId: "
 const sections: Record<ScanTab, string> = {
   overview: "overview", index: "index", static: "static", threat: "threat", mining: "mining",
   validation: "validation", fp_review: "fp-review", issues: "issues",
-  review_notes: "review-notes",
+  review_notes: "review-notes", coverage: "coverage",
 };
 const threatResults: ThreatAnalysisResultTab[] = ["valueAssets", "highRiskModules", "internalNodes", "attackTrees", "moduleThreats"];
 

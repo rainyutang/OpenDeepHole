@@ -6,6 +6,41 @@ import type { MiningEngineRunStatus, MiningEngineSelection } from "./mining";
 import type { OpenCodePoolStatus } from "./modelPool";
 import type { ThreatAnalysis, ThreatAnalysisMethodSelection, ThreatAnalysisRunStatus } from "./threatAnalysis";
 
+export type ProjectLanguage = "c_cpp" | "java";
+export type JavelinMiningStrategy = "focus_area" | "api" | "file_sweep";
+export type JavelinMemoryMode = "full" | "facts_only" | "off" | "blind";
+export type JavelinStaleLevel = "live" | "offline" | "stale" | "abandoned";
+
+export interface JavelinRuntimeTestingConfig {
+  enabled: boolean;
+  test_environment_context?: string;
+}
+
+export interface JavelinScanConfig {
+  mining_strategy: JavelinMiningStrategy;
+  api_inventory: string;
+  bac_enabled: boolean;
+  memory_mode: JavelinMemoryMode;
+  additional_instructions: string;
+  runtime_testing: JavelinRuntimeTestingConfig;
+  has_secret_context?: boolean;
+}
+
+export interface JavelinScanBrief {
+  audit_id: string;
+  status: string;
+  stage: string;
+  progress: number;
+  progress_text: string;
+  mining_strategy: JavelinMiningStrategy | string;
+  execution_revision: number;
+  resumable: boolean;
+  stale_level: JavelinStaleLevel;
+  allowed_actions: string[];
+  pending_action?: Record<string, unknown> | null;
+  last_synced_at: string;
+}
+
 export type ScanItemStatus =
   | "pending"
   | "analyzing"
@@ -133,7 +168,13 @@ export interface ScanStatus extends ScanAutoResume {
 
   // Agent 信息
   agent_name?: string;
+  agent_key?: string;
   agent_online?: boolean;
+
+  language?: ProjectLanguage;
+  has_javelin?: boolean;
+  javelin_config?: JavelinScanConfig | null;
+  javelin_summary?: JavelinScanBrief | null;
 
   detail_counts?: ScanDetailCounts;
   detail_pages?: ScanDetailPages;
@@ -252,7 +293,12 @@ export interface ScanSummary extends ScanAutoResume {
   user_id?: string;
   username?: string;
   agent_name?: string;
+  agent_key?: string;
   agent_online?: boolean;
+  language?: ProjectLanguage;
+  has_javelin?: boolean;
+  javelin_config?: JavelinScanConfig | null;
+  javelin_summary?: JavelinScanBrief | null;
 }
 
 export interface ScanMetadata {

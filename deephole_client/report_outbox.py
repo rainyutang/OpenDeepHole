@@ -429,26 +429,40 @@ class ReportOutbox:
         return [str(row["dedupe_key"] or "") for row in rows]
 
     def pending_scan_executions(self, target_url: str) -> list[dict]:
-        """Identify terminal scan reports without mistaking older attempts for live work."""
+        """Identify terminal or Javelin scan reports without mistaking older attempts for live work."""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT dedupe_key, payload_json FROM pending_reports
                    WHERE target_url = ? AND blocked = 0
-                     AND (path LIKE '%/finish' OR path LIKE '%/execution-failed')
+                     AND (path LIKE '%/finish' OR path LIKE '%/execution-failed' OR path LIKE '%/javelin/%')
                    ORDER BY id""", (target_url.rstrip("/"),),
             ).fetchall()
         result = []
+        seen: set[tuple[str, int]] = set()
         for row in rows:
             parts = str(row["dedupe_key"]).split(":")
-            if len(parts) < 3 or parts[0] != "scan" or parts[2] not in {"finish", "start-failure"}:
+            if len(parts) < 3 or parts[0] != "scan" or parts[2] not in {"finish", "start-failure", "javelin"}:
                 continue
             payload = json.loads(row["payload_json"])
+            key = (parts[1], int(payload.get("execution_revision") or 0))
+            if key in seen:
+                continue
+            seen.add(key)
             result.append({
                 "scan_id": parts[1],
-                "execution_revision": int(payload.get("execution_revision") or 0),
+                "execution_revision": key[1],
                 "agent_session_id": str(payload.get("agent_session_id") or ""),
             })
         return result
+
+    def unblocked_scan_stream_count(self, target_url: str, scan_prefix: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) FROM pending_reports
+                   WHERE target_url = ? AND blocked = 0 AND stream_key LIKE ?""",
+                (target_url.rstrip("/"), f"{scan_prefix}%"),
+            ).fetchone()
+        return int(row[0] if row else 0)
 
     def close(self) -> None:
         with self._lock:

@@ -168,10 +168,17 @@ _AGENT_RUNTIME_DIRS = [
 _AGENT_TOOL_DIRS = [
     "ctags-p6.2.20260517.0-x64",
     "ripgrep-x86_64-pc-windows-msvc",
+    "javelin_runtime_deps",
+    "third_party/Javelin/.opencode",
 ]
 
 
-_AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
+_AGENT_RUNTIME_ROOT_FILES = [
+    "requirements-agent.txt",
+    "third_party/javelin.lock.json",
+    "third_party/Javelin/AGENTS.md",
+    "third_party/Javelin/apps/workbench/THIRD_PARTY_NOTICES.md",
+]
 
 
 _AGENT_ROOT_FILES = [
@@ -179,7 +186,17 @@ _AGENT_ROOT_FILES = [
     "run_agent.sh",
     "run_agent.bat",
     "requirements-agent.txt",
+    "third_party/javelin.lock.json",
+    "third_party/Javelin/AGENTS.md",
+    "third_party/Javelin/apps/workbench/THIRD_PARTY_NOTICES.md",
 ]
+
+
+_AGENT_JAVELIN_SKIP_PREFIXES = (
+    "third_party/Javelin/.opencode/tests/",
+    "third_party/Javelin/.opencode/web/dynamic-validation-observatory/public/",
+    "third_party/Javelin/.opencode/opencode.json",
+)
 
 
 _AGENT_DOWNLOAD_SKIP_DIRS = {

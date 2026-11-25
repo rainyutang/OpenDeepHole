@@ -1,0 +1,4 @@
+[submodule "third_party/Javelin"]
+	path = third_party/Javelin
+	url = https://github.com/Bmebme/Javelin.git
+	branch = feat/deephole-bridge

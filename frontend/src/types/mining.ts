@@ -34,6 +34,8 @@ export interface MiningEngineCatalogItem {
   description: string;
   fp_review: boolean;
   requires_codex: boolean;
+  languages?: string[];
+  standalone_pipeline?: boolean;
 }
 
 export interface MiningEngineCatalog {

@@ -23,7 +23,10 @@ STANDARD_PROFILE_ENGINE_IDS = (
 # Retained for quick-profile callers and backward-compatible imports.
 BUILTIN_PROFILE_ENGINE_IDS = QUICK_PROFILE_ENGINE_IDS
 # New optional workflows must not silently join legacy callers' default scans.
-OPT_IN_MINING_ENGINE_IDS = frozenset({"threat_pattern_iterative_audit"})
+OPT_IN_MINING_ENGINE_IDS = frozenset({
+    "threat_pattern_iterative_audit",
+    "javelin",
+})
 STATIC_ANALYSIS_ENGINE_IDS = frozenset({
     "static_candidate",
     "multi_version",

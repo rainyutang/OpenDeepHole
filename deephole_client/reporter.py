@@ -177,6 +177,8 @@ def _is_stale_execution_response(response: httpx.Response) -> bool:
     if response.status_code != 409:
         return False
     detail = str(_response_detail(response) or "").strip().lower()
+    if "stale execution_revision" in detail or "stale_execution_revision" in detail or "stale agent_session_id" in detail:
+        return True
     return detail.startswith("stale ") and (
         detail.endswith(" execution") or detail.endswith(" session")
     )
@@ -445,7 +447,7 @@ class Reporter:
         result["scan_executions"] = self._outbox.pending_scan_executions(self.server_url)
         for key in self._outbox.pending_dedupe_keys(self.server_url):
             parts = key.split(":")
-            if len(parts) >= 3 and parts[0] == "scan" and parts[2] == "finish":
+            if len(parts) >= 3 and parts[0] == "scan" and parts[2] in {"finish", "javelin"}:
                 if parts[1] not in result["scans"]:
                     result["scans"].append(parts[1])
             elif (
@@ -819,11 +821,13 @@ class Reporter:
 
         delivery_agent_id = self.agent_id
         path = report.path.replace("{agent_id}", delivery_agent_id)
+        req_headers = {"X-Agent-Id": delivery_agent_id} if delivery_agent_id else None
         try:
             response = await self._client.post(
                 f"{report.target_url}{path}",
                 json=report.payload,
                 params=report.query or None,
+                headers=req_headers,
                 timeout=report.timeout_seconds,
             )
             if 200 <= response.status_code < 300:
@@ -860,6 +864,18 @@ class Reporter:
             delay = None
             if retryable:
                 delay = min(60.0, 2.0 ** min(report.attempts, 6))
+                if response.status_code == 429:
+                    detail_obj = _response_detail(response)
+                    if isinstance(detail_obj, dict) and detail_obj.get("retry_after_ms"):
+                        try:
+                            delay = max(delay, float(detail_obj["retry_after_ms"]) / 1000.0)
+                        except (TypeError, ValueError):
+                            pass
+                    elif response.headers.get("Retry-After"):
+                        try:
+                            delay = max(delay, float(response.headers["Retry-After"]))
+                        except (TypeError, ValueError):
+                            pass
                 if is_task_report and response.status_code == 404:
                     # Keep evidence queued while spreading persistent failures out.
                     # Other failures retain the shorter recovery window below.
@@ -2738,6 +2754,257 @@ class Reporter:
             response.raise_for_status()
         except Exception as e:
             print(f"Warning: failed to signal FP review finish: {e}")
+
+    # -- Javelin 5-channel reporting & transient secret_context --
+
+    def _javelin_headers(self) -> dict[str, str]:
+        return {"X-Agent-Id": self.agent_id} if self.agent_id else {}
+
+    async def report_javelin_state(
+        self,
+        scan_id: str,
+        *,
+        execution_revision: int,
+        state: dict[str, Any],
+        wait_for_delivery: bool = False,
+    ) -> None:
+        if self.dry_run:
+            return
+        from backend.models import JAVELIN_CONTRACT_VERSION
+
+        payload = {
+            "contract_version": JAVELIN_CONTRACT_VERSION,
+            "execution_revision": execution_revision,
+            "agent_session_id": self.agent_session_id,
+            "state": state,
+        }
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}:javelin:state",
+            dedupe_key=f"scan:{scan_id}:javelin:state:rev:{execution_revision}",
+            path=f"/api/agent/scan/{scan_id}/javelin/state",
+            payload=payload,
+            timeout=20.0,
+            wait_for_delivery=wait_for_delivery,
+        )
+
+    async def report_javelin_events(
+        self,
+        scan_id: str,
+        *,
+        execution_revision: int,
+        events: list[dict[str, Any]],
+    ) -> None:
+        if self.dry_run or not events:
+            return
+        from backend.models import JAVELIN_CONTRACT_VERSION
+
+        first_seq = int(events[0].get("sequence") or 0)
+        last_seq = int(events[-1].get("sequence") or first_seq)
+        payload = {
+            "contract_version": JAVELIN_CONTRACT_VERSION,
+            "execution_revision": execution_revision,
+            "agent_session_id": self.agent_session_id,
+            "events": events,
+        }
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}:javelin:events",
+            dedupe_key=f"scan:{scan_id}:javelin:events:rev:{execution_revision}:seq:{first_seq}-{last_seq}",
+            path=f"/api/agent/scan/{scan_id}/javelin/events",
+            payload=payload,
+            timeout=20.0,
+        )
+
+    async def report_javelin_task_board(
+        self,
+        scan_id: str,
+        *,
+        execution_revision: int,
+        tasks: list[dict[str, Any]],
+        board_meta: dict[str, Any] | None = None,
+    ) -> None:
+        if self.dry_run:
+            return
+        from backend.models import JAVELIN_CONTRACT_VERSION
+
+        payload: dict[str, Any] = {
+            "contract_version": JAVELIN_CONTRACT_VERSION,
+            "execution_revision": execution_revision,
+            "agent_session_id": self.agent_session_id,
+            "tasks": tasks,
+        }
+        if board_meta is not None:
+            payload["board_meta"] = board_meta
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}:javelin:board",
+            dedupe_key=f"scan:{scan_id}:javelin:board:rev:{execution_revision}",
+            path=f"/api/agent/scan/{scan_id}/javelin/task-board",
+            payload=payload,
+            timeout=30.0,
+        )
+
+    async def report_javelin_artifacts(
+        self,
+        scan_id: str,
+        *,
+        execution_revision: int,
+        findings: list[dict[str, Any]],
+        exchanges: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if self.dry_run or (not findings and not exchanges):
+            return
+        from backend.models import JAVELIN_CONTRACT_VERSION
+
+        payload = {
+            "contract_version": JAVELIN_CONTRACT_VERSION,
+            "execution_revision": execution_revision,
+            "agent_session_id": self.agent_session_id,
+            "findings": findings,
+            "exchanges": exchanges or [],
+        }
+        digest = self._report_hash(payload)[:16]
+        await self._queue_post(
+            stream_key=f"scan:{scan_id}:javelin:artifacts",
+            dedupe_key=f"scan:{scan_id}:javelin:artifacts:rev:{execution_revision}:{digest}",
+            path=f"/api/agent/scan/{scan_id}/javelin/artifacts",
+            payload=payload,
+            timeout=30.0,
+        )
+
+    async def report_javelin_report_bytes(
+        self,
+        scan_id: str,
+        *,
+        execution_revision: int,
+        report_id: str,
+        report_kind: str,
+        name: str,
+        format: str = "markdown",
+        raw_bytes: bytes,
+        sealed_at: str = "",
+        wait_for_delivery: bool = False,
+    ) -> None:
+        if self.dry_run:
+            return
+        import base64
+        from backend.models import JAVELIN_CONTRACT_VERSION
+
+        chunk_cap = 2 * 1024 * 1024
+        blob_sha = hashlib.sha256(raw_bytes).hexdigest()
+        stream = f"scan:{scan_id}:javelin:reports"
+        if len(raw_bytes) <= chunk_cap:
+            payload = {
+                "contract_version": JAVELIN_CONTRACT_VERSION,
+                "execution_revision": execution_revision,
+                "agent_session_id": self.agent_session_id,
+                "report_id": report_id,
+                "report_kind": report_kind,
+                "name": name,
+                "format": format,
+                "sealed_at": sealed_at,
+                "blob_sha256": blob_sha,
+                "data_b64": base64.b64encode(raw_bytes).decode("ascii"),
+            }
+            await self._queue_post(
+                stream_key=stream,
+                dedupe_key=f"scan:{scan_id}:javelin:report:{report_id}:{blob_sha[:16]}",
+                path=f"/api/agent/scan/{scan_id}/javelin/report",
+                payload=payload,
+                timeout=45.0,
+                wait_for_delivery=wait_for_delivery,
+            )
+            return
+
+        total_chunks = (len(raw_bytes) + chunk_cap - 1) // chunk_cap
+        for idx in range(total_chunks):
+            piece = raw_bytes[idx * chunk_cap : (idx + 1) * chunk_cap]
+            chunk_payload = {
+                "contract_version": JAVELIN_CONTRACT_VERSION,
+                "execution_revision": execution_revision,
+                "agent_session_id": self.agent_session_id,
+                "blob_sha256": blob_sha,
+                "chunk_index": idx,
+                "total_chunks": total_chunks,
+                "data_b64": base64.b64encode(piece).decode("ascii"),
+            }
+            await self._queue_post(
+                stream_key=stream,
+                dedupe_key=f"scan:{scan_id}:javelin:report-chunk:{blob_sha[:16]}:{idx}",
+                path=f"/api/agent/scan/{scan_id}/javelin/report/chunk",
+                payload=chunk_payload,
+                timeout=45.0,
+                wait_for_delivery=wait_for_delivery,
+            )
+
+        commit_payload = {
+            "contract_version": JAVELIN_CONTRACT_VERSION,
+            "execution_revision": execution_revision,
+            "agent_session_id": self.agent_session_id,
+            "report_id": report_id,
+            "report_kind": report_kind,
+            "name": name,
+            "format": format,
+            "sealed_at": sealed_at,
+            "staged": True,
+            "blob_sha256": blob_sha,
+            "total_chunks": total_chunks,
+        }
+        await self._queue_post(
+            stream_key=stream,
+            dedupe_key=f"scan:{scan_id}:javelin:report-commit:{report_id}:{blob_sha[:16]}",
+            path=f"/api/agent/scan/{scan_id}/javelin/report",
+            payload=commit_payload,
+            timeout=45.0,
+            wait_for_delivery=wait_for_delivery,
+        )
+
+    async def fetch_javelin_secret_context(self, scan_id: str, *, execution_revision: int) -> dict[str, Any]:
+        if self.dry_run:
+            return {"ok": True, "has_secret": False, "secret_context": None}
+        resp = await self._client.get(
+            f"{self.server_url}/api/agent/scan/{scan_id}/javelin/secret-context",
+            params={
+                "execution_revision": execution_revision,
+                "agent_session_id": self.agent_session_id,
+            },
+            headers=self._javelin_headers(),
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def ack_javelin_secret_context(self, scan_id: str, *, execution_revision: int) -> None:
+        if self.dry_run:
+            return
+        resp = await self._client.post(
+            f"{self.server_url}/api/agent/scan/{scan_id}/javelin/secret-context/ack",
+            json={
+                "execution_revision": execution_revision,
+                "agent_session_id": self.agent_session_id,
+            },
+            headers=self._javelin_headers(),
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+
+    async def flush_javelin_streams(self, scan_id: str, timeout: float = 20.0) -> bool:
+        """Drain all scan:<scan_id>:javelin:* Outbox streams before emitting /finish."""
+        if self.dry_run or self._outbox is None:
+            return True
+        prefix = f"scan:{scan_id}:javelin:"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.5, float(timeout))
+        while True:
+            self._wake_outbox()
+            remaining = await asyncio.to_thread(
+                self._outbox.unblocked_scan_stream_count,
+                self.server_url,
+                prefix,
+            )
+            if remaining == 0:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
 
     async def flush_for_restart(self, timeout: float = 30.0) -> bool:
         """Flush buffered reports and wait for unblocked outbox rows before exec restart."""

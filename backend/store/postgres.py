@@ -33,6 +33,7 @@ from .sqlite import (
     _retire_agent_opencode_config,
     STORAGE_COLUMNS,
 )
+from .javelin import row_has_javelin_engine
 from .summaries import summary_triggers
 from .deletion import deletion_triggers
 
@@ -624,6 +625,7 @@ def _sqlite_schema() -> list[str]:
     portable: list[str] = []
     for statement in ddl:
         statement = _AUTOINCREMENT.sub("BIGSERIAL PRIMARY KEY", statement)
+        statement = re.sub(r"\bBLOB\b", "BYTEA", statement, flags=re.IGNORECASE)
         statement = statement.replace(
             "json_extract(metadata_json, '$.task_name')",
             "(CAST(metadata_json AS jsonb) ->> 'task_name')",
@@ -791,7 +793,24 @@ class PostgresScanStore(SqliteScanStore):
                 connection.execute(statement)
             for table, columns in STORAGE_COLUMNS.items():
                 for column, definition in columns.items():
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+                    pg_def = re.sub(r"\bBLOB\b", "BYTEA", definition, flags=re.IGNORECASE)
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {pg_def}")
+            javelin_backfill = connection.execute(
+                "SELECT status FROM schema_migrations WHERE name = 'javelin-language-backfill-v1'"
+            ).fetchone()
+            if javelin_backfill is None or javelin_backfill["status"] != "complete":
+                for srow in connection.execute(
+                    "SELECT scan_id, mining_engines_json FROM scans WHERE language = 'c_cpp'"
+                ).fetchall():
+                    if row_has_javelin_engine(srow["mining_engines_json"]):
+                        connection.execute(
+                            "UPDATE scans SET language = 'java' WHERE scan_id = %s",
+                            (srow["scan_id"],),
+                        )
+                connection.execute(
+                    "INSERT INTO schema_migrations (name, status) VALUES ('javelin-language-backfill-v1', 'complete') "
+                    "ON CONFLICT(name) DO UPDATE SET status = 'complete'"
+                )
             for statement in deferred_indexes:
                 connection.execute(statement)
             # Build the partial summary index immediately on empty databases;
@@ -1434,10 +1453,10 @@ class PostgresScanStore(SqliteScanStore):
             datetime.now(timezone.utc) - timedelta(seconds=max(1, stale_seconds))
         ).isoformat()
         with self._lock:
-            rows = self._conn.execute(
+            candidates = self._conn.execute(
                 """\
-                UPDATE scans AS scan
-                SET status = 'cancelled', error_message = ?, current_candidate = NULL
+                SELECT scan.scan_id, scan.mining_engines_json
+                FROM scans AS scan
                 WHERE scan.status IN ('pending', 'analyzing', 'auditing')
                   AND scan.agent_id <> ''
                   AND NOT EXISTS (
@@ -1445,9 +1464,27 @@ class PostgresScanStore(SqliteScanStore):
                       WHERE session.agent_id = scan.agent_id
                         AND session.last_seen > ?
                   )
+                """,
+                (cutoff,),
+            ).fetchall()
+            eligible_ids = [
+                str(r["scan_id"])
+                for r in candidates
+                if not row_has_javelin_engine(r["mining_engines_json"])
+            ]
+            if not eligible_ids:
+                self._conn.commit()
+                return []
+            id_placeholders = ", ".join("?" for _ in eligible_ids)
+            rows = self._conn.execute(
+                f"""\
+                UPDATE scans AS scan
+                SET status = 'cancelled', error_message = ?, current_candidate = NULL
+                WHERE scan.status IN ('pending', 'analyzing', 'auditing')
+                  AND scan.scan_id IN ({id_placeholders})
                 RETURNING scan.scan_id, scan.opencode_pool
                 """,
-                (error_message, cutoff),
+                (error_message, *eligible_ids),
             ).fetchall()
             scan_ids = [str(row["scan_id"]) for row in rows]
             if scan_ids:

@@ -9,7 +9,12 @@ source of truth for defaults and supported parameters.
 
 OpenDeepHole (Web UI name: DeepHole 2.0) audits C/C++ source using static
 candidates, threat analysis, model-backed auditing, false-positive review, and
-optional product-specific validation.
+optional product-specific validation. When `javelin.enabled: true` is configured,
+it also supports Java/Web source auditing via the `third_party/Javelin` submodule
+(`deephole_client/javelin_runtime/`), keeping `deephole_client/scanner.py`
+untouched for C/C++ scans and persisting 5-channel Javelin telemetry, task board,
+findings, and byte-exact sealed reports into the backend database for full
+offline viewing via Shadow DOM (`frontend/src/features/javelinDetail/`).
 
 - **Frontend**: React, TypeScript, Vite and Tailwind CSS; builds to `backend/static/`.
   BrowserRouter routes and backend HTML fallback are described in
@@ -163,6 +168,8 @@ Detailed API parameters, return fields, lifecycle and retry contracts live in
 ## Development and changes
 
 ```bash
+git submodule update --init --recursive
+bash scripts/prepare_javelin_runtime_deps.sh
 python3 -m pip install -r requirements.txt -r requirements-agent.txt
 python3 -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 python3 -m deephole_client.main --server http://localhost:8000

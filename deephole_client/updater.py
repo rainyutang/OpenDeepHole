@@ -30,9 +30,19 @@ RUNTIME_DIRS = (
 RUNTIME_TOOL_DIRS = (
     "ctags-p6.2.20260517.0-x64",
     "ripgrep-x86_64-pc-windows-msvc",
+    "javelin_runtime_deps",
+    "third_party/Javelin/.opencode",
 )
 RUNTIME_ROOT_FILES = (
     "requirements-agent.txt",
+    "third_party/javelin.lock.json",
+    "third_party/Javelin/AGENTS.md",
+    "third_party/Javelin/apps/workbench/THIRD_PARTY_NOTICES.md",
+)
+JAVELIN_SKIP_PREFIXES = (
+    "third_party/Javelin/.opencode/tests/",
+    "third_party/Javelin/.opencode/web/dynamic-validation-observatory/public/",
+    "third_party/Javelin/.opencode/opencode.json",
 )
 SKIP_DIRS = {
     "__pycache__",
@@ -50,17 +60,27 @@ def runtime_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _should_skip(path: Path) -> bool:
-    return path.suffix in SKIP_SUFFIXES or any(part in SKIP_DIRS for part in path.parts)
+def _should_skip(path: Path, *, root: Path | None = None) -> bool:
+    rel_path = path.relative_to(root) if root is not None else path
+    rel_posix = rel_path.as_posix()
+    if any(rel_posix == prefix.rstrip("/") or rel_posix.startswith(prefix) for prefix in JAVELIN_SKIP_PREFIXES):
+        return True
+    if rel_path.suffix in SKIP_SUFFIXES:
+        return True
+    effective_skip_dirs = SKIP_DIRS
+    if rel_posix.startswith("javelin_runtime_deps/"):
+        effective_skip_dirs = SKIP_DIRS - {"static", "system_skills"}
+    return any(part in effective_skip_dirs for part in rel_path.parts)
 
 
 def runtime_hash_scope() -> dict[str, Any]:
     return {
-        "version": 5,
+        "version": 6,
         "dirs": list(RUNTIME_DIRS),
         "tool_dirs": list(RUNTIME_TOOL_DIRS),
         "root_files": list(RUNTIME_ROOT_FILES),
         "skip_dirs": sorted(SKIP_DIRS),
+        "javelin_skip_prefixes": list(JAVELIN_SKIP_PREFIXES),
         "skip_suffixes": sorted(SKIP_SUFFIXES),
     }
 
@@ -74,7 +94,7 @@ def _iter_runtime_files(root: Path):
         # (Windows Path sorting is case-insensitive, Linux is case-sensitive).
         entries = []
         for file_path in dir_path.rglob("*"):
-            if file_path.is_file() and not _should_skip(file_path):
+            if file_path.is_file() and not _should_skip(file_path, root=root):
                 arcname = file_path.relative_to(root).as_posix()
                 entries.append((arcname, file_path))
         entries.sort(key=lambda e: e[0])
@@ -82,7 +102,7 @@ def _iter_runtime_files(root: Path):
     for filename in RUNTIME_ROOT_FILES:
         file_path = root / filename
         if file_path.is_file():
-            yield filename, file_path
+            yield Path(filename).as_posix(), file_path
 
 
 def compute_runtime_hash(root: Path | None = None) -> str:
@@ -507,22 +527,24 @@ def _install_update_files(tmp_root: Path, root: Path, archive_paths: list[str]) 
 
 
 def _target_roots_for_archive(archive_paths: list[str]) -> set[str]:
-    managed_dirs = {*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS}
+    managed_dirs = tuple((*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS))
     managed_files = set(RUNTIME_ROOT_FILES)
     roots: set[str] = set()
     for arcname in archive_paths:
-        first, sep, _rest = arcname.partition("/")
-        if sep and first in managed_dirs:
-            roots.add(first)
-        elif not sep and first in managed_files:
-            roots.add(first)
+        if arcname in managed_files:
+            roots.add(arcname)
+            continue
+        for managed_dir in managed_dirs:
+            if arcname.startswith(f"{managed_dir}/"):
+                roots.add(managed_dir)
+                break
     return roots
 
 
 def _remove_stale_runtime_files(root: Path, desired: set[str], target_roots: set[str]) -> None:
     managed_dirs = {*RUNTIME_DIRS, *RUNTIME_TOOL_DIRS}
     for target in sorted(target_roots):
-        target_path = root / target
+        target_path = root / Path(target)
         if target in RUNTIME_ROOT_FILES:
             if target not in desired and target_path.is_file():
                 target_path.unlink()
@@ -544,7 +566,7 @@ def _prune_empty_runtime_dirs(root: Path, target_roots: set[str]) -> None:
     for target in sorted(target_roots):
         if target not in managed_dirs:
             continue
-        target_path = root / target
+        target_path = root / Path(target)
         if not target_path.is_dir():
             continue
         dirs = [path for path in target_path.rglob("*") if path.is_dir()]

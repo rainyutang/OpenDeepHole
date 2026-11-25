@@ -147,6 +147,12 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
     """Cancel a running scan once its owning agent is offline past the grace period."""
     if not scan.agent_name:
         return scan
+    from backend.models import has_javelin_engine
+    if getattr(scan, "has_javelin", False) or has_javelin_engine(scan):
+        from backend.agents.directory import is_agent_name_online
+        if not getattr(get_scan_store(), "distributed", False):
+            scan.agent_online = is_agent_name_online(scan.agent_name)
+        return scan
 
     agent_online, cancelled = _cancel_scan_if_agent_offline(
         scan_id, scan.agent_name, scan.status
@@ -163,6 +169,11 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
 def reconcile_offline_agent_summary_state(summary: ScanSummary) -> ScanSummary:
     """Summary-level variant of reconcile that avoids loading the full ScanStatus."""
     if not summary.agent_name:
+        return summary
+    if getattr(summary, "has_javelin", False):
+        from backend.agents.directory import is_agent_name_online
+        if not getattr(get_scan_store(), "distributed", False):
+            summary.agent_online = is_agent_name_online(summary.agent_name)
         return summary
 
     agent_online, cancelled = _cancel_scan_if_agent_offline(
@@ -184,6 +195,12 @@ async def reconcile_offline_agent_scan_state_async(scan_id: str, scan: ScanStatu
         return reconcile_offline_agent_scan_state(scan_id, scan)
     if not scan.agent_name:
         return scan
+    from backend.models import has_javelin_engine
+    if getattr(scan, "has_javelin", False) or has_javelin_engine(scan):
+        from backend.agents.directory import is_agent_name_online
+        if not getattr(get_scan_store(), "distributed", False):
+            scan.agent_online = is_agent_name_online(scan.agent_name)
+        return scan
 
     agent_online, cancelled = await _cancel_scan_if_agent_offline_async(
         scan_id, scan.agent_name, scan.status
@@ -202,6 +219,11 @@ async def reconcile_offline_agent_summary_state_async(summary: ScanSummary) -> S
     if reconcile_offline_agent_summary_state is not _DEFAULT_RECONCILE_OFFLINE_AGENT_SUMMARY_STATE:
         return reconcile_offline_agent_summary_state(summary)
     if not summary.agent_name:
+        return summary
+    if getattr(summary, "has_javelin", False):
+        from backend.agents.directory import is_agent_name_online
+        if not getattr(get_scan_store(), "distributed", False):
+            summary.agent_online = is_agent_name_online(summary.agent_name)
         return summary
 
     agent_online, cancelled = await _cancel_scan_if_agent_offline_async(
@@ -404,6 +426,13 @@ async def _recover_missing_agent_work(
                 scan_id,
             )
             continue
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
+        if meta is None:
+            continue
+        from backend.models import has_javelin_engine
+        if has_javelin_engine(meta):
+            await run_store_call(store, "mark_missing_javelin_scan_interrupted", scan_id)
+            continue
         previous_session = str(row.get("execution_agent_session_id") or "")
         revision = await run_store_call(
             store,
@@ -416,9 +445,6 @@ async def _recover_missing_agent_work(
             expected_revision=int(row.get("execution_revision") or 0),
         )
         if revision is None:
-            continue
-        meta = await run_store_call(store, "get_scan_meta", scan_id)
-        if meta is None:
             continue
         from backend.scans.continuation import _continue_scan
 

@@ -44,6 +44,9 @@ git_history:
 threat_analysis:
   enabled: true  # 是否运行威胁分析阶段
 
+javelin:
+  enabled: false  # 默认关闭；设为 true 时启用 Java (Javelin) 漏洞挖掘引擎（也可通过环境变量 OPENDEEPHOLE_JAVELIN_ENABLED=1 开启）
+
 # 扫描知识库连接由服务端统一维护，用户创建扫描时只选择项目。
 # projects_tool 用于“检测并拉取项目”；set_project_tool 仅用于从模型工具集中屏蔽，平台不会调用它。
 knowledge_base:

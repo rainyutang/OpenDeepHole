@@ -8,6 +8,7 @@ import type { MiningEngineCatalogItem } from "../../types/mining";
 import type { ScanConfigMemory } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
+import { JAVELIN_ENGINE_ID } from "../../miningEngines";
 import {
   emptyMemory,
   agentAcceptsTasks,
@@ -23,6 +24,8 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
   const {
     draft,
     setDraft,
+    setLanguage,
+    setJavelinConfig,
     setSelectedAgent,
     setScanName,
     setProjectPath,
@@ -47,6 +50,8 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     setReviewNoteIds,
   } = useScanDraft();
   const {
+    language,
+    javelinConfig,
     selectedAgent,
     scanName,
     projectPath,
@@ -85,7 +90,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [agentConfigLoading, setAgentConfigLoading] = useState(false);
   const copiedAgentInitialization = useRef<string | null>(null);
-  const [copiedCapabilities, setCopiedCapabilities] = useState({ knowledge: false, validation: false });
+  const [copiedCapabilities, setCopiedCapabilities] = useState({ knowledge: false, validation: false, sensitiveStripped: false });
 
   const [knowledgeProjects, setKnowledgeProjects] = useState<KnowledgeBaseProject[]>([]);
 
@@ -129,7 +134,11 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
 
         copiedAgentInitialization.current = copied.agent_key;
 
-        setCopiedCapabilities({ knowledge: copied.knowledge_base?.enabled ?? false, validation: copied.vulnerability_validation?.enabled ?? false });
+        setCopiedCapabilities({
+          knowledge: copied.knowledge_base?.enabled ?? false,
+          validation: copied.vulnerability_validation?.enabled ?? false,
+          sensitiveStripped: Boolean(copied.sensitive_fields_stripped),
+        });
         const knowledge = copied.knowledge_base;
 
         setKnowledgeProjects(knowledge?.project_id ? [{ id: knowledge.project_id, name: knowledge.project_name, path: "", current: false }] : []);
@@ -251,7 +260,14 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     } finally { setSubmitting(false); }
   };
 
+  const javelinAvailable = language === "java" || miningEngineCatalog.some((engine) => engine.engine_id === JAVELIN_ENGINE_ID);
+
   return {
+    language,
+    setLanguage,
+    javelinConfig,
+    setJavelinConfig,
+    javelinAvailable,
     setSelectedAgent,
     setScanName,
     setProjectPath,

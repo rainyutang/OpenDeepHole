@@ -184,6 +184,46 @@ async def _enrich_scan_summaries(
         s.human_confirmed_count = metrics.human_confirmed_count
         s.suspected_issue_count = metrics.suspected_issue_count
         s.confirmed_vulnerability_count = metrics.human_confirmed_issue_count
+
+    javelin_summaries = [s for s in summaries if s.has_javelin]
+    if javelin_summaries:
+        from backend.scans.javelin_queries import build_javelin_scan_brief_from_state
+
+        javelin_states, javelin_agents = await asyncio.gather(
+            run_store_call(
+                store,
+                "get_javelin_audit_states_by_scans",
+                [s.scan_id for s in javelin_summaries],
+            ),
+            run_store_call(
+                store,
+                "get_agents_javelin_metadata_batch",
+                [s.agent_key for s in javelin_summaries if s.agent_key],
+            ),
+        )
+        live_by_key = {
+            a.agent_key: a
+            for aid, a in get_runtime().agents.registered_agents.items()
+            if a.agent_key and aid in get_runtime().agents.agent_ws
+        }
+        for s in javelin_summaries:
+            st = javelin_states.get(s.scan_id)
+            meta_info = javelin_agents.get(s.agent_key, {})
+            live_agent = live_by_key.get(s.agent_key)
+            cap = (live_agent.javelin if live_agent else None) or meta_info.get("capability")
+            decommissioned = bool(meta_info.get("decommissioned_at"))
+            agent_online = False if decommissioned else (bool(live_agent) or bool(s.agent_online))
+            agent_ready = True if cap is None else bool(cap.ready)
+            s.agent_online = agent_online
+            s.javelin_summary = build_javelin_scan_brief_from_state(
+                st,
+                agent_online=agent_online,
+                agent_ready=agent_ready,
+                agent_decommissioned=decommissioned,
+            )
+            s.can_continue = bool(
+                s.javelin_summary and "recover" in s.javelin_summary.allowed_actions
+            )
     return summaries
 
 
@@ -292,6 +332,28 @@ async def get_scan_status(
     _hydrate_fp_review_method_selection(scan)
     if meta is not None:
         _apply_scan_metadata(scan, meta)
+    from backend.models import has_javelin_engine
+    if meta is not None and has_javelin_engine(meta):
+        from backend.scans.javelin_lifecycle import resolve_javelin_agent_liveness
+        from backend.scans.javelin_queries import build_javelin_scan_brief_from_state
+
+        st = await run_store_call(store, "get_javelin_audit_state", scan_id)
+        _aid, j_online, j_ready, j_decomm = await resolve_javelin_agent_liveness(
+            meta.agent_key, meta.agent_name, meta.user_id
+        )
+        scan.has_javelin = True
+        scan.language = meta.language
+        scan.javelin_config = meta.javelin_config
+        scan.agent_online = j_online
+        scan.javelin_summary = build_javelin_scan_brief_from_state(
+            st,
+            agent_online=j_online,
+            agent_ready=j_ready,
+            agent_decommissioned=j_decomm,
+        )
+        scan.can_continue = bool(
+            scan.javelin_summary and "recover" in scan.javelin_summary.allowed_actions
+        )
     # This permission belongs to the requesting user, never to the cached scan.
     by_engine = (
         await run_store_call(store, "get_threat_pattern_audit_counts_by_engine", scan_id)
@@ -461,6 +523,28 @@ async def get_scan_overview_v2(
     _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
     _apply_scan_metadata(scan, meta)
+    from backend.models import has_javelin_engine
+    if has_javelin_engine(meta):
+        from backend.scans.javelin_lifecycle import resolve_javelin_agent_liveness
+        from backend.scans.javelin_queries import build_javelin_scan_brief_from_state
+
+        st = await run_store_call(store, "get_javelin_audit_state", scan_id)
+        _aid, j_online, j_ready, j_decomm = await resolve_javelin_agent_liveness(
+            meta.agent_key, meta.agent_name, meta.user_id
+        )
+        scan.has_javelin = True
+        scan.language = meta.language
+        scan.javelin_config = meta.javelin_config
+        scan.agent_online = j_online
+        scan.javelin_summary = build_javelin_scan_brief_from_state(
+            st,
+            agent_online=j_online,
+            agent_ready=j_ready,
+            agent_decommissioned=j_decomm,
+        )
+        scan.can_continue = bool(
+            scan.javelin_summary and "recover" in scan.javelin_summary.allowed_actions
+        )
     payload = scan.model_dump(mode="python")
     reconciled_engine_runs = _reconcile_pattern_engine_runs(
         scan.mining_engine_runs,
