@@ -447,7 +447,7 @@ test("automatic resume switch is visible in fixed modes and can be disabled", as
   assert.equal(submissions[0].auto_resume_enabled, false);
 });
 
-test("compact threat analysis attack-tree toggle appears only in custom mode, unchecks threat_audit, and round-trips on copy", async () => {
+test("attack-tree card appears right below vulnerability validation for standard mode and custom compact threat analysis, unchecks threat_audit, and round-trips on copy", async () => {
   const handleRequest = (config) => {
     if (config.url === "/api/threat-analysis-methods") return { methods: [
       { method_id: "opencode_lightweight_threat_analysis", label: "Default threat" },
@@ -459,9 +459,43 @@ test("compact threat analysis attack-tree toggle appears only in custom mode, un
     ] };
     return undefined;
   };
+  const cardHeadings = (root) => root.root.findAllByType("h2").map((node) => content(node));
   const { root, submissions } = await mount({ sourceScanId: "", handleRequest });
-  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden in standard mode");
+  const treeToggle = () => root.root.findByProps({ "aria-label": "生成攻击树" });
 
+  // Visible in standard mode directly below 漏洞验证, defaulting to false.
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 1, "shown once in standard mode");
+  assert.equal(treeToggle().props["aria-checked"], false, "defaults to disabled in standard mode");
+  const standardHeadings = cardHeadings(root);
+  assert.equal(
+    standardHeadings.indexOf("生成攻击树"),
+    standardHeadings.indexOf("漏洞验证") + 1,
+    "attack-tree card sits directly below vulnerability validation in standard mode",
+  );
+
+  // Toggling on and submitting in standard mode sends true.
+  await act(async () => root.root.findByProps({ placeholder: "请输入产品名称" }).props.onChange({ target: { value: "Compact product" } }));
+  await act(async () => root.root.findByProps({ placeholder: "/path/to/project" }).props.onChange({ target: { value: "/repo/compact" } }));
+  await submit(root);
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].scan_mode, "standard");
+  assert.equal(submissions[0].threat_analysis_generate_attack_tree, false);
+
+  await act(async () => treeToggle().props.onClick());
+  assert.equal(treeToggle().props["aria-checked"], true);
+  await submit(root);
+  assert.equal(submissions.length, 2);
+  assert.equal(submissions[1].scan_mode, "standard");
+  assert.equal(submissions[1].threat_analysis_generate_attack_tree, true);
+  await act(async () => treeToggle().props.onClick());
+  assert.equal(treeToggle().props["aria-checked"], false);
+
+  // Hidden in multi-version mode.
+  const multiVersion = root.root.findAllByType("label").find((item) => content(item) === "多版本测试模式");
+  await act(async () => multiVersion.findByType("input").props.onChange());
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden in multi-version mode");
+
+  // Custom mode: hidden for non-compact method, shown below 漏洞验证 for compact method.
   const custom = root.root.findAllByType("label").find((item) => content(item) === "自定义模式");
   await act(async () => custom.findByType("input").props.onChange());
   assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden for non-compact method");
@@ -473,9 +507,22 @@ test("compact threat analysis attack-tree toggle appears only in custom mode, un
   const compactRadio = root.root.findAllByType("label")
     .find((item) => content(item).includes("DeepHole精简威胁分析")).findByType("input");
   await act(async () => compactRadio.props.onChange());
-  const treeToggle = () => root.root.findByProps({ "aria-label": "生成攻击树" });
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 1, "shown once in custom compact mode");
+  const customHeadings = cardHeadings(root);
+  assert.equal(
+    customHeadings.indexOf("生成攻击树"),
+    customHeadings.indexOf("漏洞验证") + 1,
+    "attack-tree card sits directly below vulnerability validation in custom mode too",
+  );
   assert.equal(treeToggle().props["aria-checked"], false, "defaults to disabled in custom mode");
   assert.equal(threatAuditBox().props.checked, false, "switching to compact method with default no-tree unchecks threat_audit");
+
+  // Turning off threat analysis in custom mode hides the card again.
+  const threatToggle = () => root.root.findByProps({ "aria-label": "启用威胁分析" });
+  await act(async () => threatToggle().props.onClick());
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden when threat analysis is disabled");
+  await act(async () => threatToggle().props.onClick());
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 1, "restored when threat analysis is re-enabled");
 
   await act(async () => threatAuditBox().props.onChange({ target: { checked: true } }));
   assert.equal(threatAuditBox().props.checked, true);
@@ -485,12 +532,65 @@ test("compact threat analysis attack-tree toggle appears only in custom mode, un
   assert.equal(treeToggle().props["aria-checked"], false);
   assert.equal(threatAuditBox().props.checked, false, "disabling attack tree unchecks threat_audit");
 
-  await act(async () => root.root.findByProps({ placeholder: "请输入产品名称" }).props.onChange({ target: { value: "Compact product" } }));
-  await act(async () => root.root.findByProps({ placeholder: "/path/to/project" }).props.onChange({ target: { value: "/repo/compact" } }));
   await submit(root);
-  assert.equal(submissions.length, 1);
-  assert.equal(submissions[0].threat_analysis_method, "deephole_compact_threat_analysis");
-  assert.equal(submissions[0].threat_analysis_generate_attack_tree, false);
+  assert.equal(submissions.length, 3);
+  assert.equal(submissions[2].threat_analysis_method, "deephole_compact_threat_analysis");
+  assert.equal(submissions[2].threat_analysis_generate_attack_tree, false);
+
+  const copiedStandardEnabled = await mount({
+    source: fixture({
+      scan_mode: "standard",
+      threat_analysis_enabled: null,
+      threat_analysis_method: null,
+      threat_analysis_generate_attack_tree: true,
+      mining_engines: null,
+      auto_fp_review: null,
+      fp_review_method: null,
+    }),
+    handleRequest,
+  });
+  assert.equal(copiedStandardEnabled.root.root.findByProps({ "aria-label": "生成攻击树" }).props["aria-checked"], true);
+  await fillName(copiedStandardEnabled.root, "Copied standard with-tree");
+  await submit(copiedStandardEnabled.root);
+  assert.equal(copiedStandardEnabled.submissions.length, 1);
+  assert.equal(copiedStandardEnabled.submissions[0].scan_mode, "standard");
+  assert.equal(copiedStandardEnabled.submissions[0].threat_analysis_generate_attack_tree, true);
+
+  const copiedStandardDisabled = await mount({
+    source: fixture({
+      scan_mode: "standard",
+      threat_analysis_enabled: null,
+      threat_analysis_method: null,
+      threat_analysis_generate_attack_tree: false,
+      mining_engines: null,
+      auto_fp_review: null,
+      fp_review_method: null,
+    }),
+    handleRequest,
+  });
+  assert.equal(copiedStandardDisabled.root.root.findByProps({ "aria-label": "生成攻击树" }).props["aria-checked"], false);
+  await fillName(copiedStandardDisabled.root, "Copied standard no-tree");
+  await submit(copiedStandardDisabled.root);
+  assert.equal(copiedStandardDisabled.submissions.length, 1);
+  assert.equal(copiedStandardDisabled.submissions[0].scan_mode, "standard");
+  assert.equal(copiedStandardDisabled.submissions[0].threat_analysis_generate_attack_tree, false);
+
+  const copiedQuick = await mount({
+    source: fixture({
+      scan_mode: "quick",
+      threat_analysis_enabled: null,
+      threat_analysis_method: null,
+      threat_analysis_generate_attack_tree: null,
+      mining_engines: null,
+      auto_fp_review: null,
+      fp_review_method: null,
+    }),
+    handleRequest,
+  });
+  assert.equal(copiedQuick.root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden in quick mode");
+  await fillName(copiedQuick.root, "Copied quick");
+  await submit(copiedQuick.root);
+  assert.equal("threat_analysis_generate_attack_tree" in copiedQuick.submissions[0], false);
 
   const copiedTreeEnabled = await mount({
     source: fixture({

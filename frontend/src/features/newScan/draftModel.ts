@@ -278,10 +278,13 @@ export function scanRequestFromDraft(
     review_notes_enabled: reviewNotesEnabled,
     auto_resume_enabled: autoResumeEnabled,
     review_note_ids: reviewNotesEnabled ? reviewNoteIds : [],
+    ...(scanMode === "standard" ? {
+      threat_analysis_generate_attack_tree: threatAnalysisGenerateAttackTree,
+    } : {}),
     ...(scanMode === "custom" ? {
       threat_analysis_enabled: threatAnalysisEnabled,
       threat_analysis_method: threatAnalysisMethod,
-      ...(threatAnalysisMethod === "deephole_compact_threat_analysis"
+      ...(threatAnalysisEnabled && threatAnalysisMethod === "deephole_compact_threat_analysis"
         ? { threat_analysis_generate_attack_tree: threatAnalysisGenerateAttackTree }
         : {}),
       mining_engines: miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).map((engine) => ({ engine_id: engine.engine_id })),

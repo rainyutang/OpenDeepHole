@@ -3,6 +3,7 @@
 from deephole_client.scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
+    SCAN_MODE_STANDARD,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     normalize_scan_mode,
 )
@@ -132,6 +133,17 @@ async def get_scan_copy_config(
             }, deep=True)
             for item in meta.multi_versions
         ],
+        **(
+            {
+                "threat_analysis_generate_attack_tree": (
+                    meta.threat_analysis_method_selection.generate_attack_tree
+                ),
+            }
+            if mode == SCAN_MODE_STANDARD
+            and meta.threat_analysis_method == "deephole_compact_threat_analysis"
+            and meta.threat_analysis_method_selection is not None
+            else {}
+        ),
         **({
             "threat_analysis_enabled": meta.threat_analysis_enabled,
             "threat_analysis_method": meta.threat_analysis_method,

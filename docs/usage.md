@@ -33,7 +33,7 @@ Checker 在「客户端配置 → 高级配置 → 漏洞挖掘」中按模式�
 
 | 模式 | 当前行为 |
 | --- | --- |
-| 标准 | Web 默认；固定运行 `static_candidate` 与 `threat_pattern_iterative_audit`，使用 DeepHole精简威胁分析（不生成攻击树）和默认去误报方法；规则默认排除 `skill_only_project_audit` |
+| 标准 | Web 默认；固定运行 `static_candidate` 与 `threat_pattern_iterative_audit`，使用 DeepHole精简威胁分析（默认不生成攻击树，可在创建扫描时手动开启）和默认去误报方法；规则默认排除 `skill_only_project_audit` |
 | 自定义 | 可选择威胁分析、漏洞挖掘引擎、是否自动去误报及其方法 |
 | 多版本测试 | 对 2–5 个版本执行规则扫描与跨版本归并；列表首项为基准版本，固定关闭 CodeGraph 和知识库 MCP |
 | 智能 | 页面占位，当前不可选择 |

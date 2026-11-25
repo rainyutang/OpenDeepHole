@@ -32,7 +32,7 @@
 仍失败则进入现有重试策略。续扫逐份校验 map、supplement 与 merge 缓存；任一候选变化时，merge 重新执行，
 避免旧合并结果遗漏重建后的候选。价值资产阶段保持原有处理，不批量迁移已完成扫描。
 
-自定义模式选择 `deephole_compact_threat_analysis` 时可配置“生成攻击树”开关（`generate_attack_tree`，默认关闭；标准模式固定关闭）。
+标准模式以及自定义模式选择 `deephole_compact_threat_analysis` 时均可配置“生成攻击树”开关（`generate_attack_tree`，均默认关闭，可按需手动开启）。
 当 `generate_attack_tree=False` 时，方法跳过价值资产识别（`value-assets.json` 写入 `[]`）与攻击树构建，
 对每个裁剪后的高风险模块独立创建 1 个 `module_attack_threats` 任务（使用 `deephole-compact-module-attack-threats` Skill，不合并多模块、不做 LLM 二次 merge）。
 提示词严格限定仅检查该高风险模块自身 `代码目录` 内的代码，禁止探索其它源码、禁止过度探索或挖掘具体漏洞，

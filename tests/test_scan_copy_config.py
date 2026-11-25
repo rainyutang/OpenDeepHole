@@ -205,6 +205,51 @@ def test_copy_preserves_compact_generate_attack_tree_disabled(env):
     assert parsed.threat_analysis_generate_attack_tree is False
 
 
+@pytest.mark.parametrize("generate_attack_tree", [True, False])
+def test_copy_preserves_standard_compact_generate_attack_tree(env, generate_attack_tree):
+    from backend.models import ThreatAnalysisMethodSelection
+
+    env.meta.scan_mode = "standard"
+    env.meta.threat_analysis_method = "deephole_compact_threat_analysis"
+    env.meta.threat_analysis_method_selection = ThreatAnalysisMethodSelection(
+        method_id="deephole_compact_threat_analysis",
+        method_label="DeepHole精简威胁分析",
+        description="snapshot",
+        generate_attack_tree=generate_attack_tree,
+    )
+    env.store.save_scan(env.status, env.meta)
+    response = env.get()
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["scan_mode"] == "standard"
+    assert payload["threat_analysis_generate_attack_tree"] is generate_attack_tree
+    assert all(payload[key] is None for key in (
+        "mining_engines", "threat_analysis_enabled", "threat_analysis_method",
+        "auto_fp_review", "fp_review_method",
+    ))
+    parsed = CreateScanRequest.model_validate(payload)
+    assert parsed.threat_analysis_generate_attack_tree is generate_attack_tree
+
+
+def test_copy_legacy_standard_non_compact_leaves_generate_attack_tree_unset(env):
+    from backend.models import ThreatAnalysisMethodSelection
+
+    env.meta.scan_mode = "standard"
+    env.meta.threat_analysis_method = "opencode_lightweight_threat_analysis"
+    env.meta.threat_analysis_method_selection = ThreatAnalysisMethodSelection(
+        method_id="opencode_lightweight_threat_analysis",
+        method_label="轻量级威胁分析（OpenCode）",
+        description="legacy",
+        generate_attack_tree=True,
+    )
+    env.store.save_scan(env.status, env.meta)
+    response = env.get()
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["scan_mode"] == "standard"
+    assert payload["threat_analysis_generate_attack_tree"] is None
+
+
 def test_copy_preserves_multiversion_baseline_and_legacy_scope(env):
     env.meta.scan_mode = "multi_version"
     env.meta.multi_versions = [

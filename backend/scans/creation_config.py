@@ -189,14 +189,6 @@ def resolve_creation_configuration(
             detail="快速模式固定生成攻击树",
         )
     if (
-        requested_scan_mode == SCAN_MODE_STANDARD
-        and body.threat_analysis_generate_attack_tree is True
-    ):
-        raise ApplicationError(
-            status_code=422,
-            detail="标准模式固定不生成攻击树",
-        )
-    if (
         requested_scan_mode == SCAN_MODE_MULTI_VERSION
         and body.threat_analysis_generate_attack_tree is False
     ):
@@ -205,7 +197,9 @@ def resolve_creation_configuration(
             detail="多版本测试模式不支持关闭攻击树生成",
         )
     if requested_scan_mode == SCAN_MODE_STANDARD:
-        threat_analysis_generate_attack_tree = False
+        threat_analysis_generate_attack_tree = (
+            body.threat_analysis_generate_attack_tree is True
+        )
     elif requested_scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_MULTI_VERSION}:
         threat_analysis_generate_attack_tree = True
     elif body.threat_analysis_generate_attack_tree is False:

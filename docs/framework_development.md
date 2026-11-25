@@ -71,7 +71,7 @@ flowchart TD
 实际调度遵循以下规则：
 
 1. `quick` 固定启用威胁分析、`static_candidate`、`threat_pattern_audit` 和自动去误报，使用 `opencode_lightweight_threat_analysis`；
-   `standard` 固定启用威胁分析、`static_candidate`、`threat_pattern_iterative_audit` 和自动去误报，使用不生成攻击树的 `deephole_compact_threat_analysis`；
+   `standard` 固定启用威胁分析、`static_candidate`、`threat_pattern_iterative_audit` 和自动去误报，使用 `deephole_compact_threat_analysis`（默认不生成攻击树，支持创建时开启）；
    `custom` 使用创建请求中的原有开关与引擎选择。续扫沿用已保存的方法与引擎快照。三个模式分别读取 Agent 高级配置中的
    Checker 排除列表，并在创建时固化实际规则快照。
 2. 只有本轮运行 `static_candidate` 或 `multi_version` 时才构建代码图谱；构建失败时，

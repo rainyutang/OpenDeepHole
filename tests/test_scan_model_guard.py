@@ -262,10 +262,11 @@ def test_fixed_scan_modes_reject_conflicting_overrides(
 
 
 @pytest.mark.parametrize(
-    ("scan_mode", "expected_method", "expected_label"),
+    ("scan_mode", "expected_method", "expected_label", "requested_tree", "expected_generate_tree"),
     [
-        ("quick", "opencode_lightweight_threat_analysis", "轻量级威胁分析（OpenCode）"),
-        ("standard", "deephole_compact_threat_analysis", "DeepHole精简威胁分析"),
+        ("quick", "opencode_lightweight_threat_analysis", "轻量级威胁分析（OpenCode）", None, True),
+        ("standard", "deephole_compact_threat_analysis", "DeepHole精简威胁分析", None, False),
+        ("standard", "deephole_compact_threat_analysis", "DeepHole精简威胁分析", True, True),
     ],
 )
 @pytest.mark.parametrize("explicit_method", [False, True])
@@ -273,6 +274,8 @@ def test_fixed_modes_snapshot_pipeline_defaults(
     scan_mode: str,
     expected_method: str,
     expected_label: str,
+    requested_tree: bool | None,
+    expected_generate_tree: bool,
     explicit_method: bool,
 ) -> None:
     user = User(user_id="user-1", username="alice", role="user")
@@ -349,6 +352,7 @@ def test_fixed_modes_snapshot_pipeline_defaults(
                 code_scan_path="/repo/project/src",
                 scan_mode=scan_mode,
                 threat_analysis_method=expected_method if explicit_method else None,
+                threat_analysis_generate_attack_tree=requested_tree,
             ),
             'http://testserver',
             user,
@@ -362,7 +366,6 @@ def test_fixed_modes_snapshot_pipeline_defaults(
     assert scan.project_path == meta.project_path == "/repo/project"
     assert scan.code_scan_path == meta.code_scan_path == "/repo/project/src"
     assert scan.threat_analysis_enabled is True
-    expected_generate_tree = scan_mode == "quick"
     assert scan.threat_analysis_method == expected_method
     assert meta.threat_analysis_method == expected_method
     assert command["threat_analysis_method"] == expected_method

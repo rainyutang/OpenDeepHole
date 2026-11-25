@@ -373,6 +373,41 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
         "threat_pattern_iterative_audit",
     ]
 
+    standard_tree_enabled = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="standard",
+            threat_analysis_generate_attack_tree=True,
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert standard_tree_enabled.threat_analysis_method == "deephole_compact_threat_analysis"
+    assert standard_tree_enabled.threat_analysis_generate_attack_tree is True
+    assert standard_tree_enabled.threat_analysis_method_selection.generate_attack_tree is True
+    assert [item.engine_id for item in standard_tree_enabled.mining_engine_selections] == [
+        "static_candidate",
+        "threat_pattern_iterative_audit",
+    ]
+
+    standard_tree_disabled = resolve_creation_configuration(
+        CreateScanRequest(
+            agent_key="agent-1",
+            project_path="/repo/project",
+            product="Demo",
+            scan_mode="standard",
+            threat_analysis_generate_attack_tree=False,
+        ),
+        remote_cfg,
+        user,
+        None,
+    )
+    assert standard_tree_disabled.threat_analysis_generate_attack_tree is False
+    assert standard_tree_disabled.threat_analysis_method_selection.generate_attack_tree is False
+
     custom_default_engines = resolve_creation_configuration(
         CreateScanRequest(
             agent_key="agent-1",
@@ -434,7 +469,6 @@ def test_compact_generate_attack_tree_configuration_and_storage_round_trip(tmp_p
     assert loaded_meta.threat_analysis_method_selection.generate_attack_tree is False
 
     for invalid_kwargs in (
-        dict(scan_mode="standard", threat_analysis_generate_attack_tree=True),
         dict(scan_mode="quick", threat_analysis_generate_attack_tree=False),
         dict(
             scan_mode="custom",
