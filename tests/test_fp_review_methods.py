@@ -8,8 +8,11 @@ from deephole_client.fp_review import (
 )
 from pathlib import Path
 from unittest.mock import Mock, patch
+import json
 import tempfile
 import unittest
+from deephole_client.fp_review.methods.adversarial.method import _FINAL_JUDGE_SCHEMA
+from task_agent.llm_json import parse_llm_json_schema
 import backend.scans.configuration as backend_scans_configuration
 import backend.scans.fp_review_policy as backend_scans_fp_review_policy
 import backend.scans.report_records as backend_scans_report_records
@@ -101,6 +104,46 @@ class FpReviewMethodDiscoveryTests(unittest.TestCase):
             document.path.name == "SKILL.md"
             for document in adversarial.manifest.documents
         ))
+
+    def test_adversarial_skills_and_final_judge_schema_contracts(self) -> None:
+        adversarial = load_fp_review_methods().get("adversarial")
+        self.assertIsNotNone(adversarial)
+        skill_texts = {
+            document.path.parent.name: document.path.read_text(encoding="utf-8")
+            for document in adversarial.manifest.documents
+        }
+        self.assertEqual(set(skill_texts), {"prove-bug", "prove-fp", "final-judge"})
+        for skill_name, text in skill_texts.items():
+            with self.subTest(skill=skill_name):
+                self.assertIn("健壮性或功能性缺陷", text)
+                self.assertIn("外部触发", text)
+                self.assertIn("内存/资源申请或调用失败后未校验", text)
+                self.assertIn("固有安全缺陷", text)
+                self.assertNotIn("外部触发证据不足", text)
+                self.assertLessEqual(text.count("非预期"), 1)
+        for skill_name in ("prove-bug", "prove-fp"):
+            with self.subTest(step5_clean=skill_name):
+                self.assertNotIn("memcpy_s", skill_texts[skill_name])
+                self.assertNotIn("dstsz", skill_texts[skill_name])
+        for severity in ("low", "medium"):
+            payload = {
+                "verdict": "true_positive",
+                "severity": severity,
+                "vuln_type": "类型混淆",
+                "file": "src/demo.c",
+                "line": 47,
+                "function": "CrossProc",
+                "description": "将外层消息结构指针直接强转为内层结构，导致错读字段并构造错误响应。",
+                "call_chain": "```text\nEntry: src/entry.c:10\n└── CrossProc: src/demo.c:47\n```",
+                "vulnerable_code": "`src/demo.c:47-47`\n\n```c\n47 | Inner *p = (Inner *)msg; //[deephole] SINK：未偏移至载荷即强转。\n```",
+                "remediation": "先偏移至载荷成员后再转换为目标结构体指针。",
+            }
+            parsed = parse_llm_json_schema(
+                json.dumps(payload, ensure_ascii=False),
+                _FINAL_JUDGE_SCHEMA,
+            )
+            self.assertEqual(parsed["verdict"], "true_positive")
+            self.assertEqual(parsed["severity"], severity)
 
     def test_manifest_accepts_scan_capacity_and_fixed_limits(self) -> None:
         for value in (0, 1, 4):
