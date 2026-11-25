@@ -272,50 +272,18 @@ def _normalize_scan_knowledge_base_mcp(
     project_id: str='',
     project_name: str='',
     require_project: bool=True,
+    settings: dict | None=None,
 ) -> AgentMcpConfig | None:
-    """Build a scan-private snapshot from the server-owned knowledge config."""
-    if not enabled:
-        return None
-    knowledge = get_config().knowledge_base
-    normalized_project_id = str(project_id or "").strip()
-    normalized_project_name = str(project_name or "").strip()
-    if require_project and not normalized_project_id:
-        raise HTTPException(status_code=422, detail="启用知识库后必须选择项目")
-    if require_project and not normalized_project_name:
-        raise HTTPException(status_code=422, detail="知识库项目名称不能为空")
-    projects_tool = str(knowledge.projects_tool or "").strip()
-    set_project_tool = str(knowledge.set_project_tool or "").strip()
-    if not projects_tool or not set_project_tool:
-        raise HTTPException(
-            status_code=422,
-            detail="服务端知识库 projects_tool/set_project_tool 配置不完整",
-        )
-    if projects_tool.casefold() == set_project_tool.casefold():
-        raise HTTPException(
-            status_code=422,
-            detail="服务端知识库 projects_tool 与 set_project_tool 不能相同",
-        )
-    config = AgentMcpConfig(
-        enabled=True,
-        name=str(knowledge.name or "product-info").strip(),
-        transport="remote",
-        timeout_seconds=knowledge.timeout_seconds,
-        local=AgentMcpLocalConfig(),
-        remote=AgentMcpRemoteConfig(
-            url=str(knowledge.url or "").strip(),
-            headers={
-                str(key): str(value)
-                for key, value in knowledge.headers.items()
-                if str(key)
-            },
-        ),
-        project_id=normalized_project_id,
-        project_name=normalized_project_name,
-        projects_tool=projects_tool,
-        set_project_tool=set_project_tool,
+    """Build a scan-private snapshot from the effective platform knowledge config."""
+    from backend.knowledge_base import build_scan_knowledge_base_mcp
+
+    return build_scan_knowledge_base_mcp(
+        enabled=enabled,
+        project_id=project_id,
+        project_name=project_name,
+        require_project=require_project,
+        settings=settings,
     )
-    _validate_mcp_config(config, label="扫描知识库", require_enabled=True)
-    return config
 
 
 def _validate_managed_config(

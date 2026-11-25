@@ -73,6 +73,7 @@ export {
   deleteScan,
   updateScanMetadata,
   updateScanCodeGraph,
+  updateScanKnowledgeBase,
   createScanShare,
   revokeScanShare,
   getMiningEngineCatalog,
@@ -80,6 +81,16 @@ export {
   getScanGitHistory,
 } from "./scans";
 export type { CreateScanInput, ScanCopyConfig } from "./scans";
+export {
+  getAdminKnowledgeBaseConfig,
+  updateAdminKnowledgeBaseConfig,
+  getKnowledgeBaseStatus,
+} from "./knowledgeBase";
+export type {
+  AdminKnowledgeBaseConfig,
+  UpdateAdminKnowledgeBaseConfigInput,
+  KnowledgeBasePublicStatus,
+} from "./knowledgeBase";
 export { getScanStatus, getScanStatusRequest, getScanOverview, getScanOverviewRequest } from "./scanSnapshots";
 export type { ScanSnapshotRequest } from "./scanSnapshots";
 export { getScanTasksPage, getScanTaskDetail, getScanCandidatesPage, getScanEventsPage, getScanDetailItem } from "./scanDetails";

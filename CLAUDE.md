@@ -27,7 +27,13 @@ optional product-specific validation.
   facade. The Codex threat-analysis method and explicitly Codex-dependent engines
   use their separate Codex integration.
 - **MCP**: CodeGraph and knowledge-base connections are optional per-scan
-  capabilities. The Agent does not automatically start `mcp_server/` as a fallback.
+  capabilities (disabled in `multi_version` mode). Administrators configure the
+  global remote knowledge-base MCP URL/headers in `platform_settings`, and each
+  scan binds its own `project_id` (editable dynamically in Scan Information).
+  `task_agent/kb_mcp_proxy.py` runs a loopback transparent MCP proxy for both
+  OpenCode 1.x and 2.x that strips `project_id` from `tools/list` schemas when
+  declared and conditionally injects the scan's `project_id` on `tools/call`.
+  The Agent does not automatically start `mcp_server/` as a fallback.
 
 See [architecture.md](docs/architecture.md) for data locations and source-data
 boundaries. Local source access does not imply that model requests or uploaded
@@ -48,7 +54,9 @@ Web configuration changes are saved and pushed to a live Agent, or applied on
 reconnection. Provider changes drain existing logical tasks, publish the latest
 configuration, restart Serve and check health/model visibility before admitting
 new work. Running logical tasks retain their configuration through internal
-retries. CodeGraph changes similarly apply at future task-start boundaries.
+retries. CodeGraph, per-scan knowledge-base (`enabled`/`project_id`), and
+admin global knowledge-base MCP updates similarly apply at future task-start
+boundaries without interrupting in-flight sessions.
 Backend runtime updates use a startup-cached hash (with low-frequency stat-only
 change checks) and automatically trigger graceful drain-and-update on online
 Agents advertising `graceful_runtime_update`: the Agent pauses new session

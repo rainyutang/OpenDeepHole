@@ -29,6 +29,21 @@ def _apply_scan_metadata(
         scan.code_graph_mcp_sync_status = (
             "synced" if scan.code_graph_mcp_applied_revision >= scan.code_graph_mcp_revision else "pending"
         )
+    if isinstance(metadata, ScanMeta) and metadata.knowledge_base_mcp_revision >= scan.knowledge_base_mcp_revision:
+        from backend.knowledge_base import knowledge_base_response
+
+        kb_state = knowledge_base_response(scan.scan_id, metadata)
+        scan.knowledge_base_enabled = kb_state.knowledge_base_enabled
+        scan.knowledge_base_project_id = kb_state.knowledge_base_project_id
+        scan.knowledge_base_mcp_revision = kb_state.knowledge_base_mcp_revision
+        scan.knowledge_base_mcp_applied_revision = max(
+            scan.knowledge_base_mcp_applied_revision, kb_state.knowledge_base_mcp_applied_revision,
+        )
+        scan.knowledge_base_mcp_sync_status = (
+            "synced"
+            if scan.knowledge_base_mcp_applied_revision >= scan.knowledge_base_mcp_revision
+            else "pending"
+        )
 
 
 def _apply_task_progress(scan: ScanStatus | ScanSummary, pool=None) -> None:

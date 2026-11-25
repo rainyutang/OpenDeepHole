@@ -524,6 +524,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     agent_session_id TEXT NOT NULL DEFAULT '',
     accepting_tasks INTEGER NOT NULL DEFAULT 1,
     scan_code_graph_updates INTEGER NOT NULL DEFAULT 0,
+    scan_knowledge_base_updates INTEGER NOT NULL DEFAULT 0,
     scan_paths_probe INTEGER NOT NULL DEFAULT 0,
     graceful_runtime_update INTEGER NOT NULL DEFAULT 0,
     server_url       TEXT NOT NULL DEFAULT '',
@@ -746,6 +747,7 @@ class PostgresScanStore(SqliteScanStore):
                 connection.execute(statement)
             connection.execute("ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS finished_at TEXT")
             connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS scan_code_graph_updates INTEGER NOT NULL DEFAULT 0")
+            connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS scan_knowledge_base_updates INTEGER NOT NULL DEFAULT 0")
             connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS scan_paths_probe INTEGER NOT NULL DEFAULT 0")
             connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS graceful_runtime_update INTEGER NOT NULL DEFAULT 0")
             connection.execute("ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS server_url TEXT NOT NULL DEFAULT ''")
@@ -1095,9 +1097,9 @@ class PostgresScanStore(SqliteScanStore):
                     agent_id, agent_key, worker_id, name, machine_name, user_id,
                     protocol_version, runtime_hash, agent_session_id,
                     accepting_tasks, connected_at, last_seen, disconnected_at,
-                    scan_code_graph_updates, scan_paths_probe,
+                    scan_code_graph_updates, scan_knowledge_base_updates, scan_paths_probe,
                     graceful_runtime_update, server_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     agent_key = excluded.agent_key,
                     worker_id = excluded.worker_id,
@@ -1109,6 +1111,7 @@ class PostgresScanStore(SqliteScanStore):
                     agent_session_id = excluded.agent_session_id,
                     accepting_tasks = excluded.accepting_tasks,
                     scan_code_graph_updates = excluded.scan_code_graph_updates,
+                    scan_knowledge_base_updates = excluded.scan_knowledge_base_updates,
                     scan_paths_probe = excluded.scan_paths_probe,
                     graceful_runtime_update = excluded.graceful_runtime_update,
                     server_url = excluded.server_url,
@@ -1129,6 +1132,7 @@ class PostgresScanStore(SqliteScanStore):
                     now,
                     agent.last_seen or now,
                     int(agent.scan_code_graph_updates),
+                    int(agent.scan_knowledge_base_updates),
                     int(agent.scan_paths_probe),
                     int(agent.graceful_runtime_update),
                     str(agent.server_url or ""),

@@ -24,6 +24,7 @@ export function useScanDraft() {
       setMiningEngines: field('miningEngines'),
       setKnowledgeEnabled: field('knowledgeEnabled'),
       setKnowledgeProjectId: field('knowledgeProjectId'),
+      setKnowledgeProjectName: field('knowledgeProjectName'),
       setValidationEnabled: field('validationEnabled'),
       setValidationMethodId: field('validationMethodId'),
       setValidationValues: field('validationValues'),

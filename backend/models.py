@@ -956,6 +956,10 @@ class ScanStatus(BaseModel):
     code_graph_mcp_applied_revision: int = 0
     code_graph_mcp_sync_status: Literal["synced", "pending"] = "synced"
     knowledge_base_enabled: bool = False
+    knowledge_base_project_id: str = ""
+    knowledge_base_mcp_revision: int = 0
+    knowledge_base_mcp_applied_revision: int = 0
+    knowledge_base_mcp_sync_status: Literal["synced", "pending"] = "synced"
     vulnerability_validation_enabled: bool = False
     validation_method_id: str = ""
     validation_method_label: str = ""
@@ -1239,6 +1243,7 @@ class AgentInfo(BaseModel):
     llm_api_config: bool | None = None
     llm_api_test: bool | None = None
     scan_code_graph_updates: bool = False
+    scan_knowledge_base_updates: bool = False
     scan_paths_probe: bool = False
     graceful_runtime_update: bool = False
     server_url: str = ""
@@ -2043,6 +2048,47 @@ class ScanCodeGraphResponse(BaseModel):
     sync_message: str = ""
 
 
+class UpdateScanKnowledgeBaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = Field(strict=True)
+    project_id: str | None = Field(default=None, max_length=200)
+
+
+class ScanKnowledgeBaseResponse(BaseModel):
+    scan_id: str
+    knowledge_base_enabled: bool
+    knowledge_base_project_id: str = ""
+    knowledge_base_mcp_revision: int
+    knowledge_base_mcp_applied_revision: int
+    knowledge_base_mcp_sync_status: Literal["synced", "pending"]
+    sync_message: str = ""
+
+
+class AdminKnowledgeBaseConfigResponse(BaseModel):
+    configured: bool = False
+    name: str = "knowledge-base"
+    url: str = ""
+    timeout_seconds: int = 300
+    header_keys: list[str] = Field(default_factory=list)
+    updated_at: str = ""
+    revision: int = 0
+    source: Literal["database", "config", "none"] = "none"
+
+
+class UpdateAdminKnowledgeBaseConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(default="", max_length=2000)
+    name: str = Field(default="knowledge-base", max_length=200)
+    timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    headers: dict[str, str] | None = None
+    clear_headers: bool = False
+
+
+class KnowledgeBasePublicStatusResponse(BaseModel):
+    configured: bool = False
+    name: str = "knowledge-base"
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
@@ -2070,6 +2116,8 @@ class ScanMeta(BaseModel):
     metadata_revision: int = 0
     code_graph_mcp_revision: int = 0
     code_graph_mcp_applied_revision: int = 0
+    knowledge_base_mcp_revision: int = 0
+    knowledge_base_mcp_applied_revision: int = 0
     auto_fp_review: bool = True
     fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
     fp_review_method_selection: FpReviewMethodSelection | None = None

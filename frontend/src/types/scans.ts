@@ -53,6 +53,16 @@ export interface ScanCodeGraphState {
   sync_message?: string;
 }
 
+export interface ScanKnowledgeBaseState {
+  scan_id: string;
+  knowledge_base_enabled: boolean;
+  knowledge_base_project_id: string;
+  knowledge_base_mcp_revision: number;
+  knowledge_base_mcp_applied_revision: number;
+  knowledge_base_mcp_sync_status: "synced" | "pending";
+  sync_message?: string;
+}
+
 export interface ScanProgressEstimate {
   progress: number;
   remaining_seconds: number | null;
@@ -95,6 +105,10 @@ export interface ScanStatus extends ScanAutoResume {
   code_graph_mcp_applied_revision?: number;
   code_graph_mcp_sync_status?: "synced" | "pending";
   knowledge_base_enabled: boolean;
+  knowledge_base_project_id?: string;
+  knowledge_base_mcp_revision?: number;
+  knowledge_base_mcp_applied_revision?: number;
+  knowledge_base_mcp_sync_status?: "synced" | "pending";
   vulnerability_validation_enabled: boolean;
   validation_method_id: string;
   validation_method_label: string;
@@ -230,6 +244,10 @@ export interface ScanSummary extends ScanAutoResume {
   product: string;
   validation_environment: string;
   knowledge_base_enabled: boolean;
+  knowledge_base_project_id?: string;
+  knowledge_base_mcp_revision?: number;
+  knowledge_base_mcp_applied_revision?: number;
+  knowledge_base_mcp_sync_status?: "synced" | "pending";
   vulnerability_validation_enabled: boolean;
   validation_method_id: string;
   validation_method_label: string;

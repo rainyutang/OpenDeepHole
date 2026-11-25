@@ -65,7 +65,6 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     setProduct,
     setScanMode,
     setMiningEngines,
-    setKnowledgeProjectId,
     setValidationValues,
     setCodeGraphMcp,
     setThreatAnalysisEnabled,
@@ -112,9 +111,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     setLoadAttempt,
     agentConfigLoading,
     copiedCapabilities,
-    knowledgeProjects,
-    knowledgeProbe,
-    probingKnowledge,
+    knowledgeBaseConfigured,
     reviewNotesReady,
     setReviewNotesReady,
     selectedAgentInfo,
@@ -125,8 +122,8 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     unavailableMethod,
     chooseValidationMethod,
     toggleKnowledge,
+    handleKnowledgeProjectIdChange,
     toggleValidation,
-    probeKnowledge,
     handleSubmit,
   } = useNewScan(sourceScanId, onScanStarted);
   return <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
@@ -205,26 +202,34 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-medium text-slate-200">启用知识库</h2>
-                <p className="mt-1 text-xs leading-5 text-slate-500">实现中...</p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  {knowledgeBaseConfigured
+                    ? "启用后将在扫描阶段挂载平台知识库 MCP，并自动向工具请求注入当前扫描的 Project ID（对 LLM 不可见）。"
+                    : "管理员尚未配置知识库 MCP 链接，请联系管理员配置。"}
+                </p>
               </div>
-              <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" disabled={!copiedCapabilities.knowledge} />
+              <Toggle
+                checked={knowledgeEnabled}
+                onChange={toggleKnowledge}
+                label="启用知识库"
+                disabled={!knowledgeBaseConfigured && !knowledgeEnabled}
+              />
             </div>
             {knowledgeEnabled && <div className="mt-5 space-y-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  disabled={!selectedAgentReady || probingKnowledge}
-                  onClick={() => void probeKnowledge()}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm disabled:bg-slate-700">{probingKnowledge ? "检测并拉取中…" : "检测并拉取项目"}</button>
-                {knowledgeProbe && <span className={`text-xs ${knowledgeProbe.success ? "text-emerald-300" : "text-red-300"}`}>{knowledgeProbe.success ? `连接成功，获得 ${knowledgeProbe.projects.length} 个项目` : `连接失败：${knowledgeProbe.error}`}</span>}
-              </div>
-              {knowledgeProbe?.success && knowledgeProjects.length === 0 && <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">知识库没有返回可选项目。</div>}
-              {knowledgeProjects.length > 0 && <Field label="知识库项目">
-                <select className={input} value={knowledgeProjectId} onChange={(event) => setKnowledgeProjectId(event.target.value)}>
-                  <option value="">请选择项目</option>
-                  {knowledgeProjects.map((item) => <option key={item.id} value={item.id}>{item.name}{item.current ? "（当前）" : ""}{item.path ? ` — ${item.path}` : ""}</option>)}
-                </select>
-              </Field>}
+              {!knowledgeBaseConfigured && (
+                <div role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                  管理员尚未配置知识库 MCP 链接，请关闭知识库开关或联系管理员配置。
+                </div>
+              )}
+              <Field label="Project ID *" hint="每个扫描独立填写，仅发送给知识库 MCP，LLM 不可见">
+                <input
+                  className={input}
+                  aria-label="知识库 Project ID"
+                  value={knowledgeProjectId}
+                  placeholder="例如 mae"
+                  onChange={(event) => handleKnowledgeProjectIdChange(event.target.value)}
+                />
+              </Field>
             </div>}
           </Card>
         </>}

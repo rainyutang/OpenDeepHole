@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends
 from backend.auth import get_current_user
 from backend.models import (
     ScanCodeGraphResponse,
+    ScanKnowledgeBaseResponse,
     ScanMetadataResponse,
     UpdateScanCodeGraphRequest,
+    UpdateScanKnowledgeBaseRequest,
     UpdateScanMetadataRequest,
     UpdateScanValidationTargetRequest,
     User,
@@ -35,6 +37,15 @@ async def update_scan_code_graph(
     current_user: User = Depends(get_current_user),
 ) -> ScanCodeGraphResponse:
     return await service.update_scan_code_graph(scan_id=scan_id, body=body, current_user=current_user)
+
+
+@router.put("/api/scan/{scan_id}/knowledge-base", response_model=ScanKnowledgeBaseResponse)
+async def update_scan_knowledge_base(
+    scan_id: str,
+    body: UpdateScanKnowledgeBaseRequest,
+    current_user: User = Depends(get_current_user),
+) -> ScanKnowledgeBaseResponse:
+    return await service.update_scan_knowledge_base(scan_id=scan_id, body=body, current_user=current_user)
 
 
 @router.put("/api/scan/{scan_id}/validation-target")

@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { useRef, useState } from "react";
-import { updateScanCodeGraph } from "../../../api/scans";
+import { useEffect, useRef, useState } from "react";
+import { updateScanCodeGraph, updateScanKnowledgeBase } from "../../../api/scans";
 import { STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID, canonicalMiningEngineLabel } from "../../../miningEngines";
 import { selectedScanPaths } from "../../../scanPaths";
 import { autoResumeLabel } from "../../../scanAutoResume";
-import type { ScanCodeGraphState, ScanStatus as ScanStatusType } from "../../../types/scans";
+import type { ScanCodeGraphState, ScanKnowledgeBaseState, ScanStatus as ScanStatusType } from "../../../types/scans";
 import { formatDateTime } from "../../modelPool/presentation";
 import {
   effectiveMiningEngines,
@@ -28,19 +28,65 @@ export function ScanInformationPanel({
   onEdit,
   onCopy,
   onCodeGraphSaved,
+  onKnowledgeBaseSaved,
 }: {
   scan: ScanStatusType;
   onClose: () => void;
   onEdit?: () => void;
   onCopy?: () => void;
   onCodeGraphSaved?: (state: ScanCodeGraphState) => void;
+  onKnowledgeBaseSaved?: (state: ScanKnowledgeBaseState) => void;
 }) {
   const [codeGraphSaving, setCodeGraphSaving] = useState(false);
   const codeGraphSavingRef = useRef(false);
   const [codeGraphError, setCodeGraphError] = useState("");
   const [codeGraphNotice, setCodeGraphNotice] = useState<{ revision: number; message: string; } | null>(null);
+  const savedKnowledgeProjectId = scan.knowledge_base_project_id || "";
+  const [knowledgeProjectIdInput, setKnowledgeProjectIdInput] = useState(savedKnowledgeProjectId);
+  const lastSyncedKnowledgeKeyRef = useRef(`${scan.scan_id}:${scan.knowledge_base_mcp_revision ?? 0}:${savedKnowledgeProjectId}`);
+  const [knowledgeSaving, setKnowledgeSaving] = useState(false);
+  const knowledgeSavingRef = useRef(false);
+  const [knowledgeError, setKnowledgeError] = useState("");
+  const [knowledgeNotice, setKnowledgeNotice] = useState<{ revision: number; message: string; } | null>(null);
   const multiVersion = scan.scan_mode === "multi_version";
   const codeGraphPending = scan.code_graph_mcp_sync_status === "pending";
+  const knowledgePending = scan.knowledge_base_mcp_sync_status === "pending";
+
+  useEffect(() => {
+    const syncKey = `${scan.scan_id}:${scan.knowledge_base_mcp_revision ?? 0}:${savedKnowledgeProjectId}`;
+    if (syncKey !== lastSyncedKnowledgeKeyRef.current) {
+      lastSyncedKnowledgeKeyRef.current = syncKey;
+      setKnowledgeProjectIdInput(savedKnowledgeProjectId);
+    }
+  }, [scan.scan_id, scan.knowledge_base_mcp_revision, savedKnowledgeProjectId]);
+
+  const saveKnowledgeBase = async (enabled: boolean, nextProjectId?: string) => {
+    if (knowledgeSavingRef.current || !onKnowledgeBaseSaved || multiVersion) return;
+    const trimmed = nextProjectId !== undefined ? nextProjectId.trim() : undefined;
+    if (enabled && !trimmed) {
+      setKnowledgeError("启用知识库必须填写 Project ID");
+      return;
+    }
+    knowledgeSavingRef.current = true;
+    setKnowledgeSaving(true);
+    setKnowledgeError("");
+    try {
+      const state = await updateScanKnowledgeBase(scan.scan_id, {
+        enabled,
+        ...(trimmed !== undefined ? { project_id: trimmed } : {}),
+      });
+      onKnowledgeBaseSaved(state);
+      lastSyncedKnowledgeKeyRef.current = `${state.scan_id}:${state.knowledge_base_mcp_revision}:${state.knowledge_base_project_id || ""}`;
+      setKnowledgeProjectIdInput(state.knowledge_base_project_id || "");
+      setKnowledgeNotice({ revision: state.knowledge_base_mcp_revision, message: state.sync_message || "" });
+    } catch (caught: unknown) {
+      const detail = (caught as { response?: { data?: { detail?: unknown; }; }; })?.response?.data?.detail;
+      setKnowledgeError(typeof detail === "string" ? detail : "知识库配置保存失败，请稍后重试");
+    } finally {
+      knowledgeSavingRef.current = false;
+      setKnowledgeSaving(false);
+    }
+  };
   const toggleCodeGraph = async () => {
     if (codeGraphSavingRef.current || !onCodeGraphSaved || multiVersion) return;
     codeGraphSavingRef.current = true;
@@ -79,7 +125,7 @@ export function ScanInformationPanel({
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200">扫描信息</h3>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              {onEdit ? "产品名和扫描名称可编辑；" : "本页展示最新的产品名和扫描名称；"}CodeGraph 展示当前设置，其他流程配置保留创建扫描时的快照。
+              {onEdit ? "产品名和扫描名称可编辑；" : "本页展示最新的产品名和扫描名称；"}知识库与 CodeGraph 展示当前设置，其他流程配置保留创建扫描时的快照。
             </p>
           </div>
           <button
@@ -127,8 +173,74 @@ export function ScanInformationPanel({
               <ScanInformationToggle
                 label="知识库"
                 enabled={scan.knowledge_base_enabled}
-                detail="创建扫描时的数据库能力开关"
-              />
+                detail={multiVersion
+                  ? "多版本扫描不支持知识库"
+                  : "切换或修改 Project ID 后对尚未开始的任务生效，正在运行的任务继续使用原设置。"}
+              >
+                <div className="mt-2.5 flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-2.5 py-1.5 text-xs">
+                  <span className="shrink-0 text-slate-500">Project ID</span>
+                  <span className="break-all font-mono text-slate-200">{savedKnowledgeProjectId || "未设置"}</span>
+                </div>
+                {onKnowledgeBaseSaved && (
+                  <div className="mt-2.5 space-y-2">
+                    <input
+                      type="text"
+                      aria-label="知识库 Project ID"
+                      disabled={knowledgeSaving || multiVersion}
+                      value={knowledgeProjectIdInput}
+                      placeholder="输入 Project ID（例如 mae）"
+                      onChange={(event) => {
+                        setKnowledgeProjectIdInput(event.target.value);
+                        if (knowledgeError) setKnowledgeError("");
+                      }}
+                      className="w-full rounded-lg border border-slate-600 bg-slate-900 px-2.5 py-1.5 font-mono text-xs text-white placeholder-slate-500 outline-none transition-colors focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      {scan.knowledge_base_enabled ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={
+                              knowledgeSaving
+                              || multiVersion
+                              || !knowledgeProjectIdInput.trim()
+                              || knowledgeProjectIdInput.trim() === savedKnowledgeProjectId
+                            }
+                            onClick={() => void saveKnowledgeBase(true, knowledgeProjectIdInput)}
+                            className="rounded-lg border border-blue-500/50 bg-blue-600/20 px-3 py-1.5 text-xs text-blue-200 transition-colors hover:bg-blue-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {knowledgeSaving ? "保存中..." : "保存 Project ID"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={knowledgeSaving || multiVersion}
+                            onClick={() => void saveKnowledgeBase(false)}
+                            className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {knowledgeSaving ? "保存中..." : "停用知识库"}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={knowledgeSaving || multiVersion}
+                          onClick={() => void saveKnowledgeBase(true, knowledgeProjectIdInput)}
+                          className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {knowledgeSaving ? "保存中..." : "启用知识库"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {knowledgePending && (
+                  <p role="status" className="mt-2 text-xs leading-5 text-amber-400">
+                    {knowledgeNotice && knowledgeNotice.revision === scan.knowledge_base_mcp_revision && knowledgeNotice.message
+                      ? knowledgeNotice.message : "待同步：配置已保存，等待 Agent 应用。"}
+                  </p>
+                )}
+                {knowledgeError && <p role="alert" className="mt-2 text-xs leading-5 text-red-400">{knowledgeError}</p>}
+              </ScanInformationToggle>
               <ScanInformationToggle
                 label="CodeGraph MCP"
                 enabled={scan.code_graph_mcp_enabled}

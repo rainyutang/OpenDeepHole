@@ -5,6 +5,7 @@ import type {
   HistoryPattern,
   IndexStatus,
   ScanCodeGraphState,
+  ScanKnowledgeBaseState,
   ScanMetadata,
   ScanMetadataUpdate,
   ScanStartResponse,
@@ -138,6 +139,15 @@ export async function updateScanMetadata(scanId: string, body: ScanMetadataUpdat
 export async function updateScanCodeGraph(scanId: string, enabled: boolean): Promise<ScanCodeGraphState> {
   if (isPublicScan(scanId)) throw new Error("当前访问方式不支持编辑 CodeGraph 配置");
   const { data } = await api.put<ScanCodeGraphState>(`/api/scan/${scanId}/code-graph`, { enabled });
+  return data;
+}
+
+export async function updateScanKnowledgeBase(
+  scanId: string,
+  body: { enabled: boolean; project_id?: string },
+): Promise<ScanKnowledgeBaseState> {
+  if (isPublicScan(scanId)) throw new Error("当前访问方式不支持编辑知识库配置");
+  const { data } = await api.put<ScanKnowledgeBaseState>(`/api/scan/${scanId}/knowledge-base`, body);
   return data;
 }
 

@@ -264,6 +264,7 @@ def configure_opencode_component() -> None:
     """Register DeepHole 2.0 host bindings without starting OpenCode Serve."""
     from task_agent import OpenCodeHostBindings, configure_opencode
     from .scan_code_graph import resolve_scan_code_graph
+    from .scan_knowledge_base import resolve_scan_knowledge_base
 
     configure_opencode(OpenCodeHostBindings(
         get_config=get_config,
@@ -274,6 +275,7 @@ def configure_opencode_component() -> None:
         readable_roots=_agent_readable_roots,
         fixed_skill_root=_fixed_skill_root,
         resolve_scan_code_graph=resolve_scan_code_graph,
+        resolve_scan_knowledge_base=resolve_scan_knowledge_base,
     ))
 
 

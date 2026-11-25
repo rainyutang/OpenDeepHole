@@ -70,6 +70,7 @@ from .config_json import (
     redact_opencode_config_content,
 )
 from .deadline import CLEANUP_TIMEOUT_SECONDS, OpenCodeTimeout, OperationDeadline, ResponseActivity, cancel_tasks_bounded, retire_task
+from .kb_mcp_proxy import KnowledgeBaseMcpProxy
 from .timeouts import DEFAULT_IDLE_TIMEOUT_SECONDS
 from .output_format import format_task_output, task_output_stage
 from .token_usage import (
@@ -518,6 +519,7 @@ export const OpenDeepHoleKnowledgeProjectHook = async () => ({
     const allowed = Array.isArray(binding.allowed_tool_ids) ? binding.allowed_tool_ids : []
     const prefixes = Array.isArray(binding.tool_id_prefixes) ? binding.tool_id_prefixes : []
     if (!allowed.includes(tool) && !prefixes.some((prefix) => tool.startsWith(prefix))) return
+    if (binding.inject_project_id === false) return
     if (!output?.args || typeof output.args !== "object" || Array.isArray(output.args)) {
       throw new Error("Knowledge-base tool arguments must be an object")
     }
@@ -870,6 +872,7 @@ class _ScanMcpLease:
     connected: bool
     role: str = "code_graph"
     error: str = ""
+    proxied: bool = False
 
 
 @dataclass
@@ -1554,6 +1557,7 @@ def _write_knowledge_binding(
     project_id: str,
     mcp_name: str,
     blocked_tool_ids: list[str],
+    inject_project_id: bool = True,
 ) -> Path:
     normalized_session_id = str(session_id or "").strip()
     normalized_project_id = str(project_id or "").strip()
@@ -1565,7 +1569,7 @@ def _write_knowledge_binding(
     if not blocked_tool_ids:
         raise ValueError("Knowledge-base binding has no control tools")
     binding_path = _knowledge_binding_path(cwd, normalized_session_id)
-    payload = {
+    payload: dict[str, Any] = {
         "version": 2,
         "session_id": normalized_session_id,
         "project_id": normalized_project_id,
@@ -1573,6 +1577,8 @@ def _write_knowledge_binding(
         "tool_id_prefixes": tool_id_prefixes,
         "blocked_tool_ids": list(dict.fromkeys(blocked_tool_ids)),
     }
+    if not inject_project_id:
+        payload["inject_project_id"] = False
     _write_private_text(
         binding_path,
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
@@ -6828,6 +6834,7 @@ class OpenCodeServeManager:
         # message can never observe another scan's graph.
         self._scan_mcp_states: dict[str, dict[str, Any]] = {}
         self._scan_mcp_conditions: dict[str, asyncio.Condition] = {}
+        self._kb_proxy: KnowledgeBaseMcpProxy | None = None
         self._scan_mcp_names: dict[str, set[str]] = {}
         self._serve_auth: httpx.BasicAuth | None = None
         self._serve_password: str = ""
@@ -7872,6 +7879,11 @@ class OpenCodeServeManager:
 
         return False, last_error, retryable, cleanup_pending, registered
 
+    def _ensure_kb_proxy(self) -> KnowledgeBaseMcpProxy:
+        if self._kb_proxy is None:
+            self._kb_proxy = KnowledgeBaseMcpProxy()
+        return self._kb_proxy
+
     async def _acquire_scan_mcp(
         self,
         client: httpx.AsyncClient,
@@ -7887,6 +7899,7 @@ class OpenCodeServeManager:
         normalized_role = str(role or "scan_mcp").strip() or "scan_mcp"
         state_key = f"{directory_key}\0{normalized_role}"
         spec: dict[str, Any]
+        proxied = False
         if not str(scan_id or "").strip():
             spec = {
                 "name": "",
@@ -7903,7 +7916,42 @@ class OpenCodeServeManager:
             }
         else:
             try:
-                spec = _scan_mcp_runtime_spec(scan_id, raw_config)
+                effective_raw_config = raw_config
+                if normalized_role == "knowledge_base":
+                    transport = str(raw_config.get("transport") or "remote").strip().lower()
+                    remote = raw_config.get("remote") if isinstance(raw_config.get("remote"), dict) else {}
+                    upstream_url = str(remote.get("url") or "").strip()
+                    project_id = str(raw_config.get("project_id") or "").strip()
+                    if transport == "remote" and upstream_url and project_id:
+                        try:
+                            raw_timeout = raw_config.get("timeout_seconds")
+                            timeout_seconds = max(
+                                1,
+                                int(300 if raw_timeout is None else raw_timeout),
+                            )
+                        except (TypeError, ValueError):
+                            timeout_seconds = 300
+                        upstream_headers = (
+                            {str(k): str(v) for k, v in remote.get("headers", {}).items()}
+                            if isinstance(remote.get("headers"), dict)
+                            else {}
+                        )
+                        proxy_url, _route = await self._ensure_kb_proxy().ensure_route(
+                            upstream_url=upstream_url,
+                            headers=upstream_headers,
+                            project_id=project_id,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        effective_raw_config = {
+                            **raw_config,
+                            "transport": "remote",
+                            "remote": {
+                                "url": proxy_url,
+                                "headers": {},
+                            },
+                        }
+                        proxied = True
+                spec = _scan_mcp_runtime_spec(scan_id, effective_raw_config)
             except Exception as exc:
                 spec = {
                     "name": "",
@@ -7942,6 +7990,7 @@ class OpenCodeServeManager:
                 connected=bool(state.get("connected")),
                 role=normalized_role,
                 error=str(state.get("error") or ""),
+                proxied=bool(state.get("proxied")),
             )
 
         def retain(state: dict[str, Any]) -> _ScanMcpLease:
@@ -8103,6 +8152,7 @@ class OpenCodeServeManager:
                 "directory_key": directory_key,
                 "role": normalized_role,
                 "source_graph": source_graph,
+                "proxied": proxied,
                 "retryable": not bool(spec.get("error")),
                 "next_retry_at": 0.0,
                 "registered": False,
@@ -8639,6 +8689,17 @@ class OpenCodeServeManager:
             and bool(knowledge_base_mcp.get("enabled"))
             else None
         )
+        knowledge_disabled_reason = ""
+        if knowledge_runtime is not None:
+            kb_transport = str(knowledge_runtime.get("transport") or "remote").strip().lower()
+            kb_remote = (
+                knowledge_runtime.get("remote")
+                if isinstance(knowledge_runtime.get("remote"), dict)
+                else {}
+            )
+            if kb_transport == "remote" and not str(kb_remote.get("url") or "").strip():
+                knowledge_runtime = None
+                knowledge_disabled_reason = "unconfigured"
         knowledge_mcp_name = str(
             (knowledge_runtime or {}).get("name") or ""
         ).strip()
@@ -8817,7 +8878,10 @@ class OpenCodeServeManager:
                         "session",
                         "CODE_GRAPH_MCP disabled mode=file_tools",
                     )
-                if knowledge_runtime is not None:
+                knowledge_state_key = (
+                    f"{self._event_directory_key(Path(directory).resolve())}\0knowledge_base"
+                )
+                if knowledge_runtime is not None or knowledge_state_key in self._scan_mcp_states:
                     knowledge_mcp_lease = await deadline.wait(acquire_mcp(
                         client,
                         directory,
@@ -8837,6 +8901,16 @@ class OpenCodeServeManager:
                             "KNOWLEDGE_BASE_MCP unavailable "
                             f"error={_one_line_preview(knowledge_mcp_lease.error)}",
                         )
+                    elif knowledge_disabled_reason:
+                        emit(
+                            "session",
+                            f"KNOWLEDGE_BASE_MCP disabled reason={knowledge_disabled_reason}",
+                        )
+                elif knowledge_disabled_reason:
+                    emit(
+                        "session",
+                        f"KNOWLEDGE_BASE_MCP disabled reason={knowledge_disabled_reason}",
+                    )
             session_base = api_path(normalized_version, "/session")
             if not active_session_id:
                 session_title_text = str(session_title or "").strip() or "DeepHole 2.0 task"
@@ -9136,29 +9210,57 @@ class OpenCodeServeManager:
                     *set_project_tool_ids,
                 ]))
                 binding_error = ""
-                if not projects_tool or not set_project_tool:
-                    binding_error = "knowledge control-tool configuration is incomplete"
-                else:
-                    try:
-                        if binding_workspace is None:
-                            raise RuntimeError("managed plugin workspace is unavailable")
-                        knowledge_binding_path = _write_knowledge_binding(
-                            binding_workspace,
-                            session_id=active_session_id,
-                            project_id=str(
-                                (knowledge_runtime or {}).get("project_id") or ""
-                            ),
-                            mcp_name=knowledge_mcp_name,
-                            blocked_tool_ids=blocked_knowledge_tools,
-                        )
-                    except Exception as exc:
-                        binding_error = _one_line_preview(exc)
-                        if binding_workspace is not None:
-                            with contextlib.suppress(Exception):
-                                _remove_file(_knowledge_binding_path(
-                                    binding_workspace,
-                                    active_session_id,
-                                ))
+                if knowledge_mcp_lease.proxied:
+                    # The local loopback proxy already hides project_id from
+                    # tools/list and injects project_id on tools/call only for
+                    # tools that declare it. Write a session binding only when
+                    # legacy control tools are explicitly blocked.
+                    if blocked_knowledge_tools:
+                        try:
+                            if binding_workspace is None:
+                                raise RuntimeError("managed plugin workspace is unavailable")
+                            knowledge_binding_path = _write_knowledge_binding(
+                                binding_workspace,
+                                session_id=active_session_id,
+                                project_id=str(
+                                    (knowledge_runtime or {}).get("project_id") or ""
+                                ),
+                                mcp_name=knowledge_mcp_name,
+                                blocked_tool_ids=blocked_knowledge_tools,
+                                inject_project_id=False,
+                            )
+                        except Exception as exc:
+                            binding_error = _one_line_preview(exc)
+                            if binding_workspace is not None:
+                                with contextlib.suppress(Exception):
+                                    _remove_file(_knowledge_binding_path(
+                                        binding_workspace,
+                                        active_session_id,
+                                    ))
+                elif projects_tool or set_project_tool:
+                    if not projects_tool or not set_project_tool:
+                        binding_error = "knowledge control-tool configuration is incomplete"
+                    else:
+                        try:
+                            if binding_workspace is None:
+                                raise RuntimeError("managed plugin workspace is unavailable")
+                            knowledge_binding_path = _write_knowledge_binding(
+                                binding_workspace,
+                                session_id=active_session_id,
+                                project_id=str(
+                                    (knowledge_runtime or {}).get("project_id") or ""
+                                ),
+                                mcp_name=knowledge_mcp_name,
+                                blocked_tool_ids=blocked_knowledge_tools,
+                            )
+                        except Exception as exc:
+                            binding_error = _one_line_preview(exc)
+                            if binding_workspace is not None:
+                                with contextlib.suppress(Exception):
+                                    _remove_file(_knowledge_binding_path(
+                                        binding_workspace,
+                                        active_session_id,
+                                    ))
                 if binding_error:
                     for pattern in knowledge_tool_patterns:
                         mcp_overrides[pattern] = False
@@ -9179,10 +9281,11 @@ class OpenCodeServeManager:
                     for tool_id in blocked_knowledge_tools:
                         mcp_overrides.pop(tool_id, None)
                         mcp_overrides[tool_id] = False
+                    bind_mode = " mode=proxy" if knowledge_mcp_lease.proxied else ""
                     emit(
                         "session",
                         "KNOWLEDGE_BASE_MCP project_bound "
-                        f"name={knowledge_mcp_name} "
+                        f"name={knowledge_mcp_name}{bind_mode} "
                         "query_tools=dynamic",
                     )
             if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
@@ -10825,6 +10928,12 @@ class OpenCodeServeManager:
         try:
             await OperationDeadline(CLEANUP_TIMEOUT_SECONDS).wait(stop(), phase="serve_shutdown")
         finally:
+            if self._kb_proxy is not None:
+                with contextlib.suppress(Exception):
+                    await OperationDeadline(CLEANUP_TIMEOUT_SECONDS).wait(
+                        self._kb_proxy.close(),
+                        phase="kb_proxy_shutdown",
+                    )
             self._dirty = False
             self._restart_required = self._proc is not None
             self._invalidate_model_cache()
@@ -11571,6 +11680,9 @@ class OpenCodeServeManager:
                 env[name] = _append_no_proxy_env_value(env.get(name), value)
             else:
                 env[name] = value
+        # Always bypass corporate proxies for the local loopback KB MCP proxy.
+        env["NO_PROXY"] = _append_no_proxy_env_value(env.get("NO_PROXY"), "127.0.0.1,localhost")
+        env["no_proxy"] = _append_no_proxy_env_value(env.get("no_proxy"), "127.0.0.1,localhost")
         # The resolved config is file-backed. Environment overrides are never
         # allowed to re-introduce content injection or ambient user config.
         for name in (

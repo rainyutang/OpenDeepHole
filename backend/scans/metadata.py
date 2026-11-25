@@ -10,8 +10,10 @@ from backend.application import (
 from backend.models import (
     AgentMcpConfig,
     ScanCodeGraphResponse,
+    ScanKnowledgeBaseResponse,
     ScanMetadataResponse,
     UpdateScanCodeGraphRequest,
+    UpdateScanKnowledgeBaseRequest,
     UpdateScanMetadataRequest,
     UpdateScanValidationTargetRequest,
     User,
@@ -81,6 +83,67 @@ async def update_scan_code_graph(
     if cached is not None:
         _apply_scan_metadata(cached, meta)
     return code_graph_response(scan_id, meta, message)
+
+
+async def update_scan_knowledge_base(
+    scan_id: str,
+    body: UpdateScanKnowledgeBaseRequest,
+    current_user: User = None,
+) -> ScanKnowledgeBaseResponse:
+    from backend.knowledge_base import (
+        build_scan_knowledge_base_mcp,
+        get_effective_knowledge_base_settings,
+        knowledge_base_response,
+        sync_scan_knowledge_base,
+    )
+
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        raise ApplicationError(status_code=404, detail="Scan not found")
+    await _check_scan_owner(scan_id, current_user)
+    platform_settings = (
+        await run_store_call(store, get_effective_knowledge_base_settings, store)
+        if body.enabled
+        else None
+    )
+
+    def _build_config(enabled: bool, project_id: str) -> AgentMcpConfig:
+        try:
+            config = build_scan_knowledge_base_mcp(
+                enabled=enabled,
+                project_id=project_id,
+                require_project=True,
+                settings=platform_settings,
+            )
+        except ApplicationError as exc:
+            raise ValueError(str(exc.detail)) from exc
+        assert config is not None
+        return config
+
+    try:
+        meta = await run_store_call(
+            store,
+            "update_scan_knowledge_base",
+            scan_id,
+            enabled=body.enabled,
+            project_id=body.project_id,
+            build_config=_build_config,
+        )
+    except ValueError as exc:
+        raise ApplicationError(status_code=422, detail=str(exc)) from exc
+    if meta is None:
+        raise ApplicationError(status_code=404, detail="Scan not found")
+    cached = get_runtime().scans.running_scans.get(scan_id)
+    if cached is not None:
+        _apply_scan_metadata(cached, meta)
+    publish_scan_event(scan_id, "resource_changed", {"resource": "knowledge-base"})
+    message = await sync_scan_knowledge_base(scan_id)
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
+        raise ApplicationError(status_code=404, detail="Scan not found")
+    if cached is not None:
+        _apply_scan_metadata(cached, meta)
+    return knowledge_base_response(scan_id, meta, message)
 
 
 async def update_scan_validation_target(

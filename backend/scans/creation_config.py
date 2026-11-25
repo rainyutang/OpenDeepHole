@@ -63,6 +63,8 @@ def resolve_creation_configuration(
     managed_config: AgentRemoteConfig,
     current_user: User,
     checker_names: list[str] | None,
+    *,
+    knowledge_base_settings: dict | None = None,
 ) -> ResolvedScanConfiguration:
     requested_scan_mode = _normalize_scan_mode(body.scan_mode)
     if requested_scan_mode == SCAN_MODE_MULTI_VERSION:
@@ -72,7 +74,10 @@ def resolve_creation_configuration(
         knowledge_base_mcp = None
     else:
         code_graph_mcp = _scan_code_graph_mcp(body.code_graph_mcp)
-        knowledge_base_mcp = _knowledge_base_mcp(body.knowledge_base)
+        knowledge_base_mcp = _knowledge_base_mcp(
+            body.knowledge_base,
+            settings=knowledge_base_settings,
+        )
     if (
         code_graph_mcp is not None
         and knowledge_base_mcp is not None

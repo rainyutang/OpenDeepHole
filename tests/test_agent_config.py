@@ -979,6 +979,9 @@ class AgentConfigTests(unittest.TestCase):
         from backend.models import ScanKnowledgeBaseRequest
 
         with patch(
+            "backend.application.default_store_factory",
+            return_value=SimpleNamespace(get_platform_setting=lambda _k: None),
+        ), patch(
             "backend.application.default_config_factory",
             return_value=_server_knowledge_config({
                 "Authorization": "Bearer test-secret-123",
@@ -1014,6 +1017,9 @@ class AgentConfigTests(unittest.TestCase):
             with self.subTest(headers=headers):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     with patch(
+                        "backend.application.default_store_factory",
+                        return_value=SimpleNamespace(get_platform_setting=lambda _k: None),
+                    ), patch(
                         "backend.application.default_config_factory",
                         return_value=_server_knowledge_config(headers),
                     ):

@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { scanPath } from "../routing";
 import { autoResumeActive, autoResumeLabel } from "../scanAutoResume";
 
+import AdminKnowledgeBaseModal from "./AdminKnowledgeBaseModal";
 import AnnouncementBoard from "./AnnouncementBoard";
 
 import ScanShareButton from "./ScanShareButton";
@@ -24,6 +26,7 @@ export default function ScanHistory({
   onCheckerCatalog,
   onReviewNotes,
 }: Props) {
+  const [knowledgeBaseConfigOpen, setKnowledgeBaseConfigOpen] = useState(false);
   const {
     announcementOpen,
     closeAnnouncements,
@@ -110,8 +113,16 @@ export default function ScanHistory({
         onCheckerDashboard={onCheckerDashboard}
         onCheckerCatalog={onCheckerCatalog}
         onReviewNotes={onReviewNotes}
+        onKnowledgeBaseConfig={user.role === "admin" ? () => setKnowledgeBaseConfigOpen(true) : undefined}
         openAnnouncements={toggleAnnouncements}
         announcementOpen={announcementOpen} />
+
+      {user.role === "admin" && (
+        <AdminKnowledgeBaseModal
+          open={knowledgeBaseConfigOpen}
+          onClose={() => setKnowledgeBaseConfigOpen(false)}
+        />
+      )}
 
       <AnnouncementBoard
 

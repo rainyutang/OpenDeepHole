@@ -48,6 +48,7 @@ export interface ScanDraft {
   miningEngines: Record<string, MiningEngineFormValue>;
   knowledgeEnabled: boolean;
   knowledgeProjectId: string;
+  knowledgeProjectName: string;
   validationEnabled: boolean;
   validationMethodId: string;
   validationValues: Record<string, unknown>;
@@ -77,6 +78,7 @@ export function defaultScanDraft(): ScanDraft {
     scanMode: "standard",
     knowledgeEnabled: false,
     knowledgeProjectId: "",
+    knowledgeProjectName: "",
     validationEnabled: false,
     validationMethodId: "",
     validationValues: {},
@@ -98,7 +100,8 @@ export interface ScanDraftContext {
   miningEngineCatalog: MiningEngineCatalogItem[];
   threatMethods: ThreatAnalysisMethodCatalogItem[];
   fpMethods: FpReviewMethodCatalogItem[];
-  knowledgeProjects: KnowledgeBaseProject[];
+  knowledgeProjects?: KnowledgeBaseProject[];
+  knowledgeBaseConfigured?: boolean;
 }
 
 export function selectScanDraft(draft: ScanDraft, context: ScanDraftContext) {
@@ -113,7 +116,7 @@ export function selectScanDraft(draft: ScanDraft, context: ScanDraftContext) {
     threatAnalysisMethod,
     fpReviewMethod,
   } = draft;
-  const { agents, validatorMethods, miningEngineCatalog, threatMethods, fpMethods, knowledgeProjects } = context;
+  const { agents, validatorMethods, miningEngineCatalog, threatMethods, fpMethods, knowledgeProjects = [] } = context;
   const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
   const selectedAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
   const compatibleMethods = validatorMethods.filter((method) => method.products.includes(product.trim()));
@@ -166,7 +169,6 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
     selectedValidationMethod,
     enabledEngineCount,
     selectedThreatDependentEngine,
-    selectedKnowledgeProject,
     unavailableEngines,
     unavailableMethod,
   } = selectScanDraft(draft, context);
@@ -190,7 +192,12 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
     if (pathError) return pathError;
   }
   if (!product.trim()) return "请输入产品名称";
-  if (scanMode !== "multi_version" && knowledgeEnabled && !selectedKnowledgeProject) return "启用知识库后请先拉取并选择项目";
+  if (scanMode !== "multi_version" && knowledgeEnabled) {
+    if (context.knowledgeBaseConfigured === false) {
+      return "管理员尚未配置知识库 MCP 链接，请联系管理员在「知识库配置」中设置";
+    }
+    if (!draft.knowledgeProjectId.trim()) return "启用知识库后请填写 Project ID";
+  }
   if (validationEnabled) {
     if (!selectedValidationMethod) return "当前产品没有可用的验证方法，请检查客户端 validator.yaml";
     const missing = selectedValidationMethod.fields.find((field) => field.required && (validationValues[field.key] === "" || validationValues[field.key] == null));
@@ -216,7 +223,11 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
   return null;
 }
 
-export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: MiningEngineCatalogItem[], selectedKnowledgeProject: KnowledgeBaseProject | null): CreateScanInput {
+export function scanRequestFromDraft(
+  draft: ScanDraft,
+  miningEngineCatalog: MiningEngineCatalogItem[],
+  selectedKnowledgeProject: KnowledgeBaseProject | null = null,
+): CreateScanInput {
   const {
     selectedAgent,
     scanName,
@@ -227,6 +238,8 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     scanMode,
     miningEngines,
     knowledgeEnabled,
+    knowledgeProjectId,
+    knowledgeProjectName,
     validationEnabled,
     validationMethodId,
     validationValues,
@@ -240,6 +253,7 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
     reviewNotesEnabled,
     reviewNoteIds,
   } = draft;
+  const knowledgeActive = scanMode !== "multi_version" && knowledgeEnabled;
   return {
     agent_key: selectedAgent,
     scan_name: scanName.trim(),
@@ -255,9 +269,9 @@ export function scanRequestFromDraft(draft: ScanDraft, miningEngineCatalog: Mini
       })),
     } : {}),
     knowledge_base: {
-      enabled: scanMode !== "multi_version" && knowledgeEnabled,
-      project_id: scanMode !== "multi_version" ? selectedKnowledgeProject?.id || "" : "",
-      project_name: scanMode !== "multi_version" ? selectedKnowledgeProject?.name || "" : "",
+      enabled: knowledgeActive,
+      project_id: knowledgeActive ? knowledgeProjectId.trim() : "",
+      project_name: knowledgeActive ? (knowledgeProjectName.trim() || selectedKnowledgeProject?.name || "") : "",
     },
     vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
     code_graph_mcp: scanMode !== "multi_version" && codeGraphMcp.enabled ? codeGraphMcp : null,
@@ -309,6 +323,7 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
     next.codeGraphMcp = copied.code_graph_mcp || defaultScanCodeGraphMcp();
     next.knowledgeEnabled = copied.knowledge_base?.enabled ?? false;
     next.knowledgeProjectId = copied.knowledge_base?.project_id || "";
+    next.knowledgeProjectName = copied.knowledge_base?.project_name || "";
     next.validationEnabled = copied.vulnerability_validation?.enabled ?? false;
     next.validationMethodId = copied.vulnerability_validation?.method_id || "";
     next.validationValues = copied.vulnerability_validation?.values || {};

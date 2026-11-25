@@ -1139,6 +1139,7 @@ class OpenCodeTaskService:
         quota_wait_budget = ModelQuotaWaitBudget()
         session_events: list[dict[str, Any]] = []
         code_graph_resolved = False
+        knowledge_base_resolved = False
         response_files = _TemporaryResponseFiles(_required_project_dir(context))
 
         session_attempt = 1
@@ -1251,6 +1252,26 @@ class OpenCodeTaskService:
                         context = dataclasses.replace(context, code_graph_mcp=latest_graph)
                         record.execution_context = context
                     code_graph_resolved = True
+
+                if not knowledge_base_resolved:
+                    kb_resolver = (
+                        getattr(get_host_bindings(), "resolve_scan_knowledge_base", None)
+                        if context.scan_id else None
+                    )
+                    if kb_resolver is not None:
+                        latest_kb = kb_resolver(
+                            scan_id=context.scan_id,
+                            fallback=context.knowledge_base_mcp,
+                            scan_mode=str(context.task_metadata.get("scan_mode") or "custom"),
+                        )
+                        if inspect.isawaitable(latest_kb):
+                            latest_kb = await OperationDeadline(
+                                30 + CLEANUP_TIMEOUT_SECONDS,
+                                cancel_event=combined_cancel,
+                            ).wait(latest_kb, phase="knowledge_base_preparation")
+                        context = dataclasses.replace(context, knowledge_base_mcp=latest_kb)
+                        record.execution_context = context
+                    knowledge_base_resolved = True
 
                 await self._notify_lease_state(record, "running")
 

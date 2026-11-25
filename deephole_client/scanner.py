@@ -974,6 +974,7 @@ async def _run_scan_pipeline(
             )
 
     from .scan_code_graph import resolve_scan_code_graph
+    from .scan_knowledge_base import resolve_scan_knowledge_base
 
     code_graph_mcp = await resolve_scan_code_graph(
         scan_id=scan_id,
@@ -981,6 +982,11 @@ async def _run_scan_pipeline(
         fallback=code_graph_mcp,
         scan_mode=runtime_scan_mode,
         emit=lambda message: emit("code_graph_mcp", str(message)),
+    )
+    knowledge_base_mcp = resolve_scan_knowledge_base(
+        scan_id=scan_id,
+        fallback=knowledge_base_mcp,
+        scan_mode=runtime_scan_mode,
     )
 
     scan_mcp_result = ScanCodexConfigResult()
@@ -1229,6 +1235,11 @@ async def _run_scan_pipeline(
                         start=start_file_inventory, cancel_event=cancel_event,
                         code_scan_paths=code_scan_paths,
                     )
+                effective_kb = resolve_scan_knowledge_base(
+                    scan_id=scan_id,
+                    fallback=knowledge_base_mcp,
+                    scan_mode=runtime_scan_mode,
+                )
                 return await run_threat_analysis(
                     scan_mode=runtime_scan_mode,
                     method_id=method_id,
@@ -1244,11 +1255,11 @@ async def _run_scan_pipeline(
                     ),
                     product_mcp=(
                         str(
-                            knowledge_base_mcp.get("name")
-                            or "product-info"
+                            effective_kb.get("name")
+                            or "knowledge-base"
                         )
-                        if isinstance(knowledge_base_mcp, dict)
-                        and bool(knowledge_base_mcp.get("enabled"))
+                        if isinstance(effective_kb, dict)
+                        and bool(effective_kb.get("enabled"))
                         else None
                     ),
                     output=process_output,
@@ -1626,6 +1637,11 @@ async def _run_scan_pipeline(
             else scan_dir / "mining_engines" / selection.engine_id
         )
         engine_work_dir.mkdir(parents=True, exist_ok=True)
+        effective_engine_kb = resolve_scan_knowledge_base(
+            scan_id=scan_id,
+            fallback=knowledge_base_mcp,
+            scan_mode=runtime_scan_mode,
+        )
         engine_kwargs = {
             "engine_id": selection.engine_id,
             "engine_label": selection.engine_label,
@@ -1651,11 +1667,11 @@ async def _run_scan_pipeline(
             ),
             "feedback_entries": list(feedback_entries),
             "code_graph_mcp": copy.deepcopy(code_graph_mcp),
-            "knowledge_base_mcp": copy.deepcopy(knowledge_base_mcp),
+            "knowledge_base_mcp": copy.deepcopy(effective_engine_kb),
             "product_mcp": (
-                str(knowledge_base_mcp.get("name") or "product-info")
-                if isinstance(knowledge_base_mcp, dict)
-                and bool(knowledge_base_mcp.get("enabled"))
+                str(effective_engine_kb.get("name") or "knowledge-base")
+                if isinstance(effective_engine_kb, dict)
+                and bool(effective_engine_kb.get("enabled"))
                 else None
             ),
             "is_resume": is_resume,

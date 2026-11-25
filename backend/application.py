@@ -70,6 +70,7 @@ _RESPONSE_WAITER_FIELDS = {
     "scan_paths_probe_result": "scan_paths_probe_waiters",
     "review_notes_result": "review_notes_waiters",
     "code_graph_result": "code_graph_waiters",
+    "knowledge_base_result": "knowledge_base_waiters",
 }
 
 
@@ -113,6 +114,7 @@ class AgentRuntimeState:
     scan_paths_probe_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
     review_notes_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
     code_graph_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
+    knowledge_base_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
     mcp_probe_persist_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
     @cached_property

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { createScan, getMiningEngineCatalog, getScanCopyConfig, getThreatAnalysisMethodCatalog } from "../../api/scans";
-import { getAgents, getAgentValidatorCatalog, getScanConfigMemory, probeScanKnowledgeBaseMcp } from "../../api/agents";
+import { getAgents, getAgentValidatorCatalog, getScanConfigMemory } from "../../api/agents";
 import { getFpReviewMethodCatalog } from "../../api/fpReview";
-import type { AgentInfo, AgentMcpProbeResult, AgentValidatorMethod, KnowledgeBaseProject } from "../../types/agents";
+import { getKnowledgeBaseStatus } from "../../api/knowledgeBase";
+import type { AgentInfo, AgentValidatorMethod } from "../../types/agents";
 import type { FpReviewMethodCatalogItem } from "../../types/fpReview";
 import type { MiningEngineCatalogItem } from "../../types/mining";
 import type { ScanConfigMemory } from "../../types/scans";
@@ -33,6 +34,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     setMiningEngines,
     setKnowledgeEnabled,
     setKnowledgeProjectId,
+    setKnowledgeProjectName,
     setValidationEnabled,
     setValidationMethodId,
     setValidationValues,
@@ -86,27 +88,23 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
   const [agentConfigLoading, setAgentConfigLoading] = useState(false);
   const copiedAgentInitialization = useRef<string | null>(null);
   const [copiedCapabilities, setCopiedCapabilities] = useState({ knowledge: false, validation: false });
-
-  const [knowledgeProjects, setKnowledgeProjects] = useState<KnowledgeBaseProject[]>([]);
-
-  const [knowledgeProbe, setKnowledgeProbe] = useState<AgentMcpProbeResult | null>(null);
-  const [probingKnowledge, setProbingKnowledge] = useState(false);
-  const knowledgeProbeGeneration = useRef(0);
-
-  useEffect(() => {
-    setProbingKnowledge(false);
-    return () => { knowledgeProbeGeneration.current += 1; };
-  }, [selectedAgent, knowledgeEnabled]);
+  const [knowledgeBaseConfigured, setKnowledgeBaseConfigured] = useState(false);
 
   const [reviewNotesReady, setReviewNotesReady] = useState(true);
 
-  const draftContext = { agents, validatorMethods, miningEngineCatalog, threatMethods, fpMethods, knowledgeProjects };
+  const draftContext = {
+    agents,
+    validatorMethods,
+    miningEngineCatalog,
+    threatMethods,
+    fpMethods,
+    knowledgeBaseConfigured,
+  };
   const {
     selectedAgentInfo,
     selectedAgentReady,
     compatibleMethods,
     selectedValidationMethod,
-    selectedKnowledgeProject,
     unavailableEngines,
     unavailableMethod,
   } = selectScanDraft(draft, draftContext);
@@ -115,26 +113,25 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     const controller = new AbortController();
     setLoading(true);
     setLoadError("");
-    Promise.all([getAgents(), getMiningEngineCatalog(), getThreatAnalysisMethodCatalog(), getFpReviewMethodCatalog(),
-    sourceScanId ? getScanCopyConfig(sourceScanId, controller.signal) : Promise.resolve(null),
-    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, copied]) => {
+    Promise.all([
+      getAgents(),
+      getMiningEngineCatalog(),
+      getThreatAnalysisMethodCatalog(),
+      getFpReviewMethodCatalog(),
+      getKnowledgeBaseStatus().catch(() => ({ configured: false, name: "knowledge-base" })),
+      sourceScanId ? getScanCopyConfig(sourceScanId, controller.signal) : Promise.resolve(null),
+    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, kbStatus, copied]) => {
       if (controller.signal.aborted) return;
       setAgents(agentList);
       setMiningEngineCatalog(engineCatalog.engines);
       setThreatMethods(threatCatalog.methods);
       setFpMethods(fpCatalog.methods);
+      setKnowledgeBaseConfigured(Boolean(kbStatus?.configured));
       const initialization = scanDraftInitialization(engineCatalog.engines, threatCatalog.methods, fpCatalog.methods, copied);
       setDraft((current) => ({ ...current, ...initialization }));
       if (copied) {
-
         copiedAgentInitialization.current = copied.agent_key;
-
         setCopiedCapabilities({ knowledge: copied.knowledge_base?.enabled ?? false, validation: copied.vulnerability_validation?.enabled ?? false });
-        const knowledge = copied.knowledge_base;
-
-        setKnowledgeProjects(knowledge?.project_id ? [{ id: knowledge.project_id, name: knowledge.project_name, path: "", current: false }] : []);
-        setKnowledgeProbe(null);
-
         return;
       }
       const preferred = agentList.find((agent) => agentAcceptsTasks(agent) && agent.has_explicit_model) || agentList.find(agentAcceptsTasks);
@@ -151,10 +148,9 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     const preserveCopied = copiedAgentInitialization.current === selectedAgent;
     if (preserveCopied) copiedAgentInitialization.current = null;
     if (!preserveCopied) {
-      setKnowledgeProbe(null);
       setKnowledgeEnabled(false);
-      setKnowledgeProjects([]);
       setKnowledgeProjectId("");
+      setKnowledgeProjectName("");
       setValidationEnabled(false);
       setValidationMethodId("");
       setValidationValues({});
@@ -183,12 +179,21 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
 
   const toggleKnowledge = () => {
     const next = !knowledgeEnabled;
+    if (next && !knowledgeBaseConfigured) return;
     setKnowledgeEnabled(next);
-    setKnowledgeProbe(null);
-    if (!next) {
-      setKnowledgeProjects([]);
+    if (next) {
+      if (!knowledgeProjectId.trim() && memory.knowledge_base?.project_id) {
+        setKnowledgeProjectId(String(memory.knowledge_base.project_id));
+      }
+    } else {
       setKnowledgeProjectId("");
+      setKnowledgeProjectName("");
     }
+  };
+
+  const handleKnowledgeProjectIdChange = (value: string) => {
+    setKnowledgeProjectId(value);
+    setKnowledgeProjectName("");
   };
 
   const toggleValidation = () => {
@@ -202,40 +207,6 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     chooseValidationMethod(method?.method_id || "", productName);
   };
 
-  const probeKnowledge = async () => {
-    if (!selectedAgent || probingKnowledge || !knowledgeEnabled) return;
-    const generation = ++knowledgeProbeGeneration.current;
-    setProbingKnowledge(true); setError(null);
-    setKnowledgeProbe(null);
-    setKnowledgeProjects([]);
-    setKnowledgeProjectId("");
-    try {
-      const result = await probeScanKnowledgeBaseMcp(selectedAgent);
-      if (generation !== knowledgeProbeGeneration.current) return;
-      setKnowledgeProbe(result);
-      setKnowledgeProjects(result.success ? result.projects : []);
-      if (result.success) {
-        const rememberedId = String(memory.knowledge_base?.project_id || "");
-        const preferred = result.projects.find((item) => item.id === rememberedId)
-          || result.projects.find((item) => item.id === result.session_project?.id)
-          || result.projects.find((item) => item.id === result.current_project?.id)
-          || result.projects.find((item) => item.current)
-          || null;
-        setKnowledgeProjectId(preferred?.id || "");
-      } else {
-        setKnowledgeProjectId("");
-      }
-    }
-    catch (probeError: unknown) {
-      if (generation === knowledgeProbeGeneration.current) {
-        setError((probeError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "知识库连接检测失败");
-      }
-    }
-    finally {
-      if (generation === knowledgeProbeGeneration.current) setProbingKnowledge(false);
-    }
-  };
-
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (submitting || loading || loadError || agentConfigLoading || (reviewNotesEnabled && !reviewNotesReady)) return;
@@ -244,7 +215,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     if (validationError) return setError(validationError);
     setSubmitting(true);
     try {
-      const response = await createScan(scanRequestFromDraft(draft, miningEngineCatalog, selectedKnowledgeProject));
+      const response = await createScan(scanRequestFromDraft(draft, miningEngineCatalog, null));
       onScanStarted(response.scan_id);
     } catch (submitError: unknown) {
       setError((submitError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "创建扫描失败，请检查客户端是否在线且已配置模型");
@@ -307,9 +278,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     setLoadAttempt,
     agentConfigLoading,
     copiedCapabilities,
-    knowledgeProjects,
-    knowledgeProbe,
-    probingKnowledge,
+    knowledgeBaseConfigured,
     reviewNotesReady,
     setReviewNotesReady,
     selectedAgentInfo,
@@ -320,8 +289,8 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     unavailableMethod,
     chooseValidationMethod,
     toggleKnowledge,
+    handleKnowledgeProjectIdChange,
     toggleValidation,
-    probeKnowledge,
     handleSubmit,
   };
 }

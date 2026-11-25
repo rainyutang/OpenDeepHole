@@ -11,6 +11,7 @@ from backend.application import ApplicationError
 from backend.auth import get_current_user, require_admin
 from backend.scans import admin_export as admin_export_service
 from backend.models import (
+    AdminKnowledgeBaseConfigResponse,
     CheckerDashboardAgentTokenUsage,
     CheckerDashboardResponse,
     CheckerDashboardStats,
@@ -18,9 +19,11 @@ from backend.models import (
     CheckerDashboardTokenUsage,
     CheckerScanDashboardStats,
     FpReviewResult,
+    KnowledgeBasePublicStatusResponse,
     OpenCodeModelTokenUsage,
     OpenCodeTokenUsage,
     ScanStatus,
+    UpdateAdminKnowledgeBaseConfigRequest,
     User,
 )
 from backend.registry import refresh_registry
@@ -118,6 +121,81 @@ async def get_runtime_metrics(
 ) -> dict:
     """Return per-worker request, event-loop, and database queue metrics."""
     return runtime_metrics.snapshot()
+
+
+@router.get(
+    "/api/admin/knowledge-base",
+    response_model=AdminKnowledgeBaseConfigResponse,
+)
+async def get_admin_knowledge_base_config(
+    _current_user: User = Depends(require_admin),
+) -> AdminKnowledgeBaseConfigResponse:
+    """Return administrator-managed global knowledge-base MCP settings (headers redacted)."""
+    from backend.application import get_scan_store as get_app_scan_store
+    from backend.application import run_store_call as run_app_store_call
+    from backend.knowledge_base import (
+        admin_knowledge_base_response,
+        get_effective_knowledge_base_settings,
+    )
+
+    store = get_app_scan_store()
+    settings = await run_app_store_call(store, get_effective_knowledge_base_settings, store)
+    return admin_knowledge_base_response(settings)
+
+
+@router.put(
+    "/api/admin/knowledge-base",
+    response_model=AdminKnowledgeBaseConfigResponse,
+)
+async def update_admin_knowledge_base_config(
+    body: UpdateAdminKnowledgeBaseConfigRequest,
+    _current_user: User = Depends(require_admin),
+) -> AdminKnowledgeBaseConfigResponse:
+    """Save global knowledge-base MCP settings and broadcast to all live Agents."""
+    from backend.application import get_scan_store as get_app_scan_store
+    from backend.application import run_store_call as run_app_store_call
+    from backend.knowledge_base import (
+        admin_knowledge_base_response,
+        broadcast_platform_knowledge_base_update,
+        save_admin_knowledge_base_settings,
+    )
+
+    store = get_app_scan_store()
+    try:
+        settings = await run_app_store_call(
+            store,
+            save_admin_knowledge_base_settings,
+            body,
+            store,
+        )
+    except ApplicationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=exc.headers,
+        ) from exc
+    await broadcast_platform_knowledge_base_update(settings)
+    return admin_knowledge_base_response(settings)
+
+
+@router.get(
+    "/api/knowledge-base/status",
+    response_model=KnowledgeBasePublicStatusResponse,
+)
+async def get_knowledge_base_status(
+    _current_user: User = Depends(get_current_user),
+) -> KnowledgeBasePublicStatusResponse:
+    """Return whether platform knowledge-base MCP is configured (without exposing URL/headers)."""
+    from backend.application import get_scan_store as get_app_scan_store
+    from backend.application import run_store_call as run_app_store_call
+    from backend.knowledge_base import (
+        get_effective_knowledge_base_settings,
+        public_knowledge_base_status,
+    )
+
+    store = get_app_scan_store()
+    settings = await run_app_store_call(store, get_effective_knowledge_base_settings, store)
+    return public_knowledge_base_status(settings)
 
 
 def _request_fallback_base_url(request: Request) -> str:

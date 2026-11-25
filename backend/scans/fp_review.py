@@ -185,6 +185,9 @@ async def _start_fp_review(
             "total": int(fp_job_info.get("total") or len(confirmed)),
             "processed": int(fp_job_info.get("processed") or 0),
         })
+        from backend.knowledge_base import effective_scan_knowledge_base_mcp
+
+        effective_kb = await run_store_call(store, effective_scan_knowledge_base_mcp, meta, store)
         command = {
             "type": "fp_review",
             "scan_id": scan_id,
@@ -204,9 +207,10 @@ async def _start_fp_review(
                 if meta.code_graph_mcp is not None
                 else None
             ),
+            "knowledge_base_mcp_revision": meta.knowledge_base_mcp_revision,
             "knowledge_base_mcp": (
-                meta.knowledge_base_mcp.model_dump(mode="json")
-                if meta.knowledge_base_mcp is not None
+                effective_kb.model_dump(mode="json")
+                if effective_kb is not None
                 else None
             ),
             "agent_runtime_update": runtime_update,

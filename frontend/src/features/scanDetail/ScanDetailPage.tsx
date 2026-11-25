@@ -9,7 +9,7 @@ import VulnerabilityList from "../issues/VulnerabilityList";
 import { canonicalMiningEngineLabel, isPatternAuditEngine, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
 import type { ScanNavigation } from "../../routing";
 import { findIndexedVulnerability } from "../../scanRuntime/issues";
-import { mergeScanCodeGraph, mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
+import { mergeScanCodeGraph, mergeScanKnowledgeBase, mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
 import type { IndexedVulnerability } from "../../types/issues";
 import type { ScanMetadata } from "../../types/scans";
 import { ModelPoolDashboard } from "../modelPool/ModelPoolDashboard";
@@ -517,6 +517,8 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
             ? () => onCopyScan(scan.scan_id) : undefined}
           onCodeGraphSaved={!sharedView && !isPublicScan(scanId) ? (state) => setScan((previous) => previous?.scan_id === state.scan_id
             ? mergeScanCodeGraph(previous, { ...previous, ...state }) : previous) : undefined}
+          onKnowledgeBaseSaved={!sharedView && !isPublicScan(scanId) ? (state) => setScan((previous) => previous?.scan_id === state.scan_id
+            ? mergeScanKnowledgeBase(previous, { ...previous, ...state }) : previous) : undefined}
         />
       )}
       {editingScan && (

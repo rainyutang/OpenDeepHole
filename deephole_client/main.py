@@ -40,6 +40,12 @@ from deephole_client.scan_code_graph import (
     apply_command_code_graph,
     code_graph_mcp_revisions,
 )
+from deephole_client.scan_knowledge_base import (
+    apply_command_knowledge_base,
+    apply_knowledge_base_update,
+    apply_platform_knowledge_base_update,
+    knowledge_base_mcp_revisions,
+)
 
 
 _WS_MAX_MESSAGE_ENV = "OPENDEEPHOLE_WS_MAX_MESSAGE_MB"
@@ -200,6 +206,7 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
             return
         apply_command_review_notes(msg)
         apply_command_code_graph(msg)
+        apply_command_knowledge_base(msg)
         await _set_reporter_execution(
             reporter, "set_scan_execution", msg["scan_id"], execution_revision
         )
@@ -321,6 +328,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         try:
             apply_command_review_notes(msg)
             apply_command_code_graph(msg)
+            apply_command_knowledge_base(msg)
         except Exception as exc:
             if reporter is not None:
                 await reporter.report_scan_start_failure(
@@ -409,6 +417,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         try:
             apply_command_review_notes(msg)
             apply_command_code_graph(msg)
+            apply_command_knowledge_base(msg)
         except Exception as exc:
             if reporter is not None:
                 await reporter.finish_fp_review(
@@ -465,6 +474,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             )
             return None
         apply_command_code_graph(msg)
+        apply_command_knowledge_base(msg)
         execution_revision = int(msg.get("execution_revision") or 0)
         await _set_reporter_execution(
             reporter,
@@ -530,6 +540,26 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             response["ok"] = False
             response["error"] = str(exc)
         return response
+    elif cmd_type == "knowledge_base_update":
+        response = {
+            "type": "knowledge_base_result",
+            "request_id": str(msg.get("request_id") or ""),
+            "scan_id": msg.get("scan_id", ""),
+            "revision": msg.get("revision", 0),
+        }
+        try:
+            response["revision"] = apply_knowledge_base_update(msg)
+            response["ok"] = True
+        except Exception as exc:
+            response["ok"] = False
+            response["error"] = str(exc)
+        return response
+    elif cmd_type == "platform_knowledge_base_update":
+        try:
+            apply_platform_knowledge_base_update(msg)
+        except Exception as exc:
+            print(f"Ignored invalid platform knowledge-base update: {exc}", flush=True)
+        return None
     elif cmd_type == "review_notes_update":
         payload = msg.get("review_notes", msg)
         response = {
@@ -765,6 +795,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         "incremental_validation_output": True,
                         "server_owned_pattern_task_settlement": True,
                         "scan_code_graph_updates": True,
+                        "scan_knowledge_base_updates": True,
                         "scan_paths_probe": True,
                         "graceful_runtime_update": True,
                     },
@@ -782,6 +813,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     ),
                     "review_notes_revisions": review_notes_revisions(),
                     "code_graph_mcp_revisions": code_graph_mcp_revisions(),
+                    "knowledge_base_mcp_revisions": knowledge_base_mcp_revisions(),
                     "active_validations": (
                         agent_server.active_validation_snapshots()
                         + pending_validation_snapshots()
@@ -810,6 +842,20 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         continue
                     response = await _handle_command(
                         {**payload, "type": "code_graph_update"},
+                        config, task_manager, reporter,
+                    )
+                    if response:
+                        await _send_ws_json(ws, ws_send_lock, response)
+                if isinstance(welcome.get("platform_knowledge_base"), dict):
+                    try:
+                        apply_platform_knowledge_base_update(welcome["platform_knowledge_base"])
+                    except Exception as exc:
+                        print(f"Ignored invalid welcome platform knowledge-base config: {exc}", flush=True)
+                for payload in welcome.get("knowledge_base_updates") or []:
+                    if not isinstance(payload, dict):
+                        continue
+                    response = await _handle_command(
+                        {**payload, "type": "knowledge_base_update"},
                         config, task_manager, reporter,
                     )
                     if response:

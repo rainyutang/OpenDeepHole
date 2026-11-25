@@ -25,6 +25,8 @@ class ReconnectState:
     accepted_scan_executions: list[dict]
     review_notes: list[dict]
     code_graph_updates: list[dict]
+    knowledge_base_updates: list[dict]
+    platform_knowledge_base: dict
 
 
 async def agent_websocket(websocket: WebSocket) -> None:
@@ -117,6 +119,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             ),
             protocol_version=protocol_version,
             scan_code_graph_updates=reported_capabilities.get("scan_code_graph_updates") is True,
+            scan_knowledge_base_updates=reported_capabilities.get("scan_knowledge_base_updates") is True,
             scan_paths_probe=reported_capabilities.get("scan_paths_probe") is True,
             graceful_runtime_update=graceful_runtime_update,
             server_url=ws_server_url,
@@ -148,6 +151,8 @@ async def agent_websocket(websocket: WebSocket) -> None:
             "scan_executions": reconnect.accepted_scan_executions,
             "review_notes": reconnect.review_notes,
             "code_graph_updates": reconnect.code_graph_updates,
+            "knowledge_base_updates": reconnect.knowledge_base_updates,
+            "platform_knowledge_base": reconnect.platform_knowledge_base,
             "capabilities": {
                 "candidate_batches": protocol_version >= 2,
                 "event_batches": protocol_version >= 2,
@@ -388,7 +393,34 @@ async def _prepare_reconnect(
         await code_graph_for_agent(stable_key, msg.get("code_graph_mcp_revisions"), store=store)
         if agent_info.scan_code_graph_updates else []
     )
-    return ReconnectState(pending_scan_stops, pending_validation_stops, recovery_scan_ids, promoted_by_scan, accepted_scan_executions, review_notes, code_graph_updates)
+    from backend.knowledge_base import (
+        get_effective_knowledge_base_settings,
+        knowledge_base_for_agent,
+        platform_knowledge_base_payload,
+    )
+
+    knowledge_base_updates = (
+        await knowledge_base_for_agent(
+            stable_key,
+            msg.get("knowledge_base_mcp_revisions"),
+            store=store,
+        )
+        if agent_info.scan_knowledge_base_updates else []
+    )
+    platform_knowledge_base = platform_knowledge_base_payload(
+        await run_store_call(store, get_effective_knowledge_base_settings, store)
+    )
+    return ReconnectState(
+        pending_scan_stops,
+        pending_validation_stops,
+        recovery_scan_ids,
+        promoted_by_scan,
+        accepted_scan_executions,
+        review_notes,
+        code_graph_updates,
+        knowledge_base_updates,
+        platform_knowledge_base,
+    )
 
 
 async def _recover_after_welcome(
@@ -444,6 +476,10 @@ async def _receive_messages(websocket: WebSocket, agent_id: str, agent_info: Age
                 from backend.code_graph import accept_code_graph_result
 
                 await accept_code_graph_result(incoming, agent_info)
+            elif incoming.get("type") == "knowledge_base_result":
+                from backend.knowledge_base import accept_knowledge_base_result
+
+                await accept_knowledge_base_result(incoming, agent_info)
             await _complete_agent_response(incoming, response_waiters)
             continue
         if isinstance(incoming, dict) and incoming.get("type") == "runtime_update_status":

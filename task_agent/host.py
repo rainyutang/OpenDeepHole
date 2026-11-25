@@ -78,6 +78,7 @@ class OpenCodeHostBindings:
     readable_roots: Callable[[], tuple[Path, ...]] = lambda: ()
     fixed_skill_root: Callable[[], Path] | None = None
     resolve_scan_code_graph: Callable[..., Any] | None = None
+    resolve_scan_knowledge_base: Callable[..., Any] | None = None
 
 
 _bindings: OpenCodeHostBindings | None = None

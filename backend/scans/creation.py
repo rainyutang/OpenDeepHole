@@ -232,6 +232,11 @@ def _creation_records(
         validation_environment="",
         code_graph_mcp_enabled=code_graph_mcp is not None,
         knowledge_base_enabled=knowledge_base_mcp is not None,
+        knowledge_base_project_id=(
+            str(knowledge_base_mcp.project_id or "").strip()
+            if knowledge_base_mcp is not None
+            else ""
+        ),
         vulnerability_validation_enabled=validation_config is not None,
         validation_method_id=(validation_config.method_id if validation_config else ""),
         validation_method_label=(validation_config.method_label if validation_config else ""),
@@ -440,6 +445,7 @@ async def _dispatch_creation(
             if code_graph_mcp is not None
             else None
         ),
+        "knowledge_base_mcp_revision": meta.knowledge_base_mcp_revision,
         "knowledge_base_mcp": (
             knowledge_base_mcp.model_dump(mode="json")
             if knowledge_base_mcp is not None
@@ -481,7 +487,23 @@ async def create_agent_scan(
 ) -> ScanStartResponse:
     """Resolve, preflight, persist and dispatch one new scan in that order."""
     selected = await _select_creation_agent(body, current_user, enforce_agent_owner)
-    configuration = resolve_creation_configuration(body, selected.managed_config, current_user, checker_names)
+    knowledge_base_settings = None
+    if body.knowledge_base.enabled:
+        from backend.knowledge_base import get_effective_knowledge_base_settings
+
+        store = get_scan_store()
+        knowledge_base_settings = await run_store_call(
+            store,
+            get_effective_knowledge_base_settings,
+            store,
+        )
+    configuration = resolve_creation_configuration(
+        body,
+        selected.managed_config,
+        current_user,
+        checker_names,
+        knowledge_base_settings=knowledge_base_settings,
+    )
     identity = _creation_identity(body, configuration.project_path)
     validation = await _creation_validation(body, identity, selected)
     await _preflight_creation_paths(selected, configuration)

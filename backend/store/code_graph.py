@@ -24,6 +24,7 @@ class ScanCodeGraphStoreMixin:
             if bool(enabled) != was_enabled:
                 config = (config or default_config).model_copy(update={"enabled": bool(enabled)}, deep=True)
                 if (enabled and meta.knowledge_base_mcp is not None
+                        and meta.knowledge_base_mcp.enabled
                         and config.name.strip().casefold() == meta.knowledge_base_mcp.name.strip().casefold()):
                     raise ValueError("代码图谱 MCP 与知识库 MCP 名称不能相同")
                 self._conn.execute(

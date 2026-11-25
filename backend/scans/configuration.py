@@ -553,6 +553,8 @@ def _resolve_scan_validation(
 
 def _knowledge_base_mcp(
     request: ScanKnowledgeBaseRequest,
+    *,
+    settings: dict | None = None,
 ) -> AgentMcpConfig | None:
     from backend.agents.configuration import _normalize_scan_knowledge_base_mcp
 
@@ -560,6 +562,7 @@ def _knowledge_base_mcp(
         enabled=request.enabled,
         project_id=request.project_id,
         project_name=request.project_name,
+        settings=settings,
     )
 
 

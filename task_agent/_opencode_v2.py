@@ -809,6 +809,7 @@ export default {
         const allowed = Array.isArray(binding.allowed_tool_ids) ? binding.allowed_tool_ids : []
         const prefixes = Array.isArray(binding.tool_id_prefixes) ? binding.tool_id_prefixes : []
         if (!allowed.includes(tool) && !prefixes.some((prefix) => tool.startsWith(prefix))) return
+        if (binding.inject_project_id === false) return
         const args = second?.args && typeof second.args === "object" && !Array.isArray(second.args)
           ? second.args
           : first?.args && typeof first.args === "object" && !Array.isArray(first.args)

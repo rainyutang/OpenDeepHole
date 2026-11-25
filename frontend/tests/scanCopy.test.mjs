@@ -69,13 +69,14 @@ const configMemory = {
 };
 const notes = [{ id: "note-1", title: "Saved note", content: "Saved content", created_at: "", updated_at: "" }];
 
-async function mount({ source = fixture(), sourceScanId = "source-id", agentList = agents, handleRequest } = {}) {
+async function mount({ source = fixture(), sourceScanId = "source-id", agentList = agents, kbConfigured = Boolean(source?.knowledge_base?.enabled), handleRequest } = {}) {
   const requests = [], submissions = [], started = [];
   client.api.defaults.adapter = async (config) => {
     requests.push({ url: config.url, method: config.method });
     let data = handleRequest ? await handleRequest(config) : undefined;
     if (data !== undefined) { /* A deferred or failed request may override the normal fixture. */ }
     else if (config.url === "/api/agents") data = agentList;
+    else if (config.url === "/api/knowledge-base/status") data = { configured: kbConfigured, name: "knowledge-base" };
     else if (config.url === `/api/scan/${sourceScanId}/copy-config`) data = source;
     else if (config.url === "/api/mining-engines") data = { engines: [
       { engine_id: "static_candidate", label: "Static" }, { engine_id: "threat_pattern_audit", label: "Patterns" },
@@ -371,32 +372,23 @@ test("copied knowledge-base access can be turned off without fetching a new proj
   assert.ok(requests.every((request) => !request.url.includes("probe")));
 });
 
-for (const invalidate of ["switch agent", "disable knowledge"]) {
-  test(`a late knowledge probe cannot restore projects after ${invalidate}`, async () => {
-    const pendingProbe = deferred();
-    const { root, requests } = await mount({
-      source: fixture({ knowledge_base: { enabled: true, project_id: "old-project", project_name: "Original knowledge project" } }),
-      handleRequest: (config) => config.url.includes("mcp-probe/scan_knowledge_base") ? pendingProbe.promise : undefined,
-    });
-    const probe = root.root.findAllByType("button").find((item) => content(item) === "检测并拉取项目");
-    assert.ok(probe);
-    await act(async () => probe.props.onClick());
-    assert.equal(requests.filter((request) => request.url.includes("mcp-probe/scan_knowledge_base")).length, 1);
-    if (invalidate === "switch agent") {
-      await act(async () => root.root.findAllByProps({ type: "radio" })[0].props.onChange());
-      await flush();
-    } else {
-      await act(async () => root.root.findByProps({ "aria-label": "启用知识库" }).props.onClick());
-    }
-    await act(async () => root.root.findByProps({ "aria-label": "启用知识库" }).props.onClick());
-    await act(async () => pendingProbe.resolve({
-      success: true, error: "", projects: [{ id: "stale-project", name: "Stale probe project", path: "", current: true }],
-    }));
-    await flush();
-    assert.doesNotMatch(content(root.toJSON()), /Stale probe project|连接成功/);
-    assert.equal(root.root.findAllByType("button").find((item) => content(item) === "检测并拉取项目")?.props.disabled, false);
+test("copied knowledge-base project_id can be edited directly and resets when switching agents", async () => {
+  const { root, submissions } = await mount({
+    source: fixture({ knowledge_base: { enabled: true, project_id: "old-project", project_name: "Original knowledge project" } }),
   });
-}
+  await fillName(root);
+  const projectInput = root.root.findByProps({ "aria-label": "知识库 Project ID" });
+  assert.equal(projectInput.props.value, "old-project");
+  await act(async () => projectInput.props.onChange({ target: { value: "mae-edited" } }));
+  await submit(root);
+  assert.equal(submissions.length, 1);
+  assert.deepEqual(submissions[0].knowledge_base, { enabled: true, project_id: "mae-edited", project_name: "" });
+
+  // Switching agents resets the copied knowledge-base selection cleanly.
+  await act(async () => root.root.findAllByProps({ type: "radio" })[0].props.onChange());
+  await flush();
+  assert.equal(root.root.findByProps({ "aria-label": "启用知识库" }).props["aria-checked"], false);
+});
 
 test("copy waits for the private note library before accepting a preselected note", async () => {
   const pendingNotes = deferred();

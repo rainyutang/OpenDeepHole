@@ -50,6 +50,7 @@ _ROUTE_ORDER = (
     'get_scan_validations_v2',
     'update_scan_metadata',
     'update_scan_code_graph',
+    'update_scan_knowledge_base',
     'update_scan_validation_target',
     'stop_scan',
     'resume_scan',

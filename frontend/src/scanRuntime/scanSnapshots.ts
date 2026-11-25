@@ -1,7 +1,7 @@
 import { selectedScanPaths } from "../scanPaths";
 import { normalizeScanProgressEstimate, selectScanProgressEstimate } from "../scanProgress";
 import type { Candidate, ScanCandidate } from "../types/audit";
-import type { ScanCodeGraphState, ScanEvent, ScanItemStatus, ScanStatus } from "../types/scans";
+import type { ScanCodeGraphState, ScanEvent, ScanItemStatus, ScanKnowledgeBaseState, ScanStatus } from "../types/scans";
 import { isRecord, text, finiteNumber, nullableFiniteNumber, recordArray, stringArray } from './record';
 import { normalizeCandidate } from './candidates';
 import { normalizeIndexedVulnerabilities, normalizeValidation } from './issues';
@@ -81,6 +81,36 @@ export function mergeScanCodeGraph<T extends CodeGraphSnapshot>(
   };
 }
 
+export type KnowledgeBaseSnapshot = Pick<ScanKnowledgeBaseState, "scan_id"> & Partial<ScanKnowledgeBaseState>;
+
+/** Knowledge-base changes and acknowledgements advance independently of scan execution. */
+export function mergeScanKnowledgeBase<T extends KnowledgeBaseSnapshot>(
+  previous: KnowledgeBaseSnapshot | null | undefined,
+  incoming: T,
+): T {
+  if (previous?.scan_id !== incoming.scan_id) return incoming;
+  if (previous.knowledge_base_mcp_revision == null && incoming.knowledge_base_mcp_revision == null) return incoming;
+  const selected = (previous.knowledge_base_mcp_revision ?? 0) > (incoming.knowledge_base_mcp_revision ?? 0)
+    ? previous : incoming;
+  const revision = selected.knowledge_base_mcp_revision ?? 0;
+  const applied = Math.max(previous.knowledge_base_mcp_applied_revision ?? 0, incoming.knowledge_base_mcp_applied_revision ?? 0);
+  const syncStatus = applied >= revision ? "synced" : "pending";
+  const projectId = selected.knowledge_base_project_id ?? "";
+  if (incoming.knowledge_base_enabled === selected.knowledge_base_enabled
+    && (incoming.knowledge_base_project_id ?? "") === projectId
+    && incoming.knowledge_base_mcp_revision === revision
+    && incoming.knowledge_base_mcp_applied_revision === applied
+    && incoming.knowledge_base_mcp_sync_status === syncStatus) return incoming;
+  return {
+    ...incoming,
+    knowledge_base_enabled: selected.knowledge_base_enabled,
+    knowledge_base_project_id: projectId,
+    knowledge_base_mcp_revision: revision,
+    knowledge_base_mcp_applied_revision: applied,
+    knowledge_base_mcp_sync_status: syncStatus,
+  };
+}
+
 /** Merge a GET without letting a response started before a live update undo it. */
 export function mergeScanSnapshot(
   previous: ScanStatus | null,
@@ -88,7 +118,9 @@ export function mergeScanSnapshot(
   requestedFrom?: ScanStatus | null,
 ): ScanStatus {
   if (previous?.scan_id !== incoming.scan_id) return incoming;
-  if (isOlderScanExecution(previous, incoming)) return mergeScanCodeGraph(incoming, mergeScanMetadata(incoming, previous));
+  if (isOlderScanExecution(previous, incoming)) {
+    return mergeScanKnowledgeBase(incoming, mergeScanCodeGraph(incoming, mergeScanMetadata(incoming, previous)));
+  }
   const newerExecution = (scanExecutionRevision(incoming) ?? 0) > (scanExecutionRevision(previous) ?? 0);
   const updatedDuringRequest = requestedFrom !== undefined && !newerExecution && (
     requestedFrom?.scan_id !== previous.scan_id
@@ -101,7 +133,7 @@ export function mergeScanSnapshot(
     || previous.mining_engine_runs !== requestedFrom?.mining_engine_runs
   );
   const runtime = updatedDuringRequest ? previous : incoming;
-  return mergeScanCodeGraph(previous, mergeScanMetadata(previous, {
+  return mergeScanKnowledgeBase(previous, mergeScanCodeGraph(previous, mergeScanMetadata(previous, {
     ...incoming,
     ...Object.fromEntries(progressFields.map((key) => [key, runtime[key]])),
     execution_revision: scanExecutionRevision(runtime) ?? scanExecutionRevision(previous),
@@ -126,7 +158,7 @@ export function mergeScanSnapshot(
     // Overview snapshots omit artifacts; null does not delete a loaded result.
     threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
     threat_pattern_audit_tasks: mergePatternTasks(previous.threat_pattern_audit_tasks ?? [], incoming.threat_pattern_audit_tasks ?? []),
-  }));
+  })));
 }
 
 export function mergeScanOverview(
@@ -200,6 +232,11 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     code_graph_mcp_sync_status: finiteNumber(value.code_graph_mcp_applied_revision) < finiteNumber(value.code_graph_mcp_revision)
       ? "pending" : "synced",
     knowledge_base_enabled: value.knowledge_base_enabled === true,
+    knowledge_base_project_id: text(value.knowledge_base_project_id),
+    knowledge_base_mcp_revision: Math.max(0, finiteNumber(value.knowledge_base_mcp_revision)),
+    knowledge_base_mcp_applied_revision: Math.max(0, finiteNumber(value.knowledge_base_mcp_applied_revision)),
+    knowledge_base_mcp_sync_status: finiteNumber(value.knowledge_base_mcp_applied_revision) < finiteNumber(value.knowledge_base_mcp_revision)
+      ? "pending" : "synced",
     vulnerability_validation_enabled: value.vulnerability_validation_enabled === true,
     validation_method_id: text(value.validation_method_id),
     validation_method_label: text(value.validation_method_label),

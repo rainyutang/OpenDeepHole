@@ -42,6 +42,7 @@ def _agent_info_from_shared_session(session: dict) -> AgentInfo:
         accepting_tasks=bool(session.get("accepting_tasks", 1)),
         protocol_version=int(session["protocol_version"] or 1),
         scan_code_graph_updates=bool(session.get("scan_code_graph_updates", 0)),
+        scan_knowledge_base_updates=bool(session.get("scan_knowledge_base_updates", 0)),
         scan_paths_probe=bool(session.get("scan_paths_probe", 0)),
         graceful_runtime_update=bool(session.get("graceful_runtime_update", 0)),
         server_url=str(session.get("server_url") or ""),

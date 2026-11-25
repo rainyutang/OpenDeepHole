@@ -58,9 +58,14 @@ export function HistoryNavigation({
   onCheckerDashboard,
   onCheckerCatalog,
   onReviewNotes,
+  onKnowledgeBaseConfig,
   openAnnouncements,
   announcementOpen,
-}: Omit<ScanHistoryProps, 'onViewScan'> & { openAnnouncements: () => void; announcementOpen: boolean }) {
+}: Omit<ScanHistoryProps, 'onViewScan'> & {
+  onKnowledgeBaseConfig?: () => void;
+  openAnnouncements: () => void;
+  announcementOpen: boolean;
+}) {
   return <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
     <div className="mx-auto flex max-w-[100rem] flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
       <div className="shrink-0">
@@ -96,6 +101,13 @@ export function HistoryNavigation({
 
               onClick={onManageUsers}
             />
+            {onKnowledgeBaseConfig && (
+              <NavButton
+                label="知识库配置"
+                description="配置平台全局知识库 MCP 链接和连接参数"
+                onClick={onKnowledgeBaseConfig}
+              />
+            )}
           </>
         )}
         <NavButton
