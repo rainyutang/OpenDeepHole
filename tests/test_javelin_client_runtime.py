@@ -284,3 +284,139 @@ async def test_p0_5_e2e_runner_outbox_finish_convergence_and_offline_db_view(tmp
     finally:
         set_javelin_service_factory_for_testing(None)
         store.close()
+
+
+@pytest.mark.anyio
+async def test_real_audit_service_non_git_directory_target_and_graceful_404_cancel(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spawn REAL unmodified audit-service.mjs against a plain non-Git Java folder (regression for 422 & 404)."""
+    from deephole_client.javelin_runtime.manager import JavelinAuditServiceManager
+
+    # Plain Java directory WITHOUT .git (previously triggered HTTP 422 on legacy /api/v1/audits)
+    plain_java = tmp_path / "plain_java_service"
+    java_src = plain_java / "src" / "main" / "java" / "com" / "demo"
+    java_src.mkdir(parents=True)
+    (java_src / "DemoController.java").write_text(
+        "package com.demo;\npublic class DemoController { public String ping(String q) { return q; } }\n",
+        encoding="utf-8",
+    )
+
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_opencode = fake_bin_dir / "opencode"
+    fake_opencode.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$2\" = \"--help\" ]; then\n"
+        "  echo 'usage: opencode run --format --session'\n"
+        "  exit 0\n"
+        "fi\n"
+        "sleep 2\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_opencode.chmod(0o755)
+
+    agent_cfg = AgentConfig()
+    agent_cfg.opencode.executable = str(fake_opencode)
+    # Unconfigured provider/model exercises automatic fallback to 'default' without 422!
+    agent_cfg.opencode.models = [
+        OpenCodeModelConfig(id="m-unregistered", model="unregistered-provider/demo-model", enabled=True)
+    ]
+
+    mgr = JavelinAuditServiceManager(
+        runtime_root=Path(__file__).resolve().parents[1],
+        data_root=tmp_path / "javelin_data",
+        idle_shutdown_seconds=0,
+    )
+    try:
+        # Cancel on a non-existent audit_id must NOT raise 404 Not Found
+        await mgr.ensure_started(agent_cfg, target_project_path=plain_java)
+        missing_cancel = await mgr.dispatch_action("dh-never-created", "cancel")
+        assert missing_cancel["status"] == "cancelled"
+        assert missing_cancel.get("already_missing") is True
+
+        created = await mgr.create_and_start_audit(
+            config=agent_cfg,
+            scan_id="scan-real-nongit",
+            audit_id="dh-scan-real-nongit",
+            scan_name="plain-java-app",
+            project_path=plain_java,
+            product_name="Mall",
+            javelin_config={
+                "mining_strategy": "focus_area",
+                "bac_analysis": "auto",
+                "runtime_testing": {
+                    "enabled": True,
+                    "mode": "CONTACT_ONLY",
+                    "budget_minutes": 15,
+                    "allowed_actions": ["normal_interaction"],
+                },
+            },
+            secret_test_env="http://127.0.0.1:18080\ntest_token=secret-abc",
+        )
+        assert created["id"] == "dh-scan-real-nongit"
+        assert created["source_kind"] == "directory"
+
+        # Poll briefly until runner generates source-baseline.<audit_id>.json
+        baseline_found = None
+        for _ in range(30):
+            live_audit = await mgr.get_audit("dh-scan-real-nongit")
+            baseline_found = mgr.find_source_baseline_file(live_audit, "dh-scan-real-nongit")
+            if baseline_found is not None:
+                break
+            await asyncio.sleep(0.1)
+        assert baseline_found is not None and baseline_found.is_file()
+
+        board = await mgr.get_task_board("dh-scan-real-nongit")
+        assert "items" in board
+
+        await mgr.dispatch_action("dh-scan-real-nongit", "cancel", action_id="cancel-real-1")
+
+        console_out = capsys.readouterr().out
+        assert "[javelin]" in console_out
+        assert "本地审计服务已就绪" in console_out
+        assert "Javelin 审计引擎已启动执行" in console_out
+        assert "secret-abc" not in console_out
+    finally:
+        await mgr.stop()
+
+
+def test_terminal_scan_never_displays_queued_and_workbench_routes(tmp_path: Path) -> None:
+    """Verify initial state is 'preparing' (not 'queued') and terminal scans converge out of active states."""
+    from fastapi.testclient import TestClient
+
+    _cfg, store, runtime, uid, jwt = _setup_env(tmp_path, javelin_enabled=True)
+    try:
+        _seed_javelin_scan(store, "scan-conv", user_id=uid, agent_key="ag-key-1", agent_id="ag-live-1")
+        init_state = store.get_javelin_audit_state("scan-conv")
+        assert init_state is not None
+        assert init_state["status"] == "preparing"
+
+        # Simulate legacy/stuck 'queued' row while scans.status transitions to ERROR
+        store.upsert_javelin_state_snapshot("scan-conv", execution_revision=1, snapshot={"status": "queued"})
+        store.update_scan_progress("scan-conv", status=ScanItemStatus.ERROR, error_message="startup failure")
+
+        with use_runtime(runtime):
+            client = TestClient(app)
+            headers = {"Authorization": f"Bearer {jwt}"}
+            state_resp = client.get("/api/v2/scans/scan-conv/javelin/state", headers=headers)
+            assert state_resp.status_code == 200
+            assert state_resp.json()["audit"]["status"] == "failed"
+            assert state_resp.json()["brief"]["status"] == "failed"
+
+            audits_col = client.get(
+                "/api/v2/scans/scan-conv/javelin/api/v2/products/product-undefined/audits?tab=all&page=1&page_size=20",
+                headers=headers,
+            )
+            assert audits_col.status_code == 200
+            assert audits_col.json()["items"][0]["status"] == "failed"
+
+        # Store-level convergence helper also updates persisted row
+        assert store.converge_javelin_state_on_scan_terminal(
+            "scan-conv", scan_status="error", error_message="startup failure"
+        ) is True
+        assert store.get_javelin_audit_state("scan-conv")["status"] == "failed"
+    finally:
+        store.close()

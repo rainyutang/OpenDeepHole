@@ -119,6 +119,20 @@ async def agent_scan_execution_failed(
         return_settled=True,
     )
     if changed:
+        if hasattr(store, "converge_javelin_state_on_scan_terminal"):
+            j_converged = await run_store_call(
+                store,
+                "converge_javelin_state_on_scan_terminal",
+                scan_id,
+                scan_status="error",
+                error_message=body.error_message or "",
+            )
+            if j_converged:
+                publish(
+                    scan_id,
+                    "javelin_resource_changed",
+                    {"resource": "state", "execution_revision": body.execution_revision, "status": "failed"},
+                )
         live = get_runtime().scans.running_scans.get(scan_id)
         if live is None or live.opencode_pool is None or live.opencode_pool.execution_revision <= body.execution_revision:
             get_runtime().scans.running_scans.pop(scan_id, None)
@@ -277,6 +291,25 @@ async def _persist_scan_finish(scan_id: str, body: AgentScanFinish):
     )
     if not changed:
         return None
+
+    if hasattr(store, "converge_javelin_state_on_scan_terminal"):
+        j_converged = await run_store_call(
+            store,
+            "converge_javelin_state_on_scan_terminal",
+            scan_id,
+            scan_status=final_status.value,
+            error_message=final_error_message or "",
+        )
+        if j_converged:
+            publish(
+                scan_id,
+                "javelin_resource_changed",
+                {
+                    "resource": "state",
+                    "execution_revision": existing.execution_revision,
+                    "status": {"complete": "completed", "cancelled": "cancelled"}.get(final_status.value, "failed"),
+                },
+            )
 
     from backend.scans.pattern_task_reports import publish_pattern_task_settlement
     publish_pattern_task_settlement(scan_id, settled_engines, body.execution_revision)

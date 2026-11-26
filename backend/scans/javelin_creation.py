@@ -269,6 +269,13 @@ async def create_javelin_scan(
         get_runtime().scans.scan_owners.pop(scan.scan_id, None)
         raise ApplicationError(status_code=502, detail="Agent not connected")
 
+    await run_store_call(
+        store,
+        "update_scan_progress",
+        scan.scan_id,
+        status=ScanItemStatus.AUDITING,
+    )
+    scan.status = ScanItemStatus.AUDITING
     logger.info(
         "Created Javelin Java scan %s ('%s'), dispatched to agent %s",
         scan.scan_id,

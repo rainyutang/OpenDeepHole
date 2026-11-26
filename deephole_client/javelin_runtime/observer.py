@@ -13,6 +13,7 @@ from deephole_client.javelin_runtime.findings_mapper import (
     normalize_javelin_exchange_for_ingestion,
     normalize_javelin_finding_for_ingestion,
 )
+from deephole_client.javelin_runtime.manager import javelin_console_log
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,23 @@ MAX_EVENT_TEXT_BYTES = 64 * 1024
 EVENT_BATCH_LIMIT = 100
 DEBOUNCE_SECONDS = 0.35
 FALLBACK_POLL_SECONDS = 2.5
+
+_CONSOLE_MILESTONE_EVENTS = frozenset({
+    "audit.preparing",
+    "audit.recovering",
+    "audit.workspace.ready",
+    "audit.terminal.ready",
+    "audit.terminal.unavailable",
+    "audit.terminal.failed",
+    "audit.model.applied",
+    "audit.started",
+    "audit.paused",
+    "audit.resumed",
+    "audit.completed",
+    "audit.failed",
+    "audit.interrupted",
+    "audit.cancelled",
+})
 
 
 def _canonical_digest(value: Any) -> str:
@@ -66,6 +84,19 @@ def _normalize_log_item(raw: dict[str, Any], fallback_seq: int) -> dict[str, Any
     }
 
 
+def _emit_milestone_console_logs(events: list[dict[str, Any]]) -> None:
+    for ev in events:
+        etype = ev.get("event_type") or ""
+        source = ev.get("source") or ""
+        body_line = (ev.get("body") or ev.get("label") or "").strip().splitlines()
+        snippet = body_line[0][:160] if body_line else ""
+        if etype in _CONSOLE_MILESTONE_EVENTS:
+            suffix = f" — {snippet}" if snippet else ""
+            javelin_console_log(f"引擎事件 [{etype}]{suffix}")
+        elif source == "stderr" and snippet and not snippet.startswith("{"):
+            javelin_console_log(f"引擎告警: {snippet}")
+
+
 class JavelinAuditObserver:
     """Streams Javelin state/events/board/artifacts/reports to Reporter with hash deduplication."""
 
@@ -93,6 +124,7 @@ class JavelinAuditObserver:
         self._last_state_digest = ""
         self._last_board_digest = ""
         self._last_artifacts_digest = ""
+        self._last_console_summary: tuple[Any, ...] | None = None
         self._uploaded_blobs: dict[str, str] = {}
         self._load_cursor()
 
@@ -156,6 +188,8 @@ class JavelinAuditObserver:
             if seq > self._last_event_seq:
                 new_events.append(_normalize_log_item(raw_log, seq))
         new_events.sort(key=lambda e: e["sequence"])
+        if new_events:
+            _emit_milestone_console_logs(new_events)
         for i in range(0, len(new_events), EVENT_BATCH_LIMIT):
             batch = new_events[i : i + EVENT_BATCH_LIMIT]
             await self.reporter.report_javelin_events(
@@ -189,6 +223,9 @@ class JavelinAuditObserver:
                 )
                 self._uploaded_blobs["source_baseline"] = baseline_sha
                 await asyncio.to_thread(self._save_cursor)
+                javelin_console_log(
+                    f"源码范围基线已同步至服务端: {baseline_file.name} ({len(raw_baseline)} bytes)"
+                )
 
         # 3. Task board (only pushed when task board or board_meta digest changes)
         board_page = await self.service.get_task_board(self.audit_id, offset=0, limit=500)
@@ -242,12 +279,13 @@ class JavelinAuditObserver:
             raw_bytes = await self.service.download_report_original_bytes(rep_id)
             rep_sha = hashlib.sha256(raw_bytes).hexdigest()
             if self._uploaded_blobs.get(f"report:{rep_id}") != rep_sha:
+                rep_name = str(rep.get("name") or f"{rep_id}.md")
                 await self.reporter.report_javelin_report_bytes(
                     self.scan_id,
                     execution_revision=self.execution_revision,
                     report_id=rep_id,
                     report_kind=str(rep.get("report_kind") or "final"),
-                    name=str(rep.get("name") or f"{rep_id}.md"),
+                    name=rep_name,
                     format="markdown",
                     raw_bytes=raw_bytes,
                     sealed_at=str(rep.get("sealed_at") or rep.get("created_at") or ""),
@@ -255,21 +293,40 @@ class JavelinAuditObserver:
                 )
                 self._uploaded_blobs[f"report:{rep_id}"] = rep_sha
                 await asyncio.to_thread(self._save_cursor)
+                javelin_console_log(f"审计报告已封存并上传服务端: {rep_name} ({len(raw_bytes)} bytes)")
 
         # 6. Audit state snapshot (latest-wins coalescing; skipped if unchanged)
+        j_status = str(audit.get("status") or "running")
+        j_stage = str(audit.get("stage") or "")
+        j_progress = float(audit.get("progress") or 0.0)
+        bm = board_meta if isinstance(board_meta, dict) else {}
+        t_total = int(bm.get("total") or 0)
+        t_running = int(bm.get("running") or 0)
+        t_reported = int(bm.get("reported") or 0)
+        t_failed = int(bm.get("failed") or 0)
+
+        summary_key = (j_status, j_stage, t_total, t_running, t_reported, t_failed, len(norm_findings))
+        if summary_key != self._last_console_summary:
+            self._last_console_summary = summary_key
+            javelin_console_log(
+                f"进度同步: status={j_status} | 阶段={j_stage or '执行中'} | 进度={j_progress:.1f}% | "
+                f"任务面板={t_reported}/{t_total} 完成 (运行中={t_running}, 失败={t_failed}) | "
+                f"漏洞发现={len(norm_findings)}"
+            )
+
         state_payload = {
             "audit_id": self.audit_id,
-            "status": str(audit.get("status") or "running"),
-            "resumable": bool(audit.get("resumable") or audit.get("status") == "interrupted"),
+            "status": j_status,
+            "resumable": bool(audit.get("resumable") or j_status == "interrupted"),
             "audit_version": int(audit.get("version") or 1),
             "commit_sha": str(audit.get("commit") or ""),
             "mining_strategy": str(audit.get("mining_strategy") or "focus_area"),
-            "stage": str(audit.get("stage") or ""),
+            "stage": j_stage,
             "stages": audit.get("stages") if isinstance(audit.get("stages"), list) else [],
-            "progress": float(audit.get("progress") or 0.0),
+            "progress": j_progress,
             "progress_text": str(audit.get("progress_text") or ""),
             "execution_incomplete": bool(audit.get("execution_incomplete")),
-            "board_meta": board_meta if isinstance(board_meta, dict) else {},
+            "board_meta": bm,
             "source_baseline_blob_sha": baseline_sha,
             "execution": audit.get("execution") if isinstance(audit.get("execution"), dict) else {},
             "todo_completion": audit.get("todo_completion") if isinstance(audit.get("todo_completion"), dict) else {},
@@ -279,7 +336,7 @@ class JavelinAuditObserver:
             "recovery_count": int(audit.get("recovery_count") or 0),
             "last_event_sequence": self._last_event_seq,
             "started_at": str(audit.get("created_at") or ""),
-            "finished_at": str(audit.get("updated_at") or "") if audit.get("status") in {"completed", "failed", "cancelled"} else "",
+            "finished_at": str(audit.get("updated_at") or "") if j_status in {"completed", "failed", "cancelled"} else "",
         }
         state_digest = _canonical_digest(state_payload)
         if force or state_digest != self._last_state_digest:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +12,7 @@ from backend.models import JAVELIN_ENGINE_ID, has_javelin_engine
 from deephole_client.javelin_runtime.manager import (
     default_javelin_data_root,
     get_javelin_service_manager,
+    javelin_console_log,
 )
 from deephole_client.javelin_runtime.observer import (
     DEBOUNCE_SECONDS,
@@ -90,7 +92,13 @@ async def run_javelin_scan(
     audit_id = str(getattr(task, "javelin_audit_id", "") or f"dh-{scan_id}")
     project_path = Path(task.project_path)
     javelin_cfg = dict(getattr(task, "javelin_config", None) or {})
+    mining_strategy = str(javelin_cfg.get("mining_strategy") or "focus_area")
     has_secret = bool(getattr(task, "has_secret_context", False))
+
+    javelin_console_log(
+        f"收到 Java 审计任务 ({'断点恢复' if action == 'recover' else '新建启动'}): "
+        f"scan_id={scan_id}, rev={execution_revision}, 源码目录={project_path}, 策略={mining_strategy}"
+    )
 
     service = _resolve_service()
     if hasattr(service, "mark_scan_active"):
@@ -115,13 +123,28 @@ async def run_javelin_scan(
     sse_task: asyncio.Task | None = None
 
     try:
+        # Immediately transition server state to 'preparing' / 'recovering' so UI never sits in 'queued'
+        if reporter is not None:
+            with contextlib.suppress(Exception):
+                await reporter.report_javelin_state(
+                    scan_id,
+                    execution_revision=execution_revision,
+                    state={
+                        "audit_id": audit_id,
+                        "status": "recovering" if action == "recover" else "preparing",
+                        "stage": "环境初始化",
+                        "progress_text": "客户端正在初始化 Javelin 工作区与本地审计服务...",
+                        "mining_strategy": mining_strategy,
+                    },
+                )
+
         if has_secret and reporter is not None:
             secret_data = await reporter.fetch_javelin_secret_context(
                 scan_id,
                 execution_revision=execution_revision,
             )
             if isinstance(secret_data, dict):
-                ctx = secret_data.get("secret_context")
+                ctx = secret_data.get("secret_context") or secret_data.get("context")
                 if isinstance(ctx, dict):
                     secret_env = str(ctx.get("test_environment_context") or "")
 
@@ -146,10 +169,8 @@ async def run_javelin_scan(
 
         while True:
             if getattr(task, "cancel_event", None) is not None and task.cancel_event.is_set():
-                try:
+                with contextlib.suppress(Exception):
                     await service.dispatch_action(audit_id, "cancel", action_id=f"local-cancel-{scan_id}")
-                except Exception:
-                    pass
 
             audit = await observer.sync_once(force=False)
             j_status = str(audit.get("status") or "")
@@ -157,13 +178,11 @@ async def run_javelin_scan(
             if not secret_acked and j_status in {"running", "completed", "failed", "cancelled"}:
                 secret_acked = True
                 if reporter is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await reporter.ack_javelin_secret_context(
                             scan_id,
                             execution_revision=execution_revision,
                         )
-                    except Exception:
-                        pass
 
             board_meta = audit.get("task_board") if isinstance(audit.get("task_board"), dict) else {}
             total_tasks = int(board_meta.get("total") or total_tasks)
@@ -192,21 +211,22 @@ async def run_javelin_scan(
         logger.exception("Javelin scan %s (rev=%d) failed: %s", scan_id, execution_revision, exc)
         final_deephole_status = "error"
         final_error_message = f"Javelin 执行异常：{exc}"
+        javelin_console_log(f"扫描执行失败 (scan_id={scan_id}, rev={execution_revision}): {exc}")
         if reporter is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await reporter.report_javelin_state(
                     scan_id,
                     execution_revision=execution_revision,
                     state={
                         "audit_id": audit_id,
                         "status": "failed",
-                        "resumable": True,
+                        "stage": "启动或执行失败",
+                        "progress_text": str(exc)[:240],
+                        "resumable": False,
                         "error_message": final_error_message,
                     },
                     wait_for_delivery=True,
                 )
-            except Exception:
-                pass
     finally:
         secret_env = ""
         observer.stop()
@@ -234,6 +254,11 @@ async def run_javelin_scan(
                 processed_candidates=reported_tasks,
                 error_message=final_error_message,
             )
+            javelin_console_log(
+                f"扫描收尾已同步至服务端: scan_id={scan_id}, 最终状态={final_deephole_status}, "
+                f"任务完成={reported_tasks}/{total_tasks}"
+                + (f", 原因={final_error_message}" if final_error_message else "")
+            )
 
 
 async def handle_javelin_action_command(
@@ -249,6 +274,7 @@ async def handle_javelin_action_command(
     action = str(msg.get("action") or "").strip().lower()
     action_id = str(msg.get("action_id") or "")
     execution_revision = max(1, int(msg.get("execution_revision") or 1))
+    javelin_console_log(f"收到服务端控制指令: action={action}, scan_id={scan_id}, audit_id={audit_id}")
 
     if action == "recover":
         if reporter is not None:
@@ -289,9 +315,24 @@ async def handle_javelin_action_command(
         task.asyncio_task = asyncio.create_task(_run_recover())
         return {"ok": True, "action": "recover", "execution_revision": execution_revision}
 
+    if action == "cancel" and task_manager is not None:
+        active_task = task_manager.get(scan_id)
+        if active_task is not None and getattr(active_task, "cancel_event", None) is not None:
+            active_task.cancel_event.set()
+
     service = _resolve_service()
     await service.ensure_started(config)
-    result = await service.dispatch_action(audit_id, action, action_id=action_id)
+    try:
+        result = await service.dispatch_action(audit_id, action, action_id=action_id)
+    except FileNotFoundError:
+        if action == "cancel":
+            javelin_console_log(f"本地审计 {audit_id} 尚未创建或已结束，按已取消处理")
+            return {"ok": True, "action": "cancel", "audit_status": "cancelled"}
+        if action == "dispatch" and scan_id in _ACTIVE_OBSERVERS:
+            javelin_console_log(f"本地审计 {audit_id} 正在启动准备中，忽略重复调度指令")
+            return {"ok": True, "action": "dispatch", "audit_status": "preparing"}
+        raise
+
     obs = _ACTIVE_OBSERVERS.get(scan_id)
     if obs is not None:
         obs.notify()

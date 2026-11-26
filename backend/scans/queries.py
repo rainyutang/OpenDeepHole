@@ -220,6 +220,8 @@ async def _enrich_scan_summaries(
                 agent_online=agent_online,
                 agent_ready=agent_ready,
                 agent_decommissioned=decommissioned,
+                scan_status=s.status.value,
+                scan_error=getattr(s, "error_message", "") or "",
             )
             s.can_continue = bool(
                 s.javelin_summary and "recover" in s.javelin_summary.allowed_actions
@@ -350,6 +352,8 @@ async def get_scan_status(
             agent_online=j_online,
             agent_ready=j_ready,
             agent_decommissioned=j_decomm,
+            scan_status=scan.status.value,
+            scan_error=scan.error_message or "",
         )
         scan.can_continue = bool(
             scan.javelin_summary and "recover" in scan.javelin_summary.allowed_actions
@@ -541,6 +545,8 @@ async def get_scan_overview_v2(
             agent_online=j_online,
             agent_ready=j_ready,
             agent_decommissioned=j_decomm,
+            scan_status=scan.status.value,
+            scan_error=scan.error_message or "",
         )
         scan.can_continue = bool(
             scan.javelin_summary and "recover" in scan.javelin_summary.allowed_actions

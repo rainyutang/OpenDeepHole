@@ -438,7 +438,7 @@ async def fetch_agent_javelin_secret_context(
         distributed=distributed,
     )
     log_secret_context_audit("SECRET_CONTEXT_FETCHED", scan_id=scan_id, detail=f"rev={execution_revision}")
-    return {"present": True, "context": decrypted}
+    return {"present": True, "context": decrypted, "secret_context": decrypted}
 
 
 async def ack_agent_javelin_secret_context(

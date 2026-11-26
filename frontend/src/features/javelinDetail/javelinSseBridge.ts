@@ -78,7 +78,12 @@ export function createJavelinEventSource(scanId: string, rawUrl: string): EventS
           const payload = dataLines.join("\n");
           dataLines = [];
           const msgEv = new MessageEvent(eventName || "message", { data: payload });
-          if (!eventName || eventName === "message") {
+          if (
+            !eventName ||
+            eventName === "message" ||
+            eventName.startsWith("javelin_") ||
+            eventName.startsWith("scan_")
+          ) {
             instance.onmessage?.(msgEv);
           }
           target.dispatchEvent(msgEv);

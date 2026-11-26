@@ -570,7 +570,7 @@ class JavelinStoreMixin:
                     execution_revision, audit_version, stage, stages_json, progress,
                     progress_text, provenance_json, secret_context_ciphertext,
                     secret_context_meta_json, created_at, updated_at, last_synced_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, 1, '等待调度', ?, 0, '等待客户端启动 Javelin', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'preparing', 0, ?, 1, '启动准备', ?, 0, '已派发至客户端，正在启动 Javelin 审计引擎', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     execution_revision = excluded.execution_revision,
                     mining_strategy = excluded.mining_strategy,
@@ -891,6 +891,48 @@ class JavelinStoreMixin:
         result = self.get_javelin_audit_state(scan_id) or {}
         result["_secret_wiped"] = wiped_secret
         return result
+
+    def converge_javelin_state_on_scan_terminal(
+        self,
+        scan_id: str,
+        *,
+        scan_status: str,
+        error_message: str = "",
+    ) -> bool:
+        """Ensure javelin_audit_state never stays in queued/preparing/running once scans.status is terminal."""
+        norm_scan = str(scan_status or "").strip().lower()
+        target_status = {
+            "complete": "completed",
+            "cancelled": "cancelled",
+            "error": "failed",
+        }.get(norm_scan)
+        if not target_status:
+            return False
+        now = _utc_now()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE javelin_audit_state
+                SET status = ?,
+                    error_message = CASE
+                        WHEN error_message <> '' THEN error_message
+                        ELSE ?
+                    END,
+                    finished_at = CASE
+                        WHEN finished_at <> '' THEN finished_at
+                        ELSE ?
+                    END,
+                    secret_context_ciphertext = NULL,
+                    secret_context_meta_json = 'null',
+                    updated_at = ?,
+                    last_synced_at = ?
+                WHERE scan_id = ?
+                  AND status IN ('queued', 'preparing', 'recovering', 'running', 'pausing', 'paused', 'cancelling')
+                """,
+                (target_status, str(error_message or "")[:4000], now, now, now, scan_id),
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
 
     def append_javelin_events(
         self,

@@ -12,6 +12,7 @@ from markdown_it import MarkdownIt
 from backend.application import ApplicationError, get_config, get_scan_store, run_store_call
 from backend.models import JavelinScanBrief, has_javelin_engine
 from backend.scans.javelin_actions import (
+    JAVELIN_ACTIVE_STATUSES,
     compute_javelin_allowed_actions,
     compute_javelin_stale_level,
 )
@@ -135,6 +136,28 @@ def _get_cached_or_parse_baseline(
     return parsed
 
 
+def _reconcile_javelin_state_with_scan(
+    state: dict[str, Any],
+    *,
+    scan_status: str = "",
+    scan_error: str = "",
+) -> dict[str, Any]:
+    """Reconcile active javelin_audit_state with terminal scans.status (e.g. after startup error sweep)."""
+    norm_scan = str(scan_status or "").strip().lower()
+    raw_j_status = str(state.get("status") or "").strip().lower()
+    if norm_scan in {"complete", "cancelled", "error"} and raw_j_status in JAVELIN_ACTIVE_STATUSES:
+        reconciled = dict(state)
+        reconciled["status"] = {
+            "complete": "completed",
+            "cancelled": "cancelled",
+            "error": "failed",
+        }[norm_scan]
+        if norm_scan in {"error", "cancelled"} and not reconciled.get("error_message") and scan_error:
+            reconciled["error_message"] = scan_error
+        return reconciled
+    return state
+
+
 def build_javelin_scan_brief_from_state(
     state: dict[str, Any] | None,
     *,
@@ -142,9 +165,12 @@ def build_javelin_scan_brief_from_state(
     agent_ready: bool = True,
     agent_decommissioned: bool = False,
     read_only: bool = False,
+    scan_status: str = "",
+    scan_error: str = "",
 ) -> JavelinScanBrief | None:
     if not state:
         return None
+    state = _reconcile_javelin_state_with_scan(state, scan_status=scan_status, scan_error=scan_error)
     javelin_enabled = get_config().javelin.enabled
     stale_level = compute_javelin_stale_level(
         javelin_status=state.get("status", ""),
@@ -201,7 +227,11 @@ async def load_javelin_context(scan_id: str, *, read_only: bool = False) -> tupl
             "commit_sha": "",
             "mining_strategy": meta.javelin_config.mining_strategy if meta.javelin_config else "focus_area",
             "task_protocol": "task-board.v1",
-            "status": "completed" if scan.status.value == "complete" else "queued",
+            "status": {
+                "complete": "completed",
+                "cancelled": "cancelled",
+                "error": "failed",
+            }.get(scan.status.value, "preparing"),
             "resumable": False,
             "execution_revision": max(1, int(meta.execution_revision or 1)),
             "audit_version": 1,
@@ -228,6 +258,11 @@ async def load_javelin_context(scan_id: str, *, read_only: bool = False) -> tupl
             "updated_at": meta.created_at,
             "last_synced_at": meta.created_at,
         }
+    state = _reconcile_javelin_state_with_scan(
+        state,
+        scan_status=scan.status.value,
+        scan_error=scan.error_message or "",
+    )
     _agent_id, online, ready, decommissioned = await resolve_javelin_agent_liveness(
         meta.agent_key,
         meta.agent_name,
@@ -239,6 +274,8 @@ async def load_javelin_context(scan_id: str, *, read_only: bool = False) -> tupl
         agent_ready=ready,
         agent_decommissioned=decommissioned,
         read_only=read_only,
+        scan_status=scan.status.value,
+        scan_error=scan.error_message or "",
     )
     assert brief is not None
     return scan, meta, state, brief

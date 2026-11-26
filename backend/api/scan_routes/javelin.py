@@ -128,6 +128,33 @@ def _register_javelin_read_surface(
             "items": [{"id": audit["repository_id"], "product_id": product_id, "name": audit["repository_name"], "status": "active", "source_scopes": []}],
         }
 
+    @sub.get("/api/v2/products/{product_id}/audits")
+    async def wb_audits_collection(
+        scan_id: str,
+        product_id: str,
+        tab: str = Query(default="all"),
+        _guard: Any = Depends(auth_dep),
+    ) -> dict[str, Any]:
+        _ = product_id
+        view = await javelin_queries.get_javelin_state_view(scan_id, read_only=read_only)
+        audit = view["audit"]
+        active = audit["status"] in {"preparing", "recovering", "running", "pausing", "cancelling"}
+        items = [audit]
+        if tab == "running" and not active:
+            items = []
+        elif tab == "completed" and active:
+            items = []
+        return {
+            "items": items,
+            "count": len(items),
+            "returned_count": len(items),
+            "page": 1,
+            "page_size": 20,
+            "total_pages": 1,
+            "pagination": tab != "running",
+            "tab": tab,
+        }
+
     @sub.get("/api/v1/audits/{audit_id}")
     async def wb_audit_v1(scan_id: str, audit_id: str, _guard: Any = Depends(auth_dep)) -> dict[str, Any]:
         _ = audit_id
@@ -140,11 +167,12 @@ def _register_javelin_read_surface(
         view = await javelin_queries.get_javelin_state_view(scan_id, read_only=read_only)
         return view["audit"]
 
+    @sub.get("/api/v1/audits/{audit_id}/task-board")
     @sub.get("/api/v2/products/{product_id}/audits/{audit_id}/task-board")
     async def wb_task_board(
         scan_id: str,
-        product_id: str,
         audit_id: str,
+        product_id: str = "product-undefined",
         kind: str = Query(default=""),
         status: str = Query(default=""),
         offset: int = Query(default=0, ge=0),
@@ -362,11 +390,17 @@ def _register_javelin_read_surface(
         )
 
     @sub.get("/events")
+    @sub.get("/api/v1/audits/{audit_id}/events")
+    @sub.get("/api/v2/products/{product_id}/audits/{audit_id}/events")
     async def javelin_sse_events(
         scan_id: str,
         request: Request,
+        audit_id: str = "",
+        product_id: str = "",
         _guard: Any = Depends(auth_dep),
     ) -> StreamingResponse:
+        _ = product_id
+        workbench_stream = bool(audit_id)
         queue = subscribe(scan_id)
 
         async def _stream():
@@ -379,6 +413,13 @@ def _register_javelin_read_surface(
                         msg = await asyncio.wait_for(queue.get(), timeout=25.0)
                         if isinstance(msg, str):
                             yield msg
+                            # Javelin Workbench attaches to EventSource.onmessage (unnamed SSE frames);
+                            # emit a lightweight unnamed message frame alongside named DeepHole events.
+                            if workbench_stream and msg.startswith("event: ") and any(
+                                msg.startswith(prefix)
+                                for prefix in ("event: javelin_", "event: scan_")
+                            ):
+                                yield 'data: {"type":"javelin_live_refresh"}\n\n'
                     except asyncio.TimeoutError:
                         yield SSE_KEEPALIVE
             finally:
@@ -416,11 +457,12 @@ async def javelin_direct_action(
     )
 
 
+@auth_router.post("/api/v1/audits/{audit_id}/actions")
 @auth_router.post("/api/v2/products/{product_id}/audits/{audit_id}/actions")
 async def wb_audit_actions(
     scan_id: str,
-    product_id: str,
     audit_id: str,
+    product_id: str = "product-undefined",
     payload: dict[str, Any] = Body(...),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
