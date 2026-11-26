@@ -265,12 +265,13 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reason", final_schema["properties"])
         self.assertNotIn("report", final_schema["properties"])
         description_guidance = final_schema["properties"]["description"]["description"]
+        self.assertNotIn("200 字以内", description_guidance)
         for phrase in (
-            "200 字以内",
+            "不超过 500 字",
             "不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程",
             "call_chain",
             "vulnerable_code",
-            "false_positive 时指出有效校验、不可满足约束或预期设计依据所在函数与行号",
+            "false_positive 时指出阻断缺陷本身的有效校验、不可达原因或无实现错误的预期设计依据所在函数与行号",
         ):
             self.assertIn(phrase, description_guidance)
 
@@ -285,8 +286,9 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
             / "SKILL.md"
         )
         skill_text = skill_path.read_text(encoding="utf-8")
+        self.assertNotIn("200 字以内", skill_text)
         for phrase in (
-            "200 字以内",
+            "不超过 500 字",
             "不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程",
             "调用链与数据流分别写入 `call_chain` 和 `vulnerable_code`",
         ):
@@ -411,7 +413,7 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "判断真实问题而非报告对错",
                 "只排查报告中描述的问题",
                 "不要扩展去寻找代码中的其他无关问题",
-                "影响不一致时的处理",
+                "影响不一致或较轻时的处理",
                 "合理的问题级别建议",
                 "敏感信息类问题的处理",
                 "会留存在内存中",
@@ -421,8 +423,8 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "判断真实问题而非报告对错",
                 "只排查报告中描述的问题",
                 "不要扩展去寻找代码中的其他无关问题",
-                "影响不一致不等于误报",
-                "不得仅因“与报告描述的影响不一致”就判为 `false_positive`",
+                "影响不一致或较轻不等于误报",
+                "不得仅因“影响较轻”“不构成安全漏洞”或“与报告描述的影响不一致”就判为 `false_positive`",
                 "敏感信息类问题不因不可触发判误报",
                 "会留存在内存中",
                 "通过日志打印",
@@ -431,7 +433,7 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 "判断真实问题而非报告对错",
                 "只排查报告中描述的问题",
                 "不要扩展去寻找其他无关问题",
-                "影响不一致时的处理",
+                "影响不一致或较轻时的处理",
                 "变更 `severity`（问题级别）并重写 `description`（问题描述）",
                 "critical` / `high` / `medium` / `low",
                 "敏感信息类问题的裁决",

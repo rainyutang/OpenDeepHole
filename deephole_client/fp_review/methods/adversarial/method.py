@@ -100,7 +100,7 @@ _FINAL_JUDGE_REPORT_PROPERTIES: dict[str, Any] = {
         "type": "string",
         "minLength": 1,
         "description": (
-            "true_positive 时简述缺陷核心成因、必要触发条件及直接实际影响（控制在 200 字以内，单段叙述、不分点），"
+            "true_positive 时简述缺陷核心成因、必要触发条件及直接实际影响（不超过 500 字，单段叙述、不分点），"
             "仅聚焦漏洞点本身，不要写入或复述调用链、逐层函数传递路径、多处文件/行号、代码细节或正反方辩论过程"
             "（调用链与数据流分别写入 call_chain 和 vulnerable_code）；"
             "false_positive 时指出阻断缺陷本身的有效校验、不可达原因或无实现错误的预期设计依据所在函数与行号，说明为什么缺陷本身不成立或不可外部触发。"
