@@ -178,8 +178,18 @@ test("NewScanForm allows enabling knowledge base with project_id when configured
     if (config.url === "/api/agents") return [{ agent_key: "a1", name: "Agent 1", online: true, has_explicit_model: true }];
     if (config.url === "/api/knowledge-base/status") return { configured: true, name: "knowledge-base" };
     if (config.url === "/api/mining-engines") return { engines: [{ engine_id: "static_candidate", label: "Static" }] };
-    if (config.url === "/api/threat-analysis-methods") return { methods: [{ method_id: "opencode_lightweight_threat_analysis", label: "Default" }] };
+    if (config.url === "/api/threat-analysis-methods") return { methods: [{ method_id: "deephole_compact_threat_analysis", label: "Default" }] };
     if (config.url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "Default", default: true }] };
+    if (config.url === "/api/scan-mode-defaults") return {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     if (config.url.endsWith("/validator-catalog")) return { errors: [], methods: [] };
     if (config.url.includes("/config-memory/")) return { knowledge_base: { project_id: "remembered-mae" }, validation_by_product: {} };
     if (config.url === "/api/scan" && config.method === "post") {

@@ -34,7 +34,7 @@ Checker 在「客户端配置 → 高级配置 → 漏洞挖掘」中按模式�
 | 模式 | 当前行为 |
 | --- | --- |
 | 标准 | Web 默认；固定运行 `static_candidate` 与 `threat_pattern_iterative_audit`，使用 DeepHole精简威胁分析（默认不生成攻击树，可在创建扫描时手动开启）和默认去误报方法；规则默认排除 `skill_only_project_audit` |
-| 自定义 | 可选择威胁分析、漏洞挖掘引擎、是否自动去误报及其方法 |
+| 自定义 | 默认选项自动与当前标准模式保持一致（随标准模式配置同步变化），可自由调整威胁分析、生成攻击树、漏洞挖掘引擎、是否自动去误报及其方法 |
 | 多版本测试 | 对 2–5 个版本执行规则扫描与跨版本归并；列表首项为基准版本，固定关闭 CodeGraph 和知识库 MCP |
 | 智能 | 页面占位，当前不可选择 |
 | 快速 | 保留 API、客户端高级配置、历史续扫与复制兼容，Web 普通新建扫描不提供入口 |
@@ -43,7 +43,7 @@ Checker 在「客户端配置 → 高级配置 → 漏洞挖掘」中按模式�
 
 多版本静态候选按问题类型使用对应 Checker Skill；基准版本威胁审计复用攻击模式引擎。已确认问题的跨版本匹配、对照版本新增或变化威胁的审计使用多版本审计能力。详见[多版本引擎](../deephole_client/vulnerability_mining/engines/multi_version/README.md)。
 
-新建标准模式扫描固定使用 `deephole_compact_threat_analysis`（DeepHole精简威胁分析），复制标准扫描后创建也采用此方法；已有扫描续扫沿用创建时保存的方法。快速模式和自定义模式未指定方法时仍优先选择 `opencode_lightweight_threat_analysis`。自定义模式还可选择覆盖率引导的 OpenCode 轻量方法、Codex 轻量方法、DeepHole 原生或精简方法，方法差异见[威胁分析方法](../deephole_client/threat_analysis/README.md)。
+新建标准模式扫描固定使用 `deephole_compact_threat_analysis`（DeepHole精简威胁分析），复制标准扫描后创建也采用此方法；已有扫描续扫沿用创建时保存的方法。Web 新建扫描切换到自定义模式时默认与标准模式一致并自动跟随标准模式变化；快速模式及直接 API 调用在自定义模式未指定方法时仍优先选择 `opencode_lightweight_threat_analysis`。自定义模式还可选择覆盖率引导的 OpenCode 轻量方法、Codex 轻量方法、DeepHole 原生或精简方法，方法差异见[威胁分析方法](../deephole_client/threat_analysis/README.md)。
 
 ## 扫描流程与结果
 

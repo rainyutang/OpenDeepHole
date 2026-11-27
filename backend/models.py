@@ -432,6 +432,23 @@ class FpReviewMethodSelection(BaseModel):
     stages: list[FpReviewStageConfig] = Field(default_factory=list)
 
 
+class StandardScanModeDefaults(BaseModel):
+    """Resolved standard-mode scan options mirrored as custom-mode UI defaults."""
+
+    threat_analysis_enabled: bool = True
+    threat_analysis_method: str = "deephole_compact_threat_analysis"
+    threat_analysis_generate_attack_tree: bool = False
+    mining_engines: list[str] = Field(default_factory=list)
+    auto_fp_review: bool = True
+    fp_review_method: str = ""
+
+
+class ScanModeDefaultsResponse(BaseModel):
+    """Default option profiles exposed to the scan-creation UI."""
+
+    standard: StandardScanModeDefaults
+
+
 # --- API request/response models ---
 
 class CheckerInfo(BaseModel):

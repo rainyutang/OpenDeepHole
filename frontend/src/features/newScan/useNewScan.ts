@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { createScan, getMiningEngineCatalog, getScanCopyConfig, getThreatAnalysisMethodCatalog } from "../../api/scans";
+import { createScan, getMiningEngineCatalog, getScanCopyConfig, getScanModeDefaults, getThreatAnalysisMethodCatalog } from "../../api/scans";
 import { getAgents, getAgentValidatorCatalog, getScanConfigMemory } from "../../api/agents";
 import { getFpReviewMethodCatalog } from "../../api/fpReview";
 import { getKnowledgeBaseStatus } from "../../api/knowledgeBase";
 import type { AgentInfo, AgentValidatorMethod } from "../../types/agents";
 import type { FpReviewMethodCatalogItem } from "../../types/fpReview";
 import type { MiningEngineCatalogItem } from "../../types/mining";
-import type { ScanConfigMemory } from "../../types/scans";
+import type { ScanConfigMemory, StandardScanModeDefaults } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
 import {
@@ -79,6 +79,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
   const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
   const [threatMethods, setThreatMethods] = useState<ThreatAnalysisMethodCatalogItem[]>([]);
   const [fpMethods, setFpMethods] = useState<FpReviewMethodCatalogItem[]>([]);
+  const [standardDefaults, setStandardDefaults] = useState<StandardScanModeDefaults | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -118,16 +119,24 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
       getMiningEngineCatalog(),
       getThreatAnalysisMethodCatalog(),
       getFpReviewMethodCatalog(),
+      getScanModeDefaults(),
       getKnowledgeBaseStatus().catch(() => ({ configured: false, name: "knowledge-base" })),
       sourceScanId ? getScanCopyConfig(sourceScanId, controller.signal) : Promise.resolve(null),
-    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, kbStatus, copied]) => {
+    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, modeDefaults, kbStatus, copied]) => {
       if (controller.signal.aborted) return;
       setAgents(agentList);
       setMiningEngineCatalog(engineCatalog.engines);
       setThreatMethods(threatCatalog.methods);
       setFpMethods(fpCatalog.methods);
+      setStandardDefaults(modeDefaults.standard);
       setKnowledgeBaseConfigured(Boolean(kbStatus?.configured));
-      const initialization = scanDraftInitialization(engineCatalog.engines, threatCatalog.methods, fpCatalog.methods, copied);
+      const initialization = scanDraftInitialization(
+        engineCatalog.engines,
+        threatCatalog.methods,
+        fpCatalog.methods,
+        copied,
+        modeDefaults.standard,
+      );
       setDraft((current) => ({ ...current, ...initialization }));
       if (copied) {
         copiedAgentInitialization.current = copied.agent_key;
@@ -215,7 +224,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     if (validationError) return setError(validationError);
     setSubmitting(true);
     try {
-      const response = await createScan(scanRequestFromDraft(draft, miningEngineCatalog, null));
+      const response = await createScan(scanRequestFromDraft(draft, miningEngineCatalog, null, standardDefaults));
       onScanStarted(response.scan_id);
     } catch (submitError: unknown) {
       setError((submitError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "创建扫描失败，请检查客户端是否在线且已配置模型");
@@ -271,6 +280,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     miningEngineCatalog,
     threatMethods,
     fpMethods,
+    standardDefaults,
     loading,
     submitting,
     error,

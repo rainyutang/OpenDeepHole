@@ -1,11 +1,13 @@
 """Scan configuration queries services."""
 
 from deephole_client.scan_modes import (
+    COMPACT_THREAT_ANALYSIS_METHOD_ID,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_STANDARD,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     normalize_scan_mode,
+    standard_scan_profile,
 )
 from backend.application import ApplicationError, get_scan_store, run_store_call
 from backend.models import (
@@ -140,7 +142,9 @@ async def get_scan_copy_config(
                 ),
             }
             if mode == SCAN_MODE_STANDARD
-            and meta.threat_analysis_method == "deephole_compact_threat_analysis"
+            and standard_scan_profile().threat_analysis_enabled
+            and standard_scan_profile().threat_analysis_method == COMPACT_THREAT_ANALYSIS_METHOD_ID
+            and meta.threat_analysis_method == COMPACT_THREAT_ANALYSIS_METHOD_ID
             and meta.threat_analysis_method_selection is not None
             else {}
         ),

@@ -101,9 +101,11 @@ function fixture(allTasks, { firstPage = allTasks, nextCursor = null } = {}) {
   return requests;
 }
 
-test("iterative engine is opt-in, depends on threat analysis, and legacy task defaults stay compatible", () => {
-  assert.equal(engines.miningEngineSelectedByDefault(engineId), false);
-  assert.equal(engines.miningEngineSelectedByDefault("threat_pattern_audit"), true);
+test("iterative engine is selected by default like standard mode, depends on threat analysis, and legacy task defaults stay compatible", () => {
+  assert.equal(engines.miningEngineSelectedByDefault("static_candidate"), true);
+  assert.equal(engines.miningEngineSelectedByDefault(engineId), true);
+  assert.equal(engines.miningEngineSelectedByDefault("threat_pattern_audit"), false);
+  assert.equal(engines.miningEngineSelectedByDefault("threat_audit"), false);
   assert.equal(engines.miningEngineRequiresThreatAnalysis(engineId), true);
   assert.equal(engines.canonicalMiningEngineLabel(engineId), "DeepHole基于攻击模式的迭代漏洞挖掘引擎");
   assert.equal(runtime.normalizePatternTask({ task_id: "legacy" }).engine_id, "threat_pattern_audit");

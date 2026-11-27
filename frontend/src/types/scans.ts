@@ -298,3 +298,16 @@ export interface ScanConfigMemory {
     values_by_method?: Record<string, Record<string, unknown>>;
   }>;
 }
+
+export interface StandardScanModeDefaults {
+  threat_analysis_enabled: boolean;
+  threat_analysis_method: string;
+  threat_analysis_generate_attack_tree: boolean;
+  mining_engines: string[];
+  auto_fp_review: boolean;
+  fp_review_method: string;
+}
+
+export interface ScanModeDefaults {
+  standard: StandardScanModeDefaults;
+}

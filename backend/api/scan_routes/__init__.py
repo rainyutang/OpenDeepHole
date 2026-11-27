@@ -29,6 +29,7 @@ _ROUTE_ORDER = (
     'get_mining_engine_catalog',
     'get_fp_review_method_catalog',
     'get_threat_analysis_method_catalog',
+    'get_scan_mode_defaults',
     'create_scan',
     'get_scan_config_memory',
     'list_scans',

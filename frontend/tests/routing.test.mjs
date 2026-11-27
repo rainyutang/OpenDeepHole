@@ -177,6 +177,16 @@ test("functional page titles match their entry buttons and retain the common ret
     if (["/api/review-notes", "/api/auth/users", "/api/auth/departments"].includes(config.url)) return [];
     if (config.url === "/api/agent/runtime/manifest") return { hash: "runtime" };
     if (["/api/threat-analysis-methods", "/api/fp-review-methods"].includes(config.url)) return { methods: [] };
+    if (config.url === "/api/scan-mode-defaults") return {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     return undefined;
   });
   const { root, router } = await mount();
@@ -356,6 +366,16 @@ test("copy scan opens a source URL that survives refresh and resets the form for
     if (url === "/api/agents") return [{ agent_key: "agent", name: "Agent", online: true, has_explicit_model: true }];
     if (url === "/api/threat-analysis-methods") return { methods: [{ method_id: "threat", label: "Threat" }] };
     if (url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "FP", default: true }] };
+    if (url === "/api/scan-mode-defaults") return {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     if (url.endsWith("/validator-catalog")) return { methods: [], errors: [] };
     if (url.includes("/config-memory/")) return { knowledge_base: null, validation_by_product: {} };
     if (url.endsWith("/copy-config")) return {

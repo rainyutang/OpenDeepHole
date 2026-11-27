@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 SCAN_MODE_QUICK = "quick"
 SCAN_MODE_STANDARD = "standard"
@@ -13,13 +15,31 @@ SCAN_MODE_MULTI_VERSION = "multi_version"
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
+COMPACT_THREAT_ANALYSIS_METHOD_ID = "deephole_compact_threat_analysis"
+
 # Used only when resolving newly created quick/standard scans. Resumes keep the
 # engine selections persisted with the original scan.
 QUICK_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
-STANDARD_PROFILE_ENGINE_IDS = (
-    "static_candidate",
-    "threat_pattern_iterative_audit",
-)
+
+
+@dataclass(frozen=True)
+class StandardScanProfile:
+    """Single source of truth for standard-mode scan options."""
+
+    threat_analysis_enabled: bool = True
+    threat_analysis_method: str = COMPACT_THREAT_ANALYSIS_METHOD_ID
+    threat_analysis_generate_attack_tree: bool = False
+    mining_engine_ids: tuple[str, ...] = (
+        "static_candidate",
+        "threat_pattern_iterative_audit",
+    )
+    auto_fp_review: bool = True
+    # None resolves to the FP review catalog's declared default method.
+    fp_review_method: str | None = None
+
+
+STANDARD_SCAN_PROFILE = StandardScanProfile()
+STANDARD_PROFILE_ENGINE_IDS = STANDARD_SCAN_PROFILE.mining_engine_ids
 # Retained for quick-profile callers and backward-compatible imports.
 BUILTIN_PROFILE_ENGINE_IDS = QUICK_PROFILE_ENGINE_IDS
 # New optional workflows must not silently join legacy callers' default scans.
@@ -66,11 +86,16 @@ def normalize_scan_mode(value: object) -> str:
         raise ValueError(f"Unknown scan mode: {value}") from exc
 
 
+def standard_scan_profile() -> StandardScanProfile:
+    """Return the single-source-of-truth profile for newly created standard scans."""
+    return STANDARD_SCAN_PROFILE
+
+
 def builtin_profile_engine_ids(scan_mode: str) -> tuple[str, ...]:
     """Return the fixed mining-engine IDs for newly created quick/standard scans."""
     normalized = normalize_scan_mode(scan_mode)
     if normalized == SCAN_MODE_STANDARD:
-        return STANDARD_PROFILE_ENGINE_IDS
+        return standard_scan_profile().mining_engine_ids
     if normalized == SCAN_MODE_QUICK:
         return QUICK_PROFILE_ENGINE_IDS
     raise ValueError(

@@ -134,7 +134,7 @@ flowchart TD
 
 威胁分析方法按目录自动发现，一个扫描固化并执行一个方法。`method_id` 直接使用目录名；
 `method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。新建标准模式扫描
-固定使用 `deephole_compact_threat_analysis`；快速模式和自定义模式未指定方法时优先选择
+固定使用 `deephole_compact_threat_analysis`（Web 新建扫描的自定义模式默认自动跟随标准模式）；快速模式及直接 API 在自定义模式未指定方法时优先选择
 `opencode_lightweight_threat_analysis`。独立运行适配器未传方法 ID 时默认 `deephole_threat_analysis`。
 
 每个方法在 `threat_analysis.py` 定义同步入口，并由 `__init__.py` 导出：

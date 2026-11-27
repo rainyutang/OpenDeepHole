@@ -5,6 +5,7 @@ from backend.auth import get_current_user
 from backend.models import (
     FpReviewMethodCatalog,
     MiningEngineCatalog,
+    ScanModeDefaultsResponse,
     ThreatAnalysisMethodCatalog,
     User,
 )
@@ -39,3 +40,14 @@ async def get_threat_analysis_method_catalog(
 ) -> ThreatAnalysisMethodCatalog:
     'Return repository-owned threat-analysis methods.'
     return await service.get_threat_analysis_method_catalog(current_user=current_user)
+
+
+@router.get(
+    "/api/scan-mode-defaults",
+    response_model=ScanModeDefaultsResponse,
+)
+async def get_scan_mode_defaults(
+    current_user: User = Depends(get_current_user),
+) -> ScanModeDefaultsResponse:
+    'Return resolved scan-mode defaults so custom-mode UI mirrors standard mode.'
+    return await service.get_scan_mode_defaults(current_user=current_user)

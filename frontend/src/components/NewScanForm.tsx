@@ -7,7 +7,7 @@ import PageHeader from "./PageHeader";
 import { agentOwnerLabel } from "../agentPresentation";
 import ScanPathList from "./ScanPathList";
 import { useNewScan } from '../features/newScan/useNewScan';
-import { agentAcceptsTasks } from '../features/newScan/draftModel';
+import { COMPACT_THREAT_ANALYSIS_METHOD_ID, agentAcceptsTasks, standardSupportsGenerateAttackTree } from '../features/newScan/draftModel';
 import type { ScanModeOption } from '../features/newScan/draftModel';
 
 interface Props {
@@ -104,6 +104,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     miningEngineCatalog,
     threatMethods,
     fpMethods,
+    standardDefaults,
     loading,
     submitting,
     error,
@@ -127,14 +128,14 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
     handleSubmit,
   } = useNewScan(sourceScanId, onScanStarted);
   const showGenerateAttackTreeCard =
-    scanMode === "standard"
-    || (scanMode === "custom" && threatAnalysisEnabled && threatAnalysisMethod === "deephole_compact_threat_analysis");
+    (scanMode === "standard" && standardSupportsGenerateAttackTree(standardDefaults))
+    || (scanMode === "custom" && threatAnalysisEnabled && threatAnalysisMethod === COMPACT_THREAT_ANALYSIS_METHOD_ID);
   const toggleGenerateAttackTree = () => {
     const next = !threatAnalysisGenerateAttackTree;
     setThreatAnalysisGenerateAttackTree(next);
     if (
       !next
-      && threatAnalysisMethod === "deephole_compact_threat_analysis"
+      && threatAnalysisMethod === COMPACT_THREAT_ANALYSIS_METHOD_ID
       && miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected
     ) {
       setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } }));
@@ -279,7 +280,7 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
                 checked={threatAnalysisMethod === method.method_id}
                 onChange={() => {
                   setThreatAnalysisMethod(method.method_id);
-                  if (method.method_id === "deephole_compact_threat_analysis" && !threatAnalysisGenerateAttackTree && miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected) {
+                  if (method.method_id === COMPACT_THREAT_ANALYSIS_METHOD_ID && !threatAnalysisGenerateAttackTree && miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected) {
                     setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } }));
                   }
                 }} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>

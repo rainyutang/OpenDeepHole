@@ -8,6 +8,7 @@ import type {
   ScanKnowledgeBaseState,
   ScanMetadata,
   ScanMetadataUpdate,
+  ScanModeDefaults,
   ScanStartResponse,
   ScanStopResponse,
   ScanSummary,
@@ -171,6 +172,11 @@ export async function getMiningEngineCatalog(): Promise<MiningEngineCatalog> {
 
 export async function getThreatAnalysisMethodCatalog(): Promise<ThreatAnalysisMethodCatalog> {
   const { data } = await api.get<ThreatAnalysisMethodCatalog>("/api/threat-analysis-methods");
+  return data;
+}
+
+export async function getScanModeDefaults(): Promise<ScanModeDefaults> {
+  const { data } = await api.get<ScanModeDefaults>("/api/scan-mode-defaults");
   return data;
 }
 

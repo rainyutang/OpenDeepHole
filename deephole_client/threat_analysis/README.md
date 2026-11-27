@@ -166,8 +166,8 @@ description: 生成价值资产、高风险模块和攻击树。
 ```
 
 方法 ID 已由目录名唯一确定，因此不需要 `package_name`。清单不需要 `default`：后端为新建标准扫描
-固定选择 `deephole_compact_threat_analysis`，快速模式和自定义模式未指定方法时优先选择
-`opencode_lightweight_threat_analysis`，前端自定义模式的初始选择也与此一致。运行时在调用方没有
+固定选择 `deephole_compact_threat_analysis`（Web 前端自定义模式的初始选择自动与当前标准模式保持一致），
+快速模式及直接 API 在自定义模式未指定方法时优先选择 `opencode_lightweight_threat_analysis`。运行时在调用方没有
 显式传入方法时仍以 `deephole_threat_analysis` 作为安全兜底。未知字段会使当前方法无效。
 
 ## 唯一原生入口

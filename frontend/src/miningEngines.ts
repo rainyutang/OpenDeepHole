@@ -10,8 +10,13 @@ export function isPatternAuditEngine(engineId: string): boolean {
   return engineId === THREAT_PATTERN_AUDIT_ENGINE_ID || engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID;
 }
 
+export const STANDARD_DEFAULT_MINING_ENGINE_IDS = new Set([
+  STATIC_CANDIDATE_ENGINE_ID,
+  THREAT_PATTERN_ITERATIVE_ENGINE_ID,
+]);
+
 export function miningEngineSelectedByDefault(engineId: string): boolean {
-  return engineId !== THREAT_PATTERN_ITERATIVE_ENGINE_ID;
+  return STANDARD_DEFAULT_MINING_ENGINE_IDS.has(engineId);
 }
 export const MULTI_VERSION_ENGINE_ID = "multi_version";
 export const MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎";

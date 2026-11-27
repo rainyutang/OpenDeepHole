@@ -40,12 +40,27 @@ async function mount({ createError = null } = {}) {
   client.api.defaults.adapter = async (config) => {
     let data;
     if (config.url === "/api/agents") data = [{ agent_key: "client-1", name: "client-1", online: true, has_explicit_model: true }];
-    else if (config.url === "/api/mining-engines") data = { engines: [{ engine_id: "threat_pattern_audit", label: "攻击模式审计" }] };
+    else if (config.url === "/api/mining-engines") data = { engines: [
+      { engine_id: "static_candidate", label: "代码风险点审计" },
+      { engine_id: "threat_pattern_iterative_audit", label: "迭代攻击模式审计" },
+      { engine_id: "threat_pattern_audit", label: "攻击模式审计" },
+    ] };
     else if (config.url === "/api/threat-analysis-methods") data = { methods: [
       { method_id: coverageGuidedMethodId, label: coverageGuidedMethodLabel },
+      { method_id: "deephole_compact_threat_analysis", label: "DeepHole精简威胁分析" },
       { method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" },
     ] };
     else if (config.url === "/api/fp-review-methods") data = { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
+    else if (config.url === "/api/scan-mode-defaults") data = {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     else if (config.url.endsWith("/validator-catalog")) data = { methods: [], errors: [] };
     else if (config.url.includes("/config-memory/")) data = { knowledge_base: null, validation_by_product: {} };
     else if (config.url === "/api/review-notes") data = [{ id: "note-1", title: "检查边界", content: "核对调用方校验", created_at: "", updated_at: "" }];
@@ -96,14 +111,14 @@ for (const scanMode of ["标准模式", "自定义模式"]) {
   });
 }
 
-test("custom scans can select coverage-guided analysis while keeping the original default", async () => {
+test("custom scans can select coverage-guided analysis while defaulting to standard mode's method", async () => {
   const { root, submissions } = await mount();
   await mode(root, "自定义模式");
-  const original = root.root.findAllByType("label").find((node) => text(node) === "威胁分析");
+  const standardDefault = root.root.findAllByType("label").find((node) => text(node) === "DeepHole精简威胁分析");
   const coverageGuided = root.root.findAllByType("label").find((node) => text(node) === coverageGuidedMethodLabel);
-  assert.ok(original);
+  assert.ok(standardDefault);
   assert.ok(coverageGuided);
-  assert.equal(original.findByType("input").props.checked, true);
+  assert.equal(standardDefault.findByType("input").props.checked, true);
   assert.equal(coverageGuided.findByType("input").props.checked, false);
   await act(async () => coverageGuided.findByType("input").props.onChange());
   await change(root, "/path/to/project", "/repo/project");

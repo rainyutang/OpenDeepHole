@@ -78,6 +78,7 @@ export {
   revokeScanShare,
   getMiningEngineCatalog,
   getThreatAnalysisMethodCatalog,
+  getScanModeDefaults,
   getScanGitHistory,
 } from "./scans";
 export type { CreateScanInput, ScanCopyConfig } from "./scans";

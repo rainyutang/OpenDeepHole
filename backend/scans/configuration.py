@@ -1,6 +1,7 @@
 """Scan configuration services."""
 
 from deephole_client.scan_modes import (
+    COMPACT_THREAT_ANALYSIS_METHOD_ID,
     OPT_IN_MINING_ENGINE_IDS,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
@@ -11,6 +12,7 @@ from deephole_client.scan_modes import (
     builtin_profile_engine_ids,
     component_scan_mode,
     normalize_scan_mode,
+    standard_scan_profile,
 )
 from pathlib import PurePosixPath, PureWindowsPath
 import json
@@ -29,9 +31,11 @@ from backend.models import (
     MiningEngineSelection,
     MultiVersionTarget,
     ScanKnowledgeBaseRequest,
+    ScanModeDefaultsResponse,
     ScanStatus,
     ScanVulnerabilityValidationConfig,
     ScanVulnerabilityValidationRequest,
+    StandardScanModeDefaults,
     THREAT_AUDIT_ENGINE_LABEL,
     ThreatAnalysisMethodCatalog,
     ThreatAnalysisMethodSelection,
@@ -173,6 +177,53 @@ async def get_threat_analysis_method_catalog(
 ) -> ThreatAnalysisMethodCatalog:
     """Return repository-owned threat-analysis methods."""
     return _repository_threat_analysis_method_catalog()
+
+
+def resolve_standard_mode_defaults() -> StandardScanModeDefaults:
+    """Resolve current standard-mode options from the shared scan-mode profile."""
+    profile = standard_scan_profile()
+    threat_analysis_enabled = bool(profile.threat_analysis_enabled)
+    requested_threat_method = (
+        str(profile.threat_analysis_method or "").strip() or None
+    )
+    threat_analysis_method, _ = _resolve_threat_analysis_method(
+        requested_threat_method
+    )
+    if (
+        threat_analysis_enabled
+        and threat_analysis_method == COMPACT_THREAT_ANALYSIS_METHOD_ID
+    ):
+        threat_analysis_generate_attack_tree = bool(
+            profile.threat_analysis_generate_attack_tree
+        )
+    else:
+        threat_analysis_generate_attack_tree = True
+    mining_engine_selections = _resolve_scan_mining_engines(
+        scan_overrides=None,
+        scan_mode=SCAN_MODE_STANDARD,
+        threat_analysis_enabled=threat_analysis_enabled,
+        generate_attack_tree=threat_analysis_generate_attack_tree,
+    )
+    fp_review_method, _ = _resolve_fp_review_method(profile.fp_review_method)
+    return StandardScanModeDefaults(
+        threat_analysis_enabled=threat_analysis_enabled,
+        threat_analysis_method=threat_analysis_method,
+        threat_analysis_generate_attack_tree=threat_analysis_generate_attack_tree,
+        mining_engines=[
+            item.engine_id
+            for item in mining_engine_selections
+            if item.enabled
+        ],
+        auto_fp_review=bool(profile.auto_fp_review),
+        fp_review_method=fp_review_method,
+    )
+
+
+async def get_scan_mode_defaults(
+    current_user: User = None,
+) -> ScanModeDefaultsResponse:
+    """Return resolved scan-mode defaults so custom-mode UI mirrors standard mode."""
+    return ScanModeDefaultsResponse(standard=resolve_standard_mode_defaults())
 
 
 def _resolve_threat_analysis_method(
@@ -419,8 +470,10 @@ def _resolve_threat_analysis_enabled(
 ) -> bool:
     if scan_mode == SCAN_MODE_MULTI_VERSION:
         return False
-    if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
+    if scan_mode == SCAN_MODE_QUICK:
         return True
+    if scan_mode == SCAN_MODE_STANDARD:
+        return bool(standard_scan_profile().threat_analysis_enabled)
     if requested is not None:
         return bool(requested)
     if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:

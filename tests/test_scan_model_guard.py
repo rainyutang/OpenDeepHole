@@ -387,3 +387,118 @@ def test_fixed_modes_snapshot_pipeline_defaults(
     assert scan.scan_items == meta.scan_items == ["normal"]
     assert command["checkers"] == ["normal"]
     assert command["codex_model_ids"] == ["provider/model"]
+
+
+def test_scan_mode_defaults_endpoint_matches_standard_mode_and_follows_profile_changes(
+    monkeypatch,
+) -> None:
+    import httpx
+    from fastapi import FastAPI
+    from backend.api import scan as scan_api
+    from backend.auth import get_current_user
+    import deephole_client.scan_modes as scan_modes
+
+    user = User(user_id="user-1", username="alice", role="user")
+    app = FastAPI()
+    app.include_router(scan_api.router)
+
+    async def current_user():
+        return user
+
+    app.dependency_overrides[get_current_user] = current_user
+
+    async def fetch_defaults():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as http:
+            response = await http.get("/api/scan-mode-defaults")
+            assert response.status_code == 200, response.text
+            return response.json()["standard"]
+
+    def resolve_standard_creation():
+        from backend.scans.creation_config import resolve_creation_configuration
+
+        ready = AgentRemoteConfig(model_pool={"models": [{
+            "id": "ready",
+            "model": "provider/model",
+            "enabled": True,
+        }]})
+        with (
+            patch(
+                "backend.scans.creation_config._globally_enabled_checker_names",
+                return_value=["normal"],
+            ),
+            patch(
+                "backend.scans.creation_config._validated_checker_names",
+                side_effect=lambda names, _user: list(names),
+            ),
+            patch(
+                "backend.scans.creation_config._checker_packages_for",
+                return_value=[{"name": "normal"}],
+            ),
+        ):
+            return resolve_creation_configuration(
+                CreateScanRequest(
+                    agent_key="stable-client",
+                    project_path="/repo/project",
+                    scan_mode="standard",
+                ),
+                ready,
+                user,
+                None,
+            )
+
+    current_defaults = asyncio.run(fetch_defaults())
+    current_resolved = resolve_standard_creation()
+    assert current_defaults == {
+        "threat_analysis_enabled": True,
+        "threat_analysis_method": "deephole_compact_threat_analysis",
+        "threat_analysis_generate_attack_tree": False,
+        "mining_engines": ["static_candidate", "threat_pattern_iterative_audit"],
+        "auto_fp_review": True,
+        "fp_review_method": "adversarial",
+    }
+    assert current_defaults["threat_analysis_enabled"] is current_resolved.threat_analysis_enabled
+    assert current_defaults["threat_analysis_method"] == current_resolved.threat_analysis_method
+    assert (
+        current_defaults["threat_analysis_generate_attack_tree"]
+        is current_resolved.threat_analysis_generate_attack_tree
+    )
+    assert current_defaults["mining_engines"] == [
+        item.engine_id for item in current_resolved.mining_engine_selections
+    ]
+    assert current_defaults["auto_fp_review"] is current_resolved.auto_fp_review
+    assert current_defaults["fp_review_method"] == current_resolved.fp_review_method
+
+    updated_profile = scan_modes.StandardScanProfile(
+        threat_analysis_enabled=True,
+        threat_analysis_method="opencode_lightweight_threat_analysis",
+        threat_analysis_generate_attack_tree=True,
+        mining_engine_ids=("static_candidate", "threat_pattern_audit"),
+        auto_fp_review=False,
+        fp_review_method="fp_check",
+    )
+    monkeypatch.setattr(scan_modes, "STANDARD_SCAN_PROFILE", updated_profile)
+
+    followed_defaults = asyncio.run(fetch_defaults())
+    followed_resolved = resolve_standard_creation()
+    assert followed_defaults == {
+        "threat_analysis_enabled": True,
+        "threat_analysis_method": "opencode_lightweight_threat_analysis",
+        "threat_analysis_generate_attack_tree": True,
+        "mining_engines": ["static_candidate", "threat_pattern_audit"],
+        "auto_fp_review": False,
+        "fp_review_method": "fp_check",
+    }
+    assert followed_defaults["threat_analysis_enabled"] is followed_resolved.threat_analysis_enabled
+    assert followed_defaults["threat_analysis_method"] == followed_resolved.threat_analysis_method
+    assert (
+        followed_defaults["threat_analysis_generate_attack_tree"]
+        is followed_resolved.threat_analysis_generate_attack_tree
+    )
+    assert followed_defaults["mining_engines"] == [
+        item.engine_id for item in followed_resolved.mining_engine_selections
+    ]
+    assert followed_defaults["auto_fp_review"] is followed_resolved.auto_fp_review
+    assert followed_defaults["fp_review_method"] == followed_resolved.fp_review_method

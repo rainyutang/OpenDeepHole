@@ -79,10 +79,14 @@ async function mount({ source = fixture(), sourceScanId = "source-id", agentList
     else if (config.url === "/api/knowledge-base/status") data = { configured: kbConfigured, name: "knowledge-base" };
     else if (config.url === `/api/scan/${sourceScanId}/copy-config`) data = source;
     else if (config.url === "/api/mining-engines") data = { engines: [
-      { engine_id: "static_candidate", label: "Static" }, { engine_id: "threat_pattern_audit", label: "Patterns" },
+      { engine_id: "static_candidate", label: "Static" },
+      { engine_id: "threat_audit", label: "Threat audit" },
+      { engine_id: "threat_pattern_audit", label: "Patterns" },
       { engine_id: "threat_pattern_iterative_audit", label: "Iterative patterns" },
+      { engine_id: "multi_version", label: "Multi version" },
     ] };
     else if (config.url === "/api/threat-analysis-methods") data = { methods: [
+      { method_id: "deephole_compact_threat_analysis", label: "DeepHole精简威胁分析" },
       { method_id: "opencode_lightweight_threat_analysis", label: "Default threat" },
       { method_id: "saved-threat", label: "Saved threat" },
     ] };
@@ -90,6 +94,16 @@ async function mount({ source = fixture(), sourceScanId = "source-id", agentList
       { method_id: "adversarial", label: "Default review", default: true },
       { method_id: "staged", label: "Saved review" },
     ] };
+    else if (config.url === "/api/scan-mode-defaults") data = {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     else if (config.url.endsWith("/validator-catalog")) data = validatorCatalog;
     else if (config.url.includes("/config-memory/")) data = configMemory;
     else if (config.url === "/api/review-notes") data = notes;
@@ -142,19 +156,107 @@ test("copy restores all custom form selections, requires a new name, and submits
   assert.ok(requests.every((request) => !request.url.includes("probe")));
 });
 
-test("iterative engine remains opt-in and enables its threat analysis dependency", async () => {
-  const { root } = await mount({ sourceScanId: undefined });
+test("switching to custom mode mirrors standard mode defaults and iterative engine preserves its threat analysis dependency", async () => {
+  const { root, submissions } = await mount({ sourceScanId: "" });
   const custom = root.root.findAllByType("label").find((item) => content(item) === "自定义模式");
   await act(async () => custom.findByType("input").props.onChange());
-  const selection = () => root.root.findAllByType("label")
-    .find((item) => content(item).includes("DeepHole基于攻击模式的迭代漏洞挖掘引擎")).findByType("input");
-  assert.equal(selection().props.checked, false);
+
+  const checkboxFor = (labelPart) => root.root.findAllByType("label")
+    .find((item) => content(item).includes(labelPart)).findByType("input");
   const threatToggle = () => root.root.findByProps({ "aria-label": "启用威胁分析" });
+  const treeToggle = () => root.root.findByProps({ "aria-label": "生成攻击树" });
+  const fpToggle = () => root.root.findByProps({ "aria-label": "自动去误报" });
+
+  assert.equal(threatToggle().props["aria-checked"], true);
+  assert.equal(checkboxFor("DeepHole精简威胁分析").props.checked, true);
+  assert.equal(treeToggle().props["aria-checked"], false);
+  assert.equal(checkboxFor("DeepHole基于代码风险点的漏洞挖掘引擎").props.checked, true);
+  assert.equal(checkboxFor("DeepHole基于攻击模式的迭代漏洞挖掘引擎").props.checked, true);
+  assert.equal(checkboxFor("DeepHole基于攻击模式的漏洞挖掘引擎").props.checked, false);
+  assert.equal(checkboxFor("DeepHole基于攻击威胁的漏洞挖掘引擎").props.checked, false);
+  assert.equal(checkboxFor("DeepHole多版本代码漏洞挖掘引擎").props.checked, false);
+  assert.equal(fpToggle().props["aria-checked"], true);
+  assert.equal(checkboxFor("Default review").props.checked, true);
+
+  await act(async () => root.root.findByProps({ placeholder: "请输入产品名称" }).props.onChange({ target: { value: "Std product" } }));
+  await act(async () => root.root.findByProps({ placeholder: "/path/to/project" }).props.onChange({ target: { value: "/repo/std" } }));
+  await submit(root);
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].scan_mode, "custom");
+  assert.equal(submissions[0].threat_analysis_enabled, true);
+  assert.equal(submissions[0].threat_analysis_method, "deephole_compact_threat_analysis");
+  assert.equal(submissions[0].threat_analysis_generate_attack_tree, false);
+  assert.deepEqual(submissions[0].mining_engines, [
+    { engine_id: "static_candidate" },
+    { engine_id: "threat_pattern_iterative_audit" },
+  ]);
+  assert.equal(submissions[0].auto_fp_review, true);
+  assert.equal(submissions[0].fp_review_method, "adversarial");
+
+  const iterativeBox = () => checkboxFor("DeepHole基于攻击模式的迭代漏洞挖掘引擎");
   await act(async () => threatToggle().props.onClick());
   assert.equal(threatToggle().props["aria-checked"], false);
-  await act(async () => selection().props.onChange({ target: { checked: true } }));
+  assert.equal(iterativeBox().props.checked, false);
+  await act(async () => iterativeBox().props.onChange({ target: { checked: true } }));
   assert.equal(threatToggle().props["aria-checked"], true);
-  assert.equal(selection().props.checked, true);
+  assert.equal(iterativeBox().props.checked, true);
+});
+
+test("custom mode defaults and standard attack-tree visibility automatically follow updated backend standard defaults", async () => {
+  const { root, submissions } = await mount({
+    sourceScanId: "",
+    handleRequest: (config) => {
+      if (config.url === "/api/scan-mode-defaults") {
+        return {
+          standard: {
+            threat_analysis_enabled: true,
+            threat_analysis_method: "opencode_lightweight_threat_analysis",
+            threat_analysis_generate_attack_tree: true,
+            mining_engines: ["static_candidate", "threat_pattern_audit"],
+            auto_fp_review: false,
+            fp_review_method: "staged",
+          },
+        };
+      }
+      return undefined;
+    },
+  });
+
+  // Standard mode uses non-compact threat analysis: attack-tree toggle card is hidden and omitted on submit.
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0);
+  await act(async () => root.root.findByProps({ placeholder: "请输入产品名称" }).props.onChange({ target: { value: "Future product" } }));
+  await act(async () => root.root.findByProps({ placeholder: "/path/to/project" }).props.onChange({ target: { value: "/repo/future" } }));
+  await submit(root);
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].scan_mode, "standard");
+  assert.equal("threat_analysis_generate_attack_tree" in submissions[0], false);
+
+  // Switching to custom mode automatically mirrors the updated standard profile.
+  const custom = root.root.findAllByType("label").find((item) => content(item) === "自定义模式");
+  await act(async () => custom.findByType("input").props.onChange());
+  const inputFor = (labelPart) => root.root.findAllByType("label")
+    .find((item) => content(item).includes(labelPart)).findByType("input");
+  assert.equal(root.root.findByProps({ "aria-label": "启用威胁分析" }).props["aria-checked"], true);
+  assert.equal(inputFor("Default threat").props.checked, true);
+  assert.equal(inputFor("DeepHole精简威胁分析").props.checked, false);
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0);
+  assert.equal(inputFor("DeepHole基于代码风险点的漏洞挖掘引擎").props.checked, true);
+  assert.equal(inputFor("DeepHole基于攻击模式的漏洞挖掘引擎").props.checked, true);
+  assert.equal(inputFor("DeepHole基于攻击模式的迭代漏洞挖掘引擎").props.checked, false);
+  assert.equal(inputFor("DeepHole基于攻击威胁的漏洞挖掘引擎").props.checked, false);
+  assert.equal(root.root.findByProps({ "aria-label": "自动去误报" }).props["aria-checked"], false);
+  assert.equal(inputFor("Saved review").props.checked, true);
+
+  await submit(root);
+  assert.equal(submissions.length, 2);
+  assert.equal(submissions[1].scan_mode, "custom");
+  assert.equal(submissions[1].threat_analysis_method, "opencode_lightweight_threat_analysis");
+  assert.deepEqual(submissions[1].mining_engines, [
+    { engine_id: "static_candidate" },
+    { engine_id: "threat_pattern_audit" },
+  ]);
+  assert.equal(submissions[1].auto_fp_review, false);
+  assert.equal(submissions[1].fp_review_method, "staged");
 });
 
 test("copy retains an explicitly selected iterative engine", async () => {
@@ -495,18 +597,9 @@ test("attack-tree card appears right below vulnerability validation for standard
   await act(async () => multiVersion.findByType("input").props.onChange());
   assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden in multi-version mode");
 
-  // Custom mode: hidden for non-compact method, shown below 漏洞验证 for compact method.
+  // Custom mode mirrors standard compact defaults immediately: card shown below 漏洞验证, disabled, threat_audit unchecked.
   const custom = root.root.findAllByType("label").find((item) => content(item) === "自定义模式");
   await act(async () => custom.findByType("input").props.onChange());
-  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden for non-compact method");
-
-  const threatAuditBox = () => root.root.findAllByType("label")
-    .find((item) => content(item).includes("基于攻击威胁")).findByType("input");
-  assert.equal(threatAuditBox().props.checked, true, "selected before switching to compact method");
-
-  const compactRadio = root.root.findAllByType("label")
-    .find((item) => content(item).includes("DeepHole精简威胁分析")).findByType("input");
-  await act(async () => compactRadio.props.onChange());
   assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 1, "shown once in custom compact mode");
   const customHeadings = cardHeadings(root);
   assert.equal(
@@ -515,7 +608,27 @@ test("attack-tree card appears right below vulnerability validation for standard
     "attack-tree card sits directly below vulnerability validation in custom mode too",
   );
   assert.equal(treeToggle().props["aria-checked"], false, "defaults to disabled in custom mode");
-  assert.equal(threatAuditBox().props.checked, false, "switching to compact method with default no-tree unchecks threat_audit");
+
+  const threatAuditBox = () => root.root.findAllByType("label")
+    .find((item) => content(item).includes("基于攻击威胁")).findByType("input");
+  assert.equal(threatAuditBox().props.checked, false, "threat_audit is not selected by default in custom compact mode");
+
+  // Switching to a non-compact method hides the card; selecting threat_audit and switching back to compact unchecks threat_audit.
+  const lightweightRadio = root.root.findAllByType("label")
+    .find((item) => content(item).includes("Default threat")).findByType("input");
+  await act(async () => lightweightRadio.props.onChange());
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 0, "hidden for non-compact method");
+  await act(async () => threatAuditBox().props.onChange({ target: { checked: true } }));
+  assert.equal(threatAuditBox().props.checked, true, "selected before switching back to compact method");
+  // Reset attack tree flag via compact method toggle flow.
+  const compactRadio = root.root.findAllByType("label")
+    .find((item) => content(item).includes("DeepHole精简威胁分析")).findByType("input");
+  await act(async () => compactRadio.props.onChange());
+  assert.equal(root.root.findAllByProps({ "aria-label": "生成攻击树" }).length, 1, "shown again in custom compact mode");
+  assert.equal(treeToggle().props["aria-checked"], true, "enabling threat_audit enabled attack tree");
+  await act(async () => treeToggle().props.onClick());
+  assert.equal(treeToggle().props["aria-checked"], false);
+  assert.equal(threatAuditBox().props.checked, false, "disabling attack tree unchecks threat_audit");
 
   // Turning off threat analysis in custom mode hides the card again.
   const threatToggle = () => root.root.findByProps({ "aria-label": "启用威胁分析" });

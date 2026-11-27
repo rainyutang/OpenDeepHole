@@ -1,7 +1,7 @@
 import type { AgentInfo, AgentValidatorMethod, KnowledgeBaseProject } from "../../types/agents";
 import type { FpReviewMethodCatalogItem } from "../../types/fpReview";
 import type { MiningEngineCatalogItem } from "../../types/mining";
-import type { ScanConfigMemory } from "../../types/scans";
+import type { ScanConfigMemory, StandardScanModeDefaults } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
 import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
@@ -9,6 +9,16 @@ import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequire
 import type { AgentMcpConfig } from "../../types/agents";
 import type { CreateScanInput, ScanCopyConfig } from "../../api/scans";
 import { defaultScanCodeGraphMcp } from './codeGraphDefaults';
+
+export const COMPACT_THREAT_ANALYSIS_METHOD_ID = "deephole_compact_threat_analysis";
+
+export function standardSupportsGenerateAttackTree(
+  standardDefaults?: StandardScanModeDefaults | null,
+): boolean {
+  if (!standardDefaults) return true;
+  return standardDefaults.threat_analysis_enabled
+    && standardDefaults.threat_analysis_method === COMPACT_THREAT_ANALYSIS_METHOD_ID;
+}
 
 export interface MiningEngineFormValue { selected: boolean }
 
@@ -227,6 +237,7 @@ export function scanRequestFromDraft(
   draft: ScanDraft,
   miningEngineCatalog: MiningEngineCatalogItem[],
   selectedKnowledgeProject: KnowledgeBaseProject | null = null,
+  standardDefaults: StandardScanModeDefaults | null = null,
 ): CreateScanInput {
   const {
     selectedAgent,
@@ -278,13 +289,13 @@ export function scanRequestFromDraft(
     review_notes_enabled: reviewNotesEnabled,
     auto_resume_enabled: autoResumeEnabled,
     review_note_ids: reviewNotesEnabled ? reviewNoteIds : [],
-    ...(scanMode === "standard" ? {
+    ...(scanMode === "standard" && standardSupportsGenerateAttackTree(standardDefaults) ? {
       threat_analysis_generate_attack_tree: threatAnalysisGenerateAttackTree,
     } : {}),
     ...(scanMode === "custom" ? {
       threat_analysis_enabled: threatAnalysisEnabled,
       threat_analysis_method: threatAnalysisMethod,
-      ...(threatAnalysisEnabled && threatAnalysisMethod === "deephole_compact_threat_analysis"
+      ...(threatAnalysisEnabled && threatAnalysisMethod === COMPACT_THREAT_ANALYSIS_METHOD_ID
         ? { threat_analysis_generate_attack_tree: threatAnalysisGenerateAttackTree }
         : {}),
       mining_engines: miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).map((engine) => ({ engine_id: engine.engine_id })),
@@ -294,14 +305,48 @@ export function scanRequestFromDraft(
   };
 }
 
-export function scanDraftInitialization(engines: MiningEngineCatalogItem[], threatMethods: ThreatAnalysisMethodCatalogItem[], fpMethods: FpReviewMethodCatalogItem[], copied: ScanCopyConfig | null): Partial<ScanDraft> {
+export function scanDraftInitialization(
+  engines: MiningEngineCatalogItem[],
+  threatMethods: ThreatAnalysisMethodCatalogItem[],
+  fpMethods: FpReviewMethodCatalogItem[],
+  copied: ScanCopyConfig | null,
+  standardDefaults?: StandardScanModeDefaults | null,
+): Partial<ScanDraft> {
   const next: Partial<ScanDraft> = {};
-  next.miningEngines = Object.fromEntries(engines.map((engine) => [engine.engine_id, { selected: miningEngineSelectedByDefault(engine.engine_id) }]));
-  next.threatAnalysisMethod = threatMethods.find((method) => method.method_id === "opencode_lightweight_threat_analysis")?.method_id || threatMethods[0]?.method_id || "";
-  if (next.threatAnalysisMethod === "deephole_compact_threat_analysis" && next.miningEngines[THREAT_AUDIT_ENGINE_ID]) {
+  if (standardDefaults) {
+    const standardEngineIds = new Set(standardDefaults.mining_engines);
+    next.threatAnalysisEnabled = standardDefaults.threat_analysis_enabled;
+    next.threatAnalysisMethod = threatMethods.find((method) => method.method_id === standardDefaults.threat_analysis_method)?.method_id
+      || threatMethods[0]?.method_id
+      || "";
+    next.threatAnalysisGenerateAttackTree = standardDefaults.threat_analysis_generate_attack_tree;
+    next.miningEngines = Object.fromEntries(
+      engines.map((engine) => [engine.engine_id, { selected: standardEngineIds.has(engine.engine_id) }]),
+    );
+    next.autoFpReview = standardDefaults.auto_fp_review;
+    next.fpReviewMethod = fpMethods.find((method) => method.method_id === standardDefaults.fp_review_method)?.method_id
+      || fpMethods.find((method) => method.default)?.method_id
+      || fpMethods[0]?.method_id
+      || "";
+  } else {
+    next.threatAnalysisEnabled = true;
+    next.threatAnalysisMethod = threatMethods.find((method) => method.method_id === COMPACT_THREAT_ANALYSIS_METHOD_ID)?.method_id
+      || threatMethods[0]?.method_id
+      || "";
+    next.threatAnalysisGenerateAttackTree = false;
+    next.miningEngines = Object.fromEntries(
+      engines.map((engine) => [engine.engine_id, { selected: miningEngineSelectedByDefault(engine.engine_id) }]),
+    );
+    next.autoFpReview = true;
+    next.fpReviewMethod = fpMethods.find((method) => method.default)?.method_id || fpMethods[0]?.method_id || "";
+  }
+  if (
+    next.threatAnalysisMethod === COMPACT_THREAT_ANALYSIS_METHOD_ID
+    && !next.threatAnalysisGenerateAttackTree
+    && next.miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected
+  ) {
     next.miningEngines[THREAT_AUDIT_ENGINE_ID] = { selected: false };
   }
-  next.fpReviewMethod = fpMethods.find((method) => method.default)?.method_id || fpMethods[0]?.method_id || "";
 
   if (copied) {
     const mode = copied.scan_mode || "custom";
@@ -323,6 +368,14 @@ export function scanDraftInitialization(engines: MiningEngineCatalogItem[], thre
     if (copied.mining_engines != null) next.miningEngines = Object.fromEntries(copied.mining_engines.map((engine) => [engine.engine_id, { selected: true }]));
     if (copied.auto_fp_review != null) next.autoFpReview = copied.auto_fp_review;
     if (copied.fp_review_method != null) next.fpReviewMethod = copied.fp_review_method;
+    if (
+      copied.mining_engines == null
+      && next.threatAnalysisMethod === COMPACT_THREAT_ANALYSIS_METHOD_ID
+      && !next.threatAnalysisGenerateAttackTree
+      && next.miningEngines?.[THREAT_AUDIT_ENGINE_ID]?.selected
+    ) {
+      next.miningEngines[THREAT_AUDIT_ENGINE_ID] = { selected: false };
+    }
     next.codeGraphMcp = copied.code_graph_mcp || defaultScanCodeGraphMcp();
     next.knowledgeEnabled = copied.knowledge_base?.enabled ?? false;
     next.knowledgeProjectId = copied.knowledge_base?.project_id || "";

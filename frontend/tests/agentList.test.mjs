@@ -174,6 +174,16 @@ test("new scan identifies same-name Agents by owner and submits the selected sta
     if (request.url === "/api/mining-engines") return { engines: [{ engine_id: "threat_pattern_audit", label: "攻击模式审计" }] };
     if (request.url === "/api/threat-analysis-methods") return { methods: [{ method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" }] };
     if (request.url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
+    if (request.url === "/api/scan-mode-defaults") return {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     if (request.url.endsWith("/validator-catalog")) return { methods: [], errors: [] };
     if (request.url.includes("/config-memory/")) return { knowledge_base: null, validation_by_product: {} };
     if (request.url === "/api/scan") { submitted.push(JSON.parse(request.data)); return { scan_id: "new-scan" }; }
@@ -204,6 +214,16 @@ test("draining Agent shows waiting-for-active-tasks label in download and new sc
     if (request.url === "/api/mining-engines") return { engines: [{ engine_id: "threat_pattern_audit", label: "攻击模式审计" }] };
     if (request.url === "/api/threat-analysis-methods") return { methods: [{ method_id: "opencode_lightweight_threat_analysis", label: "威胁分析" }] };
     if (request.url === "/api/fp-review-methods") return { methods: [{ method_id: "adversarial", label: "去误报", default: true }] };
+    if (request.url === "/api/scan-mode-defaults") return {
+      standard: {
+        threat_analysis_enabled: true,
+        threat_analysis_method: "deephole_compact_threat_analysis",
+        threat_analysis_generate_attack_tree: false,
+        mining_engines: ["static_candidate", "threat_pattern_iterative_audit"],
+        auto_fp_review: true,
+        fp_review_method: "adversarial",
+      },
+    };
     if (request.url.endsWith("/validator-catalog")) return { methods: [], errors: [] };
     if (request.url.includes("/config-memory/")) return { knowledge_base: null, validation_by_product: {} };
     assert.fail("Unexpected request: " + request.url);
