@@ -345,10 +345,15 @@ def test_local_validation_executes_an_argv_without_a_shell(
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
+        env = kwargs.pop("env")
+        assert env["PYTHONUTF8"] == "1"
+        assert env["PYTHONIOENCODING"] == "utf-8"
         assert kwargs == {
             "check": False,
             "capture_output": True,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "timeout": lightweight_contract.ARTIFACT_VALIDATION_TIMEOUT_SECONDS,
         }
         return subprocess.CompletedProcess(argv, 0, "valid\n", "")

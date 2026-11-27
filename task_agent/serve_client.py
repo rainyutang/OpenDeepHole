@@ -535,7 +535,7 @@ _MANAGED_COMPACTION_CONFIG = {
     "prune": True,
     "reserved": 20_000,
 }
-_MANAGED_MODEL_DEFAULT_CONTEXT = 131_072
+_MANAGED_MODEL_DEFAULT_CONTEXT = 200_000
 _MANAGED_MODEL_DEFAULT_OUTPUT = 32_768
 _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "apply_patch",
@@ -666,6 +666,8 @@ class OpenCodePromptResult:
     model: str = ""
     token_usage: OpenCodeTokenUsage | None = None
     raw: Any = field(default=None, repr=False, compare=False)
+    finish_reason: str = field(default="", compare=False)
+    output_tokens: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1596,8 +1598,14 @@ def _with_managed_compaction(data: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _positive_int_limit(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def _with_managed_model_limits(data: dict[str, Any]) -> dict[str, Any]:
-    """Fill safe limits for configured models without a context limit."""
+    """Fill safe defaults for configured models missing context or output limits."""
     resolved = dict(data)
     for providers_key in ("provider", "providers"):
         configured_providers = resolved.get(providers_key)
@@ -1620,11 +1628,16 @@ def _with_managed_model_limits(data: dict[str, Any]) -> dict[str, Any]:
                     continue
                 configured_limit = configured_model.get("limit")
                 limit = dict(configured_limit) if isinstance(configured_limit, dict) else {}
-                if "context" in limit:
+                context_limit = _positive_int_limit(limit.get("context"))
+                output_limit = _positive_int_limit(limit.get("output"))
+                if context_limit is not None and output_limit is not None:
                     continue
 
-                limit["context"] = _MANAGED_MODEL_DEFAULT_CONTEXT
-                limit.setdefault("output", _MANAGED_MODEL_DEFAULT_OUTPUT)
+                if context_limit is None:
+                    context_limit = _MANAGED_MODEL_DEFAULT_CONTEXT
+                    limit["context"] = context_limit
+                if output_limit is None:
+                    limit["output"] = min(_MANAGED_MODEL_DEFAULT_OUTPUT, context_limit)
                 model = dict(configured_model)
                 model["limit"] = limit
                 models[model_id] = model
@@ -6194,6 +6207,69 @@ def _latest_assistant_message(value: object, session_id: str) -> dict[str, Any] 
     return None
 
 
+_NON_TERMINAL_FINISH_REASONS = frozenset({
+    "tool-calls",
+    "tool_calls",
+    "tool_use",
+})
+_OUTPUT_LENGTH_FINISH_REASONS = frozenset({
+    "length",
+    "max_tokens",
+    "max-tokens",
+    "max_output_tokens",
+    "output_length",
+    "output-length",
+})
+
+
+def _response_finish_reason(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    info = value.get("info")
+    if isinstance(info, dict):
+        for key in ("finish", "rawFinish"):
+            finish = str(info.get(key) or "").strip().lower()
+            if finish:
+                return finish
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        for part in reversed(parts):
+            if not isinstance(part, dict) or part.get("type") != "step-finish":
+                continue
+            for key in ("reason", "finish"):
+                reason = str(part.get(key) or "").strip().lower()
+                if reason:
+                    return reason
+    return ""
+
+
+def _is_output_length_finish(reason: object) -> bool:
+    return str(reason or "").strip().lower() in _OUTPUT_LENGTH_FINISH_REASONS
+
+
+def _response_output_tokens(value: object) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    info = value.get("info")
+    if isinstance(info, dict):
+        tokens = info.get("tokens")
+        if isinstance(tokens, dict):
+            output = _positive_int_limit(tokens.get("output"))
+            if output is not None:
+                return output
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        for part in reversed(parts):
+            if not isinstance(part, dict) or part.get("type") != "step-finish":
+                continue
+            tokens = part.get("tokens")
+            if isinstance(tokens, dict):
+                output = _positive_int_limit(tokens.get("output"))
+                if output is not None:
+                    return output
+    return None
+
+
 def _assistant_message_is_terminal(value: object) -> bool:
     if not isinstance(value, dict):
         return False
@@ -6202,10 +6278,13 @@ def _assistant_message_is_terminal(value: object) -> bool:
         return False
     if info.get("error") is not None:
         return True
+    finish_reason = _response_finish_reason(value)
+    if finish_reason in _NON_TERMINAL_FINISH_REASONS:
+        return False
+    if finish_reason:
+        return True
     message_time = info.get("time")
     if isinstance(message_time, dict) and message_time.get("completed") is not None:
-        return True
-    if str(info.get("finish") or "").strip():
         return True
     parts = value.get("parts")
     if isinstance(parts, list) and any(
@@ -6248,7 +6327,7 @@ async def _recover_prompt_response(
 ) -> tuple[dict[str, Any] | None, str]:
     is_v2 = normalize_opencode_version(opencode_version) == OPENCODE_V2
     poll_params = dict(params)
-    poll_params["limit"] = "20" if is_v2 else "2"
+    poll_params["limit"] = "20"
     deadline = (
         asyncio.get_running_loop().time()
         + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
@@ -9722,6 +9801,14 @@ class OpenCodeServeManager:
                                 event_state.handle_part(part)
                 event_state.reconcile_text("text", "".join(response_text))
                 event_state.flush()
+            finish_reason = _response_finish_reason(response_data)
+            output_tokens = _response_output_tokens(response_data)
+            if _is_output_length_finish(finish_reason):
+                tokens_note = f" output_tokens={output_tokens}" if output_tokens is not None else ""
+                emit(
+                    "session",
+                    f"TRUNCATED finish={finish_reason}{tokens_note}",
+                )
             details = OpenCodePromptResult(
                 session_id=active_session_id,
                 message_id=_response_message_id(response_data),
@@ -9730,6 +9817,8 @@ class OpenCodeServeManager:
                 model=response_model,
                 token_usage=captured_token_usage,
                 raw=response_data,
+                finish_reason=finish_reason,
+                output_tokens=output_tokens,
             )
             if required_bash_commands:
                 if command_audit_path is None:

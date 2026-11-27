@@ -9,6 +9,7 @@ const server = await createServer({ appType: "custom", logLevel: "silent", serve
 const client = await server.ssrLoadModule("/src/api/client.ts");
 const { ScanTaskQueuePanel } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
 const {
+  scanQueueFailureKindLabel,
   scanQueueFreshSessionRetryLabel,
   scanQueueSessionEventLabel,
   scanQueueTaskSessionEvents,
@@ -1111,4 +1112,33 @@ test("completed same-session retry keeps consistent badge before and after expan
   })));
   await settleHistory();
   assert.match(text(rows(root)[0].findAllByType("td")[1]), /同 Session 换模第 2\/3 次/);
+});
+
+test("renders length_continuation phase and output_truncated failure kind labels", () => {
+  const events = scanQueueTaskSessionEvents({
+    session_events: [
+      {
+        sequence: 1,
+        phase: "business",
+        session_id: "ses_trunc",
+        session_attempt: 1,
+        outcome: "failure",
+        failure_kind: "output_truncated",
+        failure_reason: "OpenCode output truncated (finish=length, output_tokens=10240)",
+      },
+      {
+        sequence: 2,
+        phase: "length_continuation",
+        session_id: "ses_trunc",
+        session_attempt: 1,
+        retry_ordinal: 1,
+        retry_total: 2,
+        outcome: "success",
+      },
+    ],
+  }, "success", "glm", "");
+  assert.equal(events.length, 2);
+  assert.equal(events[1].phase, "length_continuation");
+  assert.equal(scanQueueSessionEventLabel(events[1]), "同 Session 截断续写 1/2");
+  assert.equal(scanQueueFailureKindLabel("output_truncated"), "输出长度截断");
 });

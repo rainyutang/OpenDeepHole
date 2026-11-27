@@ -456,7 +456,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
 
-模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配、同 Session JSON 纠正或同 Session 命令纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`json_format`、`json_retry` 和 `validation_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/重试序号、模型、结果、时间、耗时和失败原因；校验输出正文只用于当次纠正 Prompt，不进入历史。`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
+模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配、同 Session 截断续写、同 Session JSON 纠正或同 Session 命令纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`length_continuation`、`json_format`、`json_retry` 和 `validation_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/重试序号、模型、结果、时间、耗时和失败原因；校验输出正文只用于当次纠正 Prompt，不进入历史。当模型单轮回复命中输出 Token 上限（`finish="length"` 等）导致产物校验失败或结构化 JSON 未完成时，任务会在当前 Session 内自动触发最多 2 次截断续写（共享原业务预算，不消耗产物校验重试或 JSON 纠正次数）；耗尽后以 `output_truncated`（健康中性）进入换模重试。`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
 
 完成记录上报与模型额度释放分开执行：释放时在内存保留待上报记录并唤醒后续任务，后台线程再写入 Agent 的持久 outbox；写入失败保留记录并重试，日志输出 `OpenCode completion report pending`。尚未写入 outbox 的记录仍依赖当前 Agent 进程，正常退出最多等待 10 秒落盘，失败会明确记录。outbox 的入队、领取、确认和重试操作均离开事件循环执行；领取或发送被取消时归还该次领取，迟到清理不能影响后续领取。相同 Lease 的重复或迟到释放不重复计数，也不能释放下一次尝试的额度。Task Service 的收尾异常会记录错误并结束结果与 Session 等待，不留下永远运行的任务。
 

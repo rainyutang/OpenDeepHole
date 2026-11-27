@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import shlex
 import subprocess
 import sys
@@ -185,6 +186,14 @@ def build_lightweight_prompt(
     return prompt
 
 
+def _validator_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+
 def validate_artifacts_locally(
     *,
     guidance_path: Path,
@@ -198,6 +207,9 @@ def validate_artifacts_locally(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_validator_env(),
             timeout=ARTIFACT_VALIDATION_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -235,6 +247,7 @@ async def validate_artifacts_locally_async(
             *validation_argv(guidance_path=guidance_path, paths=paths),
             stdout=stdout,
             stderr=stderr,
+            env=_validator_env(),
         )
         deadline = OperationDeadline(ARTIFACT_VALIDATION_TIMEOUT_SECONDS)
         try:

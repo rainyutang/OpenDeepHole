@@ -70,7 +70,7 @@ export interface OpenCodeTokenUsage extends OpenCodeTokenCounters {
 
 export interface OpenCodeSessionEvent {
   sequence: number;
-  phase: "business" | "json_format" | "json_retry" | "validation_retry";
+  phase: "business" | "json_format" | "json_retry" | "validation_retry" | "length_continuation";
   session_id: string;
   session_attempt: number;
   retry_mode?: "same_session" | "fresh_session";

@@ -32,7 +32,7 @@ export interface ScanQueueTask {
 
 export interface ScanQueueSessionEvent {
   sequence: number;
-  phase: "business" | "json_format" | "json_retry" | "validation_retry";
+  phase: "business" | "json_format" | "json_retry" | "validation_retry" | "length_continuation";
   sessionId: string;
   sessionAttempt: number;
   retryMode?: "same_session" | "fresh_session";

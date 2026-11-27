@@ -5730,3 +5730,250 @@ def test_same_session_retry_preserves_retry_mode_across_structured_recovery(tmp_
         assert formatter_ctx["retry_mode"] == "same_session"
 
     asyncio.run(run())
+
+
+def test_post_session_validation_output_truncation_continues_without_consuming_validation_retry(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[dict[str, object]] = []
+        artifact = tmp_path / "work" / "result.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or "ses_trunc"
+            calls.append({"session_id": kwargs["session_id"], "prompt": kwargs["prompt"]})
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            turn = len(calls)
+            if turn == 1:
+                # Truncated mid-thought before writing the file.
+                return OpenCodePromptResult(
+                    session_id=session_id,
+                    message_id="msg_1",
+                    lines=["thinking cut off"],
+                    text="thinking cut off",
+                    model=kwargs["model"],
+                    finish_reason="length",
+                    output_tokens=10240,
+                )
+            if turn == 2:
+                # Continuation completes normally, writes invalid JSON payload to test that
+                # the regular post_session_validation_retry_count=1 budget is still intact.
+                artifact.write_text('{"bad": true}', encoding="utf-8")
+                return OpenCodePromptResult(
+                    session_id=session_id,
+                    message_id="msg_2",
+                    lines=["wrote draft"],
+                    text="wrote draft",
+                    model=kwargs["model"],
+                    finish_reason="stop",
+                    output_tokens=1200,
+                )
+            artifact.write_text("[]", encoding="utf-8")
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_3",
+                lines=["fixed"],
+                text="fixed",
+                model=kwargs["model"],
+                finish_reason="stop",
+                output_tokens=300,
+            )
+
+        def validator() -> str | None:
+            if not artifact.is_file():
+                return f"{artifact}: result is not a file"
+            if artifact.read_text(encoding="utf-8") != "[]":
+                return f"{artifact}: expected JSON list"
+            return None
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", OutputSource(backend="opencode", tool="opencode", model_id="m", model="p/m")))
+        patches = _service_patches(manager)
+        with patches[0], patches[1], patches[2] as release_mock, patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="trunc-then-repair",
+                    prompt="audit target",
+                    directory=tmp_path,
+                    output_schema=None,
+                    post_session_validator=validator,
+                    post_session_validation_retry_count=1,
+                    attempt=0,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_trunc"
+        assert len(calls) == 3
+        assert calls[0]["session_id"] is None
+        assert calls[1]["session_id"] == "ses_trunc"
+        assert "截断续写 1/2" in str(calls[1]["prompt"])
+        assert "10240" in str(calls[1]["prompt"])
+        assert calls[2]["session_id"] == "ses_trunc"
+        assert "产物纠正 1/1" in str(calls[2]["prompt"])
+        events = release_mock.await_args.kwargs["context_updates"]["session_events"]
+        assert [(e["phase"], e["outcome"], e.get("failure_kind", "")) for e in events] == [
+            ("business", "failure", "output_truncated"),
+            ("length_continuation", "failure", "post_session_validation_failed"),
+            ("validation_retry", "success", ""),
+        ]
+
+    asyncio.run(run())
+
+
+def test_post_session_validation_valid_file_succeeds_when_trailing_summary_hits_length(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls = 0
+        artifact = tmp_path / "work" / "ok.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            artifact.write_text("[]", encoding="utf-8")
+            return OpenCodePromptResult(
+                session_id="ses_ok_len",
+                message_id="msg_1",
+                lines=["verbose summary cut off"],
+                text="verbose summary cut off",
+                model=kwargs["model"],
+                finish_reason="length",
+                output_tokens=10240,
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", OutputSource(backend="opencode", tool="opencode", model_id="m", model="p/m")))
+        patches = _service_patches(manager)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="valid-file-truncated-summary",
+                    prompt="audit target",
+                    directory=tmp_path,
+                    output_schema=None,
+                    post_session_validator=lambda: None if artifact.is_file() else "missing",
+                    post_session_validation_retry_count=1,
+                    attempt=0,
+                ))
+
+        assert result.status == "success"
+        assert calls == 1
+
+    asyncio.run(run())
+
+
+def test_post_session_validation_exhausted_output_truncation_reports_output_truncated(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str | None, str]] = []
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or f"ses_{len(calls) + 1}"
+            calls.append((kwargs["session_id"], kwargs["model"]))
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id=f"msg_{len(calls)}",
+                lines=["truncated again"],
+                text="truncated again",
+                model=kwargs["model"],
+                finish_reason="length",
+                output_tokens=10240,
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", OutputSource(backend="opencode", tool="opencode", model_id="m", model="p/m")))
+        patches = _service_patches(manager)
+        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="exhausted-truncation",
+                    prompt="audit target",
+                    directory=tmp_path,
+                    output_schema=None,
+                    post_session_validator=lambda: "result.json: threat-pattern task result is not a file",
+                    post_session_validation_retry_count=1,
+                    attempt=1,
+                ))
+
+        assert result.status == "failure"
+        assert "finish=length" in result.error
+        assert "output_tokens=10240" in result.error
+        # 2 fresh sessions x (1 business + 2 length_continuations) = 6 turns.
+        assert len(calls) == 6
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"]
+        final_release = release_mock.await_args_list[-1].kwargs
+        assert final_release["health_outcome"] is None
+        assert final_release["context_updates"]["failure_kind"] == "output_truncated"
+
+    asyncio.run(run())
+
+
+def test_structured_output_truncation_continues_same_session_before_formatter(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[dict[str, object]] = []
+
+        async def run_prompt(**kwargs):
+            session_id = kwargs["session_id"] or "ses_json_trunc"
+            calls.append({"session_id": kwargs["session_id"], "prompt": kwargs["prompt"]})
+            cb = kwargs["on_session_id"](session_id)
+            if hasattr(cb, "__await__"):
+                await cb
+            if len(calls) == 1:
+                return OpenCodePromptResult(
+                    session_id=session_id,
+                    message_id="msg_1",
+                    lines=['{"answer": '],
+                    text='{"answer": ',
+                    model=kwargs["model"],
+                    finish_reason="length",
+                    output_tokens=10240,
+                )
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_2",
+                lines=['{"answer": 42}'],
+                text='{"answer": 42}',
+                model=kwargs["model"],
+                finish_reason="stop",
+                output_tokens=20,
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "p/m", OutputSource(backend="opencode", tool="opencode", model_id="m", model="p/m")))
+        patches = _service_patches(manager)
+        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="structured-truncation",
+                    prompt="return json",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    attempt=0,
+                ))
+
+        assert result.status == "success"
+        assert result.structured == {"answer": 42}
+        assert len(calls) == 2
+        assert acquire_mock.await_count == 1
+        assert "截断续写 1/2" in str(calls[1]["prompt"])
+        events = release_mock.await_args.kwargs["context_updates"]["session_events"]
+        assert [(e["phase"], e["outcome"], e.get("failure_kind", "")) for e in events] == [
+            ("business", "invalid_output", "output_truncated"),
+            ("length_continuation", "success", ""),
+        ]
+
+    asyncio.run(run())

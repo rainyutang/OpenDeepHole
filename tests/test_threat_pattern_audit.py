@@ -1736,3 +1736,45 @@ def test_resume_reinterleaves_remaining_pending_targets_across_modules(tmp_path:
         ("模块B", "P2"),
         ("模块B", "P3"),
     ]
+
+
+def test_validator_returns_chinese_diagnostics_with_non_utf8_parent_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "repo"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    schema_path = tmp_path / "schema.json"
+    result_path = tmp_path / "result.json"
+    schema_path.write_text(json.dumps(THREAT_PATTERN_VULNERABILITY_LIST_SCHEMA, ensure_ascii=False), encoding="utf-8")
+    finding = {**_finding(), "file": "src/missing.c"}
+    result_path.write_text(
+        json.dumps([finding], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    scope = engine.resolve_scan_scope(project, project / "src")
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+
+    with pytest.raises(ValueError) as sync_exc:
+        engine._validate_result(
+            validator_path=engine.VALIDATOR_PATH,
+            schema_path=schema_path,
+            result_path=result_path,
+            scan_scope=scope,
+        )
+    assert "结果文件：" in str(sync_exc.value)
+    assert "漏洞位置必须指向真实存在的源码文件" in str(sync_exc.value)
+    assert "\ufffd" not in str(sync_exc.value)
+
+    with pytest.raises(ValueError) as async_exc:
+        asyncio.run(engine._validate_result_async(
+            validator_path=engine.VALIDATOR_PATH,
+            schema_path=schema_path,
+            result_path=result_path,
+            scan_scope=scope,
+        ))
+    assert "结果文件：" in str(async_exc.value)
+    assert "漏洞位置必须指向真实存在的源码文件" in str(async_exc.value)
+    assert "\ufffd" not in str(async_exc.value)

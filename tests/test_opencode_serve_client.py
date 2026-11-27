@@ -34,16 +34,20 @@ from task_agent.serve_client import (
     _FILE_WRITE_PLUGIN_SOURCE,
     _KNOWLEDGE_PROJECT_PLUGIN_HASH,
     _KNOWLEDGE_PROJECT_PLUGIN_SOURCE,
+    _assistant_message_is_terminal,
     _config_hash,
     _executable_argv,
     _flush_event_state_periodically,
     _handle_serve_event,
+    _is_output_length_finish,
     _log_serve_startup_output_updates,
     _message_token_entries,
     _next_event_reconnect_delay,
     _opencode_mcp_tool_ids,
     _opencode_mcp_tool_prefixes,
     _port_bind_error,
+    _response_finish_reason,
+    _response_output_tokens,
     _run_command_text_async,
     _session_tree_token_entries,
     _serve_context_headers,
@@ -6005,6 +6009,12 @@ def test_managed_model_limits_fill_models_without_context(
                         "with-context": {
                             "limit": {"context": 200_000},
                         },
+                        "small-context": {
+                            "limit": {"context": 16_384},
+                        },
+                        "explicit-both": {
+                            "limit": {"context": 128_000, "output": 10_240},
+                        },
                     },
                 },
                 "without-models": {"name": "No Models"},
@@ -6017,31 +6027,37 @@ def test_managed_model_limits_fill_models_without_context(
     assert custom["name"] == "Custom Provider"
     assert custom["models"]["empty"] == {
         "name": "Empty Model",
-        "limit": {"context": 131_072, "output": 32_768},
+        "limit": {"context": 200_000, "output": 32_768},
     }
     assert custom["models"]["output-only"] == {
-        "limit": {"context": 131_072, "output": 8_192},
+        "limit": {"context": 200_000, "output": 8_192},
         "options": {"reasoningEffort": "high"},
     }
     assert custom["models"]["invalid-limit"] == {
-        "limit": {"context": 131_072, "output": 32_768},
+        "limit": {"context": 200_000, "output": 32_768},
     }
     assert custom["models"]["with-input"] == {
         "limit": {
-            "context": 131_072,
+            "context": 200_000,
             "input": 100_000,
             "output": 16_384,
         },
     }
     assert custom["models"]["input-only"] == {
         "limit": {
-            "context": 131_072,
+            "context": 200_000,
             "input": 100_000,
             "output": 32_768,
         },
     }
     assert custom["models"]["with-context"] == {
-        "limit": {"context": 200_000},
+        "limit": {"context": 200_000, "output": 32_768},
+    }
+    assert custom["models"]["small-context"] == {
+        "limit": {"context": 16_384, "output": 16_384},
+    }
+    assert custom["models"]["explicit-both"] == {
+        "limit": {"context": 128_000, "output": 10_240},
     }
     assert config["provider"]["without-models"] == {"name": "No Models"}
     assert config["model"] == "custom/empty"
@@ -6108,7 +6124,7 @@ def test_config_hash_uses_managed_model_limit_values() -> None:
                 "models": {
                     "model": {
                         "name": "Model",
-                        "limit": {"context": 131_072, "output": 32_768},
+                        "limit": {"context": 200_000, "output": 32_768},
                     },
                 },
             },
@@ -6120,7 +6136,7 @@ def test_config_hash_uses_managed_model_limit_values() -> None:
                 "models": {
                     "model": {
                         "name": "Model",
-                        "limit": {"context": 200_000, "output": 32_768},
+                        "limit": {"context": 256_000, "output": 32_768},
                     },
                 },
             },
@@ -10585,4 +10601,119 @@ def test_run_prompt_classifies_http_503_cooldown_response_and_v2_session_error(
         payload = synthesized.json()
         assert payload["info"]["error"] == structured_503
 
+    asyncio.run(run())
+
+
+def test_assistant_message_is_terminal_ignores_intermediate_tool_calls() -> None:
+    for non_terminal in ("tool-calls", "tool_calls", "tool_use"):
+        assert _assistant_message_is_terminal({
+            "info": {
+                "id": "msg-tool",
+                "role": "assistant",
+                "finish": non_terminal,
+                "time": {"created": 1, "completed": 2},
+            },
+            "parts": [{"type": "step-finish", "reason": non_terminal}],
+        }) is False
+        assert _assistant_message_is_terminal({
+            "info": {
+                "id": "msg-tool-part-only",
+                "role": "assistant",
+                "time": {"created": 1, "completed": 2},
+            },
+            "parts": [{"type": "step-finish", "reason": non_terminal}],
+        }) is False
+
+    for terminal in ("stop", "length", "max_tokens"):
+        assert _assistant_message_is_terminal({
+            "info": {
+                "id": f"msg-{terminal}",
+                "role": "assistant",
+                "finish": terminal,
+                "time": {"created": 1, "completed": 2},
+            },
+            "parts": [{"type": "step-finish", "reason": terminal}],
+        }) is True
+
+    assert _assistant_message_is_terminal({
+        "info": {
+            "id": "msg-err",
+            "role": "assistant",
+            "finish": "tool-calls",
+            "error": {"name": "APIError"},
+        },
+        "parts": [],
+    }) is True
+
+
+def test_run_prompt_extracts_output_length_finish_reason_and_tokens(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    truncated_payload = {
+        "info": {
+            "id": "msg-truncated",
+            "sessionID": "session-1",
+            "role": "assistant",
+            "providerID": "openai-compatible",
+            "modelID": "GLM-Degradable",
+            "finish": "length",
+            "tokens": {"total": 44044, "input": 33804, "output": 10240, "reasoning": 0},
+            "time": {"created": 1, "completed": 2},
+        },
+        "parts": [
+            {"type": "text", "text": "thinking cut off mid-sentence"},
+            {
+                "type": "step-finish",
+                "reason": "length",
+                "tokens": {"total": 44044, "input": 33804, "output": 10240, "reasoning": 0},
+            },
+        ],
+    }
+
+    class TruncatedAsyncClient(_FakeAsyncClient):
+        async def post(self, path: str, **kwargs):
+            if path.startswith("/session/") and path.endswith("/message"):
+                self.posts.append({"path": path, **kwargs})
+                await asyncio.sleep(0)
+                return _FakeResponse(truncated_payload)
+            return await super().post(path, **kwargs)
+
+    async def run() -> None:
+        TruncatedAsyncClient.instances = []
+        TruncatedAsyncClient.event_lines = []
+        TruncatedAsyncClient.tool_ids = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            TruncatedAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        output: list[str] = []
+
+        result = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=tmp_path,
+            prompt="analyze",
+            model="openai-compatible/GLM-Degradable",
+            timeout=5,
+            on_line=output.append,
+            return_details=True,
+        )
+
+        assert isinstance(result, OpenCodePromptResult)
+        assert result.finish_reason == "length"
+        assert result.output_tokens == 10240
+        assert _is_output_length_finish(result.finish_reason) is True
+        assert any(
+            line == "[opencode][session-1][session] TRUNCATED finish=length output_tokens=10240"
+            for line in output
+        )
+
+    assert _response_finish_reason({"parts": [{"type": "step-finish", "reason": "max_tokens"}]}) == "max_tokens"
+    assert _response_output_tokens({"parts": [{"type": "step-finish", "tokens": {"output": 8192}}]}) == 8192
     asyncio.run(run())
