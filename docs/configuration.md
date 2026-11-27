@@ -141,7 +141,7 @@ Agent 按以下顺序合并配置，后面的受管项覆盖前面的对应字�
 
 可执行文件名为 `nga` 时兼容发现 `~/.config/nga`。全局及显式目录兼容旧版 `config.json`；自动发现的可执行文件相邻目录、项目目录只识别 `opencode.json` / `opencode.jsonc`，避免读取项目自身的通用配置。无效 JSON/JSONC 会警告并忽略。
 
-受管字段包括技能路径、权限、Hook 与压缩策略 `auto: true`、`prune: true`、`reserved: 20000`。已有 Provider 模型缺少 `limit.context` 时补 200000，缺少 `limit.output` 时补 32768（不超过有效 `limit.context`）；不从平台模型池反向创建 Provider 模型定义。
+受管字段包括技能路径、权限、Hook 与压缩策略 `auto: true`、`prune: true`、`reserved: 20000`。已有 Provider 模型缺少 `limit.context` 时补 200000，缺少 `limit.output` 时补 32768（不超过有效 `limit.context`）；不从平台模型池反向创建 Provider 模型定义。客户端从 OpenCode 读取模型及上报模型池状态时会一并上报实际生效的 `limit_context` / `limit_output`（用户已填写则上报配置值，未填写则上报托管默认值），并在网页「模型配置」中以只读字段展示。
 
 完整 Agent 使用 `~/.opendeephole/opencode_workspace/opencode.json`，在安全的 Serve 启动边界原子发布最终配置，POSIX 文件权限为 `0600`。Web LLM API 变更由上述配置协调器等待已有逻辑任务结束后主动重启并检查；其它受管资源更新遵循各自的空闲重载规则。配置通过专用目录隔离，受管 Hook 追加到已有 Plugin 列表。
 

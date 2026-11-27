@@ -1769,7 +1769,11 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         prefix="[opencode_models]",
     ), flush=True)
     try:
-        from task_agent.serve_client import get_serve_manager
+        from task_agent.serve_client import (
+            extract_configured_model_limits,
+            get_serve_manager,
+            resolve_reported_model_limits,
+        )
         from deephole_client.opencode_integration import (
             build_opencode_session_runtime,
         )
@@ -1817,9 +1821,36 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             serve_port_auto=runtime.serve_port_auto,
             refresh=refresh,
         )
+        configured_limits = extract_configured_model_limits(
+            getattr(runtime, "config_content", "") or "",
+        )
+        reported_models: list[dict] = []
+        observed_limits: dict[str, tuple[int, int]] = {}
+        for item in model_result.models:
+            limit_context, limit_output = resolve_reported_model_limits(
+                item,
+                configured_limits,
+            )
+            observed_limits[item.id] = (limit_context, limit_output)
+            reported_models.append({
+                "id": item.id,
+                "model": item.id,
+                "provider_id": item.provider_id,
+                "model_id": item.model_id,
+                "name": item.name,
+                "limit_context": limit_context,
+                "limit_output": limit_output,
+            })
+        if observed_limits:
+            from task_agent.model_pool import (
+                notify_model_pool_config_changed,
+                set_observed_model_limits,
+            )
+            set_observed_model_limits(observed_limits)
+            await notify_model_pool_config_changed()
         print(with_local_timestamp(
             "SUCCESS "
-            f"request_id={request_id or '(empty)'} models={len(model_result.models)} "
+            f"request_id={request_id or '(empty)'} models={len(reported_models)} "
             f"elapsed_seconds={max(0.0, time.monotonic() - started_at):.1f}",
             prefix="[opencode_models]",
         ), flush=True)
@@ -1831,16 +1862,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
                 "等待已有任务完成后应用 API 配置；当前显示旧模型目录"
                 if reload_status["state"] == "draining" else model_result.message
             ),
-            "models": [
-                {
-                    "id": item.id,
-                    "model": item.id,
-                    "provider_id": item.provider_id,
-                    "model_id": item.model_id,
-                    "name": item.name,
-                }
-                for item in model_result.models
-            ],
+            "models": reported_models,
         }
     except Exception as exc:
         diagnostic = "\n".join((

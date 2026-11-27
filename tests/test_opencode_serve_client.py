@@ -10717,3 +10717,166 @@ def test_run_prompt_extracts_output_length_finish_reason_and_tokens(
     assert _response_finish_reason({"parts": [{"type": "step-finish", "reason": "max_tokens"}]}) == "max_tokens"
     assert _response_output_tokens({"parts": [{"type": "step-finish", "tokens": {"output": 8192}}]}) == 8192
     asyncio.run(run())
+
+
+def test_fetch_models_preserves_positive_limits_when_merging_sources(monkeypatch) -> None:
+    async def run() -> None:
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/provider": {
+                "all": [
+                    {
+                        "id": "internal",
+                        "models": {
+                            "glm-default": {
+                                "name": "GLM Default",
+                                "limit": {"context": 200000, "output": 32768},
+                            },
+                            "glm-override": {
+                                "name": "GLM Override",
+                                "limit": {"context": 200000, "output": 32768},
+                            },
+                        },
+                    },
+                ],
+                "connected": ["internal", "extra"],
+            },
+            "/config/providers": {
+                "providers": [
+                    {
+                        "id": "internal",
+                        "models": {
+                            "glm-default": {
+                                "name": "",
+                                "limit": {"context": 0, "output": 0},
+                            },
+                            "glm-override": {
+                                "limit": {"context": 128000, "output": 10240},
+                            },
+                        },
+                    },
+                    {
+                        "id": "extra",
+                        "models": {
+                            "plain": {"name": "Plain"},
+                        },
+                    },
+                ],
+            },
+        }
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+
+        models = {item.id: item for item in await manager._fetch_models(None)}
+        assert models["internal/glm-default"].name == "GLM Default"
+        assert models["internal/glm-default"].limit_context == 200000
+        assert models["internal/glm-default"].limit_output == 32768
+        assert models["internal/glm-override"].limit_context == 128000
+        assert models["internal/glm-override"].limit_output == 10240
+        assert models["extra/plain"].limit_context is None
+        assert models["extra/plain"].limit_output is None
+
+    asyncio.run(run())
+
+
+def test_resolve_reported_and_configured_model_limits() -> None:
+    from task_agent.serve_client import (
+        OpenCodeServeKey,
+        _config_hash,
+        extract_configured_model_limits,
+        resolve_configured_effective_limits,
+        resolve_reported_model_limits,
+    )
+
+    config_content = json.dumps({
+        "provider": {
+            "internal": {
+                "models": {
+                    "user-both": {"limit": {"context": 200000, "output": 10240}},
+                    "user-context-only": {"limit": {"context": 128000}},
+                    "user-small-context": {"limit": {"context": 16384}},
+                    "user-output-only": {"limit": {"output": 16384}},
+                    "default-only": {"name": "Default Model"},
+                    "zero-limits": {"limit": {"context": 0, "output": 0}},
+                },
+            },
+        },
+    })
+
+    configured = extract_configured_model_limits(config_content)
+    assert configured["internal/user-both"] == (200000, 10240)
+    assert configured["internal/user-context-only"] == (128000, None)
+    assert configured["internal/default-only"] == (None, None)
+    assert configured["internal/zero-limits"] == (None, None)
+
+    effective = resolve_configured_effective_limits(config_content)
+    assert effective == {
+        "internal/user-both": (200000, 10240),
+        "internal/user-context-only": (128000, 32768),
+        "internal/user-small-context": (16384, 16384),
+        "internal/user-output-only": (200000, 16384),
+        "internal/default-only": (200000, 32768),
+        "internal/zero-limits": (200000, 32768),
+    }
+
+    assert resolve_reported_model_limits(
+        OpenCodeModelInfo(
+            id="internal/user-both",
+            provider_id="internal",
+            model_id="user-both",
+            limit_context=None,
+            limit_output=0,
+        ),
+        configured,
+    ) == (200000, 10240)
+    assert resolve_reported_model_limits(
+        OpenCodeModelInfo(
+            id="anthropic/claude-sonnet",
+            provider_id="anthropic",
+            model_id="claude-sonnet",
+            limit_context=200000,
+            limit_output=8192,
+        ),
+        configured,
+    ) == (200000, 8192)
+    assert resolve_reported_model_limits(
+        OpenCodeModelInfo(
+            id="openai/gpt-5",
+            provider_id="openai",
+            model_id="gpt-5",
+        ),
+        configured,
+    ) == (200000, 32768)
+
+    manager = OpenCodeServeManager()
+    serve_key = OpenCodeServeKey(
+        tool="opencode",
+        executable="opencode",
+        config_hash=_config_hash(config_content),
+        config_content=config_content,
+    )
+    manager._key = serve_key
+    manager._model_cache[(serve_key, "")] = (
+        OpenCodeModelInfo(
+            id="anthropic/claude-sonnet",
+            provider_id="anthropic",
+            model_id="claude-sonnet",
+            limit_context=200000,
+            limit_output=8192,
+        ),
+        OpenCodeModelInfo(
+            id="internal/default-only",
+            provider_id="internal",
+            model_id="default-only",
+        ),
+    )
+    assert manager.cached_model_limits(config_content=config_content) == {
+        "anthropic/claude-sonnet": (200000, 8192),
+        "internal/default-only": (200000, 32768),
+    }
+    assert manager.cached_model_limits(config_content='{"provider":{}}') == {}

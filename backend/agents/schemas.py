@@ -28,6 +28,8 @@ class _AgentOpenCodeModelInfo(BaseModel):
     provider_id: str = ""
     model_id: str = ""
     name: str = ""
+    limit_context: int | None = None
+    limit_output: int | None = None
 
 
 class _AgentOpenCodeModelsResponse(BaseModel):

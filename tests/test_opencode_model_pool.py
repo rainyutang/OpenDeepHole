@@ -42,6 +42,7 @@ def _reset_model_pool():
     model_pool_module._global_stats_by_model.clear()
     model_pool_module._options_by_id.clear()
     model_pool_module._model_health_by_id.clear()
+    model_pool_module._observed_model_limits.clear()
     model_pool_module._scope_updated_at.clear()
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
@@ -2688,5 +2689,44 @@ def test_503_cooldown_prevents_multi_model_fast_fail_blackhole() -> None:
         assert admitted is not None and admitted.option.id == "healthy-model"
         await release_model_lease(busy_2, outcome="success", health_outcome="success")
         await release_model_lease(admitted, outcome="success", health_outcome="success")
+
+    asyncio.run(run())
+
+
+def test_model_pool_snapshot_reports_observed_and_configured_model_limits() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "glm",
+                "model": "internal/GLM-Degradable",
+                "limit_context": 200000,
+                "limit_output": 10240,
+            },
+            {
+                "id": "default-model",
+                "model": "internal/default-model",
+            },
+        ])
+        await refresh_configured_model_pool(cfg)
+        initial = {item["id"]: item for item in model_pool_snapshot()["models"]}
+        assert initial["glm"]["limit_context"] == 200000
+        assert initial["glm"]["limit_output"] == 10240
+        assert initial["default-model"]["limit_context"] is None
+        assert initial["default-model"]["limit_output"] is None
+
+        model_pool_module.set_observed_model_limits({
+            "internal/GLM-Degradable": (200000, 32768),
+            "internal/default-model": (200000, 32768),
+        })
+        observed = {item["id"]: item for item in model_pool_snapshot()["models"]}
+        assert observed["glm"]["limit_context"] == 200000
+        assert observed["glm"]["limit_output"] == 32768
+        assert observed["default-model"]["limit_context"] == 200000
+        assert observed["default-model"]["limit_output"] == 32768
+
+        model_pool_module.set_observed_model_limits({}, replace=True)
+        cleared = {item["id"]: item for item in model_pool_snapshot()["models"]}
+        assert cleared["glm"]["limit_output"] == 10240
+        assert cleared["default-model"]["limit_output"] is None
 
     asyncio.run(run())

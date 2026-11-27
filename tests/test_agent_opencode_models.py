@@ -308,3 +308,147 @@ def test_agent_handler_labels_serve_failure_stage(monkeypatch, tmp_path, capsys)
     assert "executable=opencode" in console
     assert "[opencode_models] OpenCode Serve 模型枚举失败" in console
     assert "provider failed to load" in console
+
+
+def test_agent_handler_reports_configured_and_default_model_limits(monkeypatch, tmp_path) -> None:
+    import json
+    import task_agent.model_pool as model_pool_module
+    from task_agent.serve_client import OpenCodeModelInfo, OpenCodeModelListResult
+
+    model_pool_module._observed_model_limits.clear()
+    try:
+        manager = SimpleNamespace(
+            list_models=AsyncMock(return_value=OpenCodeModelListResult(
+                models=[
+                    OpenCodeModelInfo(
+                        id="internal/GLM-Degradable",
+                        provider_id="internal",
+                        model_id="GLM-Degradable",
+                        name="GLM-Degradable",
+                        limit_context=200000,
+                        limit_output=10240,
+                    ),
+                    OpenCodeModelInfo(
+                        id="internal/default-model",
+                        provider_id="internal",
+                        model_id="default-model",
+                        name="Default Model",
+                    ),
+                    OpenCodeModelInfo(
+                        id="internal/context-only",
+                        provider_id="internal",
+                        model_id="context-only",
+                        name="Context Only",
+                        limit_context=0,
+                        limit_output=0,
+                    ),
+                    OpenCodeModelInfo(
+                        id="anthropic/claude-sonnet",
+                        provider_id="anthropic",
+                        model_id="claude-sonnet",
+                        name="Claude Sonnet",
+                        limit_context=200000,
+                        limit_output=8192,
+                    ),
+                ],
+                message="",
+            )),
+        )
+        runtime = SimpleNamespace(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="1",
+            directory=tmp_path,
+            config_workspace=tmp_path,
+            config_content=json.dumps({
+                "provider": {
+                    "internal": {
+                        "models": {
+                            "GLM-Degradable": {"limit": {"context": 200000, "output": 10240}},
+                            "default-model": {"name": "Default Model"},
+                            "context-only": {"limit": {"context": 128000}},
+                        },
+                    },
+                },
+            }),
+            env_overrides={},
+            serve_port_auto=False,
+        )
+        monkeypatch.setattr("task_agent.serve_client.get_serve_manager", lambda: manager)
+        monkeypatch.setattr(
+            "deephole_client.opencode_integration.build_opencode_session_runtime",
+            lambda *_args, **_kwargs: runtime,
+        )
+        previous_config = agent_server._config
+        agent_server._config = SimpleNamespace(
+            opencode=SimpleNamespace(tool="opencode"),
+        )
+        try:
+            result = asyncio.run(agent_server.handle_opencode_models("request-limits"))
+        finally:
+            agent_server._config = previous_config
+
+        assert result["ok"] is True
+        by_id = {item["id"]: item for item in result["models"]}
+        assert by_id["internal/GLM-Degradable"]["limit_context"] == 200000
+        assert by_id["internal/GLM-Degradable"]["limit_output"] == 10240
+        assert by_id["internal/default-model"]["limit_context"] == 200000
+        assert by_id["internal/default-model"]["limit_output"] == 32768
+        assert by_id["internal/context-only"]["limit_context"] == 128000
+        assert by_id["internal/context-only"]["limit_output"] == 32768
+        assert by_id["anthropic/claude-sonnet"]["limit_context"] == 200000
+        assert by_id["anthropic/claude-sonnet"]["limit_output"] == 8192
+        assert model_pool_module._observed_model_limits["internal/GLM-Degradable"] == (200000, 10240)
+        assert model_pool_module._observed_model_limits["internal/default-model"] == (200000, 32768)
+    finally:
+        model_pool_module._observed_model_limits.clear()
+
+
+def test_stable_model_listing_passes_through_and_defaults_model_limits(monkeypatch) -> None:
+    store = _AgentStore()
+    live_agent = _agent()
+
+    async def send(_agent_id: str, command: dict) -> bool:
+        get_runtime().agents.opencode_model_waiters[command["request_id"]].set_result({
+            "ok": True,
+            "message": "",
+            "models": [
+                {
+                    "id": "internal/GLM-Degradable",
+                    "model": "internal/GLM-Degradable",
+                    "provider_id": "internal",
+                    "model_id": "GLM-Degradable",
+                    "name": "GLM-Degradable",
+                    "limit_context": 200000,
+                    "limit_output": 10240,
+                },
+                {
+                    "id": "legacy/old-agent-model",
+                    "model": "legacy/old-agent-model",
+                    "provider_id": "legacy",
+                    "model_id": "old-agent-model",
+                    "name": "Old Agent",
+                },
+            ],
+        })
+        return True
+
+    monkeypatch.setattr(application, 'default_store_factory', lambda: store)
+    monkeypatch.setattr(
+        backend_agents_directory,
+        'resolve_agent_connection_async',
+        AsyncMock(return_value=(live_agent.agent_id, live_agent)),
+    )
+    monkeypatch.setattr(backend_agents_gateway, 'send_agent_command', send)
+
+    result = asyncio.run(backend_api_agent_routes_models.get_stable_agent_opencode_models(
+        "stable-agent",
+        current_user=_user(),
+    ))
+
+    assert result.ok is True
+    by_id = {item.id: item for item in result.models}
+    assert by_id["internal/GLM-Degradable"].limit_context == 200000
+    assert by_id["internal/GLM-Degradable"].limit_output == 10240
+    assert by_id["legacy/old-agent-model"].limit_context is None
+    assert by_id["legacy/old-agent-model"].limit_output is None

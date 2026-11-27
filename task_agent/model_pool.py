@@ -120,6 +120,8 @@ class ModelOption:
     timeout: int | None = None
     idle_timeout: int | None = None
     max_retries: int | None = None
+    limit_context: int | None = None
+    limit_output: int | None = None
     time_windows: tuple[ModelTimeWindow, ...] = ()
 
 
@@ -242,6 +244,7 @@ _stats_by_scope: dict[str, dict[str, ModelRuntimeStats]] = {}
 _global_stats_by_model: dict[str, ModelRuntimeStats] = {}
 _options_by_id: dict[str, ModelOption] = {}
 _model_health_by_id: dict[str, _ModelHealthState] = {}
+_observed_model_limits: dict[str, tuple[int | None, int | None]] = {}
 _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
@@ -387,6 +390,39 @@ def _safe_int(value: object, default: int, minimum: int = 1) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= minimum else default
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def set_observed_model_limits(
+    limits: dict[str, tuple[int | None, int | None]],
+    *,
+    replace: bool = False,
+) -> None:
+    """Record live context/output token limits observed from OpenCode config or Serve."""
+    if replace:
+        _observed_model_limits.clear()
+    for raw_model, pair in (limits or {}).items():
+        model = str(raw_model or "").strip()
+        if not model or not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            continue
+        ctx = _optional_positive_int(pair[0])
+        out = _optional_positive_int(pair[1])
+        if ctx is None and out is None:
+            continue
+        prev_ctx, prev_out = _observed_model_limits.get(model, (None, None))
+        _observed_model_limits[model] = (
+            ctx if ctx is not None else prev_ctx,
+            out if out is not None else prev_out,
+        )
 
 
 def _safe_float(value: object, default: float, minimum: float = 0.01) -> float:
@@ -1012,6 +1048,8 @@ def model_options(cli_config: Any) -> list[ModelOption]:
                     if _cfg_value(raw, "max_retries", None) not in (None, "")
                     else None
                 ),
+                limit_context=_optional_positive_int(_cfg_value(raw, "limit_context", None)),
+                limit_output=_optional_positive_int(_cfg_value(raw, "limit_output", None)),
                 time_windows=_parse_time_windows(_cfg_value(raw, "time_windows", [])),
             )
         )
@@ -2401,6 +2439,20 @@ def _stats_item_snapshot(
                 **task_context,
                 "started_at": attempt_started_at or task.get("started_at", ""),
             })
+    observed_context, observed_output = _observed_model_limits.get(
+        item.model,
+        (None, None),
+    )
+    limit_context = (
+        observed_context
+        if observed_context is not None
+        else (option.limit_context if option is not None else None)
+    )
+    limit_output = (
+        observed_output
+        if observed_output is not None
+        else (option.limit_output if option is not None else None)
+    )
     return {
         "id": item.id,
         "model": item.model,
@@ -2414,6 +2466,8 @@ def _stats_item_snapshot(
         "circuit_state": circuit_state,
         "cooldown_remaining_seconds": cooldown_remaining_seconds,
         "max_concurrency": item.max_concurrency,
+        "limit_context": limit_context,
+        "limit_output": limit_output,
         "enabled": option is not None,
         "available": _option_available_now(option) if option is not None else False,
         "time_windows": _format_time_windows(option.time_windows) if option is not None else [],

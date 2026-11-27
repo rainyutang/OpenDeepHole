@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentModelTimeWindow, AgentOpenCodeApiTestResult, AgentOpenCodeConfigStatus, AgentOpenCodeModelConfig, AgentOpenCodePoolStatus, AgentRemoteConfig } from "../types";
 import { testAgentOpenCodeApi } from "../api/client";
 import { findLlmBinding, llmDraftFingerprint, modelRowKey, newModelPoolRow, removeModelRow, selectedLlmDraft, validateLlmProviders } from "../llmApiConfig";
+import { positiveLimitOrNull, type OpenCodeModelLimitSnapshot } from "../features/agentConfig/configModel";
 import LlmModelFields, { ApiField, LlmFieldHint } from "./LlmApiEditor";
 
 const input = "w-full min-w-0 rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-blue-500";
+const readonlyInput = "w-full min-w-0 cursor-default rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-slate-300 outline-none";
 const button = "rounded-md bg-slate-700 px-3 py-2 text-sm hover:bg-slate-600 disabled:opacity-40";
 const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const allWeekdays = [1, 2, 3, 4, 5, 6, 7];
@@ -21,6 +23,7 @@ interface Props {
   online: boolean;
   onImport: () => void;
   pool: AgentOpenCodePoolStatus | null;
+  opencodeModelLimits?: Record<string, OpenCodeModelLimitSnapshot>;
   status: AgentOpenCodeConfigStatus | null;
   onRetry: () => void;
   retrying: boolean;
@@ -28,7 +31,7 @@ interface Props {
   savedVersion: number;
 }
 
-export default function ModelEditor({ agentKey, config, setCfg, online, onImport, pool, status, onRetry, retrying, saving, savedVersion }: Props) {
+export default function ModelEditor({ agentKey, config, setCfg, online, onImport, pool, opencodeModelLimits = {}, status, onRetry, retrying, saving, savedVersion }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState(activeTests.has(agentKey));
   const [testingRow, setTestingRow] = useState<string | null>(null);
@@ -143,6 +146,20 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
       const opened = expanded === key;
       const binding = findLlmBinding(config, model.model);
       const observed = pool?.models.find((item) => item.id === model.id);
+      const observedForModel =
+        (observed && observed.model === model.model ? observed : undefined)
+        ?? pool?.models.find(
+          (item) =>
+            item.model === model.model
+            && (positiveLimitOrNull(item.limit_context) !== null || positiveLimitOrNull(item.limit_output) !== null),
+        );
+      const catalogLimits = opencodeModelLimits[model.model];
+      const contextLimit = positiveLimitOrNull(
+        catalogLimits?.limit_context ?? observedForModel?.limit_context ?? model.limit_context,
+      );
+      const outputLimit = positiveLimitOrNull(
+        catalogLimits?.limit_output ?? observedForModel?.limit_output ?? model.limit_output,
+      );
       const runtime = observed?.enabled ? observed : undefined;
       const savedResult = results[key];
       const result = savedResult?.generation === revisions.current.get(key)?.generation ? savedResult.result : undefined;
@@ -173,7 +190,14 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
               </span>}
             </div>
           </>}
-          <SchedulingFields model={model} apiBound={Boolean(binding)} runtime={runtime} onChange={(patch) => update(index, patch)} />
+          <SchedulingFields
+            model={model}
+            apiBound={Boolean(binding)}
+            runtime={runtime}
+            contextLimit={contextLimit}
+            outputLimit={outputLimit}
+            opencodeModelLimits={opencodeModelLimits}
+            onChange={(patch) => update(index, patch)} />
           <div className="flex justify-end"><button type="button" className="rounded-md px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/10" onClick={() => remove(index)}>删除模型</button></div>
         </div>}
       </div>;
@@ -181,10 +205,13 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
   </fieldset>;
 }
 
-function SchedulingFields({ model, apiBound, runtime, onChange }: {
+function SchedulingFields({ model, apiBound, runtime, contextLimit, outputLimit, opencodeModelLimits, onChange }: {
   model: AgentOpenCodeModelConfig;
   apiBound: boolean;
   runtime: AgentOpenCodePoolStatus["models"][number] | undefined;
+  contextLimit: number | null;
+  outputLimit: number | null;
+  opencodeModelLimits: Record<string, OpenCodeModelLimitSnapshot>;
   onChange: (patch: Partial<AgentOpenCodeModelConfig>) => void;
 }) {
   const windows = model.time_windows || [];
@@ -195,9 +222,21 @@ function SchedulingFields({ model, apiBound, runtime, onChange }: {
     <div className="grid items-end gap-3 md:grid-cols-4">
       {!apiBound && <>
         <ApiField label="模型 ID" required hint="平台内唯一的调度 ID。"><input className={input} value={model.id} onChange={(event) => onChange({ id: event.target.value })} /></ApiField>
-        <div className="md:col-span-2"><ApiField label="模型名称" required hint="OpenCode 中的 provider/model 完整名称。"><input className={input} value={model.model} placeholder="provider/model" onChange={(event) => onChange({ model: event.target.value })} /></ApiField></div>
+        <div className="md:col-span-2"><ApiField label="模型名称" required hint="OpenCode 中的 provider/model 完整名称。"><input className={input} value={model.model} placeholder="provider/model" onChange={(event) => {
+          const nextModel = event.target.value;
+          const matched = opencodeModelLimits[nextModel];
+          onChange({
+            model: nextModel,
+            limit_context: matched?.limit_context ?? null,
+            limit_output: matched?.limit_output ?? null,
+          });
+        }} /></ApiField></div>
       </>}
       <ApiField label="模型能力"><select className={input} value={model.capability} onChange={(event) => onChange({ capability: event.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select></ApiField>
+      {!apiBound && <>
+        <ApiField label="Context" hint="由客户端从 OpenCode 配置上报的上下文 Token 上限（未显式配置时显示托管默认值 200000），只读展示。如需调整请修改 OpenCode 配置后重新读取。"><input className={readonlyInput} readOnly value={contextLimit ?? ""} placeholder="未读取" /></ApiField>
+        <ApiField label="Output" hint="由客户端从 OpenCode 配置上报的输出 Token 上限（未显式配置时显示托管默认值 32768），只读展示。如需调整请修改 OpenCode 配置后重新读取。"><input className={readonlyInput} readOnly value={outputLimit ?? ""} placeholder="未读取" /></ApiField>
+      </>}
       <ApiField label="模型可用并发" hint="该模型允许同时运行的任务数，默认 1。"><input className={input} type="number" min={1} value={model.max_concurrency} onChange={(event) => onChange({ max_concurrency: Number(event.target.value) })} /></ApiField>
       <ApiField label="权重" hint="选择模型时的调度权重，默认 1。"><input className={input} type="number" min={0.1} step={0.1} value={model.weight} onChange={(event) => onChange({ weight: Number(event.target.value) })} /></ApiField>
       <ApiField label="重试次数覆盖"><input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="继承任务配置" onChange={(event) => onChange({ max_retries: event.target.value === "" ? null : Number(event.target.value) })} /></ApiField>

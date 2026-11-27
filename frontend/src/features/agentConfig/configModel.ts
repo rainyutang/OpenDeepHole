@@ -1,7 +1,70 @@
-import type { AgentModelTimeWindow } from "../../types/modelPool";
+import type { AgentModelTimeWindow, AgentOpenCodePoolStatus } from "../../types/modelPool";
 import type { AgentModelTaskPolicy, AgentOpenCodeModelConfig, AgentOpenCodeModelListItem, AgentRemoteConfig } from "../../types/agents";
 
-import { validateLlmProviders } from "../../llmApiConfig";
+import { findLlmBinding, validateLlmProviders } from "../../llmApiConfig";
+
+export interface OpenCodeModelLimitSnapshot {
+  limit_context: number | null;
+  limit_output: number | null;
+}
+
+export function positiveLimitOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+export function buildOpenCodeModelLimitsMap(
+  models: AgentOpenCodeModelListItem[],
+): Record<string, OpenCodeModelLimitSnapshot> {
+  const result: Record<string, OpenCodeModelLimitSnapshot> = {};
+  for (const item of models) {
+    const model = item.model || item.id;
+    if (!model) continue;
+    const limit_context = positiveLimitOrNull(item.limit_context);
+    const limit_output = positiveLimitOrNull(item.limit_output);
+    if (limit_context === null && limit_output === null) continue;
+    result[model] = { limit_context, limit_output };
+  }
+  return result;
+}
+
+export function syncOpenCodeModelLimits(
+  config: AgentRemoteConfig,
+  catalog: Record<string, OpenCodeModelLimitSnapshot>,
+  pool?: AgentOpenCodePoolStatus | null,
+): { config: AgentRemoteConfig; updatedCount: number } {
+  let updatedCount = 0;
+  let changed = false;
+  const models = config.model_pool.models.map((row) => {
+    if (findLlmBinding(config, row.model)) {
+      if (positiveLimitOrNull(row.limit_context) !== null || positiveLimitOrNull(row.limit_output) !== null) {
+        changed = true;
+        return { ...row, limit_context: null, limit_output: null };
+      }
+      return row;
+    }
+    const live = catalog[row.model];
+    const observed =
+      pool?.models.find((item) => item.id === row.id && item.model === row.model)
+      ?? pool?.models.find(
+        (item) =>
+          item.model === row.model
+          && (positiveLimitOrNull(item.limit_context) !== null || positiveLimitOrNull(item.limit_output) !== null),
+      );
+    const currentContext = positiveLimitOrNull(row.limit_context);
+    const currentOutput = positiveLimitOrNull(row.limit_output);
+    const nextContext = positiveLimitOrNull(live?.limit_context ?? observed?.limit_context) ?? currentContext;
+    const nextOutput = positiveLimitOrNull(live?.limit_output ?? observed?.limit_output) ?? currentOutput;
+    if (nextContext === currentContext && nextOutput === currentOutput) return row;
+    changed = true;
+    updatedCount += 1;
+    return { ...row, limit_context: nextContext, limit_output: nextOutput };
+  });
+  if (!changed) return { config, updatedCount: 0 };
+  return {
+    config: { ...config, model_pool: { ...config.model_pool, models } },
+    updatedCount,
+  };
+}
 
 export type Section = "basic" | "advanced";
 
@@ -171,7 +234,10 @@ export function buildImportedModels(config: AgentRemoteConfig, modelPicker: { se
     added.push({
       id, model, capability: "high", weight: 1,
       max_concurrency: 1, enabled: true,
-      timeout: null, idle_timeout: null, max_retries: null, time_windows: [],
+      timeout: null, idle_timeout: null, max_retries: null,
+      limit_context: positiveLimitOrNull(item.limit_context),
+      limit_output: positiveLimitOrNull(item.limit_output),
+      time_windows: [],
     });
   }
 

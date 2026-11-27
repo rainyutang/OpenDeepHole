@@ -19,11 +19,14 @@ import {
   Section,
   AdvancedSection,
   CheckerProfileMode,
+  OpenCodeModelLimitSnapshot,
   defaultConfig,
   normalizeAgentBaseConfig,
   validateAgentConfig,
   formatModelPickerError,
   buildImportedModels,
+  buildOpenCodeModelLimitsMap,
+  syncOpenCodeModelLimits,
 } from './configModel';
 
 export function useAgentConfig(initialAgentKey = "") {
@@ -36,9 +39,11 @@ export function useAgentConfig(initialAgentKey = "") {
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ methods: [], errors: [], updated_at: "" });
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
+  const [opencodeModelLimits, setOpencodeModelLimits] = useState<Record<string, OpenCodeModelLimitSnapshot>>({});
   const [llmStatus, setLlmStatus] = useState<AgentOpenCodeConfigStatus | null>(null);
   const [retryingLlm, setRetryingLlm] = useState(false);
   const [savedVersion, setSavedVersion] = useState(0);
+  const activeAgentKey = useRef("");
   const llmStatusRequest = useRef(0);
   const editRevision = useRef(0);
   const savedProviders = useRef("{}");
@@ -58,6 +63,7 @@ export function useAgentConfig(initialAgentKey = "") {
   } | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.agent_key === agentKey);
+  activeAgentKey.current = agentKey;
   const setCfg = (next: AgentRemoteConfig) => { editRevision.current += 1; setConfig(next); setDirty(true); setMessage(""); };
 
   const refreshLlmStatus = async (targetAgentKey: string) => {
@@ -97,6 +103,7 @@ export function useAgentConfig(initialAgentKey = "") {
     setLoading(true);
     poolRequest.current += 1;
     setPool(null);
+    setOpencodeModelLimits({});
     Promise.all([
       getAgentConfig(agentKey),
       getAgentValidatorCatalog(agentKey),
@@ -180,10 +187,11 @@ export function useAgentConfig(initialAgentKey = "") {
     if (configError) { setMessage(configError); return; }
     setSaving(true); setMessage("");
     const submittedRevision = editRevision.current;
-    const providersChanged = JSON.stringify(config.llm_providers || {}) !== savedProviders.current;
+    const { config: preparedConfig } = syncOpenCodeModelLimits(config, opencodeModelLimits, pool);
+    const providersChanged = JSON.stringify(preparedConfig.llm_providers || {}) !== savedProviders.current;
     try {
-      const result = await updateAgentConfig(agentKey, config);
-      const saved = savedLlmConfig(config);
+      const result = await updateAgentConfig(agentKey, preparedConfig);
+      const saved = savedLlmConfig(preparedConfig);
       savedProviders.current = JSON.stringify(saved.llm_providers);
       if (submittedRevision === editRevision.current) {
         setConfig(saved);
@@ -223,6 +231,10 @@ export function useAgentConfig(initialAgentKey = "") {
     try {
       const result = await getAgentOpenCodeModels(targetAgentKey, refresh);
       if (!result.ok) throw new Error(result.message || "读取模型失败");
+      if (activeAgentKey.current === targetAgentKey) {
+        const fetchedLimits = buildOpenCodeModelLimitsMap(result.models);
+        setOpencodeModelLimits((current) => ({ ...current, ...fetchedLimits }));
+      }
       setModelPicker((current) => current?.agentKey === targetAgentKey ? {
         ...current,
         loading: false,
@@ -253,9 +265,25 @@ export function useAgentConfig(initialAgentKey = "") {
 
   const importPickedModels = () => {
     if (!modelPicker) return;
-    const added = buildImportedModels(config, modelPicker);
-    setCfg({ ...config, model_pool: { ...config.model_pool, models: [...config.model_pool.models, ...added] } });
-    setMessage(`从 opencode 添加了 ${added.length} 个模型`);
+    const fetchedLimits = buildOpenCodeModelLimitsMap(modelPicker.models);
+    const { config: syncedConfig, updatedCount } = syncOpenCodeModelLimits(config, fetchedLimits, pool);
+    const added = buildImportedModels(syncedConfig, modelPicker);
+    if (added.length > 0 || updatedCount > 0) {
+      setCfg({
+        ...syncedConfig,
+        model_pool: {
+          ...syncedConfig.model_pool,
+          models: [...syncedConfig.model_pool.models, ...added],
+        },
+      });
+    }
+    setMessage(
+      added.length > 0
+        ? `从 opencode 添加了 ${added.length} 个模型`
+        : updatedCount > 0
+          ? `已同步 ${updatedCount} 个 OpenCode 模型的上下文/输出上限`
+          : "所选模型均已存在，未新增模型",
+    );
     setModelPicker(null);
   };
 
@@ -268,6 +296,7 @@ export function useAgentConfig(initialAgentKey = "") {
     setAdvancedSection,
     config,
     pool,
+    opencodeModelLimits,
     llmStatus,
     retryingLlm,
     savedVersion,

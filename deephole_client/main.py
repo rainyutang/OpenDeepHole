@@ -704,13 +704,19 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
     from task_agent.model_pool import (
         notify_model_pool_config_changed,
         refresh_configured_model_pool,
+        set_observed_model_limits,
     )
-    from task_agent.serve_client import get_serve_manager, mark_serve_config_dirty
+    from task_agent.serve_client import (
+        get_serve_manager,
+        mark_serve_config_dirty,
+        resolve_configured_effective_limits,
+    )
 
     apply_network_env(config)
     refresh_platform_runtime_config(config)
     from deephole_client.opencode_integration import (
         build_managed_mcp_runtime_specs,
+        build_opencode_session_runtime,
         configure_opencode_component,
         refresh_global_opencode_config,
     )
@@ -721,11 +727,28 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
         config,
         reason="platform model configuration",
     )
-    get_serve_manager().update_managed_mcp_configs(
+    serve_manager = get_serve_manager()
+    serve_manager.update_managed_mcp_configs(
         build_managed_mcp_runtime_specs(config)
     )
     if mark_dirty:
         mark_serve_config_dirty()
+    try:
+        runtime_snapshot = build_opencode_session_runtime(
+            config.opencode,
+            directory=Path.cwd(),
+        )
+        config_content = getattr(runtime_snapshot, "config_content", "") or ""
+        observed_limits: dict[str, tuple[int | None, int | None]] = dict(
+            resolve_configured_effective_limits(config_content)
+        )
+        if hasattr(serve_manager, "cached_model_limits"):
+            observed_limits.update(
+                serve_manager.cached_model_limits(config_content=config_content)
+            )
+        set_observed_model_limits(observed_limits, replace=True)
+    except Exception:
+        pass
     await refresh_configured_model_pool(config.opencode)
     await notify_model_pool_config_changed()
     # Increasing an environment limit should start already queued validations

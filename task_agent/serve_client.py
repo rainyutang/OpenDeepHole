@@ -1604,6 +1604,90 @@ def _positive_int_limit(value: Any) -> int | None:
     return value if value > 0 else None
 
 
+def extract_configured_model_limits(
+    config_content: str,
+) -> dict[str, tuple[int | None, int | None]]:
+    """Extract raw positive (context, output) limits declared in OpenCode config JSON."""
+    raw = str(config_content or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    limits: dict[str, tuple[int | None, int | None]] = {}
+    for providers_key in ("provider", "providers"):
+        configured_providers = data.get(providers_key)
+        if not isinstance(configured_providers, dict):
+            continue
+        for provider_id_raw, configured_provider in configured_providers.items():
+            provider_id = str(provider_id_raw or "").strip()
+            if not provider_id or not isinstance(configured_provider, dict):
+                continue
+            configured_models = configured_provider.get("models")
+            if not isinstance(configured_models, dict):
+                continue
+            for model_id_raw, configured_model in configured_models.items():
+                model_id = str(model_id_raw or "").strip()
+                if not model_id or not isinstance(configured_model, dict):
+                    continue
+                configured_limit = configured_model.get("limit")
+                limit = configured_limit if isinstance(configured_limit, dict) else {}
+                pair = (
+                    _positive_int_limit(limit.get("context")),
+                    _positive_int_limit(limit.get("output")),
+                )
+                limits[f"{provider_id}/{model_id}"] = pair
+                inner_id = str(configured_model.get("id") or "").strip()
+                if inner_id and inner_id != model_id:
+                    limits[f"{provider_id}/{inner_id}"] = pair
+    return limits
+
+
+def resolve_reported_model_limits(
+    model: OpenCodeModelInfo,
+    configured_limits: dict[str, tuple[int | None, int | None]] | None = None,
+) -> tuple[int, int]:
+    """Return effective (context, output) limits for a Serve-reported model."""
+    configured_context, configured_output = (
+        (configured_limits or {}).get(model.id, (None, None))
+    )
+    context_limit = (
+        _positive_int_limit(model.limit_context)
+        or _positive_int_limit(configured_context)
+        or _MANAGED_MODEL_DEFAULT_CONTEXT
+    )
+    output_limit = (
+        _positive_int_limit(model.limit_output)
+        or _positive_int_limit(configured_output)
+        or min(_MANAGED_MODEL_DEFAULT_OUTPUT, context_limit)
+    )
+    return context_limit, output_limit
+
+
+def resolve_configured_effective_limits(
+    config_content: str,
+) -> dict[str, tuple[int, int]]:
+    """Return effective (context, output) limits for models explicitly declared in config."""
+    resolved: dict[str, tuple[int, int]] = {}
+    for model_ref, (configured_context, configured_output) in (
+        extract_configured_model_limits(config_content).items()
+    ):
+        context_limit = (
+            _positive_int_limit(configured_context)
+            or _MANAGED_MODEL_DEFAULT_CONTEXT
+        )
+        output_limit = (
+            _positive_int_limit(configured_output)
+            or min(_MANAGED_MODEL_DEFAULT_OUTPUT, context_limit)
+        )
+        resolved[model_ref] = (context_limit, output_limit)
+    return resolved
+
+
 def _with_managed_model_limits(data: dict[str, Any]) -> dict[str, Any]:
     """Fill safe defaults for configured models missing context or output limits."""
     resolved = dict(data)
@@ -6784,6 +6868,33 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _merge_model_info(
+    existing: OpenCodeModelInfo | None,
+    incoming: OpenCodeModelInfo,
+) -> OpenCodeModelInfo:
+    """Merge duplicate model records without letting missing/zero limits clobber known ones."""
+    if existing is None:
+        return incoming
+    incoming_context = _positive_int_limit(incoming.limit_context)
+    incoming_input = _positive_int_limit(incoming.limit_input)
+    incoming_output = _positive_int_limit(incoming.limit_output)
+    return OpenCodeModelInfo(
+        id=incoming.id,
+        provider_id=incoming.provider_id or existing.provider_id,
+        model_id=incoming.model_id or existing.model_id,
+        name=incoming.name or existing.name,
+        limit_context=(
+            incoming_context if incoming_context is not None else existing.limit_context
+        ),
+        limit_input=(
+            incoming_input if incoming_input is not None else existing.limit_input
+        ),
+        limit_output=(
+            incoming_output if incoming_output is not None else existing.limit_output
+        ),
+    )
+
+
 class OpenCodeServePermit:
     """One ready-process reservation, released exactly once by its owner."""
 
@@ -10735,6 +10846,28 @@ class OpenCodeServeManager:
         self._model_cache.clear()
         self._model_cache_generation += 1
 
+    def cached_model_limits(
+        self,
+        *,
+        config_content: str | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        """Return effective (context, output) limits already observed in the Serve model cache."""
+        limits: dict[str, tuple[int, int]] = {}
+        expected_hash = _config_hash(config_content) if config_content is not None else ""
+        active_key = self._key or self._applied_provider_key
+        entries = list(self._model_cache.items())
+        if expected_hash:
+            entries = [pair for pair in entries if pair[0][0].config_hash == expected_hash]
+        elif active_key is not None:
+            matching = [pair for pair in entries if pair[0][0] == active_key]
+            if matching:
+                entries = matching
+        for (serve_key, _directory_key), models in entries:
+            configured = extract_configured_model_limits(serve_key.config_content)
+            for item in models:
+                limits[item.id] = resolve_reported_model_limits(item, configured)
+        return limits
+
     async def _load_models(
         self,
         *,
@@ -10955,10 +11088,10 @@ class OpenCodeServeManager:
 
         models: dict[str, OpenCodeModelInfo] = {}
         for item in v2_direct_models:
-            models[item.id] = item
+            models[item.id] = _merge_model_info(models.get(item.id), item)
         for provider in providers + config_providers:
             for item in _provider_models(provider):
-                models[item.id] = item
+                models[item.id] = _merge_model_info(models.get(item.id), item)
         result = sorted(models.values(), key=lambda item: item.id)
         logger.info(
             "OpenCode serve provider lookup provider_ms=%s config_ms=%s fallback=%s models=%s",

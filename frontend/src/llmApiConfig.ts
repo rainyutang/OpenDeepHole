@@ -25,7 +25,7 @@ export function newModelPoolRow(config: AgentRemoteConfig, model = "", enabled =
   let id = "model-1";
   for (let suffix = 2; ids.has(id); suffix += 1) id = `model-${suffix}`;
   const row = { id, model, capability: "high", weight: 1, max_concurrency: 1, enabled,
-    timeout: null, idle_timeout: null, max_retries: null, time_windows: [] };
+    timeout: null, idle_timeout: null, max_retries: null, limit_context: null, limit_output: null, time_windows: [] };
   modelRowKey(row);
   return row;
 }

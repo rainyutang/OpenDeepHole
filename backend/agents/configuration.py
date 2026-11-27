@@ -327,6 +327,10 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的无新内容超时必须大于 0")
         if model.max_retries is not None and model.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的重试次数不能小于 0")
+        if model.limit_context is not None and model.limit_context < 1:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的 Context 上限必须大于 0")
+        if model.limit_output is not None and model.limit_output < 1:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的 Output 上限必须大于 0")
         for window in model.time_windows:
             weekdays = window.weekdays
             if not weekdays:

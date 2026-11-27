@@ -1085,6 +1085,57 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(cfg.opencode.models[0].max_concurrency, 1)
             self.assertEqual(cfg.opencode.models[0].time_windows, [])
 
+    def test_opencode_model_limits_round_trip_and_validation(self) -> None:
+        from backend.agents.configuration import _validate_managed_config
+        from backend.application import ApplicationError
+
+        remote = AgentRemoteConfig.model_validate({
+            "schema_version": 11,
+            "model_pool": {
+                "models": [
+                    {
+                        "id": "glm",
+                        "model": "internal/GLM-Degradable",
+                        "limit_context": 200000,
+                        "limit_output": 10240,
+                    },
+                    {
+                        "id": "legacy",
+                        "model": "internal/legacy",
+                    },
+                ],
+            },
+        })
+        _validate_managed_config(remote)
+
+        cfg = AgentConfig()
+        apply_remote_config(cfg, remote.model_dump(mode="json"))
+        self.assertEqual(cfg.opencode.models[0].limit_context, 200000)
+        self.assertEqual(cfg.opencode.models[0].limit_output, 10240)
+        self.assertIsNone(cfg.opencode.models[1].limit_context)
+        self.assertIsNone(cfg.opencode.models[1].limit_output)
+
+        dumped = remote_config_dict(cfg)
+        self.assertEqual(dumped["model_pool"]["models"][0]["limit_context"], 200000)
+        self.assertEqual(dumped["model_pool"]["models"][0]["limit_output"], 10240)
+        self.assertIsNone(dumped["model_pool"]["models"][1]["limit_context"])
+
+        invalid = AgentRemoteConfig.model_validate({
+            "schema_version": 11,
+            "model_pool": {
+                "models": [
+                    {
+                        "id": "bad",
+                        "model": "internal/bad",
+                        "limit_output": 0,
+                    },
+                ],
+            },
+        })
+        with self.assertRaises(ApplicationError) as exc_info:
+            _validate_managed_config(invalid)
+        self.assertEqual(exc_info.exception.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

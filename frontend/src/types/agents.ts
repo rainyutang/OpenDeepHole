@@ -40,6 +40,8 @@ export interface AgentOpenCodeModelConfig {
   timeout?: number | null;
   idle_timeout?: number | null;
   max_retries?: number | null;
+  limit_context?: number | null;
+  limit_output?: number | null;
   time_windows?: AgentModelTimeWindow[];
 }
 
@@ -246,6 +248,8 @@ export interface AgentOpenCodeModelListItem {
   provider_id: string;
   model_id: string;
   name?: string;
+  limit_context?: number | null;
+  limit_output?: number | null;
 }
 
 export interface AgentOpenCodeModelsResult {

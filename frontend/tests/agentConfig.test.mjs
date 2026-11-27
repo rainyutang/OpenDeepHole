@@ -99,7 +99,7 @@ test("unified model joins preserve scheduling aliases, stable keys, shared renam
   }
 });
 
-async function mountPage({ config = emptyConfig(), online = true, testApi } = {}) {
+async function mountPage({ config = emptyConfig(), online = true, testApi, opencodeModels, poolModels } = {}) {
   let saved = null;
   let status = { state: "active", desired_revision: "old", applied_revision: "old", active_tasks: 0, error: "" };
   let retries = 0;
@@ -110,7 +110,7 @@ async function mountPage({ config = emptyConfig(), online = true, testApi } = {}
     if (request.url === "/api/agents") data = [{ agent_key: "api-agent", agent_id: "session", name: "API Agent", online }];
     else if (request.url === "/api/checkers") data = [];
     else if (request.url.endsWith("/validator-catalog")) data = { methods: [], errors: [], updated_at: "" };
-    else if (request.url.endsWith("/opencode-pool")) data = { models: [], global_running: 0, global_queued: 0 };
+    else if (request.url.endsWith("/opencode-pool")) data = { models: poolModels ?? [], global_running: 0, global_queued: 0 };
     else if (request.url.endsWith("/opencode-config-status")) data = status;
     else if (request.url.endsWith("/opencode-config-apply")) { retries += 1; data = { ...status, state: "applying", error: "" }; }
     else if (request.url.endsWith("/opencode-api-test")) {
@@ -118,9 +118,9 @@ async function mountPage({ config = emptyConfig(), online = true, testApi } = {}
       assert.equal(request.timeout, 45000);
       data = testApi ? await testApi(body) : { success: true, elapsed_ms: 123, http_status: 200, category: "success", error: "" };
     }
-    else if (request.url.endsWith("/opencode-models")) data = { ok: true, message: "", models: [
-      { id: "external/model", provider: "external", model: "external/model", name: "External" },
-      { id: "custom/llm", provider: "custom", model: "custom/llm", name: "Custom" },
+    else if (request.url.endsWith("/opencode-models")) data = { ok: true, message: "", models: opencodeModels ?? [
+      { id: "external/model", provider_id: "external", model_id: "model", model: "external/model", name: "External", limit_context: 200000, limit_output: 32768 },
+      { id: "custom/llm", provider_id: "custom", model_id: "llm", model: "custom/llm", name: "Custom", limit_context: 128000, limit_output: 8192 },
     ] };
     else if (request.url === "/api/agent-configs/api-agent") {
       if (request.method === "put") { saved = JSON.parse(request.data); status = { ...status, state: "failed", desired_revision: "next", error: "Serve 启动失败" }; data = { ok: true, saved_revision: "next" }; }
@@ -542,5 +542,98 @@ test("OpenCode version selector switches between independent 1.x and 2.x executa
     assert.equal(page.saved.base.executable_v2, "/usr/local/bin/opencode2");
   } finally {
     await page.dispose();
+  }
+});
+
+test("OpenCode models show read-only Context/Output limits from picker, live pool, and saved config", async () => {
+  const config = emptyConfig();
+  config.model_pool.models = [
+    { id: "existing-glm", model: "internal/GLM-Degradable", enabled: true, capability: "high", weight: 1, max_concurrency: 2 },
+    { id: "disabled-alias", model: "internal/GLM-Degradable", enabled: false, capability: "high", weight: 1, max_concurrency: 1 },
+  ];
+  const page = await mountPage({
+    config,
+    poolModels: [
+      {
+        id: "existing-glm",
+        model: "internal/GLM-Degradable",
+        enabled: true,
+        weight: 1,
+        effective_weight: 1,
+        health_penalty_level: 0,
+        limit_context: 200000,
+        limit_output: 10240,
+      },
+    ],
+    opencodeModels: [
+      { id: "internal/GLM-Degradable", provider_id: "internal", model_id: "GLM-Degradable", model: "internal/GLM-Degradable", name: "GLM-Degradable", limit_context: 200000, limit_output: 10240 },
+      { id: "internal/default-model", provider_id: "internal", model_id: "default-model", model: "internal/default-model", name: "Default Model", limit_context: 200000, limit_output: 32768 },
+    ],
+  });
+  try {
+    // Existing pre-upgrade OpenCode rows automatically show live limits reported via opencode-pool.
+    await page.open(0);
+    assert.equal(page.control("Context").props.readOnly, true);
+    assert.equal(page.control("Output").props.readOnly, true);
+    assert.equal(page.control("Context").props.value, 200000);
+    assert.equal(page.control("Output").props.value, 10240);
+
+    // Disabled sibling alias referencing the same OpenCode model also resolves live limits.
+    await page.open(1);
+    assert.equal(page.control("Context").props.value, 200000);
+    assert.equal(page.control("Output").props.value, 10240);
+
+    // Open picker: verify limits are shown and importing carries default/configured values into config.
+    await page.click("从 opencode 读取");
+    const picker = page.root.root.findByProps({ role: "dialog" });
+    assert.match(text(picker), /Context 200000 · Output 10240/);
+    assert.match(text(picker), /Context 200000 · Output 32768/);
+    const boxes = picker.findAllByType("input").filter((item) => item.props.type === "checkbox");
+    await act(async () => { boxes[1].props.onChange(); });
+    await page.click("导入");
+
+    await page.open(2);
+    assert.equal(page.control("Context").props.readOnly, true);
+    assert.equal(page.control("Output").props.readOnly, true);
+    assert.equal(page.control("Context").props.value, 200000);
+    assert.equal(page.control("Output").props.value, 32768);
+
+    // Save persists newly imported limits and backfills observed limits onto existing OpenCode rows.
+    await page.click("保存配置");
+    assert.ok(page.saved);
+    assert.deepEqual(
+      page.saved.model_pool.models.map((item) => [item.model, item.limit_context, item.limit_output]),
+      [
+        ["internal/GLM-Degradable", 200000, 10240],
+        ["internal/GLM-Degradable", 200000, 10240],
+        ["internal/default-model", 200000, 32768],
+      ],
+    );
+
+    // Manually renaming an OpenCode model to an unknown name clears stale limits instead of showing old values.
+    await page.open(2);
+    await page.change("模型名称", "internal/unknown-manual");
+    assert.equal(page.control("Context").props.value, "");
+    assert.equal(page.control("Output").props.value, "");
+    assert.equal(page.control("Context").props.placeholder, "未读取");
+    assert.equal(page.control("Output").props.placeholder, "未读取");
+  } finally {
+    await page.dispose();
+  }
+
+  // Offline view still renders saved read-only limits from persisted config.
+  const offlineConfig = emptyConfig();
+  offlineConfig.model_pool.models = [
+    { id: "saved-row", model: "internal/GLM-Degradable", enabled: true, capability: "high", weight: 1, max_concurrency: 1, limit_context: 200000, limit_output: 10240 },
+  ];
+  const offlinePage = await mountPage({ config: offlineConfig, online: false });
+  try {
+    await offlinePage.open(0);
+    assert.equal(offlinePage.control("Context").props.readOnly, true);
+    assert.equal(offlinePage.control("Output").props.readOnly, true);
+    assert.equal(offlinePage.control("Context").props.value, 200000);
+    assert.equal(offlinePage.control("Output").props.value, 10240);
+  } finally {
+    await offlinePage.dispose();
   }
 });

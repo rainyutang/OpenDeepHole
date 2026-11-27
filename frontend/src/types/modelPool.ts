@@ -25,6 +25,8 @@ export interface OpenCodePoolModelStats {
   circuit_state?: ModelCircuitState;
   cooldown_remaining_seconds?: number;
   max_concurrency: number;
+  limit_context?: number | null;
+  limit_output?: number | null;
   enabled: boolean;
   available: boolean;
   time_windows: AgentModelTimeWindow[];

@@ -77,6 +77,8 @@ class OpenCodeModelConfig:
     timeout: int | None = None
     idle_timeout: int | None = None
     max_retries: int | None = None
+    limit_context: int | None = None
+    limit_output: int | None = None
     time_windows: list[dict[str, object]] = field(default_factory=list)
 
 
@@ -266,6 +268,8 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
             model_cfg.weight = 1.0
         if model_cfg.max_concurrency < 1:
             model_cfg.max_concurrency = 1
+        model_cfg.limit_context = _optional_positive_int(model_cfg.limit_context)
+        model_cfg.limit_output = _optional_positive_int(model_cfg.limit_output)
         if not isinstance(model_cfg.time_windows, list):
             model_cfg.time_windows = []
         model_cfg.time_windows = [
@@ -312,6 +316,16 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, parsed))
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _bool_value(value: object, default: bool) -> bool:

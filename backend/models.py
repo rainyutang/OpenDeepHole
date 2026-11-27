@@ -791,6 +791,8 @@ class OpenCodePoolModelStats(BaseModel):
     circuit_state: str = "closed"
     cooldown_remaining_seconds: int = 0
     max_concurrency: int = 1
+    limit_context: int | None = None
+    limit_output: int | None = None
     enabled: bool = True
     available: bool = True
     time_windows: list[dict[str, object]] = []
@@ -1264,6 +1266,8 @@ class AgentOpenCodeModelConfig(BaseModel):
     timeout: int | None = None
     idle_timeout: int | None = None
     max_retries: int | None = None
+    limit_context: int | None = None
+    limit_output: int | None = None
     time_windows: list[AgentModelTimeWindow] = []
 
 

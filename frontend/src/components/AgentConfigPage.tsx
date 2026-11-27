@@ -34,6 +34,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     setAdvancedSection,
     config,
     pool,
+    opencodeModelLimits,
     llmStatus,
     retryingLlm,
     savedVersion,
@@ -149,6 +150,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
                 online={Boolean(selectedAgent?.online)}
                 onImport={() => void openModelPicker(true)}
                 pool={pool}
+                opencodeModelLimits={opencodeModelLimits}
 
                 status={llmStatus}
                 onRetry={() => void retryLlm()}
@@ -213,6 +215,9 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
                     <span className="block truncate font-mono text-xs text-slate-100">{model.id}</span>
                     {model.name && <span className="block truncate text-xs text-slate-500">{model.name}</span>}
                   </span>
+                  {(model.limit_context != null || model.limit_output != null) && <span className="shrink-0 font-mono text-xs text-slate-400">
+                    Context {model.limit_context ?? "—"} · Output {model.limit_output ?? "—"}
+                  </span>}
                 </label>)}</div>}
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
