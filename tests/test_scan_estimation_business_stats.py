@@ -203,3 +203,65 @@ def test_early_findings_from_remaining_audits_do_not_inflate_completed_discovery
         "success": 0, "done": 1, "remaining": 3, "findings": 0, "remaining_findings": 3,
     }
     assert stats["fp_pending_indexes"] == pending
+
+
+def test_redline_audit_business_stats_include_all_items_and_tasks(business):
+    import json
+    from backend.models import RedlineAuditTask
+
+    b = business
+    redline_snapshot = [
+        {"item_id": f"rl-{i}", "code": f"5.1.{i}", "requirement": f"要求{i}"}
+        for i in range(66)
+    ]
+    b.store._conn.execute(
+        "UPDATE scans SET redline_items_json = ? WHERE scan_id = ?",
+        (json.dumps(redline_snapshot, ensure_ascii=False), b.scan_id),
+    )
+    b.store._conn.commit()
+    for i in range(4):
+        b.store.upsert_redline_audit_task(
+            b.scan_id,
+            RedlineAuditTask(
+                task_id=f"redline-audit-rl-{i}-round-1",
+                scan_id=b.scan_id,
+                redline_item_id=f"rl-{i}",
+                item_code=f"5.1.{i}",
+                requirement=f"要求{i}",
+                iteration=1,
+                max_iterations=5,
+                status="completed",
+                found=False,
+                stop_reason="no_finding",
+            ),
+        )
+    for i in range(4, 8):
+        b.store.upsert_redline_audit_task(
+            b.scan_id,
+            RedlineAuditTask(
+                task_id=f"redline-audit-rl-{i}-round-1",
+                scan_id=b.scan_id,
+                redline_item_id=f"rl-{i}",
+                item_code=f"5.1.{i}",
+                requirement=f"要求{i}",
+                iteration=1,
+                max_iterations=5,
+                status="running",
+            ),
+        )
+    counts = b.store.get_scan_detail_counts(b.scan_id)
+    assert counts["redline_audit_items_total"] == 66
+    assert counts["redline_audit_items_completed"] == 4
+    assert counts["redline_audit_items_running"] == 4
+    assert counts["redline_audit_items_pending"] == 58
+    assert counts["redline_audit_tasks_completed"] == 4
+    assert counts["redline_audit_tasks_running"] == 4
+
+    stats = b.store.get_scan_estimation_business_stats(b.scan_id, counts=counts)
+    assert stats["audits"]["redline_audit"] == {
+        "success": 4,
+        "done": 4,
+        "remaining": 62,
+        "findings": 0,
+        "remaining_findings": 0,
+    }

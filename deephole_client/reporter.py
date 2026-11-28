@@ -226,6 +226,7 @@ class Reporter:
         ] = {}
         self._model_pool_sink_bound = False
         self._resume_task_reports = False
+        self._resume_redline_reports = self._outbox is not None
         self._task_report_failures: dict[str, str] = {}
         self._static_progress_warning_at: dict[str, float] = {}
         self._batch_lock = asyncio.Lock()
@@ -489,6 +490,7 @@ class Reporter:
             for key, value in capabilities.items()
         } if isinstance(capabilities, dict) else {}
         self._resume_task_reports = bool(self.capabilities.get("incremental_opencode_task_reports"))
+        self._resume_redline_reports = self._outbox is not None
         if self.capabilities.get("incremental_opencode_task_reports"):
             self.bind_model_pool_reporting()
         else:
@@ -942,6 +944,16 @@ class Reporter:
                             await asyncio.to_thread(self._outbox.resume_task_reports, self.server_url)
                         except BaseException:
                             self._resume_task_reports = True
+                            raise
+                    if self._resume_redline_reports:
+                        self._resume_redline_reports = False
+                        try:
+                            await asyncio.to_thread(
+                                self._outbox.resume_redline_audit_task_reports,
+                                self.server_url,
+                            )
+                        except BaseException:
+                            self._resume_redline_reports = True
                             raise
                     ready = await self._claim_outbox()
                 if ready:

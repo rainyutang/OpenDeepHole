@@ -17,6 +17,9 @@ const processFlow = await server.ssrLoadModule("/src/features/scanDetail/model/p
 const poolPresentation = await server.ssrLoadModule("/src/features/modelPool/presentation.ts");
 const draftModel = await server.ssrLoadModule("/src/features/newScan/draftModel.ts");
 const { VulnListItem } = await server.ssrLoadModule("/src/features/issues/VulnListItem.tsx");
+const { RedlineAuditPanel } = await server.ssrLoadModule("/src/features/redlines/RedlineAuditPanel.tsx");
+const redlinesApi = await server.ssrLoadModule("/src/api/redlines.ts");
+const { api } = await server.ssrLoadModule("/src/api/transport.ts");
 
 const textContent = (node) => typeof node === "string" || typeof node === "number" ? String(node)
   : Array.isArray(node) ? node.map(textContent).join("") : textContent(node?.children ?? "");
@@ -247,4 +250,193 @@ test("redlinesModel aggregates per-item progress and draftModel blocks zero enab
     redlineEnabledCount: 0,
   });
   assert.ok(err && err.includes("没有启用的网络安全红线条目"));
+});
+
+test("RedlineAuditPanel omits manual refresh button, uses concise copy, and updates metrics on live task revisions", async () => {
+  const originalGet = api.get;
+  let calls = 0;
+  api.get = async (url) => {
+    if (String(url).includes("/redline-audit-tasks")) {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          data: {
+            items: [
+              {
+                task_id: "redline-audit-1-round-1",
+                redline_item_id: "i1",
+                item_code: "5.2.2",
+                security_attribute: "产品开发、发布和安装安全",
+                attribute_description: "禁止恶意软件",
+                requirement: "禁止恶意广告",
+                category: "A1",
+                iteration: 1,
+                max_iterations: 5,
+                status: "running",
+                result_vuln_indexes: [],
+              },
+            ],
+            next_cursor: null,
+            has_more: false,
+          },
+        };
+      }
+      return {
+        data: {
+          items: [
+            {
+              task_id: "redline-audit-1-round-1",
+              redline_item_id: "i1",
+              item_code: "5.2.2",
+              security_attribute: "产品开发、发布和安装安全",
+              attribute_description: "禁止恶意软件",
+              requirement: "禁止恶意广告",
+              category: "A1",
+              iteration: 1,
+              max_iterations: 5,
+              status: "completed",
+              found: false,
+              stop_reason: "no_finding",
+              result_vuln_indexes: [],
+            },
+          ],
+          next_cursor: null,
+          has_more: false,
+        },
+      };
+    }
+    return { data: [] };
+  };
+
+  const scan = {
+    scan_id: "scan-panel-live",
+    vulnerabilities: [],
+    mining_engines: [{ engine_id: miningEngines.REDLINE_AUDIT_ENGINE_ID, engine_label: miningEngines.REDLINE_AUDIT_ENGINE_LABEL, enabled: true }],
+    mining_engine_runs: [{ engine_id: miningEngines.REDLINE_AUDIT_ENGINE_ID, status: "running", total_candidates: 2, processed_candidates: 0 }],
+    redline_items: [
+      { item_id: "i1", code: "5.2.2", security_attribute: "属性", attribute_description: "禁止恶意软件", requirement: "禁止恶意广告", category: "A1", guidance: "", remark: "" },
+      { item_id: "i2", code: "5.2.3", security_attribute: "通信安全", attribute_description: "加密", requirement: "禁止明文传输", category: "A2", guidance: "", remark: "" },
+    ],
+    redline_audit_tasks: [],
+    detail_counts: {
+      redline_audit_items_total: 2,
+      redline_audit_items_completed: 0,
+      redline_audit_items_running: 0,
+      redline_audit_items_queued: 0,
+      redline_audit_items_failed: 0,
+      redline_audit_findings: 0,
+    },
+    events: [],
+    candidates: [],
+    validations: [],
+    status: "auditing",
+    progress: 0,
+    total_candidates: 0,
+    processed_candidates: 0,
+    static_total_files: 0,
+    static_scanned_files: 0,
+    static_analysis_done: false,
+    threat_analysis_enabled: false,
+    threat_analysis_method: "",
+    product: "demo",
+    validation_environment: "",
+    code_graph_mcp_enabled: false,
+    knowledge_base_enabled: false,
+    vulnerability_validation_enabled: false,
+    validation_method_id: "",
+    validation_method_label: "",
+    scan_items: [],
+    skill_reports: [],
+    current_candidate: null,
+    error_message: null,
+    feedback_ids: [],
+    retryable_candidates_count: 0,
+    continuable_task_count: 0,
+    can_continue: false,
+    fp_review_running: false,
+    total_task_count: 0,
+    completed_task_count: 0,
+    scan_name: "Live Redline",
+    metadata_revision: 0,
+    project_id: "p1",
+    project_path: "/repo",
+    code_scan_path: "/repo/src",
+    created_at: "",
+  };
+
+  let root;
+  try {
+    await act(async () => {
+      root = create(createElement(RedlineAuditPanel, {
+        scan,
+        events: [],
+        taskRevision: 0,
+        resultRevision: 0,
+        onOpenIssue: () => {},
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const firstRender = textContent(root.toJSON());
+    assert.ok(!firstRender.includes("刷新进度"), "RedlineAuditPanel must not render a manual 刷新进度 button");
+    assert.ok(firstRender.includes("排查《网络安全红线V3.3》"), `Expected concise copy, got: ${firstRender}`);
+    assert.ok(!firstRender.includes("跳过误报复核"), "Verbose redline copy must be removed");
+    assert.ok(firstRender.includes("排查中（1）"), `Expected running item after initial load, got: ${firstRender}`);
+
+    // Trigger SSE revision update; separate act() so useEffect schedules before waiting
+    await act(async () => {
+      root.update(createElement(RedlineAuditPanel, {
+        scan,
+        events: [],
+        taskRevision: 1,
+        resultRevision: 0,
+        onOpenIssue: () => {},
+      }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1150));
+    });
+    const secondRender = textContent(root.toJSON());
+    assert.ok(secondRender.includes("已完成（1）"), `Expected completed item after live revision update, got: ${secondRender}`);
+  } finally {
+    if (root) {
+      await act(async () => { root.unmount(); });
+    }
+    api.get = originalGet;
+  }
+  assert.ok(redlinesApi.getScanRedlineAuditTasksPage);
+});
+
+test("selectVisibleIssues in final_tp mode includes backend-shaped redline findings without FP review", () => {
+  const backendPayloadVuln = {
+    vuln_index: 0,
+    file: "src/bg.c",
+    line: 84,
+    function: "SendHiddenAdLoop",
+    vuln_type: "5.2.2 禁止恶意软件",
+    severity: "high",
+    description: "后台广告",
+    confirmed: true,
+    ai_verdict: "confirmed",
+    ai_analysis: "",
+    provisional: false,
+    analysis_source: miningEngines.REDLINE_AUDIT_ENGINE_ID,
+    engine_id: miningEngines.REDLINE_AUDIT_ENGINE_ID,
+    engine_label: miningEngines.REDLINE_AUDIT_ENGINE_LABEL,
+    source_task_id: "redline-audit-1-round-1",
+    vulnerability_report: "**编号**：5.2.2\n\n**红线要求**：禁止恶意广告",
+  };
+  const annotated = issuesModel.annotateIssues([backendPayloadVuln], new Map(), new Map());
+  const visible = issuesModel.selectVisibleIssues(annotated, {
+    finalTpOnly: true,
+    showAll: false,
+    severityFilter: issuesModel.ALL_FILTER,
+    typeFilter: issuesModel.ALL_FILTER,
+    effectiveEngineFilter: issuesModel.ALL_FILTER,
+    validationFilter: issuesModel.ALL_FILTER,
+    fpReviewFilter: issuesModel.ALL_FILTER,
+    userFeedbackFilter: issuesModel.ALL_FILTER,
+    directIndex: null,
+  });
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].index, 0);
 });

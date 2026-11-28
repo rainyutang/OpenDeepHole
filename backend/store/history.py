@@ -568,6 +568,29 @@ class ScanHistoryMixin:
                 "findings": 0,
                 "remaining_findings": 0,
             }
+        redline_total = max(0, int(counts.get("redline_audit_items_total", 0) or 0))
+        redline_tasks = max(0, int(counts.get("redline_audit_tasks", 0) or 0))
+        if redline_total > 0 or redline_tasks > 0:
+            redline_completed = max(0, int(counts.get("redline_audit_tasks_completed", 0) or 0))
+            redline_done = redline_completed + sum(
+                max(0, int(counts.get(f"redline_audit_tasks_{state}", 0) or 0))
+                for state in ("failed", "cancelled")
+            )
+            redline_task_remaining = sum(
+                max(0, int(counts.get(f"redline_audit_tasks_{state}", 0) or 0))
+                for state in ("pending", "queued", "running")
+            )
+            redline_item_remaining = sum(
+                max(0, int(counts.get(f"redline_audit_items_{state}", 0) or 0))
+                for state in ("pending", "queued", "running")
+            )
+            audits["redline_audit"] = {
+                "success": redline_completed,
+                "done": redline_done,
+                "remaining": max(redline_task_remaining, redline_item_remaining),
+                "findings": 0,
+                "remaining_findings": 0,
+            }
         # Match audit_source_kind's precedence, including old threat rows whose
         # category was recorded only in engine_id or vuln_type.
         category_sql = (

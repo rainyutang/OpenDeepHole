@@ -168,6 +168,7 @@ async def agent_report_vulnerability(
             scan_id,
             vuln,
         )
+        vuln = vuln.model_copy(update={"vuln_index": vuln_index})
     else:
         vuln_index, vuln = existing_report
 
@@ -222,21 +223,34 @@ async def agent_report_vulnerability(
             source_task_id,
             vuln_index,
         )
-        if linked and scan is not None:
-            for stored_task in scan.redline_audit_tasks:
-                if stored_task.task_id != source_task_id:
-                    continue
-                if vuln_index not in stored_task.result_vuln_indexes:
-                    stored_task.result_vuln_indexes = sorted([
-                        *stored_task.result_vuln_indexes,
-                        vuln_index,
-                    ])
-                    publish(scan_id, "redline_audit_task", {
-                        "task": stored_task.model_dump(mode="json"),
-                        "change": "result",
-                        "engine_ids": ["redline_audit"],
-                    })
-                break
+        if linked:
+            published_task = None
+            if scan is not None:
+                for stored_task in scan.redline_audit_tasks:
+                    if stored_task.task_id != source_task_id:
+                        continue
+                    if vuln_index not in stored_task.result_vuln_indexes:
+                        stored_task.result_vuln_indexes = sorted([
+                            *stored_task.result_vuln_indexes,
+                            vuln_index,
+                        ])
+                    published_task = stored_task
+                    break
+            if published_task is None:
+                loaded_tasks = await run_store_call(
+                    store,
+                    "list_redline_audit_tasks",
+                    scan_id,
+                    task_id=source_task_id,
+                    limit=1,
+                )
+                published_task = loaded_tasks[0] if loaded_tasks else None
+            if published_task is not None:
+                publish(scan_id, "redline_audit_task", {
+                    "task": published_task.model_dump(mode="json"),
+                    "change": "result",
+                    "engine_ids": ["redline_audit"],
+                })
     elif source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"}:
         task_kind = "threat_pattern_audit" if vuln.analysis_source == "threat_pattern_iterative_audit" else str(vuln.analysis_source)
         linked = await run_store_call(

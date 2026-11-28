@@ -99,7 +99,13 @@ def _known_tasks(scan: ScanStatus, completed: list[dict]) -> list[tuple[str, dic
     return list(groups.values())
 
 
-AUDIT_CATEGORIES = ("static_candidate", "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit")
+AUDIT_CATEGORIES = (
+    "static_candidate",
+    "threat_audit",
+    "threat_pattern_audit",
+    "threat_pattern_iterative_audit",
+    "redline_audit",
+)
 
 
 def _elapsed(task: dict, state: str, now: datetime) -> float:
@@ -260,14 +266,21 @@ def estimate_scan_progress(
         remaining.extend((value, requirement, running, "fp_review") for value, requirement, running in fp_remaining)
         missing = missing or bool(fp_remaining and fp_mean is None)
         if scan.auto_fp_review and main_active:
-            successes = sum(value.get("success", 0) for value in audits.values())
-            findings = sum(value.get("findings", 0) for value in audits.values())
+            # Redline audit findings are exempt from automatic FP review; do not
+            # predict FP-review work for them or dilute other engines' yield.
+            fp_audits = {
+                category: value
+                for category, value in audits.items()
+                if category != "redline_audit"
+            }
+            successes = sum(value.get("success", 0) for value in fp_audits.values())
+            findings = sum(value.get("findings", 0) for value in fp_audits.values())
             global_yield = findings / successes if successes else 0.0
             predicted = math.ceil(sum(
                 max(0.0, value.get("remaining", 0) *
                     (value.get("findings", 0) / value["success"] if value.get("success") else global_yield)
                     - value.get("remaining_findings", 0))
-                for value in audits.values()
+                for value in fp_audits.values()
             ))
         if predicted:
             remaining.append((predicted * (fp_mean or 1.0), "high", False, "fp_review"))

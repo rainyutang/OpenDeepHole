@@ -54,7 +54,7 @@ def _dashboard_summary(
         project_count=project_count,
         checker_count=checker_count,
         **{key: totals[key] for key in _SUMMARY_METRICS},
-        suspected_issue_count=totals["fp_review_issue_count"],
+        suspected_issue_count=totals["fp_review_issue_count"] + int(totals.get("direct_suspected_issue_count", 0) or 0),
         total_issue_count=totals["llm_issue_count"] - totals["fp_review_false_positive_count"],
         accuracy=accuracy(totals["human_confirmed_count"], totals["accuracy_basis_count"]),
         ticket_accuracy=accuracy(totals["ticket_submitted_count"], totals["accuracy_basis_count"]),
@@ -464,6 +464,7 @@ def _build_checker_dashboard(
     all_projects: set[str] = set()
     filtered_scan_count = 0
     totals = {key: 0 for key in _SUMMARY_METRICS}
+    totals["direct_suspected_issue_count"] = 0
 
     for summary, scan, meta in loaded_scans:
         if product_filter == UNCONFIGURED_PRODUCT:
@@ -486,6 +487,7 @@ def _build_checker_dashboard(
         for key in _SUMMARY_METRICS:
             if key != "ticket_submitted_count":
                 totals[key] += getattr(metrics, key)
+        totals["direct_suspected_issue_count"] += metrics.direct_suspected_issue_count
         totals["ticket_submitted_count"] += sum(
             1 for entry in feedback_entries if entry.ticket_submitted
         )

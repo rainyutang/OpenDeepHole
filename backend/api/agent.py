@@ -68,6 +68,8 @@ router.routes.append(next(route for route in scan_artifacts.router.routes if rou
 router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_list_threat_audit_tasks"))
 router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_upsert_threat_pattern_audit_task"))
 router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_list_threat_pattern_audit_tasks"))
+router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_upsert_redline_audit_task"))
+router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_list_redline_audit_tasks"))
 router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_list_vulnerabilities"))
 router.routes.append(next(route for route in scan_artifacts.router.routes if route.name == "agent_replace_skill_reports"))
 router.routes.append(next(route for route in scan_completion.router.routes if route.name == "agent_scan_execution_failed"))

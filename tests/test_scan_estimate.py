@@ -306,3 +306,73 @@ def test_fp_check_cold_start_accounts_for_observed_deep_path():
     prior_short_route = reviewed_problem()[:2]
     result = estimate(value, prior_short_route, business_stats=stats)
     assert result.remaining_seconds == 420  # Short-path samples don't erase a known seven-stage path.
+
+
+def test_redline_audit_progress_reflects_all_items_and_skips_fp_review_prediction():
+    completed = [
+        task(f"rl-done-{i}", "vulnerability_mining", 60, token_category="redline_audit")
+        for i in range(4)
+    ]
+    running = [
+        task(
+            f"rl-run-{i}",
+            "vulnerability_mining",
+            token_category="redline_audit",
+            started_at=(NOW - timedelta(seconds=30)).isoformat(),
+        )
+        for i in range(4)
+    ]
+    value = scan(
+        auto_fp_review=True,
+        total_candidates=0,
+        processed_candidates=0,
+        running=running,
+        models=[dict(id="model", capability="high", max_concurrency=4, active_tasks=running)],
+    )
+    business = {
+        "audits": {
+            "redline_audit": {
+                "success": 4,
+                "done": 4,
+                "remaining": 62,
+                "findings": 0,
+                "remaining_findings": 0,
+            },
+        },
+        "completed_reviews": [],
+        "fp_pending_indexes": [],
+    }
+    result = estimate(
+        value,
+        completed,
+        unfinished=True,
+        pending_counts={"redline_audit": 62},
+        business_stats=business,
+    )
+    assert result.state == "ready"
+    # 4 done (240s) + 4 half-done (120s) = 360s credit out of 66 * 60 = 3960s total (~9.1%, NOT 50%)
+    assert result.progress == pytest.approx(360 / 3960)
+    assert result.remaining_seconds == pytest.approx(3600 / 4)
+
+    # Also verify redline_audit does not trigger predicted FP-review work or dilute static_candidate yield
+    mixed_business = {
+        "audits": {
+            "static_candidate": {"success": 1, "done": 1, "remaining": 0, "findings": 1, "remaining_findings": 0},
+            "redline_audit": {"success": 4, "done": 4, "remaining": 62, "findings": 0, "remaining_findings": 0},
+        },
+        "completed_reviews": [],
+        "fp_pending_indexes": [],
+    }
+    mixed_completed = [
+        *completed,
+        task("static-done", "static_candidate", 60),
+    ]
+    mixed_result = estimate(
+        value,
+        mixed_completed,
+        unfinished=True,
+        pending_counts={"redline_audit": 62},
+        business_stats=mixed_business,
+    )
+    # Without excluding redline_audit from FP prediction, global_yield * 62 would inflate remaining_seconds by thousands of seconds
+    assert mixed_result.remaining_seconds == pytest.approx(3600 / 4)

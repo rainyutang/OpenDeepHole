@@ -1205,6 +1205,12 @@ class ScanDetailCounts(BaseModel):
     threat_pattern_audit_superseded: int = 0
     threat_pattern_audit_by_engine: dict[str, dict[str, int]] = Field(default_factory=dict)
     redline_audit_tasks: int = 0
+    redline_audit_tasks_completed: int = 0
+    redline_audit_tasks_failed: int = 0
+    redline_audit_tasks_cancelled: int = 0
+    redline_audit_tasks_pending: int = 0
+    redline_audit_tasks_queued: int = 0
+    redline_audit_tasks_running: int = 0
     redline_audit_items_total: int = 0
     redline_audit_items_completed: int = 0
     redline_audit_items_running: int = 0

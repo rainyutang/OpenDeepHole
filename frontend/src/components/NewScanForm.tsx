@@ -295,10 +295,8 @@ export default function NewScanForm({ sourceScanId, onScanStarted, onBack, onCon
                 className="mr-3"
                 type="checkbox"
                 checked={enabled}
-                onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisGenerateAttackTree(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span>{isRedline && enabled && redlineSummary && (
-                  redlineSummary.enabled_count > 0
-                    ? <span className="mt-2 block pl-6 text-xs text-rose-300">将排查管理员当前已启用的 {redlineSummary.enabled_count} 条网络安全红线（每条最多 5 轮），发现的问题将跳过误报复核直接进入「疑似问题」列表。</span>
-                    : <span role="alert" className="mt-2 block pl-6 text-xs text-amber-300">当前没有已启用的网络安全红线条目，无法启动红线排查，请联系管理员在「红线管理」中配置并启用。</span>
+                onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (miningEngineRequiresThreatAnalysis(engine.engine_id) && selected) setThreatAnalysisEnabled(true); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisGenerateAttackTree(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span>{isRedline && enabled && redlineSummary && redlineSummary.enabled_count === 0 && (
+                  <span role="alert" className="mt-2 block pl-6 text-xs text-amber-300">当前没有已启用的网络安全红线条目，请先在「红线管理」中启用。</span>
                 )}</label>;
           })}</div></Card>
 

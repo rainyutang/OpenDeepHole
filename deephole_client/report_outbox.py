@@ -134,6 +134,21 @@ class ReportOutbox:
             self._conn.commit()
             return cursor.rowcount
 
+    def resume_redline_audit_task_reports(self, target_url: str) -> int:
+        """Unblock historical 404 redline-audit-task rows so queued scan streams drain."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """UPDATE pending_reports SET blocked = 0, next_attempt_at = 0
+                   WHERE target_url = ?
+                     AND path LIKE '/api/agent/scan/%/redline-audit-task'
+                     AND blocked = 1
+                     AND last_error LIKE 'HTTP 404:%'
+                     AND last_error NOT LIKE '%Scan not found%'""",
+                (target_url.rstrip("/"),),
+            )
+            self._conn.commit()
+            return cursor.rowcount
+
     def next_sequence(self, scope: str) -> int:
         """Persistent sequence allocation; gaps are harmless, reuse is not."""
         with self._lock:

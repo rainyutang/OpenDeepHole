@@ -45,6 +45,7 @@ from backend.models import (
     OpenCodeTokenUsage,
     OutputSource,
     REDLINE_AUDIT_ENGINE_ID,
+    REDLINE_AUDIT_ENGINE_LABEL,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -408,10 +409,18 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         variant_of=(row["variant_of"] if "variant_of" in keys else "") or "",
         analysis_source=analysis_source,
         engine_id=(row["engine_id"] if "engine_id" in keys else "")
-        or ("threat_audit" if analysis_source == "threat_audit" else "static_candidate"),
+        or (
+            REDLINE_AUDIT_ENGINE_ID
+            if analysis_source == REDLINE_AUDIT_ENGINE_ID
+            else "threat_audit"
+            if analysis_source == "threat_audit"
+            else "static_candidate"
+        ),
         engine_label=(row["engine_label"] if "engine_label" in keys else "")
         or (
-            THREAT_AUDIT_ENGINE_LABEL
+            REDLINE_AUDIT_ENGINE_LABEL
+            if analysis_source == REDLINE_AUDIT_ENGINE_ID
+            else THREAT_AUDIT_ENGINE_LABEL
             if analysis_source == "threat_audit"
             else STATIC_CANDIDATE_ENGINE_LABEL
         ),

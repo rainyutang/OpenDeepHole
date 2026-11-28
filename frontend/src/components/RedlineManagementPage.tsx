@@ -232,7 +232,7 @@ export default function RedlineManagementPage({ onBack }: Props) {
       <PageHeader
         title="红线管理"
         onBack={onBack}
-        description="维护 DeepHole 网络安全红线条目，并勾选参与排查的条目（支持手动维护与 .xlsx 批量导入）"
+        description="管理网络安全红线条目并选择启用项"
         actions={
           <>
             <button

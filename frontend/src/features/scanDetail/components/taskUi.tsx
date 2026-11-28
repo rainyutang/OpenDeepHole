@@ -13,7 +13,7 @@ export function TaskPanel({
   title: string;
   status: string;
   tone: TaskTone;
-  summary: string;
+  summary?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -21,7 +21,7 @@ export function TaskPanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-white">{title}</h2>
-          <p className="mt-1 text-sm text-slate-400">{summary}</p>
+          {summary && <p className="mt-1 text-sm text-slate-400">{summary}</p>}
         </div>
         <StatusPill label={status} tone={tone} />
       </div>

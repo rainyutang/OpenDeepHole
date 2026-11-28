@@ -702,6 +702,12 @@ class RedlineStoreMixin:
     def get_redline_audit_item_counts(self, scan_id: str) -> dict[str, int]:
         counts = {
             "redline_audit_tasks": 0,
+            "redline_audit_tasks_completed": 0,
+            "redline_audit_tasks_failed": 0,
+            "redline_audit_tasks_cancelled": 0,
+            "redline_audit_tasks_pending": 0,
+            "redline_audit_tasks_queued": 0,
+            "redline_audit_tasks_running": 0,
             "redline_audit_items_total": 0,
             "redline_audit_items_completed": 0,
             "redline_audit_items_running": 0,
@@ -737,7 +743,20 @@ class RedlineStoreMixin:
         for row in rows:
             item_id = str(row["redline_item_id"] or "").strip() or str(row["task_id"])
             by_item.setdefault(item_id, []).append(dict(row))
-            if str(row["status"] or "").strip().lower() != "superseded":
+            status = str(row["status"] or "").strip().lower()
+            if status != "superseded":
+                if status == "completed":
+                    counts["redline_audit_tasks_completed"] += 1
+                elif status in {"running", "analyzing", "auditing"}:
+                    counts["redline_audit_tasks_running"] += 1
+                elif status == "queued":
+                    counts["redline_audit_tasks_queued"] += 1
+                elif status == "pending":
+                    counts["redline_audit_tasks_pending"] += 1
+                elif status in {"failed", "failure", "error", "timeout", "no_result"}:
+                    counts["redline_audit_tasks_failed"] += 1
+                elif status == "cancelled":
+                    counts["redline_audit_tasks_cancelled"] += 1
                 indexes, _ = _indexes(row["result_vuln_indexes"])
                 finding_indexes.update(indexes)
                 if row["found"] == 1:

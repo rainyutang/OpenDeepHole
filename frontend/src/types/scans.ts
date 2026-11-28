@@ -200,6 +200,12 @@ export interface ScanDetailCounts {
   threat_pattern_audit_cancelled?: number;
   threat_pattern_audit_superseded?: number;
   redline_audit_tasks?: number;
+  redline_audit_tasks_completed?: number;
+  redline_audit_tasks_failed?: number;
+  redline_audit_tasks_cancelled?: number;
+  redline_audit_tasks_pending?: number;
+  redline_audit_tasks_queued?: number;
+  redline_audit_tasks_running?: number;
   redline_audit_items_total?: number;
   redline_audit_items_completed?: number;
   redline_audit_items_running?: number;

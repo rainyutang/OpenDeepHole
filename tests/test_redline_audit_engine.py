@@ -190,6 +190,23 @@ class RedlinePromptSchemaValidatorTests(unittest.TestCase):
             )
             self.assertFalse(dup_prev.ok)
 
+            # Subdirectory-relative path, backtick wrapper, and :line suffix normalize cleanly
+            sub_relative = validate_redline_structured_result(
+                {**base_payload, "file": "bg.c"},
+                expected_requirement=SAMPLE_ITEM["requirement"],
+                scan_scope=scope,
+            )
+            self.assertTrue(sub_relative.ok)
+            self.assertEqual(sub_relative.canonical_file, "src/bg.c")
+
+            wrapped_with_line = validate_redline_structured_result(
+                {**base_payload, "file": "`src/bg.c:2`"},
+                expected_requirement=SAMPLE_ITEM["requirement"],
+                scan_scope=scope,
+            )
+            self.assertTrue(wrapped_with_line.ok)
+            self.assertEqual(wrapped_with_line.canonical_file, "src/bg.c")
+
     def test_final_report_field_order_and_vulnerability_fields(self) -> None:
         report = build_redline_vulnerability_report(
             SAMPLE_ITEM,
@@ -545,6 +562,217 @@ class RedlineEngineExecutionTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(resumed["status"], "success")
             resume_mock.assert_not_awaited()
+
+    async def test_stop_and_resume_only_scans_unfinished_and_skips_duplicate_reporting(self) -> None:
+        from backend.models import RedlineAuditTask
+        from deephole_client.vulnerability_mining.engines.redline_audit.engine import _task_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project, src, work = self._make_workspace(tmp)
+            item_done = {**SAMPLE_ITEM, "item_id": "item-a", "code": "5.1.1", "requirement": "要求甲"}
+            item_partial = {**SAMPLE_ITEM, "item_id": "item-b", "code": "5.1.2", "requirement": "要求乙"}
+            item_todo = {**SAMPLE_ITEM, "item_id": "item-c", "code": "5.1.3", "requirement": "要求丙"}
+            all_items = [item_done, item_partial, item_todo]
+            scan_id = "scan-rl-stop-resume"
+
+            # First run: complete item_done (found=False) and item_partial round 1 (found=True),
+            # then cancel before item_partial round 2 and item_todo finish.
+            cancel_first = threading.Event()
+            server_tasks: dict[str, RedlineAuditTask] = {}
+            reported_vulns: list[Vulnerability] = []
+
+            class StatefulReporter:
+                async def get_redline_audit_tasks(self, _scan_id: str):
+                    return [t.model_copy(deep=True) for t in server_tasks.values()]
+
+                async def push_redline_audit_task(self, _scan_id: str, task: RedlineAuditTask):
+                    server_tasks[task.task_id] = task.model_copy(deep=True)
+                    return task
+
+                async def get_vulnerability_dedup_context(self, _scan_id: str):
+                    return [v.model_copy(deep=True) for v in reported_vulns]
+
+            async def report_vulns(items):
+                out = []
+                for item in items:
+                    idx = len(reported_vulns)
+                    v = Vulnerability.model_validate({**item, "vuln_index": idx})
+                    reported_vulns.append(v)
+                    out.append((item, {"index": idx}))
+                return out
+
+            async def first_run_llm(**kwargs):
+                import asyncio
+
+                name = kwargs["task_name"]
+                if name == _task_id(scan_id, item_done, 1):
+                    return OpenCodeResult(
+                        session_id="s-done",
+                        status="success",
+                        text='{"found": false}',
+                        structured={"found": False},
+                        model="provider/model",
+                        output_source={"serve_session_id": "s-done"},
+                    )
+                if name == _task_id(scan_id, item_partial, 1):
+                    return OpenCodeResult(
+                        session_id="s-p1",
+                        status="success",
+                        text="{}",
+                        structured={
+                            "found": True,
+                            "redline_requirement": item_partial["requirement"],
+                            "file": "src/bg.c",
+                            "line": 10,
+                            "function": "PartialFn",
+                            "description": "第一轮违规",
+                            "evidence": "`src/bg.c:10`",
+                            "remediation": "修复一",
+                        },
+                        model="provider/model",
+                        output_source={"serve_session_id": "s-p1"},
+                    )
+                # Wait until item_done and item_partial round 1 are persisted before user clicks stop
+                for _ in range(50):
+                    if (
+                        len(reported_vulns) >= 1
+                        and server_tasks.get(_task_id(scan_id, item_done, 1), RedlineAuditTask(task_id="x")).status == "completed"
+                        and server_tasks.get(_task_id(scan_id, item_partial, 1), RedlineAuditTask(task_id="x")).status == "completed"
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
+                cancel_first.set()
+                return OpenCodeResult(
+                    session_id="s-cancel",
+                    status="failure",
+                    text="",
+                    structured=None,
+                    model="provider/model",
+                    output_source={"serve_session_id": "s-cancel"},
+                )
+
+            config_seq = SimpleNamespace(
+                vulnerability_mining=SimpleNamespace(required_capability="high", concurrency=1),
+                opencode=SimpleNamespace(concurrency=1),
+            )
+            with patch(
+                "deephole_client.vulnerability_mining.engines.redline_audit.engine.run_opencode_task",
+                new=AsyncMock(side_effect=first_run_llm),
+            ):
+                first_outcome = await run_redline_engine(
+                    scan_id=scan_id,
+                    project_path=project,
+                    code_scan_path=src,
+                    code_scan_paths=[src],
+                    work_dir=work,
+                    config=config_seq,
+                    reporter=StatefulReporter(),
+                    redline_items=all_items,
+                    is_resume=False,
+                    output=AsyncMock(),
+                    cancel_event=cancel_first,
+                    report_vulnerabilities=report_vulns,
+                )
+            self.assertEqual(first_outcome["status"], "cancelled")
+            self.assertEqual(len(reported_vulns), 1)
+            self.assertEqual(server_tasks[_task_id(scan_id, item_done, 1)].status, "completed")
+            self.assertEqual(server_tasks[_task_id(scan_id, item_partial, 1)].status, "completed")
+            self.assertEqual(server_tasks[_task_id(scan_id, item_partial, 1)].result_vuln_indexes, [0])
+
+            # Resume WITH local checkpoints intact: item_done and item_partial round 1 must NOT re-run
+            # and item_partial round 1 must NOT re-report its already-persisted vulnerability.
+            resume_calls: list[dict] = []
+            resume_reports: list[dict] = []
+
+            async def resume_report_vulns(items):
+                resume_reports.extend(items)
+                return await report_vulns(items)
+
+            async def resume_llm(**kwargs):
+                resume_calls.append(kwargs)
+                return OpenCodeResult(
+                    session_id=f"s-res-{len(resume_calls)}",
+                    status="success",
+                    text='{"found": false}',
+                    structured={"found": False},
+                    model="provider/model",
+                    output_source={"serve_session_id": f"s-res-{len(resume_calls)}"},
+                )
+
+            with patch(
+                "deephole_client.vulnerability_mining.engines.redline_audit.engine.run_opencode_task",
+                new=AsyncMock(side_effect=resume_llm),
+            ):
+                resumed = await run_redline_engine(
+                    scan_id=scan_id,
+                    project_path=project,
+                    code_scan_path=src,
+                    code_scan_paths=[src],
+                    work_dir=work,
+                    config=config_seq,
+                    reporter=StatefulReporter(),
+                    redline_items=all_items,
+                    is_resume=True,
+                    output=AsyncMock(),
+                    cancel_event=threading.Event(),
+                    report_vulnerabilities=resume_report_vulns,
+                )
+            self.assertEqual(resumed["status"], "success")
+            self.assertEqual(resumed["processed_candidates"], 3)
+            self.assertEqual(resumed["total_candidates"], 3)
+            self.assertEqual(resume_reports, [])
+            called_names = [call["task_name"] for call in resume_calls]
+            self.assertEqual(
+                set(called_names),
+                {_task_id(scan_id, item_partial, 2), _task_id(scan_id, item_todo, 1)},
+            )
+            p2_call = next(c for c in resume_calls if c["task_name"] == _task_id(scan_id, item_partial, 2))
+            self.assertIn("src/bg.c:10", p2_call["prompt"])
+
+            # Now simulate resume WITHOUT local checkpoints (server still has item_done completed
+            # and item_partial round 1 completed with persisted finding; reset item_partial r2 & item_todo to cancelled)
+            for marker in (work / ".completed-tasks").glob("*.json"):
+                marker.unlink()
+            server_tasks[_task_id(scan_id, item_partial, 2)].status = "cancelled"
+            server_tasks[_task_id(scan_id, item_todo, 1)].status = "cancelled"
+            fallback_calls: list[dict] = []
+
+            async def fallback_llm(**kwargs):
+                fallback_calls.append(kwargs)
+                return OpenCodeResult(
+                    session_id=f"s-fb-{len(fallback_calls)}",
+                    status="success",
+                    text='{"found": false}',
+                    structured={"found": False},
+                    model="provider/model",
+                    output_source={"serve_session_id": f"s-fb-{len(fallback_calls)}"},
+                )
+
+            with patch(
+                "deephole_client.vulnerability_mining.engines.redline_audit.engine.run_opencode_task",
+                new=AsyncMock(side_effect=fallback_llm),
+            ):
+                resumed_no_markers = await run_redline_engine(
+                    scan_id=scan_id,
+                    project_path=project,
+                    code_scan_path=src,
+                    code_scan_paths=[src],
+                    work_dir=work,
+                    config=config_seq,
+                    reporter=StatefulReporter(),
+                    redline_items=all_items,
+                    is_resume=True,
+                    output=AsyncMock(),
+                    cancel_event=threading.Event(),
+                    report_vulnerabilities=resume_report_vulns,
+                )
+            self.assertEqual(resumed_no_markers["status"], "success")
+            self.assertEqual(
+                {call["task_name"] for call in fallback_calls},
+                {_task_id(scan_id, item_partial, 2), _task_id(scan_id, item_todo, 1)},
+            )
+            p2_fallback = next(c for c in fallback_calls if c["task_name"] == _task_id(scan_id, item_partial, 2))
+            self.assertIn("src/bg.c:10", p2_fallback["prompt"])
 
 
 class RedlineDedupIsolationTests(unittest.IsolatedAsyncioTestCase):

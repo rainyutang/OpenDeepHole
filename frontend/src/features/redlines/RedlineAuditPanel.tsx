@@ -60,7 +60,7 @@ export function RedlineAuditPanel({
   const [taskResults, setTaskResults] = useState<Map<string, ThreatAuditTaskResult>>(new Map());
   const [resultsLoading, setResultsLoading] = useState(false);
 
-  const { tasks, loading, error, reload } = useRedlineAuditTasks(
+  const { tasks, hasLoaded, loading, error, retry } = useRedlineAuditTasks(
     scan.scan_id,
     Boolean(scan.detail_counts) || (scan.redline_audit_tasks?.length ?? 0) === 0,
     scan.redline_audit_tasks ?? [],
@@ -158,12 +158,14 @@ export function RedlineAuditPanel({
   const run = miningEngineRun(scan, REDLINE_AUDIT_ENGINE_ID);
   const runStatus = engineFlowStatus(run);
   const counts = scan.detail_counts;
-  const totalMetric = counts?.redline_audit_items_total ?? summary.total;
-  const completedMetric = counts?.redline_audit_items_completed ?? summary.completed;
-  const runningMetric = (counts?.redline_audit_items_running ?? summary.running)
-    + (counts?.redline_audit_items_queued ?? summary.queued);
-  const failedMetric = counts?.redline_audit_items_failed ?? summary.failed;
-  const findingsMetric = counts?.redline_audit_findings ?? summary.findings;
+  const totalMetric = hasLoaded ? summary.total : (counts?.redline_audit_items_total ?? summary.total);
+  const completedMetric = hasLoaded ? summary.completed : (counts?.redline_audit_items_completed ?? summary.completed);
+  const runningMetric = hasLoaded
+    ? summary.running + summary.queued
+    : ((counts?.redline_audit_items_running ?? summary.running)
+      + (counts?.redline_audit_items_queued ?? summary.queued));
+  const failedMetric = hasLoaded ? summary.failed : (counts?.redline_audit_items_failed ?? summary.failed);
+  const findingsMetric = hasLoaded ? summary.findings : (counts?.redline_audit_findings ?? summary.findings);
 
   return (
     <div className="space-y-4">
@@ -171,7 +173,7 @@ export function RedlineAuditPanel({
         title={REDLINE_AUDIT_ENGINE_LABEL}
         status={flowStatusLabel(runStatus)}
         tone={flowStatusTone(runStatus, "blue")}
-        summary="按管理员已启用的网络安全红线条目逐条执行最多 5 轮迭代排查；发现的违规问题跳过误报复核，直接进入「疑似问题」列表并标注 [红线]。"
+        summary="排查《网络安全红线V3.3》"
       >
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <MiniMetric label="红线条目总数" value={totalMetric} />
@@ -187,8 +189,16 @@ export function RedlineAuditPanel({
           </div>
         )}
         {error && (
-          <div role="alert" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-            {error}
+          <div role="alert" className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={retry}
+              disabled={loading}
+              className="shrink-0 underline hover:text-amber-100 disabled:opacity-50"
+            >
+              重试
+            </button>
           </div>
         )}
 
@@ -228,14 +238,6 @@ export function RedlineAuditPanel({
             <option value="failed">失败（{summary.failed}）</option>
             <option value="cancelled">已取消（{summary.cancelled}）</option>
           </select>
-          <button
-            type="button"
-            onClick={reload}
-            disabled={loading}
-            className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700 disabled:opacity-50"
-          >
-            {loading ? "刷新中..." : "刷新进度"}
-          </button>
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(19rem,24rem)_1fr]">
@@ -519,7 +521,6 @@ export function RedlineAuditPanel({
           title="红线排查运行日志"
           status={`${events.length} 条`}
           tone="slate"
-          summary="展示网络安全红线排查过程中的关键运行事件与进度日志。"
         >
           <EventList events={events} empty="暂无红线排查运行日志" />
         </TaskPanel>
