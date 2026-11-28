@@ -2,6 +2,7 @@
 
 ## 2026-11-28
 
+- **修复** 修复 Windows 环境下扫描非 C 盘项目时 DeepSeek Harness 内置运行时因快照盘符限制加载 `koffi.node` 失败的问题
 - **修复** 修复客户端切换至 DeepSeek Harness 后平台运行时配置加载回退到 OpenCode 的问题，并补充本地 OpenCode 模型配置兜底发现、热重载草稿模型可见性与 Windows 插件路径兼容
 - **修复** 修复 OpenCode 2.x 常规扫描任务未禁用 Code Mode（`execute`）工具，导致模型在直调 MCP 模式下误通过 `execute` 调用 `codegraph_search`、`codegraph_files` 等工具报 `Unknown tool` 的问题
 - **新增** 底层执行引擎新增 DeepSeek Harness（`sdk-minimal`）支持，可在客户端基础配置及独立任务配置中与 OpenCode 自由切换，复用现有 LLM API、Skills、权限隔离及扫描 MCP 能力

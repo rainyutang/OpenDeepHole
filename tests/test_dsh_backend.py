@@ -1253,6 +1253,48 @@ def test_platform_runtime_preserves_deepseek_harness_and_discovers_fallback_prov
         doc, _env, _skills = build_cordis_patch_document(resolved_model=resolved)
         gate = next(r for r in doc[0]["insert"] if r.get("id") == "odh-tool-gate")
         assert gate["name"].startswith("file://")
+
+        # Verify Windows bundled SEA runtime_cwd stays on C:/V: when scanning D:\...
+        from task_agent.dsh.session_runner import _resolve_bundled_runtime_cwd
+
+        assert _resolve_bundled_runtime_cwd(
+            directory=r"D:\产品测试\基站27A\pttm\code",
+            dsh_home=r"C:\Users\tester\.opendeephole\dsh_home",
+            dsh_bin=None,
+            is_windows=True,
+        ) == r"C:\Users\tester\.opendeephole\dsh_home"
+        assert _resolve_bundled_runtime_cwd(
+            directory=r"D:\project",
+            dsh_home=r"D:\custom\dsh_home",
+            dsh_bin=None,
+            is_windows=True,
+            bundled_bin_dir=r"C:\venv\Lib\site-packages\deepseek_harness_runtime\runtime",
+        ) == r"C:\venv\Lib\site-packages\deepseek_harness_runtime\runtime"
+        assert _resolve_bundled_runtime_cwd(
+            directory=r"D:\project",
+            dsh_home=r"D:\custom\dsh_home",
+            dsh_bin=None,
+            is_windows=True,
+            bundled_bin_dir=r"D:\venv\runtime",
+        ) == "C:\\"
+        assert _resolve_bundled_runtime_cwd(
+            directory=r"C:\workspace\project",
+            dsh_home=r"C:\Users\tester\.opendeephole\dsh_home",
+            dsh_bin=None,
+            is_windows=True,
+        ) is None
+        assert _resolve_bundled_runtime_cwd(
+            directory=r"D:\project",
+            dsh_home=r"C:\Users\tester\.opendeephole\dsh_home",
+            dsh_bin=r"C:\Users\tester\AppData\Roaming\npm\dsh.CMD",
+            is_windows=True,
+        ) is None
+        assert _resolve_bundled_runtime_cwd(
+            directory="/tmp/project",
+            dsh_home="/tmp/dsh_home",
+            dsh_bin=None,
+            is_windows=False,
+        ) is None
     finally:
         backend_config._config = prev_backend_cfg
         (

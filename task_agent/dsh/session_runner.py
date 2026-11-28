@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -29,6 +29,50 @@ from .model_catalog import ResolvedDshModel, resolve_dsh_binary
 from .patch_composer import ComposedDshPatch
 
 logger = logging.getLogger(__name__)
+
+_WINDOWS_SNAPSHOT_DRIVES = frozenset({"C:", "V:"})
+
+
+def _resolve_bundled_runtime_cwd(
+    *,
+    directory: Path | str,
+    dsh_home: Path | str,
+    dsh_bin: str | None,
+    is_windows: bool | None = None,
+    bundled_bin_dir: Path | str | None = None,
+) -> str | None:
+    """Keep the bundled Windows SEA runtime subprocess on C:/V: drive.
+
+    The upstream Windows ``deepseek-harness-runtime-bin`` single-file binary
+    hardcodes ``C:\\snapshot`` and ``V:\\snapshot`` in its ``insideSnapshot()``
+    hook for ``process.dlopen``. Launching it with a ``cwd`` on another drive
+    (e.g. ``D:\\project``) causes ``/snapshot/...`` to resolve to ``D:\\snapshot\\...``,
+    bypassing native addon extraction for ``koffi.node``. Passing ``runtime_cwd``
+    on C:/V: keeps ``process.cwd()`` compatible with the snapshot VFS while
+    JSON-RPC ``initialize(cwd=...)`` still targets ``directory``.
+    """
+    windows = (os.name == "nt") if is_windows is None else bool(is_windows)
+    if not windows or dsh_bin is not None:
+        return None
+    target_drive = PureWindowsPath(str(directory)).drive.upper()
+    if not target_drive or target_drive in _WINDOWS_SNAPSHOT_DRIVES:
+        return None
+
+    candidates: list[str] = [str(dsh_home)]
+    if bundled_bin_dir is not None:
+        candidates.append(str(bundled_bin_dir))
+    else:
+        try:
+            from deepseek_harness_runtime import bundled_runtime_path
+
+            candidates.append(str(bundled_runtime_path().parent))
+        except Exception:
+            pass
+    for candidate in candidates:
+        cand_drive = PureWindowsPath(candidate).drive.upper()
+        if cand_drive in _WINDOWS_SNAPSHOT_DRIVES:
+            return candidate
+    return "C:\\"
 
 
 @dataclass(frozen=True)
@@ -237,14 +281,22 @@ async def run_dsh_turn(
         if timeout is not None and timeout > 0:
             init_timeout = min(init_timeout, max(5.0, float(timeout)))
 
+        resolved_cwd = directory.resolve()
+        resolved_dsh_home = dsh_home.resolve()
+        runtime_cwd = _resolve_bundled_runtime_cwd(
+            directory=resolved_cwd,
+            dsh_home=resolved_dsh_home,
+            dsh_bin=dsh_bin,
+        )
         cfg = DeepSeekHarnessConfig(
             provider=resolved_model.provider_id,
             model=resolved_model.model_id,
-            cwd=str(directory.resolve()),
+            cwd=str(resolved_cwd),
+            runtime_cwd=runtime_cwd,
             dsh_bin=dsh_bin,
             profile=dsh_profile or "sdk-minimal",
             patches=(str(composed_patch.patch_path),),
-            dsh_home=str(dsh_home.resolve()),
+            dsh_home=str(resolved_dsh_home),
             env=dict(composed_patch.env),
             initialize_timeout_seconds=init_timeout,
             shutdown_timeout_seconds=1.0,
