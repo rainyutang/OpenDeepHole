@@ -509,7 +509,7 @@ export default {
           return
         }
         if (!binding) {
-          if (event.effect === "ask") event.effect = "deny"
+          if (action === "execute" || event.effect === "ask") event.effect = "deny"
           return
         }
         if (action === "shell" || action === "bash") {
@@ -526,7 +526,7 @@ export default {
           event.effect = "deny"
         } else if (outcomes.length === resources.length && outcomes.every((item) => item === "allow")) {
           event.effect = "allow"
-        } else if (event.effect === "ask") {
+        } else if (action === "execute" || event.effect === "ask") {
           event.effect = "deny"
         }
       })

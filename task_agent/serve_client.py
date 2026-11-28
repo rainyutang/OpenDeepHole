@@ -561,9 +561,11 @@ _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "list_mcp_resource_templates",
     "read_mcp_resource",
 })
-_V2_ONLY_DISABLED_TOOL_IDS = frozenset({
+_V2_ALWAYS_DISABLED_TOOL_IDS = frozenset({
     "execute",
     "experimental_image_generate",
+})
+_V2_ONLY_DISABLED_TOOL_IDS = _V2_ALWAYS_DISABLED_TOOL_IDS | frozenset({
     "subagent",
 })
 _MANAGED_NATIVE_TOOL_IDS = _FORMATTER_DISABLED_TOOL_IDS | {"invalid", "StructuredOutput"}
@@ -1760,6 +1762,40 @@ def _write_serve_config_file(
     if not isinstance(data, dict):
         raise ValueError("Resolved OpenCode config must be a JSON object")
     data = _with_managed_runtime_fields(data)
+    if normalized_version == OPENCODE_V2:
+        # Unattended OpenCode 2.x scans expose MCP tools directly (`codemode: false`)
+        # rather than through the Code Mode `execute` sandbox. Deny `execute` (and
+        # other always-disabled V2 tools) at the config layer so OpenCode 2.x hides
+        # them from the model's tool catalog, and default any static MCP entries to
+        # `codemode: false`.
+        raw_permission = data.get("permission")
+        if raw_permission is None:
+            data["permission"] = {
+                tool_id: "deny"
+                for tool_id in sorted(_V2_ALWAYS_DISABLED_TOOL_IDS)
+            }
+        elif isinstance(raw_permission, dict):
+            permission = dict(raw_permission)
+            for tool_id in sorted(_V2_ALWAYS_DISABLED_TOOL_IDS):
+                permission[tool_id] = "deny"
+            data["permission"] = permission
+        elif isinstance(raw_permission, str) and raw_permission.strip():
+            data["permission"] = {
+                "*": raw_permission.strip(),
+                **{
+                    tool_id: "deny"
+                    for tool_id in sorted(_V2_ALWAYS_DISABLED_TOOL_IDS)
+                },
+            }
+        raw_mcp = data.get("mcp")
+        if isinstance(raw_mcp, dict):
+            normalized_mcp: dict[str, Any] = {}
+            for mcp_name, mcp_entry in raw_mcp.items():
+                if isinstance(mcp_entry, dict) and not isinstance(mcp_entry.get("codemode"), bool):
+                    normalized_mcp[mcp_name] = {**mcp_entry, "codemode": False}
+                else:
+                    normalized_mcp[mcp_name] = mcp_entry
+            data["mcp"] = normalized_mcp
     plugins: list[str] = []
     if normalized_version == OPENCODE_V2 and "plugins" in data:
         legacy_plural = data.pop("plugins")
@@ -9112,12 +9148,23 @@ class OpenCodeServeManager:
                 async def create_session() -> None:
                     nonlocal active_session_id
                     if is_v2:
+                        initial_v2_permissions = _session_tool_permissions(
+                            permissions,
+                            [],
+                            {
+                                "question": False,
+                                **{
+                                    tool_id: False
+                                    for tool_id in sorted(_V2_ALWAYS_DISABLED_TOOL_IDS)
+                                },
+                            },
+                        )
                         created = await create_v2_session(
                             client,
                             session_base=session_base,
                             title=session_title_text,
                             directory=directory,
-                            permissions=permissions,
+                            permissions=initial_v2_permissions,
                             model_spec=initial_model_spec,
                             agent=agent,
                             params=params,
@@ -9505,6 +9552,14 @@ class OpenCodeServeManager:
             # when tool discovery fails, to both Session permissions and the
             # execution Hook inherited by child Sessions.
             mcp_overrides["question"] = False
+            if is_v2:
+                # OpenCode 2.x exposes Code Mode (`execute`) unless explicitly
+                # denied, while OpenDeepHole registers MCP servers with
+                # `codemode: false` for direct tool calls. Always deny `execute`
+                # (and other non-task V2 tools) across Session permissions and
+                # plugin tool rules even when `/api/tool/ids` is unavailable.
+                for tool_id in sorted(_V2_ALWAYS_DISABLED_TOOL_IDS):
+                    mcp_overrides[tool_id] = False
             session_permissions = _session_tool_permissions(permissions, tool_ids, mcp_overrides)
             if session_mode == "continued" and permissions is None and session_permissions is not None:
                 existing = await deadline.wait(client.get(

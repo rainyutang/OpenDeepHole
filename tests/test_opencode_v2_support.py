@@ -2425,3 +2425,348 @@ def test_v2_scan_mcp_acquisition_put_polling_error_preservation_and_plugin_wildc
         )
         result = json.loads(proc.stdout.strip())
         assert result == {"ev1": "allow", "ev2": "allow", "ev3": "deny"}
+
+
+def test_v2_disables_execute_across_config_session_permissions_and_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify V2 unattended runs deny Code Mode (`execute`) everywhere while keeping direct MCP tools and `subagent`."""
+    import hashlib
+    import shutil
+    import subprocess
+    from unittest.mock import patch
+
+    import httpx
+
+    from task_agent._opencode_v2 import FILE_WRITE_PLUGIN_V2_SOURCE, V2OpenApiSpec
+    from task_agent.serve_client import _ScanMcpLease
+
+    # Part A: _write_serve_config_file enforces execute/image deny and static MCP codemode=False on V2 only.
+    v2_dir = tmp_path / "cfg-v2"
+    v2_dir.mkdir()
+    v2_cfg_path = _write_serve_config_file(
+        v2_dir,
+        json.dumps({
+            "permission": {"read": {"*": "allow"}, "execute": "allow"},
+            "mcp": {
+                "static_cg": {"type": "local", "command": ["codegraph", "serve", "--mcp"]},
+                "explicit_cm": {"type": "remote", "url": "http://127.0.0.1:9000/mcp", "codemode": True},
+            },
+        }),
+        opencode_version="2",
+    )
+    v2_cfg = json.loads(v2_cfg_path.read_text(encoding="utf-8"))
+    assert v2_cfg["permission"]["read"] == {"*": "allow"}
+    assert v2_cfg["permission"]["execute"] == "deny"
+    assert v2_cfg["permission"]["experimental_image_generate"] == "deny"
+    assert v2_cfg["mcp"]["static_cg"]["codemode"] is False
+    assert v2_cfg["mcp"]["explicit_cm"]["codemode"] is True
+
+    v2_str_perm_dir = tmp_path / "cfg-v2-str"
+    v2_str_perm_dir.mkdir()
+    v2_str_cfg = json.loads(
+        _write_serve_config_file(
+            v2_str_perm_dir,
+            json.dumps({"permission": "allow"}),
+            opencode_version="2",
+        ).read_text(encoding="utf-8")
+    )
+    assert v2_str_cfg["permission"] == {
+        "*": "allow",
+        "execute": "deny",
+        "experimental_image_generate": "deny",
+    }
+
+    v2_empty_perm_dir = tmp_path / "cfg-v2-empty"
+    v2_empty_perm_dir.mkdir()
+    v2_empty_cfg = json.loads(
+        _write_serve_config_file(
+            v2_empty_perm_dir,
+            "{}",
+            opencode_version="2",
+        ).read_text(encoding="utf-8")
+    )
+    assert v2_empty_cfg["permission"] == {
+        "execute": "deny",
+        "experimental_image_generate": "deny",
+    }
+
+    v1_dir = tmp_path / "cfg-v1"
+    v1_dir.mkdir()
+    v1_cfg = json.loads(
+        _write_serve_config_file(
+            v1_dir,
+            json.dumps({
+                "permission": {"read": {"*": "allow"}},
+                "mcp": {"static_cg": {"type": "local", "command": ["codegraph", "serve", "--mcp"]}},
+            }),
+            opencode_version="1",
+        ).read_text(encoding="utf-8")
+    )
+    assert "execute" not in v1_cfg["permission"]
+    assert "codemode" not in v1_cfg["mcp"]["static_cg"]
+
+    # Part B: Real run_prompt (is_v2=True, disable_all_tools=False, empty /api/tool/ids) denies execute
+    # in POST /api/session, PATCH /api/session/{id}, and the written V2 plugin binding while allowing
+    # direct codegraph_* tools and subagent.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    binding_ws = tmp_path / "serve-cwd"
+    binding_ws.mkdir()
+
+    session_create_bodies: list[dict] = []
+    session_patch_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        if request.method == "POST" and path == "/api/session":
+            session_create_bodies.append(body or {})
+            return httpx.Response(201, json={"data": {"id": "ses_v2_no_exec"}})
+        if request.method == "GET" and path == "/api/session":
+            return httpx.Response(200, json={"data": []})
+        if request.method == "GET" and path in {"/api/tool/ids", "/api/experimental/tool/ids", "/experimental/tool/ids"}:
+            return httpx.Response(200, text="<!doctype html><html><body>SPA</body></html>", headers={"content-type": "text/html"})
+        if request.method == "PATCH" and path == "/api/session/ses_v2_no_exec":
+            session_patch_bodies.append(body or {})
+            return httpx.Response(204)
+        if request.method == "POST" and path == "/api/session/ses_v2_no_exec/model":
+            return httpx.Response(204)
+        if request.method == "POST" and path == "/api/session/ses_v2_no_exec/prompt":
+            return httpx.Response(200, json={"data": {"id": "msg_u1", "type": "user", "text": "scan"}})
+        if request.method == "GET" and path == "/api/session/ses_v2_no_exec/message":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": "msg_idle", "type": "idle", "outcome": "succeeded", "time": {"created": 102}},
+                        {
+                            "id": "msg_a1",
+                            "type": "assistant",
+                            "finish": "stop",
+                            "time": {"created": 100, "completed": 101},
+                            "content": [{"type": "text", "text": "done"}],
+                        },
+                        {"id": "msg_u1", "type": "user", "text": "scan", "time": {"created": 99}},
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    real_async_client = httpx.AsyncClient
+
+    def make_client(*args, **kwargs):
+        kwargs.pop("transport", None)
+        return real_async_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    captured_binding_kwargs: dict = {}
+    captured_binding_file_text: str = ""
+
+    def capture_write_binding(*args, **kwargs):
+        captured_binding_kwargs.update(kwargs)
+        binding_path, audit_path = _write_command_binding(*args, **kwargs)
+        nonlocal captured_binding_file_text
+        captured_binding_file_text = binding_path.read_text(encoding="utf-8")
+        return binding_path, audit_path
+
+    async def run_v2_prompt() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 41998
+        manager._startup_cwd = binding_ws
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            opencode_version="2",
+        )
+        manager._v2_openapi = V2OpenApiSpec(
+            paths=frozenset({
+                "/api/session",
+                "/api/session/{sessionID}",
+                "/api/session/{sessionID}/prompt",
+                "/api/session/{sessionID}/message",
+                "/api/session/{sessionID}/model",
+            }),
+            raw_spec={
+                "paths": {
+                    "/api/session": {
+                        "post": {
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "title": {"type": "string"},
+                                                "location": {"type": "object"},
+                                                "permissions": {"type": "array"},
+                                                "model": {"type": "object"},
+                                                "agent": {"type": "string"},
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "/api/session/{sessionID}": {
+                        "patch": {
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {"permissions": {"type": "array"}},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "/api/session/{sessionID}/prompt": {
+                        "post": {
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {"text": {"type": "string"}},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "/api/session/{sessionID}/model": {"post": {}},
+                    "/api/session/{sessionID}/message": {"get": {}},
+                }
+            },
+        )
+        manager._discovered_v2_paths = manager._v2_openapi.paths
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._source_graph_mcp_names = lambda _directory: {"codegraph"}
+        manager._enabled_managed_mcp_names = lambda: set()
+        manager._acquire_scan_mcp = AsyncMock(return_value=_ScanMcpLease(
+            directory_key="directory",
+            state_key="source",
+            identity="source",
+            name="codegraph",
+            fingerprint="cg-fp",
+            connected=True,
+        ))
+        manager._release_scan_mcp = AsyncMock()
+
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", make_client)
+        with patch("task_agent.serve_client._write_command_binding", side_effect=capture_write_binding):
+            result = await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                opencode_version="2",
+                directory=project_dir,
+                config_workspace=binding_ws,
+                prompt="scan with codegraph",
+                model="corp/model",
+                timeout=30,
+                scan_id="scan-cg-v2",
+                disable_all_tools=False,
+                permissions=[
+                    {"permission": "read", "pattern": "*", "action": "allow"},
+                    {"permission": "bash", "pattern": "*", "action": "deny"},
+                ],
+                code_graph_mcp={"enabled": True, "name": "codegraph"},
+            )
+            assert result == ["done"]
+
+    asyncio.run(run_v2_prompt())
+
+    assert len(session_create_bodies) == 1
+    create_perms = session_create_bodies[0]["permissions"]
+    assert {"action": "execute", "resource": "*", "effect": "deny"} in create_perms
+    assert {"action": "experimental_image_generate", "resource": "*", "effect": "deny"} in create_perms
+    assert {"action": "question", "resource": "*", "effect": "deny"} in create_perms
+
+    assert len(session_patch_bodies) == 1
+    patch_perms = session_patch_bodies[0]["permissions"]
+    assert {"action": "execute", "resource": "*", "effect": "deny"} in patch_perms
+    assert {"action": "experimental_image_generate", "resource": "*", "effect": "deny"} in patch_perms
+    assert {"action": "codegraph_*", "resource": "*", "effect": "allow"} in patch_perms
+
+    hook_rules = captured_binding_kwargs["tool_rules"]
+    assert hook_rules["execute"] is False
+    assert hook_rules["experimental_image_generate"] is False
+    assert hook_rules["question"] is False
+    assert hook_rules["subagent"] is True
+    assert hook_rules["codegraph_*"] is True
+
+    binding_perm_rules = captured_binding_kwargs["permission_rules"]
+    assert {"permission": "execute", "pattern": "*", "action": "deny"} in binding_perm_rules
+    assert {"permission": "codegraph_*", "pattern": "*", "action": "allow"} in binding_perm_rules
+
+    # Part C: Feed the exact runtime-written binding into Node.js FILE_WRITE_PLUGIN_V2_SOURCE.
+    node_bin = shutil.which("node")
+    if node_bin:
+        plugin_root = tmp_path / "runtime-plugin-test" / ".opendeephole-plugins"
+        bindings_dir = plugin_root / "command-bindings"
+        bindings_dir.mkdir(parents=True)
+        plugin_file = plugin_root / "file-write-v2.mjs"
+        plugin_file.write_text(FILE_WRITE_PLUGIN_V2_SOURCE, encoding="utf-8")
+        session_id = "ses_v2_no_exec"
+        binding_file = bindings_dir / f"{hashlib.sha256(session_id.encode('utf-8')).hexdigest()}.json"
+        binding_file.write_text(captured_binding_file_text, encoding="utf-8")
+        harness = textwrap.dedent(
+            f"""
+            import plugin from {json.dumps(plugin_file.as_uri())};
+            let permHook = null;
+            let beforeHook = null;
+            const ctx = {{
+              location: {{ directory: {json.dumps(str(project_dir))} }},
+              permission: {{ hook: async (name, fn) => {{ if (name === "evaluate") permHook = fn; }} }},
+              tool: {{ hook: async (name, fn) => {{ if (name === "execute.before") beforeHook = fn; }} }},
+            }};
+            await plugin.setup(ctx);
+            const evExecDefaultAllow = {{ sessionID: {json.dumps(session_id)}, action: "execute", resources: ["*"], effect: "allow" }};
+            await permHook(evExecDefaultAllow);
+            const evExecNoBinding = {{ sessionID: "ses_unbound", action: "execute", resources: ["*"], effect: "allow" }};
+            await permHook(evExecNoBinding);
+            const evSearch = {{ sessionID: {json.dumps(session_id)}, action: "codegraph_search", resources: ["*"], effect: "ask" }};
+            await permHook(evSearch);
+            const evFiles = {{ sessionID: {json.dumps(session_id)}, action: "codegraph_files", resources: ["*"], effect: "ask" }};
+            await permHook(evFiles);
+            const evNode = {{ sessionID: {json.dumps(session_id)}, action: "codegraph_node", resources: ["*"], effect: "ask" }};
+            await permHook(evNode);
+            let execBeforeError = "";
+            try {{
+              await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "execute", args: {{ code: "1+1" }} }});
+            }} catch (err) {{
+              execBeforeError = String(err?.message || err);
+            }}
+            await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "codegraph_search", args: {{}} }});
+            await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "codegraph_files", args: {{}} }});
+            await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "codegraph_node", args: {{}} }});
+            await beforeHook({{ sessionID: {json.dumps(session_id)}, tool: "subagent", args: {{}} }});
+            console.log(JSON.stringify({{
+              execDefaultAllow: evExecDefaultAllow.effect,
+              execNoBinding: evExecNoBinding.effect,
+              search: evSearch.effect,
+              files: evFiles.effect,
+              node: evNode.effect,
+              execBeforeBlocked: execBeforeError.includes("not allowed"),
+            }}));
+            """
+        )
+        proc = subprocess.run(
+            [node_bin, "--input-type=module", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        result = json.loads(proc.stdout.strip())
+        assert result == {
+            "execDefaultAllow": "deny",
+            "execNoBinding": "deny",
+            "search": "allow",
+            "files": "allow",
+            "node": "allow",
+            "execBeforeBlocked": True,
+        }
