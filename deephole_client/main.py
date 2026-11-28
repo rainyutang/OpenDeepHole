@@ -716,6 +716,11 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
         refresh_configured_model_pool,
         set_observed_model_limits,
     )
+    from task_agent.runtime_backend import (
+        TOOL_OPENCODE,
+        active_runtime_tool,
+        get_runtime_manager,
+    )
     from task_agent.serve_client import (
         get_serve_manager,
         mark_serve_config_dirty,
@@ -737,12 +742,20 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
         config,
         reason="platform model configuration",
     )
-    serve_manager = get_serve_manager()
-    serve_manager.update_managed_mcp_configs(
+    tool = active_runtime_tool(config)
+    backend_manager = (
+        get_serve_manager()
+        if tool == TOOL_OPENCODE
+        else get_runtime_manager(tool)
+    )
+    backend_manager.update_managed_mcp_configs(
         build_managed_mcp_runtime_specs(config)
     )
     if mark_dirty:
-        mark_serve_config_dirty()
+        if tool == TOOL_OPENCODE:
+            mark_serve_config_dirty()
+        else:
+            backend_manager.mark_dirty()
     try:
         runtime_snapshot = build_opencode_session_runtime(
             config.opencode,
@@ -752,9 +765,9 @@ async def _refresh_live_runtime(config, *, mark_dirty: bool = True) -> None:
         observed_limits: dict[str, tuple[int | None, int | None]] = dict(
             resolve_configured_effective_limits(config_content)
         )
-        if hasattr(serve_manager, "cached_model_limits"):
+        if hasattr(backend_manager, "cached_model_limits"):
             observed_limits.update(
-                serve_manager.cached_model_limits(config_content=config_content)
+                backend_manager.cached_model_limits(config_content=config_content)
             )
         set_observed_model_limits(observed_limits, replace=True)
     except Exception:
@@ -823,6 +836,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "capabilities": {
                         "llm_api_config": True,
                         "llm_api_test": True,
+                        "deepseek_harness": True,
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
                         "incremental_validation_output": True,

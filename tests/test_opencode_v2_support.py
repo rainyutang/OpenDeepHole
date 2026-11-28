@@ -139,6 +139,8 @@ def test_client_config_runtime_and_model_pool_switch_between_v1_and_v2(
         "opencode_version": "2",
         "executable": "/opt/v1/opencode",
         "executable_v2": "/opt/v2/opencode",
+        "dsh_executable": "",
+        "dsh_profile": "sdk-minimal",
         "no_proxy": "127.0.0.1",
         "opencode_serve_port": 4319,
     }

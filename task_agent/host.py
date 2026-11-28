@@ -52,6 +52,7 @@ class OpenCodeSessionRuntime:
     config_content: str | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
     serve_port_auto: bool = False
+    backend_options: dict[str, Any] = field(default_factory=dict)
 
     def kwargs(self) -> dict[str, Any]:
         return {
@@ -64,6 +65,13 @@ class OpenCodeSessionRuntime:
             "env_overrides": dict(self.env_overrides),
             "serve_port_auto": self.serve_port_auto,
         }
+
+    def kwargs_for_backend(self) -> dict[str, Any]:
+        """Return backend-safe call kwargs without adding unknown keys to OpenCode Serve."""
+        base = self.kwargs()
+        if str(self.tool or "opencode").strip().lower() != "opencode":
+            base["backend_options"] = dict(self.backend_options)
+        return base
 
 
 @dataclass(frozen=True)

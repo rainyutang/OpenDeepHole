@@ -6,7 +6,7 @@ context:
   workspace_dir: /absolute/path/to/opencode-workspace
 
 serve:
-  # Task Agent 的实现固定为 OpenCode；这里只保留 opencode。
+  # 底层执行引擎：opencode（默认）或 deepseek_harness（基于 sdk-minimal）。
   tool: opencode
   # OpenCode 主版本："1"（1.x，默认）或 "2"（2.x）。
   opencode_version: "1"
@@ -14,6 +14,10 @@ serve:
   executable: opencode
   # 2.x 启动文件（当 opencode_version 为 "2" 时优先使用，可选，默认回退至 executable）。
   # executable_v2: opencode
+  # 当 tool 为 deepseek_harness 时可选配置：
+  # dsh_profile: sdk-minimal
+  # dsh_executable: ""
+  # dsh_home: /absolute/path/to/dsh-home
   port: 4096
   # 每次业务尝试的总超时（同 Session 修复共用），以及连续无新内容超时，单位均为秒。
   timeout: 10800

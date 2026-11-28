@@ -76,6 +76,7 @@ class KnowledgeBaseProxyRoute:
     headers: dict[str, str]
     project_id: str
     timeout_seconds: int = 300
+    blocked_tools: frozenset[str] = field(default_factory=frozenset)
     project_id_tools: set[str] = field(default_factory=set)
     tools_discovered: bool = False
     schema_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -84,8 +85,10 @@ class KnowledgeBaseProxyRoute:
 
 def rewrite_tools_list_result(
     result: dict[str, Any],
+    *,
+    blocked_tools: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], set[str], set[str]]:
-    """Strip ``project_id`` from tool schemas that declare it.
+    """Strip ``project_id`` from tool schemas and drop blocked tools.
 
     Returns ``(rewritten_result, tools_with_project_id, tools_without_project_id)``.
     """
@@ -103,6 +106,9 @@ def rewrite_tools_list_result(
             rewritten_tools.append(tool)
             continue
         name = str(tool.get("name") or "").strip()
+        if name and name in blocked_tools:
+            changed = True
+            continue
         schema = tool.get("inputSchema")
         if (
             name
@@ -143,7 +149,10 @@ def _apply_tools_list_rewrite_to_jsonrpc(
         result = item.get("result")
         if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
             return item, False
-        rewritten, with_pid, without_pid = rewrite_tools_list_result(result)
+        rewritten, with_pid, without_pid = rewrite_tools_list_result(
+            result,
+            blocked_tools=route.blocked_tools,
+        )
         route.project_id_tools.update(with_pid)
         route.project_id_tools.difference_update(without_pid)
         route.tools_discovered = True
@@ -240,13 +249,41 @@ def _filter_response_headers(upstream_headers: httpx.Headers) -> dict[str, str]:
     return filtered
 
 
-def _route_key(upstream_url: str, headers: dict[str, str], project_id: str) -> str:
+def _find_blocked_tools_call(
+    payload: Any,
+    blocked_tools: frozenset[str],
+) -> tuple[Any, str] | None:
+    """Return ``(request_id, tool_name)`` if *payload* invokes a blocked tool."""
+    if not blocked_tools:
+        return None
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        if not isinstance(item, dict) or item.get("method") != "tools/call":
+            continue
+        params = item.get("params")
+        if not isinstance(params, dict):
+            continue
+        tool_name = str(params.get("name") or "").strip()
+        if tool_name and tool_name in blocked_tools:
+            return item.get("id"), tool_name
+    return None
+
+
+def _route_key(
+    upstream_url: str,
+    headers: dict[str, str],
+    project_id: str,
+    blocked_tools: frozenset[str] = frozenset(),
+) -> str:
+    data: dict[str, Any] = {
+        "url": upstream_url,
+        "headers": sorted((str(k), str(v)) for k, v in headers.items()),
+        "project_id": project_id,
+    }
+    if blocked_tools:
+        data["blocked_tools"] = sorted(blocked_tools)
     payload = json.dumps(
-        {
-            "url": upstream_url,
-            "headers": sorted((str(k), str(v)) for k, v in headers.items()),
-            "project_id": project_id,
-        },
+        data,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -460,6 +497,7 @@ class KnowledgeBaseMcpProxy:
         headers: dict[str, str] | None = None,
         project_id: str,
         timeout_seconds: int = 300,
+        blocked_tools: frozenset[str] | set[str] | tuple[str, ...] = (),
     ) -> tuple[str, KnowledgeBaseProxyRoute]:
         normalized_url = str(upstream_url or "").strip()
         normalized_project_id = str(project_id or "").strip()
@@ -472,8 +510,16 @@ class KnowledgeBaseMcpProxy:
             for key, value in (headers or {}).items()
             if str(key)
         }
+        normalized_blocked = frozenset(
+            str(name).strip() for name in (blocked_tools or ()) if str(name).strip()
+        )
         port = await self.ensure_started()
-        key = _route_key(normalized_url, normalized_headers, normalized_project_id)
+        key = _route_key(
+            normalized_url,
+            normalized_headers,
+            normalized_project_id,
+            normalized_blocked,
+        )
         existing = self._routes_by_key.get(key)
         if existing is not None:
             existing.timeout_seconds = max(1, int(timeout_seconds or 300))
@@ -486,6 +532,7 @@ class KnowledgeBaseMcpProxy:
             headers=normalized_headers,
             project_id=normalized_project_id,
             timeout_seconds=max(1, int(timeout_seconds or 300)),
+            blocked_tools=normalized_blocked,
         )
         self._routes_by_key[key] = route
         self._routes_by_token[token] = route
@@ -662,6 +709,23 @@ class KnowledgeBaseMcpProxy:
             if parsed is not None:
                 is_tools_list_request = _payload_has_tools_list(parsed)
                 if _payload_has_tools_call(parsed):
+                    blocked_hit = _find_blocked_tools_call(parsed, route.blocked_tools)
+                    if blocked_hit is not None:
+                        req_id, tool_name = blocked_hit
+                        return JSONResponse(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {
+                                    "code": -32602,
+                                    "message": (
+                                        f"Tool {tool_name!r} is disabled by OpenDeepHole "
+                                        "scan knowledge-base policy"
+                                    ),
+                                },
+                            },
+                            status_code=200,
+                        )
                     await self._ensure_tools_discovered(route, target_url, request.headers)
                     rewritten, changed = inject_project_id_into_jsonrpc_request(
                         parsed,

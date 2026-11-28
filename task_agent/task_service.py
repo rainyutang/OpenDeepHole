@@ -55,6 +55,12 @@ from .model_pool import (
     wake_model_pool_waiters,
 )
 from .output_format import format_task_output, task_output_stage
+from .runtime_backend import (
+    TOOL_OPENCODE,
+    active_runtime_tool,
+    get_runtime_manager,
+    normalize_runtime_tool,
+)
 from .serve_client import (
     SAME_SESSION_RETRY_CLEAN_REVERTED,
     SAME_SESSION_RETRY_CONTINUATION,
@@ -521,6 +527,23 @@ class OpenCodeTaskHandle:
         await self._service.cancel_task(self.task_id)
 
 
+def _backend_manager(tool: object = None) -> Any:
+    """Resolve the execution backend manager while preserving OpenCode test hooks."""
+    raw = getattr(tool, "tool", tool) if tool is not None else TOOL_OPENCODE
+    normalized = normalize_runtime_tool(raw)
+    if normalized == TOOL_OPENCODE:
+        return get_serve_manager()
+    return get_runtime_manager(normalized)
+
+
+def _active_backend_manager() -> Any:
+    try:
+        tool = active_runtime_tool(get_config())
+    except Exception:
+        tool = TOOL_OPENCODE
+    return _backend_manager(tool)
+
+
 class OpenCodeTaskService:
     """Agent-process singleton for all OpenCode model work."""
 
@@ -535,14 +558,14 @@ class OpenCodeTaskService:
         self._serve_bootstrap_task_id: str | None = None
 
     def _serve_is_ready(self) -> bool:
-        manager = get_serve_manager()
+        manager = _active_backend_manager()
         is_ready = getattr(manager, "is_ready_for_prompt", None)
         return True if not callable(is_ready) else bool(is_ready())
 
     def _serve_is_preparing(self) -> bool:
         if self._serve_preparing_count > 0:
             return True
-        manager = get_serve_manager()
+        manager = _active_backend_manager()
         is_preparing = getattr(manager, "is_preparing", None)
         return bool(callable(is_preparing) and is_preparing())
 
@@ -991,13 +1014,13 @@ class OpenCodeTaskService:
         **kwargs: Any,
     ) -> OpenCodePromptResult:
         """Queue Serve recovery without surrendering this message or its Session."""
-        manager = get_serve_manager()
+        manager = _backend_manager(runtime)
         prepare = getattr(manager, "prepare_prompt", None)
         permit = None
         try:
             if prepare is not None:
                 deadline.check(phase="prompt")
-                prepared = await prepare(**runtime.kwargs())
+                prepared = await prepare(**runtime.kwargs_for_backend())
                 if not isinstance(prepared, OpenCodeServePreparation):
                     self._release_serve_bootstrap(record.task_id)
                 if isinstance(prepared, OpenCodeServePreparation):
@@ -1048,7 +1071,7 @@ class OpenCodeTaskService:
                                 )
                                 # Recovery can be requested after the capacity grant.
                                 # Atomically reserve Serve before resuming the clock.
-                                prepared = await prepare(**runtime.kwargs())
+                                prepared = await prepare(**runtime.kwargs_for_backend())
                             permit = prepared
                             if on_lease_resumed is not None and resumed_at_iso:
                                 resumed_outcome = on_lease_resumed(
@@ -1095,7 +1118,7 @@ class OpenCodeTaskService:
                 else {}
             )
             result = await _run_prompt_with_deadline(
-                deadline, **runtime.kwargs(),
+                deadline, **runtime.kwargs_for_backend(),
                 **({"serve_permit": permit} if permit is not None else {}),
                 **progress_kwargs,
                 **kwargs,
@@ -2649,13 +2672,18 @@ class OpenCodeTaskService:
             spec.directory,
         )
         runtime = _runtime_with_task_skills(runtime, record.execution_context.skill_paths)
-        runtime = _runtime_with_permissions(
-            runtime,
-            record.execution_context,
-        )
+        backend_manager = _backend_manager(runtime)
+        prepare_runtime = getattr(backend_manager, "prepare_runtime", None)
+        if callable(prepare_runtime):
+            runtime = prepare_runtime(runtime, record.execution_context)
+        else:
+            runtime = _runtime_with_permissions(
+                runtime,
+                record.execution_context,
+            )
         model = runtime.model
         source = OutputSource(
-            backend="opencode",
+            backend=runtime.tool,
             tool=runtime.tool,
             model_id=lease.option.id,
             model=model,
@@ -3555,11 +3583,17 @@ class OpenCodeTaskService:
 
     async def get_session(self, session_id: str) -> Any:
         runtime = self._runtime_for_session(session_id)
-        return await get_serve_manager().get_session(session_id, **runtime.kwargs())
+        return await _backend_manager(runtime).get_session(
+            session_id,
+            **runtime.kwargs_for_backend(),
+        )
 
     async def get_session_messages(self, session_id: str) -> list[dict[str, Any]]:
         runtime = self._runtime_for_session(session_id)
-        return await get_serve_manager().get_session_messages(session_id, **runtime.kwargs())
+        return await _backend_manager(runtime).get_session_messages(
+            session_id,
+            **runtime.kwargs_for_backend(),
+        )
 
     async def get_session_result(self, session_id: str) -> OpenCodeTaskResult | None:
         messages = await self.get_session_messages(session_id)
@@ -3592,7 +3626,10 @@ class OpenCodeTaskService:
                 raise RuntimeError(f"OpenCode session {session_id} is currently running")
             await self.cancel_task(active_task_id)
         runtime = self._runtime_for_session(session_id)
-        result = await get_serve_manager().delete_session(session_id, **runtime.kwargs())
+        result = await _backend_manager(runtime).delete_session(
+            session_id,
+            **runtime.kwargs_for_backend(),
+        )
         self._session_directories.pop(session_id, None)
         self._session_work_directories.pop(session_id, None)
         self._session_runtimes.pop(session_id, None)
@@ -3955,9 +3992,10 @@ async def _run_prompt_with_deadline(
     ):
         if name in kwargs:
             kwargs[name] = guard(kwargs[name], session_callback=name == "on_session_id")
+    manager = _backend_manager(kwargs.get("tool"))
     try:
         result = await prompt_deadline.wait(
-            get_serve_manager().run_prompt(timeout=remaining, **kwargs),
+            manager.run_prompt(timeout=remaining, **kwargs),
             phase="prompt_and_cleanup",
         )
         deadline.check(phase="response_validation")
@@ -3969,7 +4007,7 @@ async def _run_prompt_with_deadline(
             time.monotonic() + CLEANUP_TIMEOUT_SECONDS,
         ))
         if not drained:
-            mark_restart = getattr(get_serve_manager(), "_mark_serve_restart_required", None)
+            mark_restart = getattr(manager, "_mark_serve_restart_required", None)
             if callable(mark_restart):
                 mark_restart("Task Service deadline expired before prompt cleanup returned")
         raise

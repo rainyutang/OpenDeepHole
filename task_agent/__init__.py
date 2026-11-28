@@ -11,12 +11,12 @@ from .host import OpenCodeHostBindings, OpenCodeSessionRuntime, configure_openco
 
 
 async def shutdown_opencode() -> None:
-    """Stop the managed Serve process and reset lazy component singletons."""
+    """Stop all managed runtime backends and reset lazy component singletons."""
     from .host import _reset_standalone_opencode_configuration
-    from .serve_client import shutdown_serve_manager
+    from .runtime_backend import shutdown_all_runtime_backends
     from .task_service import reset_opencode_task_service
 
-    await shutdown_serve_manager()
+    await shutdown_all_runtime_backends()
     reset_opencode_task_service()
     _reset_standalone_opencode_configuration()
 

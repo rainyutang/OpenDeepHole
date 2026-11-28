@@ -125,6 +125,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             server_url=ws_server_url,
             llm_api_config=reported_capabilities.get("llm_api_config") is True,
             llm_api_test=reported_capabilities.get("llm_api_test") is True,
+            deepseek_harness=reported_capabilities.get("deepseek_harness") is True,
         )
         get_runtime().agents.registered_agents[agent_id] = agent_info
         get_runtime().agents.agent_ws[agent_id] = websocket

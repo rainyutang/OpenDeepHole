@@ -1779,6 +1779,11 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         prefix="[opencode_models]",
     ), flush=True)
     try:
+        from task_agent.runtime_backend import (
+            SUPPORTED_RUNTIME_TOOLS,
+            TOOL_OPENCODE,
+            get_runtime_manager,
+        )
         from task_agent.serve_client import (
             extract_configured_model_limits,
             get_serve_manager,
@@ -1800,10 +1805,10 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
                 else "API 配置应用失败，请先重试应用",
             }
         runtime_config = active_config(_config)
-        tool = str(getattr(runtime_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
-        if tool != "opencode":
-            raise RuntimeError(f"{tool} does not support serve model listing")
-        stage = "解析 OpenCode Serve 运行配置"
+        tool = str(getattr(runtime_config.opencode, "tool", "") or TOOL_OPENCODE).strip().lower() or TOOL_OPENCODE
+        if tool not in SUPPORTED_RUNTIME_TOOLS:
+            raise RuntimeError(f"{tool} does not support model listing")
+        stage = "解析运行时配置"
         runtime = build_opencode_session_runtime(
             runtime_config.opencode,
             directory=Path.cwd(),
@@ -1819,18 +1824,38 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             f"port_mode={'auto' if runtime.serve_port_auto else 'fixed'}",
             prefix="[opencode_models]",
         ), flush=True)
-        stage = "准备 OpenCode Serve 并查询 Provider"
-        model_result = await get_serve_manager().list_models(
-            tool=runtime.tool,
-            executable=runtime.executable,
-            opencode_version=runtime_version,
-            directory=runtime.directory,
-            config_workspace=runtime.config_workspace,
-            config_content=runtime.config_content,
-            env_overrides=runtime.env_overrides,
-            serve_port_auto=runtime.serve_port_auto,
-            refresh=refresh,
-        )
+        if runtime.tool == TOOL_OPENCODE:
+            stage = "准备 OpenCode Serve 并查询 Provider"
+            model_result = await get_serve_manager().list_models(
+                executable=runtime.executable,
+                directory=runtime.directory,
+                config_workspace=runtime.config_workspace,
+                config_content=runtime.config_content,
+                env_overrides=runtime.env_overrides,
+                serve_port=getattr(runtime, "serve_port", None),
+                serve_port_auto=getattr(runtime, "serve_port_auto", False),
+                opencode_version=runtime_version,
+                refresh=refresh,
+            )
+        else:
+            stage = "查询运行时可用模型"
+            backend_manager = get_runtime_manager(runtime.tool)
+            backend_kwargs = (
+                runtime.kwargs_for_backend()
+                if hasattr(runtime, "kwargs_for_backend")
+                else {
+                    "executable": runtime.executable,
+                    "directory": runtime.directory,
+                    "config_workspace": runtime.config_workspace,
+                    "config_content": runtime.config_content,
+                    "env_overrides": runtime.env_overrides,
+                    "backend_options": getattr(runtime, "backend_options", {}),
+                }
+            )
+            model_result = await backend_manager.list_models(
+                **backend_kwargs,
+                refresh=refresh,
+            )
         configured_limits = extract_configured_model_limits(
             getattr(runtime, "config_content", "") or "",
         )
@@ -1939,6 +1964,11 @@ async def handle_mcp_probe(
 ) -> dict:
     """Probe one saved MCP configuration and report the serve reload state."""
     from deephole_client.mcp_probe import probe_mcp_config
+    from task_agent.runtime_backend import (
+        TOOL_OPENCODE,
+        active_runtime_tool,
+        get_runtime_manager,
+    )
     from task_agent.serve_client import get_serve_manager
 
     result = await probe_mcp_config(
@@ -1946,7 +1976,13 @@ async def handle_mcp_probe(
         mcp_config if isinstance(mcp_config, dict) else {},
         projects_tool=str(projects_tool or ""),
     )
-    result.update(get_serve_manager().config_runtime_status())
+    tool = active_runtime_tool(_config)
+    backend_manager = (
+        get_serve_manager()
+        if tool == TOOL_OPENCODE
+        else get_runtime_manager(tool)
+    )
+    result.update(backend_manager.config_runtime_status())
     result.update({
         "type": "mcp_probe_result",
         "request_id": request_id,
@@ -1956,13 +1992,24 @@ async def handle_mcp_probe(
 
 
 async def handle_mcp_status(request_id: str) -> dict:
-    """Return the actual managed-MCP state of the current OpenCode serve."""
+    """Return the actual managed-MCP state of the current runtime backend."""
+    from task_agent.runtime_backend import (
+        TOOL_OPENCODE,
+        active_runtime_tool,
+        get_runtime_manager,
+    )
     from task_agent.serve_client import get_serve_manager
 
+    tool = active_runtime_tool(_config)
+    backend_manager = (
+        get_serve_manager()
+        if tool == TOOL_OPENCODE
+        else get_runtime_manager(tool)
+    )
     return {
         "type": "mcp_status_result",
         "request_id": request_id,
-        "targets": await get_serve_manager().refresh_managed_mcp_runtime_status(),
+        "targets": await backend_manager.refresh_managed_mcp_runtime_status(),
     }
 
 

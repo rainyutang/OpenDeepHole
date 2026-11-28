@@ -59,6 +59,14 @@ def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
 def _build_session_runtime(cli_config, model_option, directory: Path):
     """Resolve the existing DeepHole 2.0 Serve configuration for the component."""
     from task_agent import OpenCodeSessionRuntime
+    from task_agent.runtime_backend import TOOL_DEEPSEEK_HARNESS
+
+    configured_tool = str(_config_value(cli_config, "tool", "opencode") or "opencode").strip().lower()
+    if configured_tool == TOOL_DEEPSEEK_HARNESS:
+        from .dsh_integration import build_dsh_session_runtime
+
+        return build_dsh_session_runtime(cli_config, model_option, directory)
+
     effective = _effective_model_config(cli_config, model_option)
     tool = str(effective["tool"] or "opencode").strip().lower()
     if tool != "opencode":
@@ -326,7 +334,8 @@ def _fixed_skill_root() -> Path:
 
 
 async def sync_agent_skills(sources, *, replace_existing=True, cancel_event=None) -> None:
-    """Publish received resources only while the shared Serve is idle."""
+    """Publish received resources only while the active runtime backend is idle."""
+    from task_agent.runtime_backend import TOOL_OPENCODE, active_runtime_tool, get_runtime_manager
     from task_agent.serve_client import get_serve_manager
     from .skill_catalog import install_skills, needs_install
 
@@ -340,7 +349,12 @@ async def sync_agent_skills(sources, *, replace_existing=True, cancel_event=None
         with get_workspace_lock(workspace):
             install_skills(workspace, sources, replace_existing=replace_existing)
 
-    await get_serve_manager().update_skill_catalog(needed, publish, cancel_event=cancel_event)
+    try:
+        tool = active_runtime_tool(get_config())
+    except Exception:
+        tool = TOOL_OPENCODE
+    manager = get_serve_manager() if tool == TOOL_OPENCODE else get_runtime_manager(tool)
+    await manager.update_skill_catalog(needed, publish, cancel_event=cancel_event)
 
 
 async def sync_rule_skill_roots(roots, *, replace_existing=True, cancel_event=None) -> None:

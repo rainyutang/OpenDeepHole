@@ -992,17 +992,13 @@ def total_model_capacity(
 
 
 def model_options(cli_config: Any) -> list[ModelOption]:
+    from .runtime_backend import resolve_cli_runtime_identity
+
     raw_models = _cfg_value(cli_config, "models", None) or []
-    configured_tool = "opencode"
+    configured_tool, configured_executable = resolve_cli_runtime_identity(cli_config)
     configured_version = normalize_opencode_version(
         _cfg_value(cli_config, "opencode_version", "1")
     )
-    raw_executable = _cfg_value(cli_config, "executable", "")
-    if configured_version == "2":
-        raw_v2_executable = _cfg_value(cli_config, "executable_v2", None)
-        if raw_v2_executable not in (None, ""):
-            raw_executable = raw_v2_executable
-    configured_executable = str(raw_executable or "opencode").strip()
     options: list[ModelOption] = []
     for index, raw in enumerate(raw_models):
         if raw is None:

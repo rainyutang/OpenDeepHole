@@ -14,6 +14,11 @@ from typing import Optional
 import yaml
 
 from task_agent._opencode_v2 import normalize_opencode_version
+from task_agent.runtime_backend import (
+    DEFAULT_DSH_PROFILE,
+    TOOL_DEEPSEEK_HARNESS,
+    TOOL_OPENCODE,
+)
 from task_agent.timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_REVIEW_TIMEOUT_SECONDS,
@@ -88,6 +93,8 @@ class OpenCodeConfig:
     opencode_version: str = "1"   # "1" for OpenCode 1.x, "2" for OpenCode 2.x
     executable: str = "opencode"  # OpenCode 1.x executable name or full path
     executable_v2: str = "opencode"  # OpenCode 2.x executable name or full path
+    dsh_executable: str = ""      # optional custom `dsh` path; empty uses bundled SDK runtime
+    dsh_profile: str = DEFAULT_DSH_PROFILE
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -234,22 +241,32 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
             raise ValueError("opencode serve_port must be an integer") from exc
         if not 1 <= config.serve_port <= 65535:
             raise ValueError("opencode serve_port must be between 1 and 65535")
-    if legacy_tool not in _LEGACY_AI_TOOL_EXECUTABLES:
-        if legacy_tool:
-            warnings.warn(
-                f"Legacy AI tool {legacy_tool!r} is no longer supported; using opencode serve",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+    if legacy_tool == TOOL_DEEPSEEK_HARNESS:
+        config.tool = TOOL_DEEPSEEK_HARNESS
+    else:
+        if legacy_tool not in _LEGACY_AI_TOOL_EXECUTABLES:
+            if legacy_tool:
+                warnings.warn(
+                    f"Legacy AI tool {legacy_tool!r} is no longer supported; using opencode serve",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        config.tool = _CANONICAL_AI_TOOL
     if not executable:
         executable = "nga" if legacy_tool == "nga" else "opencode"
-    config.tool = _CANONICAL_AI_TOOL
     config.opencode_version = normalize_opencode_version(
         getattr(config, "opencode_version", "1")
     )
     config.executable = executable
     executable_v2 = str(getattr(config, "executable_v2", "") or "").strip()
     config.executable_v2 = executable_v2 or "opencode"
+    config.dsh_executable = str(getattr(config, "dsh_executable", "") or "").strip()
+    raw_dsh_profile = str(
+        getattr(config, "dsh_profile", DEFAULT_DSH_PROFILE) or DEFAULT_DSH_PROFILE
+    ).strip()
+    config.dsh_profile = (
+        raw_dsh_profile if raw_dsh_profile == DEFAULT_DSH_PROFILE else DEFAULT_DSH_PROFILE
+    )
     normalized_models: list[OpenCodeModelConfig] = []
     for index, model_cfg in enumerate(config.models or []):
         if isinstance(model_cfg, dict):
@@ -753,6 +770,12 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             config.opencode.executable = str(base.get("executable") or "")
         if "executable_v2" in base:
             config.opencode.executable_v2 = str(base.get("executable_v2") or "")
+        if "dsh_executable" in base:
+            config.opencode.dsh_executable = str(base.get("dsh_executable") or "")
+        if "dsh_profile" in base:
+            config.opencode.dsh_profile = str(
+                base.get("dsh_profile") or DEFAULT_DSH_PROFILE
+            )
         if "opencode_serve_port" in base:
             config.opencode.serve_port = base.get("opencode_serve_port")
         if isinstance(model_pool.get("models"), list):
@@ -909,10 +932,16 @@ def remote_config_dict(config: AgentConfig) -> dict:
         "schema_version": 11,
         "llm_providers": copy.deepcopy(config.llm_providers),
         "base": {
-            "tool": "opencode",
+            "tool": (
+                TOOL_DEEPSEEK_HARNESS
+                if config.opencode.tool == TOOL_DEEPSEEK_HARNESS
+                else TOOL_OPENCODE
+            ),
             "opencode_version": normalize_opencode_version(config.opencode.opencode_version),
             "executable": config.opencode.executable,
             "executable_v2": config.opencode.executable_v2,
+            "dsh_executable": config.opencode.dsh_executable,
+            "dsh_profile": config.opencode.dsh_profile or DEFAULT_DSH_PROFILE,
             "no_proxy": config.no_proxy,
             "opencode_serve_port": config.opencode.serve_port,
         },

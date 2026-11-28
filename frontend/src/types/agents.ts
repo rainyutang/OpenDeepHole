@@ -17,6 +17,7 @@ export interface AgentInfo {
   runtime_update_target_hash?: string;
   runtime_update_error?: string;
   accepting_tasks?: boolean;
+  deepseek_harness?: boolean | null;
   has_explicit_model: boolean;
 }
 
@@ -47,11 +48,15 @@ export interface AgentOpenCodeModelConfig {
 
 export type OpenCodeMajorVersion = "1" | "2";
 
+export type AgentRuntimeTool = "opencode" | "deepseek_harness";
+
 export interface AgentBaseConfig {
-  tool: "opencode";
+  tool: AgentRuntimeTool;
   opencode_version?: OpenCodeMajorVersion;
   executable: string;
   executable_v2?: string;
+  dsh_executable?: string;
+  dsh_profile?: "sdk-minimal";
   no_proxy: string;
   opencode_serve_port: number | null;
 }

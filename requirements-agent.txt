@@ -23,3 +23,5 @@ fastmcp>=0.1.0
 mcp>=1.0.0
 # sse-starlette 3.0 isolates MCP SSE shutdown state per event loop.
 sse-starlette>=3.0.0
+# Optional/bundled DeepSeek Harness runtime for base.tool="deepseek_harness" (sdk-minimal).
+deepseek-harness-sdk>=0.2.2rc2

@@ -77,7 +77,7 @@ checker_selection:
 
 `server_url`、`agent_name`、`owner_token`、`checkers` 是本机启动字段，其余受管字段通过 Web 编辑并下发。客户端以 IP 和机器名形成稳定身份，重连保留已有配置；离线编辑在重连后生效。新注册客户端的模型列表为空，不采用启动模板上报的模型。
 
-基础配置管理程序和模型池；高级配置管理威胁分析、漏洞挖掘、去误报和漏洞验证。在「基础配置 → 基础参数」中可通过「OpenCode 版本」在 `OpenCode 1.x`（`base.opencode_version="1"`，默认）与 `OpenCode 2.x`（`base.opencode_version="2"`）之间切换：1.x 与 2.x 的启动路径分别独立保存在 `base.executable` 与 `base.executable_v2` 中，切换版本时界面自动展示对应版本的可执行文件路径，启动 Serve 时会校验实际二进制主版本，并在 2.x 模式下自动注入随机 HTTP Basic Auth 密码及 V2 插件/接口契约。各模式通过 Checker 排除列表表达选择，未被排除且当前启用、对用户可见的新增规则会进入后续新扫描。
+基础配置管理程序和模型池；高级配置管理威胁分析、漏洞挖掘、去误报和漏洞验证。在「基础配置 → 基础参数」中可通过「工具」在 `OpenCode`（默认）与 `DeepSeek Harness (sdk-minimal)`（`base.tool="deepseek_harness"`）之间切换：选择 OpenCode 时可通过「OpenCode 版本」在 `OpenCode 1.x`（`base.opencode_version="1"`，默认）与 `OpenCode 2.x`（`base.opencode_version="2"`）之间切换，1.x 与 2.x 的启动路径分别独立保存在 `base.executable` 与 `base.executable_v2` 中，启动 Serve 时会校验实际二进制主版本，并在 2.x 模式下自动注入随机 HTTP Basic Auth 密码及 V2 插件/接口契约；选择 DeepSeek Harness 时基于 `sdk-minimal` 配置档运行，默认使用 `deepseek-harness-sdk` 内置运行时（亦可在 `base.dsh_executable` 中指定自定义 `dsh` 路径），直接复用网页「添加 LLM API」或环境变量 `DEEPSEEK_API_KEY`，并按需挂载受管 Skills、程序化权限审批以及扫描专属代码图谱/知识库 MCP。各模式通过 Checker 排除列表表达选择，未被排除且当前启用、对用户可见的新增规则会进入后续新扫描。
 
 兼容迁移包括：v5→v6 固定 `base.tool=opencode` 并保留可执行文件；v6→v7 将旧排除列表迁移到自定义模式；v7→v8 将旧默认威胁分析超时 3600 秒迁移为 7200 秒；v8→v9 将各阶段原默认总超时升级为 10800 秒，补充无新内容超时 1200 秒。v9→v10 细分任务超时：旧默认值按下表更新，原阶段自定义总超时保留并继承到该阶段新增的任务和纠正重试项。判定使用原始版本及原始值，v10 中用户修改的值不再迁移。历史 `full` / `threat_analysis_only` 的组件上下文按兼容规则处理，不批量重写历史记录。
 

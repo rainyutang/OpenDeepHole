@@ -294,17 +294,26 @@ def _validate_managed_config(
         config.llm_providers = normalize_llm_providers(config.llm_providers)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    if config.base.tool != "opencode":
-        raise HTTPException(status_code=422, detail="基础配置中的工具只能是 opencode")
-    if config.base.opencode_version not in {"1", "2"}:
-        raise HTTPException(status_code=422, detail="基础配置中的 OpenCode 版本只能是 1 或 2")
-    active_executable = (
-        config.base.executable_v2
-        if config.base.opencode_version == "2"
-        else config.base.executable
-    )
-    if not active_executable.strip():
-        raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
+    if config.base.tool not in {"opencode", "deepseek_harness"}:
+        raise HTTPException(
+            status_code=422,
+            detail="基础配置中的工具只能是 opencode 或 deepseek_harness",
+        )
+    if config.base.tool == "opencode":
+        if config.base.opencode_version not in {"1", "2"}:
+            raise HTTPException(status_code=422, detail="基础配置中的 OpenCode 版本只能是 1 或 2")
+        active_executable = (
+            config.base.executable_v2
+            if config.base.opencode_version == "2"
+            else config.base.executable
+        )
+        if not active_executable.strip():
+            raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
+    elif config.base.dsh_profile != "sdk-minimal":
+        raise HTTPException(
+            status_code=422,
+            detail="DeepSeek Harness 配置档目前仅支持 sdk-minimal",
+        )
     seen: set[str] = set()
     for index, model in enumerate(config.model_pool.models, start=1):
         model_id = model.id.strip()

@@ -299,6 +299,7 @@ async def list_agents(current_user: User=None) -> list:
             "accepting_tasks": (
                 _runtime_update_status(record) not in constants._RUNTIME_UPDATE_BLOCKING_STATUSES
             ),
+            "deepseek_harness": agent.deepseek_harness if agent else None,
             "has_explicit_model": agent_config_has_explicit_model(
                 _stored_agent_config(record)
             ),

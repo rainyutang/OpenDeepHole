@@ -134,8 +134,12 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
     </div>
     {status?.state === "failed" && <p role="alert" className="text-xs text-red-300">{status.error || "配置应用失败，请重试或修改配置。"}</p>}
     <div className="flex flex-wrap items-center gap-2">
-      <button type="button" onClick={onImport} disabled={!online} className={button}>从 opencode 读取</button>
-      <button type="button" onClick={addManual} className={button}>手动添加 opencode 模型</button>
+      <button type="button" onClick={onImport} disabled={!online} className={button}>
+        {config.base.tool === "deepseek_harness" ? "从 DeepSeek Harness 读取" : "从 opencode 读取"}
+      </button>
+      <button type="button" onClick={addManual} className={button}>
+        {config.base.tool === "deepseek_harness" ? "手动添加 DeepSeek Harness 模型" : "手动添加 opencode 模型"}
+      </button>
       <button type="button" onClick={() => addApi()} className={`${button} bg-blue-600 hover:bg-blue-500`}>添加 LLM API</button>
       <span className="ml-auto inline-flex items-center gap-1 text-xs text-slate-400">总并发 <output className="font-semibold tabular-nums text-slate-100">{capacity}</output>{capacity > 0 && highCapacity < capacity && <span className="text-amber-300">（高能力可用 {highCapacity}）</span>}<LlmFieldHint label="总并发">已启用模型的并发容量之和；扫描主要阶段默认仅调度高能力模型。</LlmFieldHint></span>
       {pool && <span className="text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
@@ -174,7 +178,7 @@ export default function ModelEditor({ agentKey, config, setCfg, online, onImport
             className="flex min-w-0 flex-1 items-center gap-3 py-3 text-left">
             {!binding && <span className="min-w-0 w-1/3 truncate font-mono text-xs text-slate-200" title={model.id}>{model.id || "未命名 ID"}</span>}
             <span className="min-w-0 flex-1 truncate text-sm text-slate-300" title={model.model}>{model.model || "未填写模型名称"}</span>
-            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${binding ? "bg-blue-500/15 text-blue-200" : "bg-slate-700 text-slate-300"}`}>{binding ? "LLM API" : "OpenCode 模型"}</span>
+            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${binding ? "bg-blue-500/15 text-blue-200" : "bg-slate-700 text-slate-300"}`}>{binding ? "LLM API" : (config.base.tool === "deepseek_harness" ? "DeepSeek Harness 模型" : "OpenCode 模型")}</span>
             <span aria-hidden="true" className="text-slate-500">{opened ? "▾" : "▸"}</span>
           </button>
         </div>

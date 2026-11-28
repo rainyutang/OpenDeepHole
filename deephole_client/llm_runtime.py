@@ -40,6 +40,11 @@ async def update(config: AgentConfig) -> None:
     global _active
     from task_agent.config_reload import get_config_reload_coordinator
     from task_agent.llm_config import llm_provider_revision
+    from task_agent.runtime_backend import (
+        active_runtime_tool,
+        shutdown_runtime_backend,
+    )
+    from .dsh_integration import dsh_runtime_change_key
 
     initialize(config)
     coordinator = get_config_reload_coordinator()
@@ -50,18 +55,10 @@ async def update(config: AgentConfig) -> None:
         return
     previous = _active
     changed_runtime = previous is not None and (
-        getattr(previous.opencode, "opencode_version", "1"),
-        previous.opencode.executable,
-        getattr(previous.opencode, "executable_v2", "opencode"),
-        previous.opencode.serve_port,
-        previous.no_proxy,
-    ) != (
-        getattr(config.opencode, "opencode_version", "1"),
-        config.opencode.executable,
-        getattr(config.opencode, "executable_v2", "opencode"),
-        config.opencode.serve_port,
-        config.no_proxy,
+        dsh_runtime_change_key(previous) != dsh_runtime_change_key(config)
     )
+    if previous is not None and active_runtime_tool(previous) != active_runtime_tool(config):
+        await shutdown_runtime_backend(active_runtime_tool(previous))
     _active = copy.deepcopy(config)
     from .main import _refresh_live_runtime
     await _refresh_live_runtime(config, mark_dirty=changed_runtime)
@@ -70,11 +67,26 @@ async def update(config: AgentConfig) -> None:
 async def _apply(candidate: AgentConfig, revision: str) -> None:
     global _active
     previous = _active
+    from task_agent.runtime_backend import (
+        TOOL_OPENCODE,
+        active_runtime_tool,
+        get_runtime_manager,
+        shutdown_runtime_backend,
+    )
     from task_agent.serve_client import get_serve_manager
+    from .dsh_integration import dsh_runtime_change_key
     from .opencode_integration import (
         build_opencode_session_runtime,
         configure_opencode_component,
         refresh_global_opencode_config,
+    )
+
+    candidate_tool = active_runtime_tool(candidate)
+    previous_tool = active_runtime_tool(previous) if previous is not None else candidate_tool
+    backend_manager = (
+        get_serve_manager()
+        if candidate_tool == TOOL_OPENCODE
+        else get_runtime_manager(candidate_tool)
     )
 
     try:
@@ -87,30 +99,24 @@ async def _apply(candidate: AgentConfig, revision: str) -> None:
             previous is not None
             and get_config_reload_coordinator().status()["applied_revision"] == revision
             and (
-                getattr(previous.opencode, "opencode_version", "1"),
-                previous.opencode.executable,
-                getattr(previous.opencode, "executable_v2", "opencode"),
-                previous.opencode.serve_port,
+                *dsh_runtime_change_key(previous),
                 previous.opencode.config_paths,
-                previous.no_proxy,
             )
             == (
-                getattr(candidate.opencode, "opencode_version", "1"),
-                candidate.opencode.executable,
-                getattr(candidate.opencode, "executable_v2", "opencode"),
-                candidate.opencode.serve_port,
+                *dsh_runtime_change_key(candidate),
                 candidate.opencode.config_paths,
-                candidate.no_proxy,
             )
-            and get_serve_manager().config_runtime_status()["runtime_state"] == "active"
+            and backend_manager.config_runtime_status()["runtime_state"] == "active"
         ):
             _active = copy.deepcopy(candidate)
             await _refresh_live_runtime(_active, mark_dirty=False)
             return
+        if previous is not None and previous_tool != candidate_tool:
+            await shutdown_runtime_backend(previous_tool)
         configure_opencode_component()
         refresh_global_opencode_config(providers=candidate.llm_providers)
         runtime = build_opencode_session_runtime(candidate.opencode, directory=Path.cwd())
-        result = await get_serve_manager().reload_runtime(**runtime.kwargs())
+        result = await backend_manager.reload_runtime(**runtime.kwargs_for_backend())
         visible = {f"{model.provider_id}/{model.model_id}" for model in result.models}
         expected = {
             f"{provider_id}/{model_id}"
@@ -118,7 +124,7 @@ async def _apply(candidate: AgentConfig, revision: str) -> None:
             for model_id in provider["models"]
         }
         if expected - visible:
-            raise RuntimeError("Serve 未加载全部配置的模型，请检查 API 模型配置")
+            raise RuntimeError("运行时未加载全部配置的模型，请检查 API 模型配置")
         _active = copy.deepcopy(candidate)
         await _refresh_live_runtime(_active, mark_dirty=False)
     except BaseException:

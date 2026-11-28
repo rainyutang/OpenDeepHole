@@ -5,6 +5,7 @@ import ModelEditor from "./ModelEditor";
 
 import { useAgentConfig } from '../features/agentConfig/useAgentConfig';
 import { AdvancedSettings, Field, input } from '../features/agentConfig/AdvancedSettings';
+import DshBaseFields from '../features/agentConfig/DshBaseFields';
 import type { Section, AdvancedSection } from '../features/agentConfig/configModel';
 
 interface Props {
@@ -91,48 +92,67 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
             <div>
               <h3 className="mb-4 text-sm font-semibold text-slate-200">基础参数</h3>
               <div className="grid gap-5 md:grid-cols-2">
-                <Field label="工具" hint="实现固定为 OpenCode"><select disabled className={`${input} cursor-not-allowed opacity-70`} value={config.base.tool}><option value="opencode">OpenCode</option></select></Field>
-                <Field label="OpenCode 版本" hint="切换 OpenCode 1.x 与 2.x 协议及对应启动路径"><select
-                  aria-label="OpenCode 版本"
+                <Field label="工具" hint="选择底层执行引擎：OpenCode 或 DeepSeek Harness（sdk-minimal）"><select
+                  aria-label="工具"
                   className={input}
-                  value={config.base.opencode_version ?? "1"}
+                  value={config.base.tool}
                   onChange={(e) => setCfg({
                     ...config,
                     base: {
                       ...config.base,
-                      opencode_version: e.target.value === "2" ? "2" : "1",
+                      tool: e.target.value === "deepseek_harness" ? "deepseek_harness" : "opencode",
+                      dsh_profile: config.base.dsh_profile ?? "sdk-minimal",
+                      dsh_executable: config.base.dsh_executable ?? "",
                     },
                   })}>
-                  <option value="1">OpenCode 1.x</option>
-                  <option value="2">OpenCode 2.x</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="deepseek_harness">DeepSeek Harness (sdk-minimal)</option>
                 </select></Field>
-                <Field
-                  label="工具可执行文件名或完整路径"
-                  hint={
-                    (config.base.opencode_version ?? "1") === "2"
-                      ? "当前编辑 OpenCode 2.x 路径（如 opencode、/usr/local/bin/opencode2 或完整路径），与 1.x 路径独立保存"
-                      : "当前编辑 OpenCode 1.x 路径（如 opencode、nga、/opt/bin/nga 或完整路径），与 2.x 路径独立保存"
-                  }><input
-                  aria-label="工具可执行文件名或完整路径"
-                  className={input}
-                  value={
-                    (config.base.opencode_version ?? "1") === "2"
-                      ? (config.base.executable_v2 ?? "opencode")
-                      : config.base.executable
-                  }
-                  onChange={(e) => setCfg({
-                    ...config,
-                    base: (config.base.opencode_version ?? "1") === "2"
-                      ? { ...config.base, executable_v2: e.target.value }
-                      : { ...config.base, executable: e.target.value },
-                  })} /></Field>
-                <Field label="OpenCode Serve 端口" hint="留空时，本次客户端进程自动选择一个空闲端口"><input
-                  className={input}
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={config.base.opencode_serve_port ?? ""}
-                  onChange={(e) => setCfg({ ...config, base: { ...config.base, opencode_serve_port: e.target.value === "" ? null : Number(e.target.value) } })} /></Field>
+                {config.base.tool === "deepseek_harness" ? (
+                  <DshBaseFields config={config} setCfg={setCfg} selectedAgent={selectedAgent} />
+                ) : <>
+                  <Field label="OpenCode 版本" hint="切换 OpenCode 1.x 与 2.x 协议及对应启动路径"><select
+                    aria-label="OpenCode 版本"
+                    className={input}
+                    value={config.base.opencode_version ?? "1"}
+                    onChange={(e) => setCfg({
+                      ...config,
+                      base: {
+                        ...config.base,
+                        opencode_version: e.target.value === "2" ? "2" : "1",
+                      },
+                    })}>
+                    <option value="1">OpenCode 1.x</option>
+                    <option value="2">OpenCode 2.x</option>
+                  </select></Field>
+                  <Field
+                    label="工具可执行文件名或完整路径"
+                    hint={
+                      (config.base.opencode_version ?? "1") === "2"
+                        ? "当前编辑 OpenCode 2.x 路径（如 opencode、/usr/local/bin/opencode2 或完整路径），与 1.x 路径独立保存"
+                        : "当前编辑 OpenCode 1.x 路径（如 opencode、nga、/opt/bin/nga 或完整路径），与 2.x 路径独立保存"
+                    }><input
+                    aria-label="工具可执行文件名或完整路径"
+                    className={input}
+                    value={
+                      (config.base.opencode_version ?? "1") === "2"
+                        ? (config.base.executable_v2 ?? "opencode")
+                        : config.base.executable
+                    }
+                    onChange={(e) => setCfg({
+                      ...config,
+                      base: (config.base.opencode_version ?? "1") === "2"
+                        ? { ...config.base, executable_v2: e.target.value }
+                        : { ...config.base, executable: e.target.value },
+                    })} /></Field>
+                  <Field label="OpenCode Serve 端口" hint="留空时，本次客户端进程自动选择一个空闲端口"><input
+                    className={input}
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={config.base.opencode_serve_port ?? ""}
+                    onChange={(e) => setCfg({ ...config, base: { ...config.base, opencode_serve_port: e.target.value === "" ? null : Number(e.target.value) } })} /></Field>
+                </>}
                 <Field label="代理跳过列表" hint="逗号分隔"><textarea
                   className={input}
                   rows={4}
@@ -197,14 +217,16 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
         aria-labelledby="model-picker-title"
         className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 id="model-picker-title" className="text-sm font-semibold text-white">从 opencode 读取模型</h3>
+          <h3 id="model-picker-title" className="text-sm font-semibold text-white">
+            {config.base.tool === "deepseek_harness" ? "从 DeepSeek Harness 读取模型" : "从 opencode 读取模型"}
+          </h3>
           <button type="button" onClick={() => setModelPicker(null)} className="px-2 py-1 text-xs text-slate-300 hover:text-white">关闭</button>
         </div>
         {modelPicker.message && <div className="mb-3 whitespace-pre-wrap break-all rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
         <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
           {modelPicker.loading ? <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>
             : modelPicker.error ? <pre className="whitespace-pre-wrap break-all px-3 py-4 text-left font-mono text-xs leading-5 text-red-300">{modelPicker.error}</pre>
-              : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">opencode 未返回可用模型</div>
+              : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">{config.base.tool === "deepseek_harness" ? "DeepSeek Harness 未返回可用模型" : "opencode 未返回可用模型"}</div>
                 : <div className="divide-y divide-slate-700">{modelPicker.models.map((model) => <label key={model.id} className="flex items-center gap-3 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
                   <input
                     type="checkbox"

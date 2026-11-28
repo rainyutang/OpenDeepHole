@@ -99,7 +99,7 @@ test("unified model joins preserve scheduling aliases, stable keys, shared renam
   }
 });
 
-async function mountPage({ config = emptyConfig(), online = true, testApi, opencodeModels, poolModels } = {}) {
+async function mountPage({ config = emptyConfig(), online = true, deepseekHarness, testApi, opencodeModels, poolModels } = {}) {
   let saved = null;
   let status = { state: "active", desired_revision: "old", applied_revision: "old", active_tasks: 0, error: "" };
   let retries = 0;
@@ -107,7 +107,7 @@ async function mountPage({ config = emptyConfig(), online = true, testApi, openc
   globalThis.window.confirm = () => true;
   client.api.defaults.adapter = async (request) => {
     let data;
-    if (request.url === "/api/agents") data = [{ agent_key: "api-agent", agent_id: "session", name: "API Agent", online }];
+    if (request.url === "/api/agents") data = [{ agent_key: "api-agent", agent_id: "session", name: "API Agent", online, ...(deepseekHarness === undefined ? {} : { deepseek_harness: deepseekHarness }) }];
     else if (request.url === "/api/checkers") data = [];
     else if (request.url.endsWith("/validator-catalog")) data = { methods: [], errors: [], updated_at: "" };
     else if (request.url.endsWith("/opencode-pool")) data = { models: poolModels ?? [], global_running: 0, global_queued: 0 };
@@ -635,5 +635,47 @@ test("OpenCode models show read-only Context/Output limits from picker, live poo
     assert.equal(offlinePage.control("Output").props.value, 10240);
   } finally {
     await offlinePage.dispose();
+  }
+});
+
+test("switching backend to DeepSeek Harness shows sdk-minimal fields, capability warning, and saves without executable", async () => {
+  const unsupportedPage = await mountPage({ config: emptyConfig(), online: true, deepseekHarness: false });
+  try {
+    const toolSelect = () => unsupportedPage.root.root.findByProps({ "aria-label": "工具" });
+    assert.equal(toolSelect().props.value, "opencode");
+    assert.ok(unsupportedPage.button("从 opencode 读取"));
+
+    await act(async () => { toolSelect().props.onChange({ target: { value: "deepseek_harness" } }); });
+    assert.equal(toolSelect().props.value, "deepseek_harness");
+
+    const profileSelect = unsupportedPage.root.root.findByProps({ "aria-label": "DeepSeek Harness 配置档" });
+    assert.equal(profileSelect.props.value, "sdk-minimal");
+    assert.equal(profileSelect.props.disabled, true);
+
+    const dshExecInput = unsupportedPage.root.root.findByProps({ "aria-label": "dsh 可执行文件路径（可选）" });
+    assert.equal(dshExecInput.props.value, "");
+    assert.match(text(unsupportedPage.root.toJSON()), /尚未声明 DeepSeek Harness 支持/);
+    assert.ok(unsupportedPage.button("从 DeepSeek Harness 读取"));
+    assert.ok(unsupportedPage.button("手动添加 DeepSeek Harness 模型"));
+
+    await unsupportedPage.click("保存配置");
+    assert.ok(unsupportedPage.saved);
+    assert.equal(unsupportedPage.saved.base.tool, "deepseek_harness");
+    assert.equal(unsupportedPage.saved.base.dsh_profile, "sdk-minimal");
+    assert.equal(unsupportedPage.saved.base.dsh_executable, "");
+  } finally {
+    await unsupportedPage.dispose();
+  }
+
+  const supportedConfig = emptyConfig();
+  supportedConfig.base.tool = "deepseek_harness";
+  supportedConfig.base.dsh_profile = "sdk-minimal";
+  supportedConfig.base.dsh_executable = "";
+  const supportedPage = await mountPage({ config: supportedConfig, online: true, deepseekHarness: true });
+  try {
+    assert.doesNotMatch(text(supportedPage.root.toJSON()), /尚未声明 DeepSeek Harness 支持/);
+    assert.equal(validateAgentConfig(supportedConfig), "");
+  } finally {
+    await supportedPage.dispose();
   }
 });

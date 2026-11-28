@@ -2,7 +2,7 @@
 
 DeepHole 2.0 的 OpenCode 模型任务统一调用 `task_agent.run_opencode_task()`。业务调用方不直接启动 Serve，也不自行创建、查询、取消或删除 OpenCode Session。Codex 威胁分析和声明 `requires_codex` 的引擎使用独立 Codex 通道，见[配置参考](configuration.md#codex-运行配置)。
 
-> 此接口只使用 OpenCode 兼容 serve 与 OpenCode Session，没有直接调用 LLM API 的降级路径。
+> 此接口统一通过可插拔的底层执行后端（OpenCode 兼容 serve 或 DeepSeek Harness `sdk-minimal`）运行 Session 任务，没有直接调用 LLM API 的降级路径。
 
 Agent 启动时只注册一次 DeepHole 2.0 的后端配置、workspace 与 MCP/SKILL 适配，不创建 Serve 进程。首次 `run_opencode_task()` 会惰性创建共享任务服务和 Serve 管理单例；组件在真正发送 prompt 前检查 Serve，按现有规则启动、复用兼容进程或恢复异常进程。没有后端宿主绑定时，公共函数改从组件自己的 YAML 配置自举，仍不存在额外的组件 CLI。
 

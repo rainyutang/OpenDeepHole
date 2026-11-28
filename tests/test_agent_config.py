@@ -542,6 +542,8 @@ class AgentConfigTests(unittest.TestCase):
             "opencode_version": "1",
             "executable": "nga",
             "executable_v2": "opencode",
+            "dsh_executable": "",
+            "dsh_profile": "sdk-minimal",
             "no_proxy": "10.0.0.0/8",
             "opencode_serve_port": None,
         })

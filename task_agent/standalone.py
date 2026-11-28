@@ -24,6 +24,12 @@ from .host import (
     _configure_standalone_opencode,
     _get_opencode_configuration_state,
 )
+from .runtime_backend import (
+    DEFAULT_DSH_PROFILE,
+    SUPPORTED_RUNTIME_TOOLS,
+    TOOL_DEEPSEEK_HARNESS,
+    TOOL_OPENCODE,
+)
 from .timeouts import (
     DEFAULT_IDLE_TIMEOUT_SECONDS, DEFAULT_SESSION_TIMEOUT_SECONDS,
     DEFAULT_CORRECTION_TIMEOUT_SECONDS, inherited_retry_timeout,
@@ -63,6 +69,8 @@ class StandaloneCLIConfig:
     max_retries: int
     models: tuple[StandaloneModelConfig, ...]
     opencode_version: str = "1"
+    dsh_executable: str = ""
+    dsh_profile: str = DEFAULT_DSH_PROFILE
     model: str = ""
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     json_correction_timeout_seconds: int = DEFAULT_CORRECTION_TIMEOUT_SECONDS
@@ -80,6 +88,7 @@ class StandaloneOpenCodeConfig:
     opencode_config: dict[str, Any]
     opencode: StandaloneCLIConfig
     fp_review_cli: None = None
+    dsh_home: Path | None = None
 
     @property
     def opencode_concurrency(self) -> int:
@@ -300,6 +309,9 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
             "opencode_version",
             "executable",
             "executable_v2",
+            "dsh_executable",
+            "dsh_profile",
+            "dsh_home",
             "port",
             "timeout",
             "idle_timeout",
@@ -334,23 +346,41 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         base_dir=base_dir,
     )
 
-    legacy_tool = str(serve.get("tool") or "opencode").strip().lower()
-    if version == _SCHEMA_VERSION and legacy_tool != "opencode":
-        raise ValueError("serve.tool must be 'opencode'")
-    if version == _LEGACY_SCHEMA_VERSION and legacy_tool not in {"opencode", "nga"}:
-        raise ValueError("serve.tool must be 'opencode' or legacy 'nga'")
+    legacy_tool = str(serve.get("tool") or TOOL_OPENCODE).strip().lower()
+    if version == _SCHEMA_VERSION and legacy_tool not in SUPPORTED_RUNTIME_TOOLS:
+        raise ValueError("serve.tool must be 'opencode' or 'deepseek_harness'")
+    if version == _LEGACY_SCHEMA_VERSION and legacy_tool not in (
+        SUPPORTED_RUNTIME_TOOLS | {"nga"}
+    ):
+        raise ValueError(
+            "serve.tool must be 'opencode', 'deepseek_harness', or legacy 'nga'"
+        )
     if version == _LEGACY_SCHEMA_VERSION and legacy_tool == "nga":
         warnings.warn(
             "serve.tool='nga' is deprecated; using tool='opencode' with the nga executable",
             RuntimeWarning,
             stacklevel=2,
         )
-    tool = "opencode"
+    tool = (
+        TOOL_DEEPSEEK_HARNESS
+        if legacy_tool == TOOL_DEEPSEEK_HARNESS
+        else TOOL_OPENCODE
+    )
     try:
         opencode_version = normalize_opencode_version(serve.get("opencode_version"))
     except ValueError as exc:
         raise ValueError("serve.opencode_version must be '1' or '2'") from exc
-    if opencode_version == "2" and "executable_v2" in serve and serve.get("executable_v2") is not None:
+    dsh_settings = None
+    if tool == TOOL_DEEPSEEK_HARNESS:
+        from .dsh.standalone_adapter import parse_standalone_dsh_settings
+
+        dsh_settings = parse_standalone_dsh_settings(
+            serve,
+            base_dir=base_dir,
+            workspace_dir=workspace_dir,
+        )
+        executable = dsh_settings.dsh_executable or "dsh"
+    elif opencode_version == "2" and "executable_v2" in serve and serve.get("executable_v2") is not None:
         executable = str(serve.get("executable_v2") or "").strip()
         if not executable:
             raise ValueError("serve.executable_v2 is required")
@@ -421,6 +451,12 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         tool=tool,
         opencode_version=opencode_version,
         executable=executable,
+        dsh_executable=dsh_settings.dsh_executable if dsh_settings is not None else "",
+        dsh_profile=(
+            dsh_settings.dsh_profile
+            if dsh_settings is not None
+            else DEFAULT_DSH_PROFILE
+        ),
         timeout=session_timeout,
         idle_timeout=_integer(
             serve.get("idle_timeout"),
@@ -460,6 +496,7 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         environment=environment,
         opencode_config=opencode_config,
         opencode=cli_config,
+        dsh_home=dsh_settings.dsh_home if dsh_settings is not None else None,
     )
 
 
@@ -485,6 +522,24 @@ def _build_bindings(config: StandaloneOpenCodeConfig) -> OpenCodeHostBindings:
             if bool(getattr(model_option, "use_default_model", False))
             else str(getattr(model_option, "model", "") or cli_config.model).strip()
         )
+        if tool == TOOL_DEEPSEEK_HARNESS:
+            from .dsh.standalone_adapter import (
+                StandaloneDshSettings,
+                build_standalone_dsh_runtime,
+            )
+
+            return build_standalone_dsh_runtime(
+                directory=Path(directory).resolve(),
+                model=model,
+                workspace_dir=config.workspace_dir,
+                opencode_config=config.opencode_config,
+                environment=config.environment,
+                settings=StandaloneDshSettings(
+                    dsh_executable=cli_config.dsh_executable,
+                    dsh_profile=cli_config.dsh_profile,
+                    dsh_home=config.dsh_home,
+                ),
+            )
         return OpenCodeSessionRuntime(
             directory=Path(directory).resolve(),
             tool=tool,

@@ -10,11 +10,14 @@ checkers: []
 schema_version: 11
 llm_providers: {}
 base:
-  # OpenCode is the fixed implementation; opencode_version selects "1" (1.x) or "2" (2.x).
+  # Supported tools: "opencode" (default) or "deepseek_harness" (sdk-minimal).
   tool: "opencode"
   opencode_version: "1"
   executable: "opencode"
   executable_v2: "opencode"
+  # Optional custom dsh executable path when tool="deepseek_harness" (empty = bundled SDK runtime).
+  dsh_executable: ""
+  dsh_profile: "sdk-minimal"
   # Comma-separated; appended independently to inherited NO_PROXY and no_proxy.
   no_proxy: "10.0.0.0/8"
   # null = choose one free local port once for this Agent process.

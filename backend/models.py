@@ -1435,6 +1435,7 @@ class AgentInfo(BaseModel):
     protocol_version: int = 1
     llm_api_config: bool | None = None
     llm_api_test: bool | None = None
+    deepseek_harness: bool | None = None
     scan_code_graph_updates: bool = False
     scan_knowledge_base_updates: bool = False
     scan_paths_probe: bool = False
@@ -1463,10 +1464,12 @@ class AgentOpenCodeModelConfig(BaseModel):
 
 
 class AgentOpenCodeConfig(BaseModel):
-    tool: Literal["opencode"] = "opencode"
+    tool: Literal["opencode", "deepseek_harness"] = "opencode"
     opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"
     executable_v2: str = "opencode"
+    dsh_executable: str = ""
+    dsh_profile: Literal["sdk-minimal"] = "sdk-minimal"
     model: str = ""
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -1488,10 +1491,12 @@ class AgentOpenCodeConfig(BaseModel):
 
 
 class AgentBaseConfig(BaseModel):
-    tool: Literal["opencode"] = "opencode"
+    tool: Literal["opencode", "deepseek_harness"] = "opencode"
     opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"
     executable_v2: str = "opencode"
+    dsh_executable: str = ""
+    dsh_profile: Literal["sdk-minimal"] = "sdk-minimal"
     no_proxy: str = "10.0.0.0/8"
     opencode_serve_port: int | None = Field(default=None, ge=1, le=65535)
 
@@ -1703,7 +1708,10 @@ def _upgrade_agent_v2_config(value: dict) -> dict:
     migrated = copy.deepcopy(value)
     migrated["schema_version"] = 5
     base = migrated.get("base")
-    if not isinstance(base, dict):
+    if isinstance(base, BaseModel):
+        base = base.model_dump()
+        migrated["base"] = base
+    elif not isinstance(base, dict):
         base = {}
         migrated["base"] = base
     base.setdefault("opencode_serve_port", None)
@@ -1746,15 +1754,21 @@ def _upgrade_agent_v6_config(value: dict) -> dict:
     migrated = copy.deepcopy(value)
     migrated["schema_version"] = 6
     base = migrated.get("base")
-    if not isinstance(base, dict):
+    if isinstance(base, BaseModel):
+        base = base.model_dump()
+        migrated["base"] = base
+    elif not isinstance(base, dict):
         base = {}
         migrated["base"] = base
     legacy_tool = str(base.get("tool") or "").strip().lower()
-    executable = str(base.get("executable") or "").strip()
-    if not executable:
-        executable = "nga" if legacy_tool == "nga" else "opencode"
-    base["tool"] = "opencode"
-    base["executable"] = executable
+    if legacy_tool == "deepseek_harness":
+        base["tool"] = "deepseek_harness"
+    else:
+        executable = str(base.get("executable") or "").strip()
+        if not executable:
+            executable = "nga" if legacy_tool == "nga" else "opencode"
+        base["tool"] = "opencode"
+        base["executable"] = executable
 
     model_pool = migrated.get("model_pool")
     if isinstance(model_pool, dict) and isinstance(model_pool.get("models"), list):
@@ -2065,6 +2079,8 @@ class AgentRemoteConfig(BaseModel):
             opencode_version=self.base.opencode_version,
             executable=active_executable,
             executable_v2=self.base.executable_v2,
+            dsh_executable=self.base.dsh_executable,
+            dsh_profile=self.base.dsh_profile,
             timeout=self.vulnerability_mining.timeout_seconds,
             idle_timeout=self.vulnerability_mining.idle_timeout_seconds,
             json_correction_timeout_seconds=self.vulnerability_mining.json_correction_timeout_seconds,

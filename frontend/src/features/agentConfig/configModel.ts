@@ -88,6 +88,8 @@ export const defaultConfig = (): AgentRemoteConfig => ({
     opencode_version: "1",
     executable: "opencode",
     executable_v2: "opencode",
+    dsh_executable: "",
+    dsh_profile: "sdk-minimal",
     no_proxy: "10.0.0.0/8",
     opencode_serve_port: null,
   },
@@ -133,27 +135,39 @@ export function configuredWeekdays(window: AgentModelTimeWindow): number[] {
 }
 
 export function normalizeAgentBaseConfig(config: AgentRemoteConfig): AgentRemoteConfig {
+  const tool = config.base?.tool === "deepseek_harness" ? "deepseek_harness" : "opencode";
   const opencodeVersion = config.base?.opencode_version === "2" ? "2" : "1";
   const executable = typeof config.base?.executable === "string" ? config.base.executable : "opencode";
   const executableV2 = typeof config.base?.executable_v2 === "string" ? config.base.executable_v2 : "opencode";
+  const dshExecutable = typeof config.base?.dsh_executable === "string" ? config.base.dsh_executable : "";
+  const dshProfile = config.base?.dsh_profile === "sdk-minimal" ? "sdk-minimal" : "sdk-minimal";
   return {
     ...config,
     base: {
       ...config.base,
+      tool,
       opencode_version: opencodeVersion,
       executable,
       executable_v2: executableV2,
+      dsh_executable: dshExecutable,
+      dsh_profile: dshProfile,
     },
   };
 }
 
 export function validateAgentConfig(config: AgentRemoteConfig): string {
-  const opencodeVersion = config.base?.opencode_version ?? "1";
-  if (opencodeVersion !== "1" && opencodeVersion !== "2") return "OpenCode 版本只能是 1.x 或 2.x";
-  const activeExecutable = opencodeVersion === "2"
-    ? (config.base?.executable_v2 ?? "opencode")
-    : (config.base?.executable ?? "");
-  if (!activeExecutable.trim()) return "工具可执行文件不能为空";
+  const tool = config.base?.tool ?? "opencode";
+  if (tool !== "opencode" && tool !== "deepseek_harness") return "底层工具只能是 opencode 或 deepseek_harness";
+  if (tool === "opencode") {
+    const opencodeVersion = config.base?.opencode_version ?? "1";
+    if (opencodeVersion !== "1" && opencodeVersion !== "2") return "OpenCode 版本只能是 1.x 或 2.x";
+    const activeExecutable = opencodeVersion === "2"
+      ? (config.base?.executable_v2 ?? "opencode")
+      : (config.base?.executable ?? "");
+    if (!activeExecutable.trim()) return "工具可执行文件不能为空";
+  } else if ((config.base?.dsh_profile ?? "sdk-minimal") !== "sdk-minimal") {
+    return "DeepSeek Harness 配置档仅支持 sdk-minimal";
+  }
   const providerError = validateLlmProviders(config);
   if (providerError) return providerError;
   const policies = [config.threat_analysis.model_policy, config.vulnerability_mining, config.false_positive, config.vulnerability_validation.model_policy];
