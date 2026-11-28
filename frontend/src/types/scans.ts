@@ -4,6 +4,7 @@ import type { FpReviewMethod, FpReviewMethodSelection } from "./fpReview";
 import type { IndexedVulnerability, VulnerabilityValidation } from "./issues";
 import type { MiningEngineRunStatus, MiningEngineSelection } from "./mining";
 import type { OpenCodePoolStatus } from "./modelPool";
+import type { RedlineAuditTask, ScanRedlineItem } from "./redlines";
 import type { ThreatAnalysis, ThreatAnalysisMethodSelection, ThreatAnalysisRunStatus } from "./threatAnalysis";
 
 export type ScanItemStatus =
@@ -115,6 +116,7 @@ export interface ScanStatus extends ScanAutoResume {
   scan_items: string[];
   mining_engines?: MiningEngineSelection[];
   mining_engine_runs?: MiningEngineRunStatus[];
+  redline_items?: ScanRedlineItem[];
   created_at: string;
   status: ScanItemStatus;
   progress: number;
@@ -127,6 +129,7 @@ export interface ScanStatus extends ScanAutoResume {
   threat_analysis?: ThreatAnalysis | null;
   threat_audit_tasks?: ThreatAuditTask[];
   threat_pattern_audit_tasks?: ThreatPatternAuditTask[];
+  redline_audit_tasks?: RedlineAuditTask[];
   validations?: VulnerabilityValidation[];
   events: ScanEvent[];
   current_candidate: Candidate | null;
@@ -169,6 +172,8 @@ export interface ScanDetailCounts {
   candidate_audit_failed?: number;
   vulnerabilities: number;
   effective_issue_count?: number;
+  suspected_issue_count?: number;
+  direct_suspected_issue_count?: number;
   human_confirmed_issue_count?: number;
   validated_issue_count?: number;
   events: number;
@@ -194,6 +199,15 @@ export interface ScanDetailCounts {
   threat_pattern_audit_failed?: number;
   threat_pattern_audit_cancelled?: number;
   threat_pattern_audit_superseded?: number;
+  redline_audit_tasks?: number;
+  redline_audit_items_total?: number;
+  redline_audit_items_completed?: number;
+  redline_audit_items_running?: number;
+  redline_audit_items_queued?: number;
+  redline_audit_items_pending?: number;
+  redline_audit_items_failed?: number;
+  redline_audit_items_cancelled?: number;
+  redline_audit_findings?: number;
 
   validations: number;
   skill_reports: number;

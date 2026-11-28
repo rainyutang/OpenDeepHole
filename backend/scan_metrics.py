@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
 
 from backend.models import FpReviewResult
+from deephole_client.scan_modes import FP_REVIEW_EXEMPT_ENGINE_IDS
 
 FP_REVIEW_NO_RESULT_REASON = "Review incomplete"
 VALIDATION_TERMINAL_STATUSES = frozenset({
@@ -40,6 +41,7 @@ class VulnStat:
     analysis_source: str = "static_candidate"
     provisional: bool = False
     vuln_index: int | None = None
+    engine_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class ScanIssueMetrics:
     llm_issue_count: int = 0
     fp_review_issue_count: int = 0
     fp_review_false_positive_count: int = 0
+    direct_suspected_issue_count: int = 0
     effective_issue_count: int = 0
     suspected_issue_count: int = 0
     human_confirmed_issue_count: int = 0
@@ -57,10 +60,39 @@ class ScanIssueMetrics:
     accuracy: float | None = None
 
 
+def _field(obj: object, key: str, default: object = "") -> object:
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    if hasattr(obj, "keys") and callable(obj.keys):
+        try:
+            return obj[key]
+        except (KeyError, IndexError, TypeError):
+            return default
+    return getattr(obj, key, default)
+
+
 def is_llm_issue(vuln: VulnLike) -> bool:
-    if vuln.ai_verdict:
-        return vuln.ai_verdict == "confirmed"
-    return vuln.confirmed
+    ai_verdict = _field(vuln, "ai_verdict", None)
+    if ai_verdict:
+        return ai_verdict == "confirmed"
+    return bool(_field(vuln, "confirmed", False))
+
+
+def is_fp_review_exempt_vulnerability(vuln: object) -> bool:
+    """Return True when a finding belongs to an engine that bypasses FP review."""
+    engine_id = str(_field(vuln, "engine_id", "") or "").strip()
+    analysis_source = str(_field(vuln, "analysis_source", "") or "").strip()
+    return (
+        engine_id in FP_REVIEW_EXEMPT_ENGINE_IDS
+        or analysis_source in FP_REVIEW_EXEMPT_ENGINE_IDS
+    )
+
+
+def is_direct_suspected_issue(vuln: object) -> bool:
+    """Return True for confirmed findings that go straight to suspected issues."""
+    if bool(_field(vuln, "provisional", False)):
+        return False
+    return is_llm_issue(vuln) and is_fp_review_exempt_vulnerability(vuln)
 
 
 def accuracy(numerator: int, denominator: int) -> float | None:
@@ -99,6 +131,7 @@ def calculate_issue_metrics(
     llm_issue_count = 0
     fp_review_issue_count = 0
     fp_review_false_positive_count = 0
+    direct_suspected_issue_count = 0
     human_confirmed_count = 0
     human_confirmed_issue_count = 0
     human_false_positive_count = 0
@@ -116,7 +149,14 @@ def calculate_issue_metrics(
             llm_issue_count += 1
 
         fp_result = fp_results.get(index)
-        if fp_result is not None:
+        direct_suspected = is_direct_suspected_issue(vuln)
+        if direct_suspected:
+            direct_suspected_issue_count += 1
+            suspected_issue_count += 1
+            accuracy_basis_count += 1
+            if vuln.user_verdict == "confirmed":
+                human_confirmed_issue_count += 1
+        elif fp_result is not None:
             if fp_result.verdict == "tp":
                 fp_review_issue_count += 1
                 suspected_issue_count += 1
@@ -140,6 +180,7 @@ def calculate_issue_metrics(
         llm_issue_count=llm_issue_count,
         fp_review_issue_count=fp_review_issue_count,
         fp_review_false_positive_count=fp_review_false_positive_count,
+        direct_suspected_issue_count=direct_suspected_issue_count,
         effective_issue_count=effective_issue_count,
         suspected_issue_count=suspected_issue_count,
         human_confirmed_issue_count=human_confirmed_issue_count,

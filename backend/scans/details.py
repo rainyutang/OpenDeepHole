@@ -3,6 +3,8 @@
 from backend.application import ApplicationError, get_scan_store, run_store_call
 from backend.models import (
     CandidateAuditTaskResult,
+    RedlineAuditTaskDetail,
+    RedlineAuditTaskPage,
     ScanCandidatePage,
     ScanEventPage,
     ThreatAuditTaskPage,
@@ -275,6 +277,65 @@ async def get_scan_threat_pattern_audit_task_v2(
     if task is None:
         raise ApplicationError(status_code=404, detail="Audit task not found")
     return ThreatPatternAuditTaskDetail.model_validate(task)
+
+
+async def get_scan_redline_audit_results_v2(
+    scan_id: str,
+    task_ids: list[str] = ...,
+    current_user: User = None,
+) -> list[ThreatAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_redline_audit_task_results", scan_id, task_ids,
+    )
+
+
+async def get_scan_redline_audit_tasks_v2(
+    scan_id: str,
+    limit: int = 100,
+    cursor: str | None = None,
+    current_user: User = None,
+    redline_item_id: str | None = None,
+) -> RedlineAuditTaskPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    after: tuple[str, str] | None = None
+    if cursor:
+        try:
+            after = decode_cursor(cursor, size=2)
+        except ValueError as exc:
+            raise ApplicationError(status_code=400, detail="Invalid task cursor") from exc
+    tasks = await run_store_call(
+        get_scan_store(),
+        "list_redline_audit_tasks",
+        scan_id,
+        after_created_at=after[0] if after is not None else None,
+        after_task_id=after[1] if after is not None else None,
+        limit=limit + 1,
+        redline_item_id=redline_item_id,
+    )
+    has_more = len(tasks) > limit
+    items = tasks[:limit]
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(last.created_at or "", last.task_id)
+    return RedlineAuditTaskPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=next_cursor,
+    )
+
+
+async def get_scan_redline_audit_task_v2(
+    scan_id: str, task_id: str, current_user: User = None,
+) -> RedlineAuditTaskDetail:
+    await _check_scan_owner_v2(scan_id, current_user)
+    task = await run_store_call(
+        get_scan_store(), "get_redline_audit_task_detail", scan_id, task_id,
+    )
+    if task is None:
+        raise ApplicationError(status_code=404, detail="Redline audit task not found")
+    return RedlineAuditTaskDetail.model_validate(task)
 
 
 async def get_scan_validations_v2(

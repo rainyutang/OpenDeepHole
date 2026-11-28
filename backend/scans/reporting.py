@@ -4,7 +4,11 @@ from dataclasses import dataclass
 import re
 from backend.call_chain import call_chain_entry_function
 from backend.models import FpReviewResult, Vulnerability, VulnerabilityValidation
-from backend.scan_metrics import is_effective_fp_review_result
+from backend.scan_metrics import (
+    is_direct_suspected_issue,
+    is_effective_fp_review_result,
+    is_fp_review_exempt_vulnerability,
+)
 from backend.scans.report_records import _fp_review_stage_titles
 from backend.vulnerability_identity import vulnerability_report_identity
 
@@ -120,9 +124,12 @@ def _exportable_problem_groups(
             validation_map,
         )
         if (
-            group.fp_result is not None
-            and is_effective_fp_review_result(group.fp_result)
-            and group.fp_result.verdict == "tp"
+            (
+                group.fp_result is not None
+                and is_effective_fp_review_result(group.fp_result)
+                and group.fp_result.verdict == "tp"
+            )
+            or is_direct_suspected_issue(group.vulnerability)
         )
     ]
 
@@ -183,6 +190,8 @@ def _resolved_report_vulnerability(
     fp_result: FpReviewResult | None,
 ) -> Vulnerability:
     """Project final-judge regenerated report fields without mutating stored mining records."""
+    if is_fp_review_exempt_vulnerability(vuln):
+        return vuln
     if (
         fp_result is None
         or not is_effective_fp_review_result(fp_result)

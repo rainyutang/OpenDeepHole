@@ -1,4 +1,5 @@
 import type { RefCallback } from "react";
+import { isRedlineAuditEngine } from "../../miningEngines";
 import type { FpReviewResult } from "../../types/fpReview";
 import type { Vulnerability, VulnerabilityValidation } from "../../types/issues";
 import {
@@ -45,6 +46,7 @@ export function VulnListItem({
 }) {
   const feedback = vuln.user_verdict ? USER_FEEDBACK_DISPLAY[vuln.user_verdict] : null;
   const validationStatus = validation?.status || "";
+  const isRedline = isRedlineAuditEngine(engineId(vuln));
   const itemClassName = `w-full px-3 py-2.5 text-left transition-colors ${
     active
       ? "bg-blue-500/15"
@@ -60,12 +62,19 @@ export function VulnListItem({
       <li>
         <button type="button" ref={focusRef} aria-current={active ? "true" : undefined} onClick={onClick} className={itemClassName}>
           <div className="flex items-center justify-between gap-2">
-            <span
-              className="min-w-0 truncate rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300"
-              title={displayedType !== rawType ? rawType.toUpperCase() : undefined}
-            >
-              {displayedType}
-            </span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              {isRedline && (
+                <span className="shrink-0 rounded border border-rose-500/40 bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">
+                  [红线]
+                </span>
+              )}
+              <span
+                className="min-w-0 truncate rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300"
+                title={displayedType !== rawType ? rawType.toUpperCase() : undefined}
+              >
+                {displayedType}
+              </span>
+            </div>
             <span className={`shrink-0 text-[10px] font-semibold ${feedback?.color ?? "text-slate-600"}`}>
               人工：{feedback?.label ?? "未标记"}
             </span>
@@ -98,6 +107,11 @@ export function VulnListItem({
           )}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {isRedline && (
+            <span className="shrink-0 rounded border border-rose-500/40 bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">
+              [红线]
+            </span>
+          )}
           <span className="text-[10px] font-semibold uppercase text-slate-400 bg-slate-700/50 px-1.5 py-0.5 rounded">
             {vulnerabilityTypeLabel(vuln)}
           </span>

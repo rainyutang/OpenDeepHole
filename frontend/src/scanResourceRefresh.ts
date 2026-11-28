@@ -1,11 +1,11 @@
 import {
   getFpReviewOverview, getFpReviewResultsPage, getScanCandidatesPage, getScanEventsPage,
-  getScanPatternTasksPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage,
+  getScanPatternTasksPage, getScanRedlineAuditTasksPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage,
 } from "./api/client";
 import type { FpReviewJob, ScanDetailPages, ScanStatus } from "./types";
 
 export const SCAN_DETAIL_RESOURCES = [
-  "candidates", "vulnerabilities", "validations", "threat-audit-tasks", "threat-pattern-audit-tasks", "events", "fp-review",
+  "candidates", "vulnerabilities", "validations", "threat-audit-tasks", "threat-pattern-audit-tasks", "redline-audit-tasks", "events", "fp-review",
 ] as const;
 export type ScanDetailResource = typeof SCAN_DETAIL_RESOURCES[number];
 
@@ -129,6 +129,15 @@ export async function refreshScanResource(
     return { scan: (current) => ({
       ...withCursor(current, "pattern_tasks_next_cursor", page.next_cursor),
       threat_pattern_audit_tasks: retainLiveChanges(before, page.items, current.threat_pattern_audit_tasks ?? [], (v) => v.task_id).sort(byTask),
+    }) };
+  }
+  if (resource === "redline-audit-tasks") {
+    const before = capture(scan.redline_audit_tasks ?? []);
+    const page = await loadRange((cursor: string | null) => getScanRedlineAuditTasksPage(id, cursor, signal, 200),
+      before, true, byTask, signal);
+    return { scan: (current) => ({
+      ...current,
+      redline_audit_tasks: retainLiveChanges(before, page.items, current.redline_audit_tasks ?? [], (v) => v.task_id).sort(byTask),
     }) };
   }
   if (resource === "events") {

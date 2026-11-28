@@ -4,7 +4,7 @@ import type { MiningEngineCatalogItem } from "../../types/mining";
 import type { ScanConfigMemory, StandardScanModeDefaults } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
-import { THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
+import { REDLINE_AUDIT_ENGINE_ID, THREAT_AUDIT_ENGINE_ID, canonicalMiningEngineLabel, miningEngineRequiresThreatAnalysis, miningEngineSelectedByDefault } from "../../miningEngines";
 
 import type { AgentMcpConfig } from "../../types/agents";
 import type { CreateScanInput, ScanCopyConfig } from "../../api/scans";
@@ -112,6 +112,7 @@ export interface ScanDraftContext {
   fpMethods: FpReviewMethodCatalogItem[];
   knowledgeProjects?: KnowledgeBaseProject[];
   knowledgeBaseConfigured?: boolean;
+  redlineEnabledCount?: number | null;
 }
 
 export function selectScanDraft(draft: ScanDraft, context: ScanDraftContext) {
@@ -226,6 +227,9 @@ export function validateScanDraft(draft: ScanDraft, context: ScanDraftContext, s
       && draft.miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected
     ) {
       return "DeepHole基于攻击威胁的漏洞挖掘引擎依赖攻击树产物，请启用生成攻击树或改用基于攻击模式的漏洞挖掘引擎";
+    }
+    if (draft.miningEngines[REDLINE_AUDIT_ENGINE_ID]?.selected && context.redlineEnabledCount === 0) {
+      return "当前没有启用的网络安全红线条目，请联系管理员在「红线管理」中配置并启用后再启动红线排查";
     }
     if (!fpReviewMethod) return "没有可用的去误报方法";
   }

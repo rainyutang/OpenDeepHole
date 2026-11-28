@@ -3,9 +3,11 @@ import { createScan, getMiningEngineCatalog, getScanCopyConfig, getScanModeDefau
 import { getAgents, getAgentValidatorCatalog, getScanConfigMemory } from "../../api/agents";
 import { getFpReviewMethodCatalog } from "../../api/fpReview";
 import { getKnowledgeBaseStatus } from "../../api/knowledgeBase";
+import { getRedlineSummary } from "../../api/redlines";
 import type { AgentInfo, AgentValidatorMethod } from "../../types/agents";
 import type { FpReviewMethodCatalogItem } from "../../types/fpReview";
 import type { MiningEngineCatalogItem } from "../../types/mining";
+import type { RedlineSummaryResponse } from "../../types/redlines";
 import type { ScanConfigMemory, StandardScanModeDefaults } from "../../types/scans";
 import type { ThreatAnalysisMethodCatalogItem } from "../../types/threatAnalysis";
 
@@ -90,6 +92,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
   const copiedAgentInitialization = useRef<string | null>(null);
   const [copiedCapabilities, setCopiedCapabilities] = useState({ knowledge: false, validation: false });
   const [knowledgeBaseConfigured, setKnowledgeBaseConfigured] = useState(false);
+  const [redlineSummary, setRedlineSummary] = useState<RedlineSummaryResponse | null>(null);
 
   const [reviewNotesReady, setReviewNotesReady] = useState(true);
 
@@ -100,6 +103,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     threatMethods,
     fpMethods,
     knowledgeBaseConfigured,
+    redlineEnabledCount: redlineSummary?.enabled_count ?? null,
   };
   const {
     selectedAgentInfo,
@@ -121,8 +125,9 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
       getFpReviewMethodCatalog(),
       getScanModeDefaults(),
       getKnowledgeBaseStatus().catch(() => ({ configured: false, name: "knowledge-base" })),
+      getRedlineSummary(controller.signal).catch(() => null),
       sourceScanId ? getScanCopyConfig(sourceScanId, controller.signal) : Promise.resolve(null),
-    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, modeDefaults, kbStatus, copied]) => {
+    ]).then(([agentList, engineCatalog, threatCatalog, fpCatalog, modeDefaults, kbStatus, redlineStats, copied]) => {
       if (controller.signal.aborted) return;
       setAgents(agentList);
       setMiningEngineCatalog(engineCatalog.engines);
@@ -130,6 +135,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
       setFpMethods(fpCatalog.methods);
       setStandardDefaults(modeDefaults.standard);
       setKnowledgeBaseConfigured(Boolean(kbStatus?.configured));
+      setRedlineSummary(redlineStats);
       const initialization = scanDraftInitialization(
         engineCatalog.engines,
         threatCatalog.methods,
@@ -289,6 +295,7 @@ export function useNewScan(sourceScanId: string | undefined, onScanStarted: (sca
     agentConfigLoading,
     copiedCapabilities,
     knowledgeBaseConfigured,
+    redlineSummary,
     reviewNotesReady,
     setReviewNotesReady,
     selectedAgentInfo,

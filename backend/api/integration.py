@@ -711,6 +711,40 @@ async def get_public_threat_pattern_audit_results(
     return await scan_details.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, current_user)
 
 
+@router.get("/api/public/scans/{scan_id}/redline-audit-tasks")
+async def get_public_redline_audit_tasks(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=200),
+    cursor: str | None = Query(None),
+    redline_item_id: str | None = None,
+    current_user: User = Depends(_public_user_dependency),
+):
+    return await scan_details.get_scan_redline_audit_tasks_v2(
+        scan_id, limit, cursor, current_user, redline_item_id=redline_item_id,
+    )
+
+
+@router.get("/api/public/scans/{scan_id}/redline-audit-tasks/{task_id}")
+async def get_public_redline_audit_task(
+    scan_id: str,
+    task_id: str,
+    current_user: User = Depends(_public_user_dependency),
+):
+    return await scan_details.get_scan_redline_audit_task_v2(scan_id, task_id, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/redline-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_public_redline_audit_results(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[ThreatAuditTaskResult]:
+    return await scan_details.get_scan_redline_audit_results_v2(scan_id, task_ids, current_user)
+
+
 @router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict | None)
 async def get_public_scan_threat_analysis(
     scan_id: str,

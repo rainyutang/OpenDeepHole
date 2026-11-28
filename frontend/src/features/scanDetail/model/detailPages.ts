@@ -1,4 +1,5 @@
 import {
+  REDLINE_AUDIT_ENGINE_ID,
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   THREAT_PATTERN_AUDIT_ENGINE_ID as THREAT_PATTERN_ENGINE_ID,
@@ -32,6 +33,7 @@ export function detailResourcesForTab(tab: MainTab, engineId: string): DetailRes
     if (engineId === THREAT_ENGINE_ID) return ["threat_tasks", "events"];
     if (engineId === THREAT_PATTERN_ENGINE_ID) return ["pattern_tasks", "events"];
     if (engineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID) return ["events"];
+    if (engineId === REDLINE_AUDIT_ENGINE_ID) return ["events"];
     if (engineId && engineId !== STATIC_ENGINE_ID) {
       return ["vulnerabilities", "validations", "events"];
     }

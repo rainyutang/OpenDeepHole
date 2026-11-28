@@ -2,7 +2,7 @@ import type { ReportFpReviewState } from "../../api/reports";
 import type { FpReviewResult } from "../../types/fpReview";
 import type { IndexedVulnerability, UserFeedbackVerdict, Vulnerability, VulnerabilityValidation } from "../../types/issues";
 import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../../fpReview";
-import { canonicalMiningEngineLabel } from "../../miningEngines";
+import { canonicalMiningEngineLabel, isRedlineAuditEngine, REDLINE_AUDIT_ENGINE_ID } from "../../miningEngines";
 
 export type AiVerdict = "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern";
 
@@ -104,10 +104,10 @@ export function auditOrder(vuln: Vulnerability, index: number): number {
 }
 
 export function engineId(vuln: Vulnerability): string {
-  return vuln.engine_id
-    || (vuln.analysis_source === "threat_audit"
-      ? "threat_audit"
-      : "static_candidate");
+  if (vuln.engine_id) return vuln.engine_id;
+  if (vuln.analysis_source === REDLINE_AUDIT_ENGINE_ID) return REDLINE_AUDIT_ENGINE_ID;
+  if (vuln.analysis_source === "threat_audit") return "threat_audit";
+  return "static_candidate";
 }
 
 export function issueSourceOrder(vuln: Vulnerability): number {
@@ -133,6 +133,16 @@ export function displayedVulnerabilityTypeLabel(
 
 export function isFinalFpProblem(result?: FpReviewResult | null): boolean {
   return isEffectiveFpReviewResult(result) && result.verdict === "tp";
+}
+
+export function isDirectSuspectedIssue(vuln: Vulnerability): boolean {
+  return !vuln.provisional
+    && getVerdict(vuln) === "confirmed"
+    && isRedlineAuditEngine(engineId(vuln));
+}
+
+export function isFinalSuspectedIssue(vuln: Vulnerability, fpResult?: FpReviewResult | null): boolean {
+  return isDirectSuspectedIssue(vuln) || isFinalFpProblem(fpResult);
 }
 
 export function validationStatusLabel(status: string): string {
@@ -215,9 +225,9 @@ export function annotateIssues(
       validationState: validationFilterState(validation),
       fpReviewState: fpReviewFilterState(fpResult),
       userFeedbackState: userFeedbackFilterState(vuln),
-      problem: isProblemVuln(vuln, fpResult),
-      fpNonProblem: getVerdict(vuln) === "confirmed" && isFpReviewNonProblem(fpResult),
-      finalTp: isFinalFpProblem(fpResult),
+      problem: isDirectSuspectedIssue(vuln) || isProblemVuln(vuln, fpResult),
+      fpNonProblem: !isDirectSuspectedIssue(vuln) && getVerdict(vuln) === "confirmed" && isFpReviewNonProblem(fpResult),
+      finalTp: isFinalSuspectedIssue(vuln, fpResult),
     };
   });
 }

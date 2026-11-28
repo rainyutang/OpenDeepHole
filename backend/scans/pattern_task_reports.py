@@ -27,15 +27,30 @@ def publish_pattern_task_settlement(scan_id: str, engine_ids: list[str], executi
     if not engine_ids:
         return
     from backend.application import get_runtime, publish
+    from backend.models import REDLINE_AUDIT_ENGINE_ID
 
+    unique_ids = sorted(set(engine_ids))
+    pattern_ids = [item for item in unique_ids if item != REDLINE_AUDIT_ENGINE_ID]
+    has_redline = REDLINE_AUDIT_ENGINE_ID in unique_ids
     # Cached lists are not the authority for detail reads. Avoid loading every
     # task (and its report metadata) merely to announce a set-based update.
     cached = get_runtime().scans.running_scans.get(scan_id)
     if cached is not None and cached.execution_revision == execution_revision:
-        cached.threat_pattern_audit_tasks = []
-    publish(scan_id, "resource_changed", {
-        "resource": "threat-pattern-audit-tasks",
-        "change": "task_status",
-        "engine_ids": sorted(set(engine_ids)),
-        "execution_revision": execution_revision,
-    })
+        if pattern_ids:
+            cached.threat_pattern_audit_tasks = []
+        if has_redline:
+            cached.redline_audit_tasks = []
+    if pattern_ids:
+        publish(scan_id, "resource_changed", {
+            "resource": "threat-pattern-audit-tasks",
+            "change": "task_status",
+            "engine_ids": pattern_ids,
+            "execution_revision": execution_revision,
+        })
+    if has_redline:
+        publish(scan_id, "resource_changed", {
+            "resource": "redline-audit-tasks",
+            "change": "task_status",
+            "engine_ids": [REDLINE_AUDIT_ENGINE_ID],
+            "execution_revision": execution_revision,
+        })

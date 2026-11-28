@@ -4,7 +4,9 @@ import {
   THREAT_PATTERN_AUDIT_ENGINE_ID,
   canonicalMiningEngineLabel,
   isPatternAuditEngine,
+  isRedlineAuditEngine,
   miningEngineRequiresCodeIndex,
+  redlineAuditFlowDetail,
   threatPatternAuditFlowDetail,
 } from "../../../miningEngines";
 import type { PatternAuditEngineCounts } from "../../../miningEngines";
@@ -180,7 +182,9 @@ export function buildProcessFlowModel({
   const threatSelected = isThreatAnalysisSelected(scan);
   const validations = scan.validations ?? [];
   const confirmedCount = scan.vulnerabilities.filter((vuln) => isAiConfirmed(vuln)).length;
-  const fpReviewTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(
+    (vuln) => isAiConfirmed(vuln) && !isRedlineAuditEngine(vuln.engine_id || vuln.analysis_source || ""),
+  ).length;
   const validationRunningCount = validations.filter((item) =>
     item.running || item.status === "queued" || item.status === "running" || item.status === "pending",
   ).length;
@@ -347,21 +351,30 @@ export function buildProcessFlowModel({
           Boolean(scan.threat_analysis),
           patternAuditEngineCounts(scan, engine.engine_id),
         )
-        : run?.error_message
-        || (engine.engine_id === STATIC_ENGINE_ID && staticRunning
-          ? `静态分析 ${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`
-          : engine.engine_id === STATIC_ENGINE_ID && candidateCount > 0
-            ? `静态分析完成 · ${scan.processed_candidates}/${scan.total_candidates || candidateCount} 候选点已审计`
-            : run?.started_at
-              ? `引擎 ID：${engine.engine_id}`
-              : "等待启动");
+        : isRedlineAuditEngine(engine.engine_id)
+          ? redlineAuditFlowDetail(run, scan.detail_counts, scan.redline_items?.length ?? 0)
+          : run?.error_message
+          || (engine.engine_id === STATIC_ENGINE_ID && staticRunning
+            ? `静态分析 ${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`
+            : engine.engine_id === STATIC_ENGINE_ID && candidateCount > 0
+              ? `静态分析完成 · ${scan.processed_candidates}/${scan.total_candidates || candidateCount} 候选点已审计`
+              : run?.started_at
+                ? `引擎 ID：${engine.engine_id}`
+                : "等待启动");
+    const redlineStatus = isRedlineAuditEngine(engine.engine_id)
+      ? (() => {
+        const baseStatus = engineFlowStatus(run);
+        if (baseStatus === "done" && (scan.detail_counts?.redline_audit_items_failed ?? 0) > 0) return "warning";
+        return baseStatus;
+      })()
+      : null;
     return {
       id: `engine:${engine.engine_id}`,
       label,
       detail,
       status: engine.engine_id === STATIC_ENGINE_ID
         ? staticCandidateAuditFlowStatus(scan, run)
-        : threatRunStatus ?? engineFlowStatus(run),
+        : threatRunStatus ?? redlineStatus ?? engineFlowStatus(run),
       active: activeTab === "mining" && activeEngineId === engine.engine_id,
       tone: engine.engine_id === THREAT_ENGINE_ID ? "green" : engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
     };

@@ -33,6 +33,7 @@ from backend.models import (
     HistoryPattern,
     MiningEngineRunStatus,
     OutputSource,
+    RedlineAuditTask,
     ScanEvent,
     ThreatAnalysisRunStatus,
     ThreatAuditTask,
@@ -1640,27 +1641,39 @@ class Reporter:
     async def push_threat_pattern_audit_task(self, scan_id: str, task: ThreatPatternAuditTask) -> ThreatPatternAuditTask | None:
         return await self._push_audit_task(scan_id, task, "threat-pattern-audit")
 
+    async def push_redline_audit_task(self, scan_id: str, task: RedlineAuditTask) -> RedlineAuditTask | None:
+        return await self._push_audit_task(scan_id, task, "redline-audit")
+
     async def get_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
         return await self._get_audit_tasks(scan_id, "threat-audit", ThreatAuditTask)
 
     async def get_threat_pattern_audit_tasks(self, scan_id: str) -> list[ThreatPatternAuditTask]:
         return await self._get_audit_tasks(scan_id, "threat-pattern-audit", ThreatPatternAuditTask)
 
+    async def get_redline_audit_tasks(self, scan_id: str) -> list[RedlineAuditTask]:
+        return await self._get_audit_tasks(scan_id, "redline-audit", RedlineAuditTask)
+
     async def _push_audit_task(self, scan_id: str, task, kind: str):
-        """Create or update one threat-analysis-derived audit task."""
+        """Create or update one threat-analysis or redline audit task."""
         if self.dry_run:
             print(
-                "  [THREAT_AUDIT] "
-                f"{task.status} {getattr(task, 'module_name', '') or getattr(task, 'surface_name', '')} / "
-                f"{getattr(task, 'pattern_name', '') or getattr(task, 'method_name', '')}"
+                f"  [{kind.upper().replace('-', '_')}] "
+                f"{task.status} "
+                f"{getattr(task, 'item_code', '') or getattr(task, 'module_name', '') or getattr(task, 'surface_name', '')} / "
+                f"{getattr(task, 'requirement', '') or getattr(task, 'pattern_name', '') or getattr(task, 'method_name', '')}"
             )
             return task
         task.output_source = self._with_agent_source(task.output_source)
-        identity = self.pattern_task_report_identity(scan_id) if kind == "threat-pattern-audit" else None
+        identity = (
+            self.pattern_task_report_identity(scan_id)
+            if kind in {"threat-pattern-audit", "redline-audit"}
+            else None
+        )
         if identity is not None:
             # One task's updates retain order while unrelated tasks can report
             # concurrently. A retry reuses the sequence saved in the outbox.
-            scope = f"scan:{scan_id}:pattern-task:{task.task_id}:{identity[0]}:{identity[1]}"
+            scope_prefix = "pattern-task" if kind == "threat-pattern-audit" else f"{kind}-task"
+            scope = f"scan:{scan_id}:{scope_prefix}:{task.task_id}:{identity[0]}:{identity[1]}"
             # A shared counter still orders every task's reports (gaps are
             # harmless), without retaining a permanent row for each task/round.
             sequence_scope = f"pattern-tasks:{self.server_url}:{identity[0]}"

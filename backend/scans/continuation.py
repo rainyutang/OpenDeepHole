@@ -223,6 +223,10 @@ async def _resume_payload(
             item.model_dump(mode="json")
             for item in meta.mining_engines
         ],
+        "redline_items": [
+            item.model_dump(mode="json")
+            for item in meta.redline_items
+        ],
         "retry_candidates": (
             [
                 candidate.model_dump(

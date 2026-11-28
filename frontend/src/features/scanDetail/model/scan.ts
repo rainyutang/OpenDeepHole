@@ -2,7 +2,9 @@ import { isEffectiveFpReviewResult } from "../../../fpReview";
 import {
   canonicalMiningEngineLabel,
   isPatternAuditEngine,
+  isRedlineAuditEngine,
   miningEngineRequiresCodeIndex,
+  REDLINE_AUDIT_ENGINE_LABEL,
   STATIC_CANDIDATE_ENGINE_LABEL,
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   THREAT_AUDIT_ENGINE_LABEL,
@@ -139,8 +141,24 @@ function finalReviewedIssueIndices(fpReview: FpReviewJob | null): Set<number> {
   );
 }
 
-export function finalReviewedIssueCount(fpReview: FpReviewJob | null): number {
-  return fpReview?.result_counts?.tp ?? finalReviewedIssueIndices(fpReview).size;
+function isDirectSuspectedScanVuln(vuln: { provisional?: boolean; ai_verdict?: string; confirmed?: boolean; engine_id?: string; analysis_source?: string }): boolean {
+  return !vuln.provisional
+    && isAiConfirmed(vuln)
+    && isRedlineAuditEngine(vuln.engine_id || vuln.analysis_source || "");
+}
+
+export function finalReviewedIssueCount(fpReview: FpReviewJob | null, scan?: ScanStatusType | null): number {
+  if (scan?.detail_counts?.suspected_issue_count != null) return scan.detail_counts.suspected_issue_count;
+  const fpCount = fpReview?.result_counts?.tp ?? finalReviewedIssueIndices(fpReview).size;
+  if (scan?.detail_counts?.direct_suspected_issue_count != null) {
+    return fpCount + scan.detail_counts.direct_suspected_issue_count;
+  }
+  if (!scan) return fpCount;
+  const fpIndices = finalReviewedIssueIndices(fpReview);
+  const directCount = scan.vulnerabilities.filter(
+    (vuln) => isDirectSuspectedScanVuln(vuln) && !fpIndices.has(vuln.vuln_index),
+  ).length;
+  return fpCount + directCount;
 }
 
 export function isValidationTerminalStatus(status: string): boolean {
@@ -151,7 +169,8 @@ export function humanConfirmedIssueCount(scan: ScanStatusType, fpReview: FpRevie
   if (scan.detail_counts?.human_confirmed_issue_count != null) return scan.detail_counts.human_confirmed_issue_count;
   const issueIndices = finalReviewedIssueIndices(fpReview);
   return scan.vulnerabilities.filter((vuln) => (
-    issueIndices.has(vuln.vuln_index) && vuln.user_verdict === "confirmed"
+    (issueIndices.has(vuln.vuln_index) || isDirectSuspectedScanVuln(vuln))
+    && vuln.user_verdict === "confirmed"
   )).length;
 }
 
@@ -320,10 +339,16 @@ function isVulnerabilityDedupPoolTask(task: Record<string, unknown>): boolean {
     && poolTaskName(task).startsWith("vulnerability-dedup-");
 }
 
+export function isRedlineAuditPoolTask(task: Record<string, unknown>): boolean {
+  return poolTaskType(task) === "vulnerability_mining"
+    && poolTaskName(task).startsWith("redline-audit-");
+}
+
 export function isCandidateAuditPoolTask(task: Record<string, unknown>): boolean {
   return isVulnerabilityMiningPoolTask(task)
     && !isThreatAuditPoolTask(task)
     && !isThreatPatternAuditPoolTask(task)
+    && !isRedlineAuditPoolTask(task)
     && !isVulnerabilityDedupPoolTask(task);
 }
 
@@ -390,6 +415,7 @@ export function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): st
   if (latest?.phase === "variant_hunt") return "威胁分析 / 历史同类问题挖掘";
   if (latest?.phase === "threat_analysis") return threatRunningStageLabel;
   if (latest?.phase === "threat_audit") return `漏洞挖掘 / ${THREAT_AUDIT_ENGINE_LABEL}`;
+  if (latest?.phase === "redline_audit") return `漏洞挖掘 / ${REDLINE_AUDIT_ENGINE_LABEL}`;
   if (latest?.phase === "git_history") return "威胁分析 / Git 历史问题分析";
   if (latest?.phase === "auditing") return `漏洞挖掘 / ${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点 AI 审计`;
   if (latest?.phase === "static_analysis") return `漏洞挖掘 / ${STATIC_CANDIDATE_ENGINE_LABEL} / 静态分析`;

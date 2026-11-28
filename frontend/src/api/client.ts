@@ -129,6 +129,20 @@ export type {
 export { listFeedback, createFeedback, updateFeedback, deleteFeedback, updateScanFeedback } from "./feedback";
 export { getReviewNotes, saveReviewNote, deleteReviewNote, getScanReviewNotes, updateScanReviewNotes } from "./reviewNotes";
 export {
+  getRedlineSummary,
+  listAdminRedlines,
+  createAdminRedline,
+  updateAdminRedline,
+  deleteAdminRedline,
+  batchSetAdminRedlinesEnabled,
+  batchDeleteAdminRedlines,
+  importAdminRedlinesExcel,
+  downloadAdminRedlineTemplate,
+  getScanRedlineAuditTasksPage,
+  getScanRedlineAuditTaskDetail,
+  getScanRedlineAuditResults,
+} from "./redlines";
+export {
   getFpReviewMethodCatalog,
   triggerFpReview,
   stopFpReview,

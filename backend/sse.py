@@ -119,6 +119,7 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
                      "file_inventory": ("file-inventory", ""),
                      "threat_audit_task": ("threat-audit-tasks", "task"),
                      "threat_pattern_audit_task": ("threat-pattern-audit-tasks", "task"),
+                     "redline_audit_task": ("redline-audit-tasks", "task"),
                      "scan_candidates": ("candidates", "")}
         if event_type in resources:
             resource, field = resources[event_type]
@@ -131,7 +132,7 @@ def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
                                if key in detail})
             if event_type in {"fp_review_result", "fp_review_stage_output"}:
                 notice["change"] = "result" if event_type == "fp_review_result" else "stage_output"
-            if event_type == "threat_pattern_audit_task":
+            if event_type in {"threat_pattern_audit_task", "redline_audit_task"}:
                 notice.update({key: data[key] for key in ("change", "execution_revision", "engine_ids")
                                if key in data})
             return "resource_changed", notice

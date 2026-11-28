@@ -22,6 +22,7 @@ export default function ScanHistory({
   user,
   onLogout,
   onManageUsers,
+  onManageRedlines,
   onCheckerDashboard,
   onCheckerCatalog,
   onReviewNotes,
@@ -110,6 +111,7 @@ export default function ScanHistory({
         user={user}
         onLogout={onLogout}
         onManageUsers={onManageUsers}
+        onManageRedlines={user.role === "admin" ? onManageRedlines : undefined}
         onCheckerDashboard={onCheckerDashboard}
         onCheckerCatalog={onCheckerCatalog}
         onReviewNotes={onReviewNotes}

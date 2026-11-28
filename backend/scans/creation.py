@@ -250,6 +250,7 @@ def _creation_records(
             for item in mining_engine_selections
             if item.enabled
         ],
+        redline_items=list(configuration.redline_items),
         created_at=now,
         status=ScanItemStatus.PENDING,
         progress=0.0,
@@ -267,6 +268,7 @@ def _creation_records(
         threat_analysis_method=threat_analysis_method,
         threat_analysis_method_selection=threat_analysis_method_selection,
         mining_engines=mining_engine_selections,
+        redline_items=list(configuration.redline_items),
         auto_resume_enabled=configuration.auto_resume_enabled,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
@@ -438,6 +440,10 @@ async def _dispatch_creation(
             item.model_dump(mode="json")
             for item in mining_engine_selections
         ],
+        "redline_items": [
+            item.model_dump(mode="json")
+            for item in configuration.redline_items
+        ],
         "codex_model_ids": agent_explicit_model_ids(managed_config),
         "code_graph_mcp_revision": meta.code_graph_mcp_revision,
         "code_graph_mcp": (
@@ -487,15 +493,24 @@ async def create_agent_scan(
 ) -> ScanStartResponse:
     """Resolve, preflight, persist and dispatch one new scan in that order."""
     selected = await _select_creation_agent(body, current_user, enforce_agent_owner)
+    store = get_scan_store()
     knowledge_base_settings = None
     if body.knowledge_base.enabled:
         from backend.knowledge_base import get_effective_knowledge_base_settings
 
-        store = get_scan_store()
         knowledge_base_settings = await run_store_call(
             store,
             get_effective_knowledge_base_settings,
             store,
+        )
+    enabled_redline_items = None
+    if any(
+        str(item.engine_id or "").strip() == "redline_audit"
+        for item in (body.mining_engines or [])
+    ):
+        enabled_redline_items = await run_store_call(
+            store,
+            "list_enabled_scan_redline_items",
         )
     configuration = resolve_creation_configuration(
         body,
@@ -503,6 +518,7 @@ async def create_agent_scan(
         current_user,
         checker_names,
         knowledge_base_settings=knowledge_base_settings,
+        enabled_redline_items=enabled_redline_items,
     )
     identity = _creation_identity(body, configuration.project_path)
     validation = await _creation_validation(body, identity, selected)

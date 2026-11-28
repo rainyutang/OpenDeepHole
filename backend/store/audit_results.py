@@ -1,7 +1,11 @@
 """Shared, bounded audit summaries; report bodies are never loaded here."""
 
 from backend.models import CandidateAuditTaskResult, FpReviewResult, ThreatAuditFindingSummary
-from backend.scan_metrics import FP_REVIEW_NO_RESULT_REASON, latest_fp_review_result_map
+from backend.scan_metrics import (
+    FP_REVIEW_NO_RESULT_REASON,
+    is_fp_review_exempt_vulnerability,
+    latest_fp_review_result_map,
+)
 
 
 FINDING_COLUMNS = (
@@ -44,7 +48,10 @@ def summarize_findings(conn, scan_id: str, findings) -> dict[int, ThreatAuditFin
                 finding["ai_verdict"] == "confirmed"
                 if finding["ai_verdict"] else bool(finding["confirmed"])
             )
-            verdict = "unreviewed" if audit_confirmed else "not_confirmed"
+            if audit_confirmed and is_fp_review_exempt_vulnerability(finding):
+                verdict = "confirmed"
+            else:
+                verdict = "unreviewed" if audit_confirmed else "not_confirmed"
             source = "audit"
         summaries[index] = ThreatAuditFindingSummary(
             vuln_index=index,
@@ -59,6 +66,8 @@ def summarize_findings(conn, scan_id: str, findings) -> dict[int, ThreatAuditFin
 
 
 def audit_source_kind(finding) -> str | None:
+    if any(finding[key] == "redline_audit" for key in ("analysis_source", "engine_id")):
+        return "redline_audit"
     if any(finding[key] in {"threat_pattern_audit", "threat_pattern_iterative_audit"} for key in ("analysis_source", "engine_id")):
         return "threat_pattern_audit"
     if any(finding[key] == "threat_audit" for key in ("analysis_source", "engine_id", "vuln_type")):

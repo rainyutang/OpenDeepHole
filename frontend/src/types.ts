@@ -12,3 +12,4 @@ export type * from "./types/agents";
 export type * from "./types/mining";
 export type * from "./types/fpReview";
 export type * from "./types/dashboard";
+export type * from "./types/redlines";

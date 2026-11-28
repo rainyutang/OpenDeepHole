@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 import uuid
 from backend.application import get_config, get_runtime, get_scan_store
 from backend.models import FpReviewJob, FpReviewMethod, FpReviewResult, FpReviewStatus, ScanStatus
-from backend.scan_metrics import is_effective_fp_review_result, is_llm_issue
+from backend.scan_metrics import (
+    is_effective_fp_review_result,
+    is_fp_review_exempt_vulnerability,
+    is_llm_issue,
+)
 
 
 _FINAL_USER_VERDICTS = {"confirmed", "false_positive"}
@@ -58,6 +62,7 @@ def _ordered_fp_review_candidates(
         if (
             v.provisional
             or not is_llm_issue(v)
+            or is_fp_review_exempt_vulnerability(v)
             or _has_final_user_verdict(v)
         ):
             continue
@@ -101,6 +106,7 @@ def _fp_review_resume_state(
         if (
             not vulnerability.provisional
             and is_llm_issue(vulnerability)
+            and not is_fp_review_exempt_vulnerability(vulnerability)
             and not _has_final_user_verdict(vulnerability)
             and (vulnerability.vuln_index if getattr(vulnerability, "vuln_index", None) is not None else index) not in latest_fp_results
         )

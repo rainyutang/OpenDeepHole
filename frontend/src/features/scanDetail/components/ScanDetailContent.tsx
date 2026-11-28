@@ -6,9 +6,12 @@ import StaticAnalysisFailures from "../../../components/StaticAnalysisFailures";
 import VulnerabilityList from "../../issues/VulnerabilityList";
 import {
   isPatternAuditEngine,
+  isRedlineAuditEngine,
+  REDLINE_AUDIT_ENGINE_ID,
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
 } from "../../../miningEngines";
+import { RedlineAuditPanel } from "../../redlines/RedlineAuditPanel";
 import type { FpReviewMethodSelection, FpReviewStageConfig } from "../../../types/fpReview";
 import type { IndexedVulnerability } from "../../../types/issues";
 import type { MiningEngineSelection } from "../../../types/mining";
@@ -51,7 +54,7 @@ interface Props {
   scan: ScanStatusType;
   sharedView: boolean;
   issuesView: React.ReactNode;
-  snapshot: Pick<ScanSnapshotState, "gitHistory" | "isRunning" | "isDone" | "fpReview" | "indexStatus" | "threatResultRevision" | "coverageRevision" | "patternTaskRevision" | "taskHistoryRevision" | "launchingValidations" | "stoppingValidations" | "fpReviewHydrated">;
+  snapshot: Pick<ScanSnapshotState, "gitHistory" | "isRunning" | "isDone" | "fpReview" | "indexStatus" | "threatResultRevision" | "coverageRevision" | "patternTaskRevision" | "redlineTaskRevision" | "taskHistoryRevision" | "launchingValidations" | "stoppingValidations" | "fpReviewHydrated">;
   navigation: Pick<ReturnType<typeof useScanNavigation>, "activeTab" | "activeEngineId" | "auditNavigation" | "setActiveTab" | "threatAnalysisResultTab" | "setThreatAnalysisResultTab">;
   resources: Pick<DetailResources, "detailFailedResources" | "loadDetailResource" | "detailLoadingResources">;
   pagination: Pick<ReturnType<typeof useDetailPagination>, "fpReviewPageFailed" | "setFpReviewPageRetry" | "fpReviewPageLoading">;
@@ -115,6 +118,7 @@ export function ScanDetailContent({
     threatResultRevision,
     coverageRevision,
     patternTaskRevision,
+    redlineTaskRevision,
     taskHistoryRevision,
     launchingValidations,
     stoppingValidations,
@@ -332,7 +336,18 @@ export function ScanDetailContent({
               onOpenIssue={auditNavigation.openIssue}
             />
           )}
-          {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && !isPatternAuditEngine(activeEngine.engine_id) && (
+          {activeTab === "mining" && activeEngine && isRedlineAuditEngine(activeEngine.engine_id) && (
+            <RedlineAuditPanel
+              key={activeEngine.engine_id}
+              scan={scan}
+              events={filterEvents(scan.events, [REDLINE_AUDIT_ENGINE_ID])}
+              taskRevision={redlineTaskRevision}
+              resultRevision={threatResultRevision}
+              focusRequest={auditNavigation.focus?.kind === "redline_audit" ? auditNavigation.focus as ListFocusRequest<string> : undefined}
+              onOpenIssue={auditNavigation.openIssue}
+            />
+          )}
+          {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && !isPatternAuditEngine(activeEngine.engine_id) && !isRedlineAuditEngine(activeEngine.engine_id) && (
             <GenericEnginePanel
               engine={activeEngine}
               run={miningEngineRun(scan, activeEngine.engine_id)}

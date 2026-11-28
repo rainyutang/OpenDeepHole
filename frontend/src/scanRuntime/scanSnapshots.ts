@@ -173,6 +173,7 @@ export function mergeScanOverview(
     skill_reports: previous.skill_reports,
     threat_audit_tasks: previous.threat_audit_tasks,
     threat_pattern_audit_tasks: previous.threat_pattern_audit_tasks,
+    redline_audit_tasks: previous.redline_audit_tasks,
     validations: previous.validations,
     events: previous.events,
     detail_pages: previous.detail_pages,
@@ -256,6 +257,16 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
       total_candidates: nullableFiniteNumber(item.total_candidates),
       processed_candidates: nullableFiniteNumber(item.processed_candidates),
     })) as ScanStatus["mining_engine_runs"],
+    redline_items: recordArray(value.redline_items).map((item) => ({
+      item_id: text(item.item_id),
+      code: text(item.code),
+      security_attribute: text(item.security_attribute),
+      attribute_description: text(item.attribute_description),
+      requirement: text(item.requirement),
+      category: text(item.category),
+      guidance: text(item.guidance),
+      remark: text(item.remark),
+    })),
     created_at: text(value.created_at),
     status,
     progress: finiteNumber(value.progress),
@@ -271,6 +282,9 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
       ? value.threat_pattern_audit_tasks.map(normalizePatternTask) : [],
     threat_audit_tasks: Array.isArray(value.threat_audit_tasks)
       ? value.threat_audit_tasks.map(normalizeThreatTask)
+      : [],
+    redline_audit_tasks: Array.isArray(value.redline_audit_tasks)
+      ? recordArray(value.redline_audit_tasks) as unknown as ScanStatus["redline_audit_tasks"]
       : [],
     validations: Array.isArray(value.validations)
       ? value.validations.map(normalizeValidation)

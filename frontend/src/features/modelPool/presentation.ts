@@ -1,5 +1,6 @@
 import {
   canonicalMiningEngineLabel,
+  REDLINE_AUDIT_ENGINE_LABEL,
   STATIC_CANDIDATE_ENGINE_LABEL,
   THREAT_AUDIT_ENGINE_LABEL,
   THREAT_PATTERN_AUDIT_ENGINE_LABEL,
@@ -39,6 +40,7 @@ export const SCAN_QUEUE_TASK_KINDS = {
   threat_audit: "威胁审计",
   threat_pattern_audit: "攻击模式审计",
   threat_pattern_iterative_audit: "迭代审计",
+  redline_audit: "红线排查",
   fp_review: "去误报复核",
   vulnerability_validation: "漏洞验证",
   vulnerability_dedup: "漏洞去重",
@@ -60,6 +62,7 @@ export function scanQueueTaskKind(task: Record<string, unknown>): ScanQueueTaskK
     if (taskName.startsWith("threat-audit-")) return "threat_audit";
     if (taskName.startsWith("threat-pattern-iterative-audit-")) return "threat_pattern_iterative_audit";
     if (taskName.startsWith("threat-pattern-audit-")) return "threat_pattern_audit";
+    if (taskName.startsWith("redline-audit-")) return "redline_audit";
     return "vulnerability_mining";
   }
   if (!type) return "vulnerability_mining";
@@ -76,6 +79,7 @@ export function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
   if (kind === "threat_audit") return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
   if (kind === "threat_pattern_audit") return `${THREAT_PATTERN_AUDIT_ENGINE_LABEL} / 攻击模式审计`;
   if (kind === "threat_pattern_iterative_audit") return `${canonicalMiningEngineLabel(THREAT_PATTERN_ITERATIVE_ENGINE_ID)} / 迭代审计`;
+  if (kind === "redline_audit") return `${REDLINE_AUDIT_ENGINE_LABEL} / 红线排查`;
   if (kind === "vulnerability_mining") return "漏洞挖掘";
   if (kind === "other") return poolTaskType(task) || "其他任务";
   return SCAN_QUEUE_TASK_KINDS[kind];

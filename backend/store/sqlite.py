@@ -44,11 +44,13 @@ from backend.models import (
     OpenCodeModelTokenUsage,
     OpenCodeTokenUsage,
     OutputSource,
+    REDLINE_AUDIT_ENGINE_ID,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
     ScanMetadataResponse,
     ScanCandidate,
+    ScanRedlineItem,
     ScanStatus,
     ScanSummary,
     ScanVulnerabilityValidationConfig,
@@ -73,7 +75,7 @@ from .base import DuplicateScanNameError, ScanStoreBase
 from .audit_results import audit_source_kind, read_candidate_audit_results
 from .threat_audit_results import read_threat_audit_task_results, resolve_threat_audit_source
 from .history import HISTORY_COLUMNS, HISTORY_SCHEMA, ScanHistoryMixin
-from .summaries import SUMMARY_SCHEMA, ScanSummariesMixin, summary_triggers
+from .summaries import SUMMARY_COLUMNS, SUMMARY_SCHEMA, ScanSummariesMixin, summary_triggers
 from .maintenance import MAINTENANCE_SCHEMA, StorageMaintenanceMixin
 from .body_migration import BodyMigrationMixin
 from .deletion import DELETION_SCHEMA, ScanDeletionMixin, deletion_triggers
@@ -90,11 +92,13 @@ from .pattern_audit import (
     PATTERN_AUDIT_COLUMNS, PATTERN_AUDIT_ENGINE_INDEX, PATTERN_AUDIT_PARENT_INDEX,
     PATTERN_AUDIT_SCHEMA, PatternAuditStoreMixin,
 )
+from .redlines import REDLINE_COLUMNS, REDLINE_SCHEMA, RedlineStoreMixin
 from .review_notes import REVIEW_NOTES_SCHEMA, ReviewNotesStoreMixin
 from .code_graph import ScanCodeGraphStoreMixin
 from .knowledge_base import PLATFORM_SETTINGS_SCHEMA, KnowledgeBaseStoreMixin
 from .auto_resume import AUTO_RESUME_SCHEMA, AUTO_RESUME_COLUMNS, AUTO_RESUME_JOB_COLUMNS, ScanAutoResumeMixin
 from .user_management import (
+    SCAN_DIRECT_SUSPECTED_PARTIAL_INDEX,
     SCAN_SUMMARY_UNREADY_INDEX,
     SCAN_SUSPECTED_PARTIAL_INDEX,
     USER_DEPARTMENT_INDEX,
@@ -111,11 +115,13 @@ STORAGE_COLUMNS = {
     **VALIDATION_COLUMNS,
     **PATTERN_AUDIT_COLUMNS,
     **USER_MANAGEMENT_COLUMNS,
+    **SUMMARY_COLUMNS,
 }
 STORAGE_COLUMNS["scan_auto_resume"] = AUTO_RESUME_JOB_COLUMNS
 STORAGE_COLUMNS["scans"] = {
     **STORAGE_COLUMNS.get("scans", {}),
     **AUTO_RESUME_COLUMNS,
+    **REDLINE_COLUMNS["scans"],
     "execution_product": "TEXT",
     "code_scan_paths_json": "TEXT NOT NULL DEFAULT '[]'",
     "metadata_revision": "INTEGER NOT NULL DEFAULT 0",
@@ -1038,6 +1044,7 @@ _SCHEMA += TOKEN_CATEGORY_SCHEMA
 _SCHEMA += FILE_INVENTORY_SCHEMA
 _SCHEMA += MODEL_USAGE_SCHEMA
 _SCHEMA += PATTERN_AUDIT_SCHEMA
+_SCHEMA += REDLINE_SCHEMA
 _SCHEMA += REVIEW_NOTES_SCHEMA
 _SCHEMA += AUTO_RESUME_SCHEMA
 _SCHEMA += USER_MANAGEMENT_SCHEMA
@@ -1254,7 +1261,7 @@ class _SqliteTransactionLock:
             self._mutex.release()
 
 
-class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoResumeMixin, KnowledgeBaseStoreMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
+class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoResumeMixin, KnowledgeBaseStoreMixin, ScanCodeGraphStoreMixin, ReviewNotesStoreMixin, RedlineStoreMixin, PatternAuditStoreMixin, ScanModelUsageMixin, ScanFileInventoriesMixin, ScanTokenCategoriesMixin, ScanSharesMixin, ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
     def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
@@ -1306,6 +1313,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             self._conn.execute(PATTERN_AUDIT_PARENT_INDEX)
             self._conn.execute(USER_DEPARTMENT_INDEX)
             self._conn.execute(SCAN_SUSPECTED_PARTIAL_INDEX)
+            self._conn.execute(SCAN_DIRECT_SUSPECTED_PARTIAL_INDEX)
             self._conn.execute(SCAN_SUMMARY_UNREADY_INDEX)
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scan_task_versions_name "
@@ -2363,6 +2371,11 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             threat_analysis=self.get_threat_analysis(row["scan_id"]) if include_details else None,
             threat_audit_tasks=self.list_threat_audit_tasks(row["scan_id"]) if include_details else [],
             threat_pattern_audit_tasks=self.list_threat_pattern_audit_tasks(row["scan_id"]) if include_details else [],
+            redline_items=_json_model_list(
+                row["redline_items_json"] if "redline_items_json" in row.keys() else "[]",
+                ScanRedlineItem,
+            ),
+            redline_audit_tasks=self.list_redline_audit_tasks(row["scan_id"]) if include_details else [],
             validations=self.list_vulnerability_validations(row["scan_id"]) if include_details else [],
             events=self.get_events(row["scan_id"]) if include_details else [],
             current_candidate=current,
@@ -2397,6 +2410,10 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
             mining_engines=_json_model_list(
                 row["mining_engines_json"],
                 MiningEngineSelection,
+            ),
+            redline_items=_json_model_list(
+                row["redline_items_json"] if "redline_items_json" in row.keys() else "[]",
+                ScanRedlineItem,
             ),
             auto_fp_review=(
                 bool(row["auto_fp_review"])
@@ -2501,10 +2518,10 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                      public_access_token, opencode_pool,
                      code_graph_mcp_json, knowledge_base_mcp_json,
                      vulnerability_validation_json, mining_engines_json,
-                     mining_engine_runs_json, multi_versions_json,
+                     mining_engine_runs_json, multi_versions_json, redline_items_json,
                      execution_product, metadata_revision, code_graph_mcp_revision, code_graph_mcp_applied_revision,
                      knowledge_base_mcp_revision, knowledge_base_mcp_applied_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2561,7 +2578,8 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     vulnerability_validation_json = excluded.vulnerability_validation_json,
                     mining_engines_json = excluded.mining_engines_json,
                     mining_engine_runs_json = excluded.mining_engine_runs_json,
-                    multi_versions_json = excluded.multi_versions_json
+                    multi_versions_json = excluded.multi_versions_json,
+                    redline_items_json = excluded.redline_items_json
                 """,
                 (
                     scan.scan_id,
@@ -2657,6 +2675,13 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                         ],
                         ensure_ascii=False,
                     ),
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in (meta.redline_items or scan.redline_items)
+                        ],
+                        ensure_ascii=False,
+                    ),
                     meta.runtime_product,
                     meta.metadata_revision,
                     meta.code_graph_mcp_revision,
@@ -2719,6 +2744,9 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     (json.dumps([item.model_dump(mode="json") for item in ordered], ensure_ascii=False), scan_id),
                 )
             settled = self._settle_unfinished_pattern_tasks_locked(scan_id, run.engine_id) if modern and run.status in terminal_statuses else []
+            if modern and run.status in terminal_statuses and run.engine_id == REDLINE_AUDIT_ENGINE_ID:
+                if self._settle_unfinished_redline_tasks_locked(scan_id):
+                    settled = sorted(set([*settled, REDLINE_AUDIT_ENGINE_ID]))
             self._conn.commit()
             return (ordered, settled) if return_settled else ordered
 
@@ -2779,7 +2807,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
     def load_scan_runtime(self, scan_id: str):
         with self._lock:
             row = self._conn.execute(
-                "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,knowledge_base_mcp_revision,knowledge_base_mcp_applied_revision,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+                "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,knowledge_base_mcp_revision,knowledge_base_mcp_applied_revision,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,redline_items_json,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
             ).fetchone()
             return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
 
@@ -2802,7 +2830,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,knowledge_base_mcp_revision,knowledge_base_mcp_applied_revision,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_resume_enabled,auto_resume_count,auto_resume_state,auto_resume_reason,auto_fp_review,code_graph_mcp_json,code_graph_mcp_revision,code_graph_mcp_applied_revision,code_scan_path,code_scan_paths_json,created_at,execution_agent_session_id,execution_revision,execution_product,metadata_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,knowledge_base_mcp_revision,knowledge_base_mcp_applied_revision,mining_engines_json,multi_versions_json,product,project_path,public_access_token,redline_items_json,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)
@@ -3445,6 +3473,8 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                         ),
                     )
                     settled = self._settle_unfinished_pattern_tasks_locked(scan_id)
+                    if self._settle_unfinished_redline_tasks_locked(scan_id):
+                        settled = sorted(set([*settled, REDLINE_AUDIT_ENGINE_ID]))
             else:
                 changed = self._conn.execute(sql, params).rowcount > 0
             self._conn.commit()
@@ -4671,7 +4701,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                 cur = self._conn.execute(
                     f"""\
                     SELECT scan_id, idx, vuln_type, ai_verdict, confirmed, user_verdict,
-                           analysis_source, provisional
+                           analysis_source, engine_id, provisional
                     FROM vulnerabilities
                     WHERE scan_id IN ({placeholders})
                     ORDER BY scan_id, idx
@@ -4687,6 +4717,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                             confirmed=bool(r["confirmed"]),
                             user_verdict=r["user_verdict"],
                             analysis_source=r["analysis_source"] or "static_candidate",
+                            engine_id=r["engine_id"] or "",
                             provisional=bool(r["provisional"]),
                         )
                     )
@@ -4904,6 +4935,8 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                         result.status = "missing"
             elif result.kind == "threat_pattern_audit":
                 result.status, result.pattern_task = self.resolve_threat_pattern_audit_source(scan_id, finding)
+            elif result.kind == "redline_audit":
+                result.status, result.redline_task = self.resolve_redline_audit_source(scan_id, finding)
             elif result.kind == "static_candidate":
                 # audit_index is the stable candidate identity; never match by location.
                 column = "idx" if finding["audit_index"] is not None else "vulnerability_idx"
@@ -5778,6 +5811,7 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
                 )
                 self._settle_unfinished_pattern_tasks_locked(scan_id)
+                self._settle_unfinished_redline_tasks_locked(scan_id)
             self._conn.commit()
             return row is not None
 
@@ -5865,6 +5899,8 @@ class SqliteScanStore(AdminExportStoreMixin, UserManagementStoreMixin, ScanAutoR
                     (self._terminal_scan_pool_json(scan_id, row["opencode_pool"]), scan_id),
                 )
                 settled = self._settle_unfinished_pattern_tasks_locked(scan_id)
+                if self._settle_unfinished_redline_tasks_locked(scan_id):
+                    settled = sorted(set([*settled, REDLINE_AUDIT_ENGINE_ID]))
             self._conn.commit()
             return (row is not None, settled) if return_settled else row is not None
 

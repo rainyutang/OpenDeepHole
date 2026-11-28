@@ -71,7 +71,7 @@ const compatibilityEntries = new Set([
 ]);
 const implementationRoots = [
   "api/", "types/", "scanRuntime/", "hooks/scanSSE/",
-  ...["scanDetail", "issues", "modelPool", "newScan", "agentConfig", "scanHistory", "threatAnalysis", "userManagement", "adminExport"].map((feature) => `features/${feature}/`),
+  ...["scanDetail", "issues", "modelPool", "newScan", "agentConfig", "scanHistory", "threatAnalysis", "userManagement", "adminExport", "redlines"].map((feature) => `features/${feature}/`),
 ];
 
 test("domain implementations import owners instead of compatibility entry points", () => {
@@ -94,7 +94,7 @@ const pureModels = files.filter((file) => {
       "features/newScan/draftModel.ts", "features/newScan/codeGraphDefaults.ts",
       "features/agentConfig/configModel.ts", "features/scanHistory/historyModel.ts",
       "features/threatAnalysis/analysisModel.ts", "features/userManagement/userManagementModel.ts",
-      "features/adminExport/exportModel.ts"].includes(name);
+      "features/adminExport/exportModel.ts", "features/redlines/redlinesModel.ts"].includes(name);
 });
 
 test("pure models stay independent of React, Axios, and browser state", () => {

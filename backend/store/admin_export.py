@@ -6,10 +6,13 @@ import json
 
 from backend.models import (
     FpReviewResult,
+    REDLINE_AUDIT_ENGINE_ID,
+    REDLINE_AUDIT_ENGINE_LABEL,
     STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_LABEL,
     Vulnerability,
 )
+from backend.store.summaries import DIRECT_SUSPECTED
 
 _LIKE_ESCAPE_CHAR = "!"
 _MAX_BIND_PARAMS = 400
@@ -56,10 +59,16 @@ def _collision_key(row: dict) -> tuple[str, str, int, str, str]:
 def _lightweight_vulnerability_from_row(row: dict) -> Vulnerability:
     analysis_source = str(row.get("analysis_source") or "static_candidate")
     engine_id = str(row.get("engine_id") or "") or (
-        "threat_audit" if analysis_source == "threat_audit" else "static_candidate"
+        REDLINE_AUDIT_ENGINE_ID
+        if analysis_source == REDLINE_AUDIT_ENGINE_ID
+        else "threat_audit"
+        if analysis_source == "threat_audit"
+        else "static_candidate"
     )
     engine_label = str(row.get("engine_label") or "") or (
-        THREAT_AUDIT_ENGINE_LABEL
+        REDLINE_AUDIT_ENGINE_LABEL
+        if engine_id == REDLINE_AUDIT_ENGINE_ID
+        else THREAT_AUDIT_ENGINE_LABEL
         if analysis_source == "threat_audit"
         else STATIC_CANDIDATE_ENGINE_LABEL
     )
@@ -127,6 +136,10 @@ class AdminExportStoreMixin:
                     SELECT DISTINCT t.scan_id
                     FROM scan_checker_totals t
                     WHERE t.fp_review_issue_count > 0
+                    UNION
+                    SELECT DISTINCT t.scan_id
+                    FROM scan_checker_totals t
+                    WHERE t.direct_suspected_issue_count > 0
                 )
                 SELECT s.scan_id,
                        s.project_id,
@@ -168,7 +181,8 @@ class AdminExportStoreMixin:
                   AND EXISTS (
                       SELECT 1
                       FROM scan_checker_totals t
-                      WHERE t.scan_id = s.scan_id AND t.fp_review_issue_count > 0
+                      WHERE t.scan_id = s.scan_id
+                        AND (t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0)
                   )
                 ORDER BY s.created_at DESC, s.scan_id DESC
             """
@@ -201,18 +215,27 @@ class AdminExportStoreMixin:
                           AND EXISTS (
                               SELECT 1
                               FROM scan_checker_totals t
-                              WHERE t.scan_id = s.scan_id AND t.fp_review_issue_count > 0
+                              WHERE t.scan_id = s.scan_id
+                                AND (t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0)
                           )
                       )
                       OR (
                           COALESCE(st.ready, 0) = 0
-                          AND EXISTS (
-                              SELECT 1
-                              FROM fp_review_jobs j
-                              JOIN fp_review_results r ON r.review_id = j.review_id
-                              WHERE j.scan_id = s.scan_id
-                                AND r.verdict = 'tp'
-                                AND {_EFFECTIVE_FP_CONDITION}
+                          AND (
+                              EXISTS (
+                                  SELECT 1
+                                  FROM fp_review_jobs j
+                                  JOIN fp_review_results r ON r.review_id = j.review_id
+                                  WHERE j.scan_id = s.scan_id
+                                    AND r.verdict = 'tp'
+                                    AND {_EFFECTIVE_FP_CONDITION}
+                              )
+                              OR EXISTS (
+                                  SELECT 1
+                                  FROM vulnerabilities v
+                                  WHERE v.scan_id = s.scan_id
+                                    AND {DIRECT_SUSPECTED}
+                              )
                           )
                       )
                   )
@@ -224,7 +247,7 @@ class AdminExportStoreMixin:
                     SELECT DISTINCT t.scan_id
                     FROM scan_checker_totals t
                     JOIN scan_summary_state st ON st.scan_id = t.scan_id AND st.ready = 1
-                    WHERE t.fp_review_issue_count > 0
+                    WHERE t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0
                     UNION
                     SELECT DISTINCT j.scan_id
                     FROM fp_review_jobs j
@@ -233,6 +256,12 @@ class AdminExportStoreMixin:
                     WHERE COALESCE(st.ready, 0) = 0
                       AND r.verdict = 'tp'
                       AND {_EFFECTIVE_FP_CONDITION}
+                    UNION
+                    SELECT DISTINCT v.scan_id
+                    FROM vulnerabilities v
+                    LEFT JOIN scan_summary_state st ON st.scan_id = v.scan_id
+                    WHERE COALESCE(st.ready, 0) = 0
+                      AND {DIRECT_SUSPECTED}
                 )
                 SELECT s.scan_id,
                        s.project_id,
@@ -321,10 +350,35 @@ class AdminExportStoreMixin:
                     created_at=str(row["created_at"] or ""),
                 )
 
-        if not fp_by_scan:
+        direct_indices_by_scan: dict[str, set[int]] = {}
+        for offset in range(0, len(chunk_ids), _MAX_BIND_PARAMS):
+            batch = chunk_ids[offset : offset + _MAX_BIND_PARAMS]
+            placeholders = ",".join("?" for _ in batch)
+            direct_rows = self._conn.execute(
+                f"""\
+                SELECT v.scan_id, v.idx
+                FROM vulnerabilities v
+                WHERE v.scan_id IN ({placeholders})
+                  AND {DIRECT_SUSPECTED}
+                ORDER BY v.scan_id, v.idx
+                """,
+                batch,
+            ).fetchall()
+            for row in direct_rows:
+                direct_indices_by_scan.setdefault(str(row["scan_id"]), set()).add(
+                    int(row["idx"])
+                )
+
+        target_indices_by_scan: dict[str, list[int]] = {}
+        for scan_id in set(fp_by_scan) | set(direct_indices_by_scan):
+            combined = set(fp_by_scan.get(scan_id, ())) | direct_indices_by_scan.get(scan_id, set())
+            if combined:
+                target_indices_by_scan[scan_id] = sorted(combined)
+
+        if not target_indices_by_scan:
             return {}
 
-        # Fetch only the TP vulnerability rows, staying below SQLite's bind limit.
+        # Fetch only the TP and direct-suspected vulnerability rows, staying below SQLite's bind limit.
         raw_vuln_rows: list[dict] = []
         pending_clauses: list[str] = []
         pending_params: list[object] = []
@@ -348,8 +402,7 @@ class AdminExportStoreMixin:
             pending_clauses.clear()
             pending_params.clear()
 
-        for scan_id, fp_map in fp_by_scan.items():
-            indices = sorted(fp_map)
+        for scan_id, indices in target_indices_by_scan.items():
             for offset in range(0, len(indices), _MAX_BIND_PARAMS - 1):
                 idx_batch = indices[offset : offset + _MAX_BIND_PARAMS - 1]
                 needed = 1 + len(idx_batch)
@@ -413,6 +466,6 @@ class AdminExportStoreMixin:
             )
 
         return {
-            scan_id: (vulns, fp_by_scan[scan_id])
+            scan_id: (vulns, fp_by_scan.get(scan_id, {}))
             for scan_id, vulns in vulns_by_scan.items()
         }

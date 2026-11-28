@@ -13,7 +13,7 @@ import type { DetailResource } from "../model/types";
 import type { ScanEventContext } from "./context";
 
 export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEventContext): Pick<ScanSSEHandlers, "onTaskHistoryRefresh" | "onDetailRefreshState" | "onStateRefresh" | "onScanStatus" | "onOpenCodeTaskReport" | "onScanEvents" | "onScanFinish" | "onIndexStatus"> {
-  const { setScan, pendingInitialOpenCodePoolRef, setThreatResultRevision, setPatternTaskRevision, setTaskHistoryRevision, setIndexStatus } = state;
+  const { setScan, pendingInitialOpenCodePoolRef, setThreatResultRevision, setPatternTaskRevision, setRedlineTaskRevision, setTaskHistoryRevision, setIndexStatus } = state;
   const {
     setDetailLoadingResources,
     setDetailFailedResources,
@@ -33,6 +33,7 @@ export function createScanLifecycleHandlers({ scanId, state, resources }: ScanEv
       }
       if (refreshing) {
         if (resources.includes("threat-pattern-audit-tasks")) setPatternTaskRevision((value) => value + 1);
+        if (resources.includes("redline-audit-tasks")) setRedlineTaskRevision((value) => value + 1);
         for (const resource of Object.keys(DETAIL_REFRESH_RESOURCE) as DetailResource[]) {
           if (!resources.includes(DETAIL_REFRESH_RESOURCE[resource])) continue;
           detailGenerationRef.current.set(resource, (detailGenerationRef.current.get(resource) ?? 0) + 1);

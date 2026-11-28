@@ -194,6 +194,7 @@ async def _run_scan(task, is_resume: bool) -> None:
             code_graph_mcp=task.code_graph_mcp,
             knowledge_base_mcp=task.knowledge_base_mcp,
             mining_engines=task.mining_engines,
+            redline_items=getattr(task, "redline_items", None),
             codex_model_ids=task.codex_model_ids,
             multi_versions=task.multi_versions,
         )
@@ -221,6 +222,7 @@ async def handle_task(
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     mining_engines: list[dict] | None = None,
+    redline_items: list[dict] | None = None,
     codex_model_ids: list[str] | None = None,
     code_scan_paths: list[str] | None = None,
 ) -> None:
@@ -255,6 +257,7 @@ async def handle_task(
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
         mining_engines=mining_engines,
+        redline_items=redline_items,
         codex_model_ids=codex_model_ids,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
@@ -380,6 +383,7 @@ async def handle_resume(
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
     mining_engines: Optional[list[dict]] = None,
+    redline_items: Optional[list[dict]] = None,
     retry_candidates: Optional[list[dict]] = None,
     retry_total_candidates: Optional[int] = None,
     retry_processed_offset: int = 0,
@@ -481,6 +485,11 @@ async def handle_resume(
         if mining_engines is not None
         else copy.deepcopy(previous_value("mining_engines", None))
     )
+    resolved_redline_items = (
+        redline_items
+        if redline_items is not None
+        else copy.deepcopy(previous_value("redline_items", None))
+    )
     resolved_codex_model_ids = (
         codex_model_ids
         if codex_model_ids is not None
@@ -517,6 +526,7 @@ async def handle_resume(
         feedback_entries=resolved_feedback_entries,
         checker_packages=resolved_checker_packages,
         mining_engines=resolved_mining_engines,
+        redline_items=resolved_redline_items,
         retry_candidates=retry_candidates,
         retry_total_candidates=retry_total_candidates,
         retry_processed_offset=retry_processed_offset,

@@ -25,6 +25,7 @@ export function useScanEvents(
   // SSE event handlers — update state incrementally
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
     ownsPatternTaskPages: () => ownsPatternTaskPages,
+    ownsRedlineTaskPages: () => activeTaskResource === "redline-audit-tasks",
     activeTaskCollections: () => activeTaskResource ? [activeTaskResource] : [],
     ...createScanLifecycleHandlers({ scanId, state, resources, analysis }),
     ...createFindingHandlers({ scanId, state, resources, analysis }),

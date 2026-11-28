@@ -43,7 +43,16 @@ STANDARD_PROFILE_ENGINE_IDS = STANDARD_SCAN_PROFILE.mining_engine_ids
 # Retained for quick-profile callers and backward-compatible imports.
 BUILTIN_PROFILE_ENGINE_IDS = QUICK_PROFILE_ENGINE_IDS
 # New optional workflows must not silently join legacy callers' default scans.
-OPT_IN_MINING_ENGINE_IDS = frozenset({"threat_pattern_iterative_audit"})
+REDLINE_AUDIT_ENGINE_ID = "redline_audit"
+OPT_IN_MINING_ENGINE_IDS = frozenset({
+    "threat_pattern_iterative_audit",
+    REDLINE_AUDIT_ENGINE_ID,
+})
+# Engines whose confirmed findings bypass vulnerability FP review and appear
+# directly in the suspected-issues list and exports.
+FP_REVIEW_EXEMPT_ENGINE_IDS = frozenset({
+    REDLINE_AUDIT_ENGINE_ID,
+})
 STATIC_ANALYSIS_ENGINE_IDS = frozenset({
     "static_candidate",
     "multi_version",

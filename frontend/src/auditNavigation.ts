@@ -3,23 +3,25 @@ import type { Dispatch, RefObject, SetStateAction } from "react";
 import { getScanFpReviewResult, getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
 import { hasFpReviewRecord } from "./fpReview";
 import { mergeIndexedVulnerabilities } from "./scanRuntime";
-import { isPatternAuditEngine } from "./miningEngines";
-import type { FpReviewJob, FpReviewResult, IndexedVulnerability, ScanCandidate, ScanStatus, ThreatAuditTask, ThreatPatternAuditTask, Vulnerability } from "./types";
+import { isPatternAuditEngine, isRedlineAuditEngine, REDLINE_AUDIT_ENGINE_ID } from "./miningEngines";
+import type { FpReviewJob, FpReviewResult, IndexedVulnerability, RedlineAuditTask, ScanCandidate, ScanStatus, ThreatAuditTask, ThreatPatternAuditTask, Vulnerability } from "./types";
 
 export interface ListFocusRequest<K> { key: K; revision: number }
 export type AuditFocus = (
   | { kind: "issue" | "static_candidate" | "fp_review"; key: number }
-  | { kind: "threat_audit" | "threat_pattern_audit"; key: string }
+  | { kind: "threat_audit" | "threat_pattern_audit" | "redline_audit"; key: string }
 ) & { revision: number };
 export type AuditTarget =
   | { kind: "issue"; vulnerability: IndexedVulnerability }
   | { kind: "fp_review"; vulnerability: IndexedVulnerability; result: FpReviewResult }
   | { kind: "threat_audit"; task: ThreatAuditTask }
   | { kind: "threat_pattern_audit"; task: ThreatPatternAuditTask }
+  | { kind: "redline_audit"; task: RedlineAuditTask }
   | { kind: "static_candidate"; candidate: ScanCandidate };
 export interface AuditNavigationRequest { kind: "issue" | "source" | "fp_review"; index: number }
 
-export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "threat_pattern_audit" | "static_candidate" | null {
+export function auditSourceKind(vuln: Vulnerability): "threat_audit" | "threat_pattern_audit" | "redline_audit" | "static_candidate" | null {
+  if ([vuln.analysis_source, vuln.engine_id].some((value) => isRedlineAuditEngine(value || ""))) return "redline_audit";
   if ([vuln.analysis_source, vuln.engine_id].some((value) => isPatternAuditEngine(value || ""))) return "threat_pattern_audit";
   if ([vuln.analysis_source, vuln.engine_id, vuln.vuln_type].includes("threat_audit")) return "threat_audit";
   return (vuln.analysis_source || "static_candidate") === "static_candidate" ? "static_candidate" : null;
@@ -57,6 +59,10 @@ export async function resolveAuditNavigation(
     if (!row) throw new Error("该问题记录已不存在，无法打开报告");
     return { kind: "issue", vulnerability: { ...row.vulnerability, vuln_index: row.index } };
   }
+  if (known && auditSourceKind(known) === "redline_audit" && known.source_task_id) {
+    const task = scan.redline_audit_tasks?.find((item) => item.task_id === known.source_task_id);
+    if (task) return { kind: "redline_audit", task };
+  }
   if (known && auditSourceKind(known) === "threat_pattern_audit" && known.source_task_id) {
     const task = scan.threat_pattern_audit_tasks?.find((item) => item.task_id === known.source_task_id);
     if (task) return { kind: "threat_pattern_audit", task };
@@ -71,6 +77,7 @@ export async function resolveAuditNavigation(
   }
   const source = await getScanVulnerabilityAuditSource(scan.scan_id, index, signal);
   if (source.status === "resolved") {
+    if (source.kind === "redline_audit" && source.redline_task) return { kind: "redline_audit", task: source.redline_task };
     if (source.kind === "threat_pattern_audit" && source.pattern_task) return { kind: "threat_pattern_audit", task: source.pattern_task };
     if (source.kind === "threat_audit" && source.threat_task) return { kind: "threat_audit", task: source.threat_task };
     if (source.kind === "static_candidate" && source.candidate) return { kind: "static_candidate", candidate: source.candidate };
@@ -87,6 +94,7 @@ export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanSta
   if ((target.kind === "issue" || target.kind === "fp_review") && scan.vulnerabilities.some((item) => item.vuln_index === target.vulnerability.vuln_index)) return scan;
   if (target.kind === "static_candidate" && scan.candidates.some((item) => item.idx === target.candidate.idx)) return scan;
   if (target.kind === "threat_pattern_audit" && scan.threat_pattern_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
+  if (target.kind === "redline_audit" && scan.redline_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
   if (target.kind === "threat_audit" && scan.threat_audit_tasks?.some((item) => item.task_id === target.task.task_id)) return scan;
   if (target.kind === "issue" || target.kind === "fp_review") return {
     ...scan,
@@ -102,6 +110,11 @@ export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanSta
   if (target.kind === "threat_pattern_audit") return {
     ...scan,
     threat_pattern_audit_tasks: [...(scan.threat_pattern_audit_tasks ?? []), target.task]
+      .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "") || a.task_id.localeCompare(b.task_id)),
+  };
+  if (target.kind === "redline_audit") return {
+    ...scan,
+    redline_audit_tasks: [...(scan.redline_audit_tasks ?? []).filter((item) => item.task_id !== target.task.task_id), target.task]
       .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "") || a.task_id.localeCompare(b.task_id)),
   };
   return {
@@ -176,7 +189,14 @@ export function useAuditNavigation(
         : target.kind === "static_candidate"
           ? { kind: "static_candidate", key: target.candidate.idx, revision: nextRevision }
           : { kind: target.kind, key: target.task.task_id, revision: nextRevision });
-      onNavigate(target.kind, target.kind === "threat_pattern_audit" ? target.task.engine_id || "threat_pattern_audit" : undefined);
+      onNavigate(
+        target.kind,
+        target.kind === "threat_pattern_audit"
+          ? target.task.engine_id || "threat_pattern_audit"
+          : target.kind === "redline_audit"
+            ? REDLINE_AUDIT_ENGINE_ID
+            : undefined,
+      );
     } catch (failure) {
       if (!pending.signal.aborted) setError(failure instanceof Error ? failure.message : "定位失败，请重试");
     } finally {

@@ -51,11 +51,27 @@ def _pattern_counts_from_tasks(tasks) -> dict[str, dict[str, int]]:
     return result
 
 
-def _reconcile_pattern_engine_runs(runs, by_engine: dict[str, dict[str, int]]):
-    if not runs or not by_engine:
+def _reconcile_pattern_engine_runs(
+    runs,
+    by_engine: dict[str, dict[str, int]],
+    redline_counts: dict[str, int] | None = None,
+):
+    if not runs or (not by_engine and not redline_counts):
         return runs
     reconciled = []
     for run in runs:
+        if run.engine_id == "redline_audit" and redline_counts:
+            total = max(0, int(redline_counts.get("redline_audit_items_total", 0) or 0))
+            completed = min(
+                total,
+                max(0, int(redline_counts.get("redline_audit_items_completed", 0) or 0)),
+            )
+            if total > 0:
+                reconciled.append(run.model_copy(update={
+                    "total_candidates": total,
+                    "processed_candidates": completed,
+                }))
+                continue
         engine_counts = (
             by_engine.get(run.engine_id)
             if run.engine_id in _PATTERN_AUDIT_ENGINE_IDS
@@ -298,9 +314,14 @@ async def get_scan_status(
         if hasattr(store, "get_threat_pattern_audit_counts_by_engine")
         else {}
     ) or _pattern_counts_from_tasks(scan.threat_pattern_audit_tasks)
+    redline_counts = (
+        await run_store_call(store, "get_redline_audit_item_counts", scan_id)
+        if hasattr(store, "get_redline_audit_item_counts")
+        else None
+    )
     return scan.model_copy(update={
         "can_copy_scan": bool(meta and meta.user_id and meta.user_id == current_user.user_id),
-        "mining_engine_runs": _reconcile_pattern_engine_runs(scan.mining_engine_runs, by_engine),
+        "mining_engine_runs": _reconcile_pattern_engine_runs(scan.mining_engine_runs, by_engine, redline_counts),
         "progress_estimate": await _scan_progress_estimate(store, scan),
     })
 
@@ -402,6 +423,8 @@ async def get_scan_overview_v2(
     issue_metrics = metrics_from_totals(fast_totals) if fast_totals is not None else calculate_issue_metrics(vulnerabilities, fp_result_map)
     counts.update({
         "effective_issue_count": issue_metrics.effective_issue_count,
+        "suspected_issue_count": issue_metrics.suspected_issue_count,
+        "direct_suspected_issue_count": issue_metrics.direct_suspected_issue_count,
         "human_confirmed_issue_count": issue_metrics.human_confirmed_issue_count,
         "validated_issue_count": int(fast_totals["validated_issue_count"]) if fast_totals is not None else calculate_validated_issue_count(
             vulnerabilities,
@@ -465,6 +488,7 @@ async def get_scan_overview_v2(
     reconciled_engine_runs = _reconcile_pattern_engine_runs(
         scan.mining_engine_runs,
         counts.get("threat_pattern_audit_by_engine") or {},
+        counts,
     )
     payload.update({
         "can_copy_scan": bool(meta.user_id and meta.user_id == current_user.user_id),
@@ -476,6 +500,7 @@ async def get_scan_overview_v2(
         "threat_analysis": None,
         "threat_audit_tasks": [],
         "threat_pattern_audit_tasks": [],
+        "redline_audit_tasks": [],
         "validations": [],
         "events": [],
         "detail_counts": counts,

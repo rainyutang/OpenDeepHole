@@ -55,6 +55,7 @@ export function HistoryNavigation({
   user,
   onLogout,
   onManageUsers,
+  onManageRedlines,
   onCheckerDashboard,
   onCheckerCatalog,
   onReviewNotes,
@@ -101,6 +102,13 @@ export function HistoryNavigation({
 
               onClick={onManageUsers}
             />
+            {onManageRedlines && (
+              <NavButton
+                label="红线管理"
+                description="管理网络安全红线条目及参与排查的红线范围"
+                onClick={onManageRedlines}
+              />
+            )}
             {onKnowledgeBaseConfig && (
               <NavButton
                 label="知识库配置"

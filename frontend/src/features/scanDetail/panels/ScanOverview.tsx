@@ -8,6 +8,8 @@ import {
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   canonicalMiningEngineLabel,
   isPatternAuditEngine,
+  isRedlineAuditEngine,
+  redlineAuditFlowDetail,
   threatPatternAuditFlowDetail,
 } from "../../../miningEngines";
 import { hasActiveScanProgress } from "../../../scanProgress";
@@ -86,7 +88,10 @@ export function ScanOverview({
   );
   const partialStatic = staticAnalysisDone && staticAnalysisFailures(scan).length > 0;
   const auditRunning = scan.status === "auditing";
-  const fpReviewTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
+  const confirmedTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(
+    (vuln) => isAiConfirmed(vuln) && !isRedlineAuditEngine(vuln.engine_id || vuln.analysis_source || ""),
+  ).length;
   const threatAnalysisStatus = threatAnalysisFlowStatus(scan);
   const validations = scan.validations ?? [];
   const validationRunning = validations.filter((item) => item.running || ["pending", "queued", "running"].includes(item.status)).length;
@@ -238,26 +243,35 @@ export function ScanOverview({
               const status = engine.engine_id === STATIC_ENGINE_ID
                 ? staticCandidateAuditFlowStatus(scan, run)
                 : engineFlowStatus(run);
+              const isRedline = isRedlineAuditEngine(engine.engine_id);
+              const redlineTotal = scan.detail_counts?.redline_audit_items_total ?? scan.redline_items?.length ?? 0;
+              const redlineCompleted = scan.detail_counts?.redline_audit_items_completed ?? 0;
               return (
                 <TaskSummaryRow
                   key={engine.engine_id}
                   label={canonicalMiningEngineLabel(engine.engine_id, engine.engine_label)}
                   status={flowStatusLabel(status)}
                   tone={flowStatusTone(status, "green")}
-                  progress={engine.engine_id === STATIC_ENGINE_ID && scan.total_candidates ? pct : undefined}
+                  progress={engine.engine_id === STATIC_ENGINE_ID && scan.total_candidates
+                    ? pct
+                    : isRedline && redlineTotal > 0
+                      ? percent(redlineCompleted, redlineTotal)
+                      : undefined}
                   detail={isPatternAuditEngine(engine.engine_id)
                     ? threatPatternAuditFlowDetail(
                       run,
                       Boolean(scan.threat_analysis),
                       patternAuditEngineCounts(scan, engine.engine_id),
                     )
-                    : run?.error_message || (
-                      engine.engine_id === STATIC_ENGINE_ID
-                        ? scan.total_candidates
-                          ? `${scan.processed_candidates}/${scan.total_candidates} 候选点已审计`
-                          : "等待静态分析候选点"
-                        : `引擎 ID：${engine.engine_id}`
-                    )}
+                    : isRedline
+                      ? redlineAuditFlowDetail(run, scan.detail_counts, scan.redline_items?.length ?? 0)
+                      : run?.error_message || (
+                        engine.engine_id === STATIC_ENGINE_ID
+                          ? scan.total_candidates
+                            ? `${scan.processed_candidates}/${scan.total_candidates} 候选点已审计`
+                            : "等待静态分析候选点"
+                          : `引擎 ID：${engine.engine_id}`
+                      )}
                 />
               );
             })}
@@ -267,13 +281,13 @@ export function ScanOverview({
                 ? "进行中"
                 : validationFinished > 0
                   ? "完成"
-                  : fpReviewTargetCount > 0
+                  : confirmedTargetCount > 0
                     ? "等待"
                     : "无目标"}
               tone={validationRunning > 0 ? "purple" : validationFinished > 0 ? "green" : "slate"}
-              progress={fpReviewTargetCount > 0 ? percent(validationFinished, fpReviewTargetCount) : undefined}
-              detail={fpReviewTargetCount > 0
-                ? `${validationFinished}/${fpReviewTargetCount} 已完成`
+              progress={confirmedTargetCount > 0 ? percent(validationFinished, confirmedTargetCount) : undefined}
+              detail={confirmedTargetCount > 0
+                ? `${validationFinished}/${confirmedTargetCount} 已完成`
                 : "当前没有待验证问题"}
             />
             <TaskSummaryRow

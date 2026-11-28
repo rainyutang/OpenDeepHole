@@ -196,6 +196,33 @@ async def threat_pattern_results(
     return await scan_details.get_scan_threat_pattern_audit_results_v2(scan_id, task_ids, user)
 
 
+@shared.get("/redline-audit-tasks")
+async def redline_audit_tasks(
+    scan_id: str,
+    user: SharedUser,
+    cursor: str | None = None,
+    limit: int = Query(100, ge=1, le=200),
+    redline_item_id: str | None = None,
+):
+    return await scan_details.get_scan_redline_audit_tasks_v2(
+        scan_id, limit, cursor, user, redline_item_id=redline_item_id,
+    )
+
+
+@shared.get("/redline-audit-tasks/{task_id}")
+async def redline_audit_task(scan_id: str, task_id: str, user: SharedUser):
+    return await scan_details.get_scan_redline_audit_task_v2(scan_id, task_id, user)
+
+
+@shared.get("/redline-audit-results")
+async def redline_audit_results(
+    scan_id: str,
+    user: SharedUser,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+):
+    return await scan_details.get_scan_redline_audit_results_v2(scan_id, task_ids, user)
+
+
 @shared.get("/threat-analysis")
 async def threat_analysis(scan_id: str, user: SharedUser, allow_missing: bool = False):
     return await scan_results.get_scan_threat_analysis(scan_id, user, allow_missing=allow_missing)

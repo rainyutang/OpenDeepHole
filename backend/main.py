@@ -14,6 +14,7 @@ from backend.api import (
     checkers,
     feedback,
     integration,
+    redlines,
     review_notes,
     scan,
     sharing,
@@ -188,6 +189,7 @@ app.include_router(sharing.router)
 app.include_router(checkers.router)
 app.include_router(skills.router)
 app.include_router(feedback.router)
+app.include_router(redlines.router)
 app.include_router(review_notes.router)
 app.include_router(announcements.router)
 app.include_router(agent.router)

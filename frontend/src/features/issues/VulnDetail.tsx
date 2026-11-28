@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { IssueDetailProps } from "./types";
 import { auditSourceKind } from "../../auditNavigation";
 import { hasFpReviewRecord } from "../../fpReview";
+import { isRedlineAuditEngine } from "../../miningEngines";
 import { IssueFeedback } from "./IssueFeedback";
 import { IssueReportSections } from "./IssueReportSections";
 import { IssueValidationActions } from "./IssueValidationActions";
@@ -50,11 +51,25 @@ export function VulnDetail({
 
   const aiVerdict = getVerdict(vuln);
   const isProblem = aiVerdict === "confirmed";
+  const isRedline = isRedlineAuditEngine(engineId(vuln));
+  const sourceKind = auditSourceKind(vuln);
+  const auditSourceLabel = sourceKind === "redline_audit"
+    ? "查看红线排查任务"
+    : sourceKind === "threat_pattern_audit"
+      ? "查看攻击模式审计任务"
+      : sourceKind === "threat_audit"
+        ? "查看威胁审计任务"
+        : "查看静态候选点";
   return (
     <div className="p-3 sm:p-4 lg:max-h-[70vh] lg:overflow-y-auto">
       {/* Header */}
       <div className="mb-3 border-b border-slate-800 pb-3">
         <div className="flex flex-wrap items-center gap-2">
+          {isRedline && (
+            <span className="shrink-0 rounded border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-xs font-semibold text-rose-300">
+              [红线]
+            </span>
+          )}
           <span className="min-w-0 break-all font-mono text-sm text-slate-200" title={vulnerabilityLocation(displayVuln)}>
             {vulnerabilityLocation(displayVuln)}
           </span>
@@ -112,14 +127,13 @@ export function VulnDetail({
                 查看去误报详情
               </button>
             )}
-            {onOpenAuditSource && auditSourceKind(vuln) && (
+            {onOpenAuditSource && sourceKind && (
               <button
                 type="button"
                 onClick={() => onOpenAuditSource(index)}
                 className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300 hover:bg-cyan-500/20"
               >
-                {auditSourceKind(vuln) === "threat_pattern_audit" ? "查看攻击模式审计任务"
-                  : auditSourceKind(vuln) === "threat_audit" ? "查看威胁审计任务" : "查看静态候选点"}
+                {auditSourceLabel}
               </button>
             )}
             </>)}
@@ -160,14 +174,13 @@ export function VulnDetail({
                 查看去误报详情
               </button>
             )}
-            {onOpenAuditSource && auditSourceKind(vuln) && (
+            {onOpenAuditSource && sourceKind && (
               <button
                 type="button"
                 onClick={() => onOpenAuditSource(index)}
                 className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-300 hover:bg-cyan-500/20"
               >
-                {auditSourceKind(vuln) === "threat_pattern_audit" ? "查看攻击模式审计任务"
-                  : auditSourceKind(vuln) === "threat_audit" ? "查看威胁审计任务" : "查看静态候选点"}
+                {auditSourceLabel}
               </button>
             )}
           </div>

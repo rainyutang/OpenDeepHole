@@ -1,4 +1,5 @@
 import type { OutputSource, Vulnerability } from "./issues";
+import type { RedlineAuditTask } from "./redlines";
 import type { ThreatCodePath } from "./threatAnalysis";
 
 export interface ThreatAuditTask {
@@ -94,9 +95,10 @@ export interface CandidateAuditTaskResult {
 export interface VulnerabilityAuditSource {
   vuln_index: number;
   status: "resolved" | "missing" | "ambiguous" | "unsupported";
-  kind: "threat_audit" | "threat_pattern_audit" | "static_candidate" | null;
+  kind: "threat_audit" | "threat_pattern_audit" | "static_candidate" | "redline_audit" | null;
   pattern_task: ThreatPatternAuditTask | null;
   threat_task: ThreatAuditTask | null;
+  redline_task?: RedlineAuditTask | null;
   candidate: ScanCandidate | null;
 }
 

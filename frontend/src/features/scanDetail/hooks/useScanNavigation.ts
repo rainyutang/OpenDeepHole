@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuditTarget } from "../../../auditNavigation";
 import { useAuditNavigation } from "../../../auditNavigation";
 import {
+  REDLINE_AUDIT_ENGINE_ID,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   THREAT_PATTERN_AUDIT_ENGINE_ID as THREAT_PATTERN_ENGINE_ID,
 } from "../../../miningEngines";
@@ -47,6 +48,7 @@ export function useScanNavigation(scanId: string, state: ScanSnapshotState, navi
     if (kind === "issue") setActiveTab("issues");
     else if (kind === "static_candidate") setActiveTab("static");
     else if (kind === "fp_review") setActiveTab("fp_review");
+    else if (kind === "redline_audit") changeRoute({ tab: "mining", engineId: engineId || REDLINE_AUDIT_ENGINE_ID });
     else {
       changeRoute({ tab: "mining", engineId: kind === "threat_pattern_audit" ? engineId || THREAT_PATTERN_ENGINE_ID : THREAT_ENGINE_ID });
     }

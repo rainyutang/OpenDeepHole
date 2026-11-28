@@ -44,6 +44,7 @@ from .reporter import Reporter
 from .scan_paths import resolve_scan_scope, scope_identity_matches
 from .scan_modes import (
     OPT_IN_MINING_ENGINE_IDS,
+    REDLINE_AUDIT_ENGINE_ID,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     STATIC_ANALYSIS_ENGINE_IDS,
@@ -646,6 +647,7 @@ async def run_scan(
     code_graph_mcp: dict[str, Any] | None = None,
     knowledge_base_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
+    redline_items: list[dict[str, Any]] | None = None,
     codex_model_ids: list[str] | None = None,
     multi_versions: list[dict[str, Any]] | None = None,
     code_scan_paths: list[str | Path] | None = None,
@@ -689,7 +691,8 @@ async def run_scan(
             threat_analysis_generate_attack_tree=threat_analysis_generate_attack_tree,
             vulnerability_validation=vulnerability_validation,
             code_graph_mcp=code_graph_mcp, knowledge_base_mcp=knowledge_base_mcp,
-            mining_engines=mining_engines, codex_model_ids=codex_model_ids,
+            mining_engines=mining_engines, redline_items=redline_items,
+            codex_model_ids=codex_model_ids,
             multi_versions=multi_versions,
         )
 
@@ -727,12 +730,16 @@ async def _run_scan_pipeline(
     code_graph_mcp: dict[str, Any] | None,
     knowledge_base_mcp: dict[str, Any] | None,
     mining_engines: list[dict[str, Any]] | None,
-    codex_model_ids: list[str] | None,
-    multi_versions: list[dict[str, Any]] | None,
+    redline_items: list[dict[str, Any]] | None = None,
+    codex_model_ids: list[str] | None = None,
+    multi_versions: list[dict[str, Any]] | None = None,
 ) -> None:
     """Existing model and engine workflow, with inventory lifetime owned above."""
     feedback_entries = list(feedback_entries or [])
     checker_packages = list(checker_packages or [])
+    redline_items = [
+        dict(item) for item in (redline_items or []) if isinstance(item, dict)
+    ]
     multi_versions = [
         dict(item) for item in (multi_versions or []) if isinstance(item, dict)
     ]
@@ -1686,6 +1693,8 @@ async def _run_scan_pipeline(
         }
         if selection.engine_id == "multi_version":
             engine_kwargs["multi_versions"] = copy.deepcopy(multi_versions)
+        if selection.engine_id == REDLINE_AUDIT_ENGINE_ID:
+            engine_kwargs["redline_items"] = copy.deepcopy(redline_items)
         if selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS:
             engine_kwargs["threat_analysis_result"] = (
                 threat_analysis_result

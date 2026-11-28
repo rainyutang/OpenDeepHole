@@ -27,10 +27,13 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
   let resourceTimer: number | null = null;
   type Notice = { resource: string; index?: number; resultsChanged?: boolean; taskSummaryPending?: boolean; delegated?: boolean };
   const pendingResources = new Map<string, Notice>();
-  const taskCollections = new Set(["threat-audit-tasks", "threat-pattern-audit-tasks"]);
+  const taskCollections = new Set(["threat-audit-tasks", "threat-pattern-audit-tasks", "redline-audit-tasks"]);
   const taskIsVisible = (resource: string) => !handlersRef.current.activeTaskCollections
     || handlersRef.current.activeTaskCollections().includes(resource as ScanDetailResource);
-  const taskIsDelegated = (resource: string) => resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.();
+  const taskIsDelegated = (resource: string) => (
+    (resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.())
+    || (resource === "redline-audit-tasks" && handlersRef.current.ownsRedlineTaskPages?.())
+  );
   const needsRead = (notice: Notice) => !taskCollections.has(notice.resource) || notice.taskSummaryPending
     || (taskIsVisible(notice.resource) && (!taskIsDelegated(notice.resource) || !notice.delegated));
   const lastTaskRefresh = new Map<string, number>();
@@ -128,7 +131,8 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
     try {
       if (source?.scan_id === scanId && collections.length) {
         const results = await Promise.allSettled(collections.map((resource) => (
-          resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.()
+          (resource === "threat-pattern-audit-tasks" && handlersRef.current.ownsPatternTaskPages?.())
+          || (resource === "redline-audit-tasks" && handlersRef.current.ownsRedlineTaskPages?.())
             ? Promise.resolve<RefreshedScanResource>({})
             : refreshScanResource(resource, source, review, resourceController.signal, reviewRequest)
         )));
@@ -208,7 +212,7 @@ export function createScanResourceCoordinator({ scanId, handlersRef, stateSetter
       if (taskExecutionRevision !== undefined && revision !== undefined && revision > taskExecutionRevision) {
         // Automatic resume can change the execution before any task notice.
         // Preserve the displayed rows but invalidate both audit caches.
-        resources = [...new Set<ScanDetailResource>([...resources, "threat-audit-tasks", "threat-pattern-audit-tasks"])];
+        resources = [...new Set<ScanDetailResource>([...resources, "threat-audit-tasks", "threat-pattern-audit-tasks", "redline-audit-tasks"])];
       }
       taskExecutionRevision = revision;
       lastTaskRefresh.clear();

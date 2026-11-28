@@ -6,7 +6,7 @@ import EditScanMetadataDialog from "../../components/EditScanMetadataDialog";
 import FeedbackManager from "../../components/FeedbackManager";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import VulnerabilityList from "../issues/VulnerabilityList";
-import { canonicalMiningEngineLabel, isPatternAuditEngine, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
+import { canonicalMiningEngineLabel, isPatternAuditEngine, isRedlineAuditEngine, REDLINE_AUDIT_ENGINE_ID, THREAT_AUDIT_ENGINE_ID, THREAT_PATTERN_ITERATIVE_ENGINE_ID } from "../../miningEngines";
 import type { ScanNavigation } from "../../routing";
 import { findIndexedVulnerability } from "../../scanRuntime/issues";
 import { mergeScanCodeGraph, mergeScanKnowledgeBase, mergeScanMetadata } from "../../scanRuntime/scanSnapshots";
@@ -178,7 +178,8 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   const events = useScanEvents(scanId, scanSnapshotState, detailResources, { refresh: refreshThreatAnalysis, acceptAnalysis: acceptThreatAnalysis },
     activeTab === "mining" && activeEngineId === THREAT_PATTERN_ITERATIVE_ENGINE_ID,
     activeTab !== "mining" ? undefined : isPatternAuditEngine(activeEngineId) ? "threat-pattern-audit-tasks"
-      : activeEngineId === THREAT_AUDIT_ENGINE_ID ? "threat-audit-tasks" : undefined);
+      : activeEngineId === REDLINE_AUDIT_ENGINE_ID ? "redline-audit-tasks"
+        : activeEngineId === THREAT_AUDIT_ENGINE_ID ? "threat-audit-tasks" : undefined);
   const { refreshFailures, refreshDetails } = events;
 
   const pagination = useDetailPagination(scanId, scanSnapshotState, detailResources, { activeTab, activeEngineId, logOpen, refreshFailures });
@@ -274,7 +275,7 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
 
   const continuableCount = scan.continuable_task_count || 0;
 
-  const issueCount = finalReviewedIssueCount(fpReview);
+  const issueCount = finalReviewedIssueCount(fpReview, scan);
 
   const confirmedIssueCount = humanConfirmedIssueCount(scan, fpReview);
 
@@ -289,8 +290,10 @@ export default function ScanStatus({ scanId, onHome, onCopyScan, sharedView = is
   const selectedEngines = effectiveMiningEngines(scan);
 
   const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId)
-    ?? (["threat_audit", "threat_pattern_audit"].includes(auditNavigation.focus?.kind ?? "")
-      && (activeEngineId === auditNavigation.focus?.kind || (auditNavigation.focus?.kind === "threat_pattern_audit" && isPatternAuditEngine(activeEngineId)))
+    ?? (["threat_audit", "threat_pattern_audit", "redline_audit"].includes(auditNavigation.focus?.kind ?? "")
+      && (activeEngineId === auditNavigation.focus?.kind
+        || (auditNavigation.focus?.kind === "threat_pattern_audit" && isPatternAuditEngine(activeEngineId))
+        || (auditNavigation.focus?.kind === "redline_audit" && isRedlineAuditEngine(activeEngineId)))
       ? { engine_id: activeEngineId, engine_label: canonicalMiningEngineLabel(activeEngineId), enabled: true }
       : null);
 

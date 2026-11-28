@@ -41,6 +41,11 @@ SCAN_SUSPECTED_PARTIAL_INDEX = (
     "ON scan_checker_totals(scan_id, fp_review_issue_count) "
     "WHERE fp_review_issue_count > 0"
 )
+SCAN_DIRECT_SUSPECTED_PARTIAL_INDEX = (
+    "CREATE INDEX IF NOT EXISTS storage_idx_checker_totals_direct_suspected "
+    "ON scan_checker_totals(scan_id, direct_suspected_issue_count) "
+    "WHERE direct_suspected_issue_count > 0"
+)
 SCAN_SUMMARY_UNREADY_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_scan_summary_unready "
     "ON scan_summary_state(scan_id) WHERE ready = 0"
@@ -394,11 +399,11 @@ class UserManagementStoreMixin:
                     GROUP BY s.user_id
                 ),
                 issue_counts AS (
-                    SELECT s.user_id, SUM(t.fp_review_issue_count) AS suspected_issue_count
+                    SELECT s.user_id, SUM(t.fp_review_issue_count + t.direct_suspected_issue_count) AS suspected_issue_count
                     FROM scan_checker_totals t
                     JOIN scans s ON s.scan_id = t.scan_id
                     LEFT JOIN scan_deletions del ON del.scan_id = s.scan_id
-                    WHERE t.fp_review_issue_count > 0 AND s.user_id > '' AND del.scan_id IS NULL
+                    WHERE (t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0) AND s.user_id > '' AND del.scan_id IS NULL
                     GROUP BY s.user_id
                 )
                 SELECT u.user_id,
@@ -449,9 +454,9 @@ class UserManagementStoreMixin:
                     SELECT s.user_id,
                            COUNT(*) AS scan_count,
                            COALESCE(SUM((
-                               SELECT SUM(t.fp_review_issue_count)
+                               SELECT SUM(t.fp_review_issue_count + t.direct_suspected_issue_count)
                                FROM scan_checker_totals t
-                               WHERE t.scan_id = s.scan_id AND t.fp_review_issue_count > 0
+                               WHERE t.scan_id = s.scan_id AND (t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0)
                            )), 0) AS suspected_issue_count
                     FROM target_users tu
                     JOIN scans s ON s.user_id = tu.user_id
@@ -515,10 +520,10 @@ class UserManagementStoreMixin:
                     GROUP BY user_id
                 ),
                 ready_issues AS (
-                    SELECT ss.user_id, SUM(t.fp_review_issue_count) AS suspected_issue_count
+                    SELECT ss.user_id, SUM(t.fp_review_issue_count + t.direct_suspected_issue_count) AS suspected_issue_count
                     FROM scoped_scans ss
                     JOIN scan_checker_totals t ON t.scan_id = ss.scan_id
-                    WHERE ss.ready = 1 AND t.fp_review_issue_count > 0
+                    WHERE ss.ready = 1 AND (t.fp_review_issue_count > 0 OR t.direct_suspected_issue_count > 0)
                     GROUP BY ss.user_id
                 ),
                 legacy_ranked AS (
@@ -545,15 +550,30 @@ class UserManagementStoreMixin:
                       ) = 1
                 ),
                 legacy_issues AS (
-                    SELECT lr.user_id, COUNT(*) AS suspected_issue_count
-                    FROM legacy_ranked lr
-                    WHERE lr.rn = 1
-                      AND lr.verdict = 'tp'
-                      AND EXISTS (
-                          SELECT 1 FROM vulnerabilities v
-                          WHERE v.scan_id = lr.scan_id AND v.idx = lr.vuln_index
-                      )
-                    GROUP BY lr.user_id
+                    SELECT user_id, SUM(suspected_issue_count) AS suspected_issue_count
+                    FROM (
+                        SELECT lr.user_id, COUNT(*) AS suspected_issue_count
+                        FROM legacy_ranked lr
+                        WHERE lr.rn = 1
+                          AND lr.verdict = 'tp'
+                          AND EXISTS (
+                              SELECT 1 FROM vulnerabilities v
+                              WHERE v.scan_id = lr.scan_id AND v.idx = lr.vuln_index
+                                AND COALESCE(v.engine_id, '') <> 'redline_audit'
+                                AND COALESCE(v.analysis_source, '') <> 'redline_audit'
+                          )
+                        GROUP BY lr.user_id
+                        UNION ALL
+                        SELECT ss.user_id, COUNT(*) AS suspected_issue_count
+                        FROM scoped_scans ss
+                        JOIN vulnerabilities v ON v.scan_id = ss.scan_id
+                        WHERE ss.ready = 0
+                          AND v.provisional = 0
+                          AND (CASE WHEN COALESCE(v.ai_verdict, '') <> '' THEN CASE WHEN v.ai_verdict = 'confirmed' THEN 1 ELSE 0 END ELSE v.confirmed END) = 1
+                          AND (COALESCE(v.engine_id, '') = 'redline_audit' OR COALESCE(v.analysis_source, '') = 'redline_audit')
+                        GROUP BY ss.user_id
+                    ) combined_legacy
+                    GROUP BY user_id
                 )
                 SELECT tu.user_id,
                        tu.username,

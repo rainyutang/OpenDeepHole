@@ -20,6 +20,12 @@ export function miningEngineSelectedByDefault(engineId: string): boolean {
 }
 export const MULTI_VERSION_ENGINE_ID = "multi_version";
 export const MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎";
+export const REDLINE_AUDIT_ENGINE_ID = "redline_audit";
+export const REDLINE_AUDIT_ENGINE_LABEL = "DeepHole网络安全红线排查引擎";
+
+export function isRedlineAuditEngine(engineId: string): boolean {
+  return engineId === REDLINE_AUDIT_ENGINE_ID;
+}
 
 export const THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = new Set([
   THREAT_AUDIT_ENGINE_ID,
@@ -37,6 +43,7 @@ const BUILTIN_MINING_ENGINE_LABELS: Record<string, string> = {
   [THREAT_PATTERN_AUDIT_ENGINE_ID]: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
   [THREAT_PATTERN_ITERATIVE_ENGINE_ID]: THREAT_PATTERN_ITERATIVE_ENGINE_LABEL,
   [MULTI_VERSION_ENGINE_ID]: MULTI_VERSION_ENGINE_LABEL,
+  [REDLINE_AUDIT_ENGINE_ID]: REDLINE_AUDIT_ENGINE_LABEL,
 };
 
 export function miningEngineRequiresThreatAnalysis(engineId: string): boolean {
@@ -117,4 +124,37 @@ export function threatPatternAuditFlowDetail(run: {
   }
   if (run?.started_at) return "正在统计审计任务";
   return threatAnalysisReady ? "等待启动" : "等待威胁分析完成";
+}
+
+export function redlineAuditFlowDetail(
+  run: {
+    status?: string;
+    error_message?: string;
+    started_at?: string;
+    total_candidates?: number | null;
+    processed_candidates?: number | null;
+  } | null | undefined,
+  counts?: {
+    redline_audit_items_total?: number;
+    redline_audit_items_completed?: number;
+    redline_audit_items_failed?: number;
+    redline_audit_findings?: number;
+  } | null,
+  snapshotItemCount = 0,
+): string {
+  const total = Math.max(0, Math.trunc(counts?.redline_audit_items_total ?? snapshotItemCount ?? 0));
+  if (total > 0) {
+    const completed = Math.min(total, Math.max(0, Math.trunc(counts?.redline_audit_items_completed ?? 0)));
+    const failed = Math.max(0, Math.trunc(counts?.redline_audit_items_failed ?? 0));
+    const findings = Math.max(0, Math.trunc(counts?.redline_audit_findings ?? 0));
+    const parts = [`${completed}/${total} 红线完成`];
+    if (findings > 0) parts.push(`${findings} 问题`);
+    if (failed > 0) parts.push(`${failed} 失败`);
+    return parts.join(" · ");
+  }
+  const progress = formatMiningEngineAuditProgress(run);
+  if (progress) return progress;
+  if (run?.error_message) return run.error_message;
+  if (run?.started_at) return "正在排查网络安全红线";
+  return "等待启动";
 }

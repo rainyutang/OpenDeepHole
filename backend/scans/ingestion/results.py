@@ -214,7 +214,30 @@ async def agent_report_vulnerability(
             "vulnerability": vuln.model_dump(),
         })
     source_task_id = str(vuln.source_task_id or "").strip()
-    if source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"}:
+    if source_task_id and str(vuln.analysis_source or "") == "redline_audit":
+        linked = await run_store_call(
+            store,
+            "link_redline_audit_task_vulnerability",
+            scan_id,
+            source_task_id,
+            vuln_index,
+        )
+        if linked and scan is not None:
+            for stored_task in scan.redline_audit_tasks:
+                if stored_task.task_id != source_task_id:
+                    continue
+                if vuln_index not in stored_task.result_vuln_indexes:
+                    stored_task.result_vuln_indexes = sorted([
+                        *stored_task.result_vuln_indexes,
+                        vuln_index,
+                    ])
+                    publish(scan_id, "redline_audit_task", {
+                        "task": stored_task.model_dump(mode="json"),
+                        "change": "result",
+                        "engine_ids": ["redline_audit"],
+                    })
+                break
+    elif source_task_id and str(vuln.analysis_source or "") in {"threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit"}:
         task_kind = "threat_pattern_audit" if vuln.analysis_source == "threat_pattern_iterative_audit" else str(vuln.analysis_source)
         linked = await run_store_call(
             store,
@@ -299,10 +322,16 @@ async def agent_report_vulnerability(
                     reported_session_id,
                     scan_session_id,
                 )
+            from backend.scan_metrics import is_fp_review_exempt_vulnerability
             first_attempt = is_new_report or not (
                 meta is not None and getattr(meta, "auto_resume_enabled", False)
             )
-            if auto_fp_review and can_dispatch_immediately and first_attempt:
+            if (
+                auto_fp_review
+                and not is_fp_review_exempt_vulnerability(vuln)
+                and can_dispatch_immediately
+                and first_attempt
+            ):
                 ensured = await run_store_call(
                     store,
                     _ensure_fp_review_job_for_scan,

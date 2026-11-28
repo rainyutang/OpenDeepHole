@@ -146,6 +146,7 @@ export interface MiningEngineRunEvent {
 
 export interface ScanSSEHandlers {
   ownsPatternTaskPages?: () => boolean;
+  ownsRedlineTaskPages?: () => boolean;
   activeTaskCollections?: () => readonly ScanDetailResource[];
   onTaskHistoryRefresh?: () => void;
   onDetailRefreshState?: (resources: readonly ScanDetailResource[], refreshing: boolean) => void;

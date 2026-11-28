@@ -5,6 +5,8 @@ from typing import Annotated
 from backend.auth import get_current_user
 from backend.models import (
     CandidateAuditTaskResult,
+    RedlineAuditTaskDetail,
+    RedlineAuditTaskPage,
     ScanCandidatePage,
     ScanEventPage,
     ThreatAuditTaskPage,
@@ -208,6 +210,56 @@ async def get_scan_threat_pattern_audit_task_v2(
     scan_id: str, task_id: str, current_user: User = Depends(get_current_user),
 ) -> ThreatPatternAuditTaskDetail:
     return await service.get_scan_threat_pattern_audit_task_v2(
+        scan_id=scan_id,
+        task_id=task_id,
+        current_user=current_user,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/redline-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_scan_redline_audit_results_v2(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[ThreatAuditTaskResult]:
+    return await service.get_scan_redline_audit_results_v2(
+        scan_id=scan_id,
+        task_ids=task_ids,
+        current_user=current_user,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/redline-audit-tasks",
+    response_model=RedlineAuditTaskPage,
+)
+async def get_scan_redline_audit_tasks_v2(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=200),
+    cursor: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+    redline_item_id: str | None = None,
+) -> RedlineAuditTaskPage:
+    return await service.get_scan_redline_audit_tasks_v2(
+        scan_id=scan_id,
+        limit=limit,
+        cursor=cursor,
+        current_user=current_user,
+        redline_item_id=redline_item_id,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/redline-audit-tasks/{task_id}",
+    response_model=RedlineAuditTaskDetail,
+)
+async def get_scan_redline_audit_task_v2(
+    scan_id: str, task_id: str, current_user: User = Depends(get_current_user),
+) -> RedlineAuditTaskDetail:
+    return await service.get_scan_redline_audit_task_v2(
         scan_id=scan_id,
         task_id=task_id,
         current_user=current_user,

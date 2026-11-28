@@ -13,11 +13,20 @@ from backend.scan_metrics import ScanIssueMetrics, accuracy
 
 METRICS = (
     "static_issue_count", "llm_issue_count", "fp_review_issue_count",
-    "fp_review_false_positive_count", "human_confirmed_count",
+    "fp_review_false_positive_count", "direct_suspected_issue_count",
+    "human_confirmed_count",
     "human_false_positive_count", "human_confirmed_issue_count",
     "accuracy_basis_count", "retryable_count", "fp_unresolved_count",
     "validated_issue_count",
 )
+SUMMARY_COLUMNS = {
+    "scan_issue_facts": {
+        "direct_suspected_issue_count": "BIGINT NOT NULL DEFAULT 0",
+    },
+    "scan_checker_totals": {
+        "direct_suspected_issue_count": "BIGINT NOT NULL DEFAULT 0",
+    },
+}
 _COUNTER_COLUMNS = ",\n".join(f"{name} BIGINT NOT NULL DEFAULT 0" for name in METRICS)
 SUMMARY_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS scan_summary_state (
@@ -51,19 +60,21 @@ EFFECTIVE_FP = ("r.verdict IN ('tp', 'fp') AND (COALESCE(r.reason, '') <> '' "
                 "OR COALESCE(r.vulnerability_report, '') <> '') "
                 "AND SUBSTR(COALESCE(r.reason, ''), 1, 17) <> 'Review incomplete'")
 LLM_ISSUE = "CASE WHEN COALESCE(v.ai_verdict, '') <> '' THEN CASE WHEN v.ai_verdict = 'confirmed' THEN 1 ELSE 0 END ELSE v.confirmed END"
+DIRECT_SUSPECTED = f"(v.provisional = 0 AND ({LLM_ISSUE}) = 1 AND (COALESCE(v.engine_id, '') = 'redline_audit' OR COALESCE(v.analysis_source, '') = 'redline_audit'))"
 _FINAL_HUMAN = "COALESCE(v.user_verdict, '') IN ('confirmed', 'false_positive')"
 _VALIDATED = "vv.running = 0 AND vv.status IN ('verified', 'success', 'failed', 'error', 'timeout', 'cancelled', 'skipped')"
 _SELECT_VALUES = (
     "1",
     LLM_ISSUE,
-    "CASE WHEN f.verdict = 'tp' THEN 1 ELSE 0 END",
-    "CASE WHEN f.verdict = 'fp' THEN 1 ELSE 0 END",
+    f"CASE WHEN NOT ({DIRECT_SUSPECTED}) AND f.verdict = 'tp' THEN 1 ELSE 0 END",
+    f"CASE WHEN NOT ({DIRECT_SUSPECTED}) AND f.verdict = 'fp' THEN 1 ELSE 0 END",
+    f"CASE WHEN {DIRECT_SUSPECTED} THEN 1 ELSE 0 END",
     "CASE WHEN v.user_verdict = 'confirmed' THEN 1 ELSE 0 END",
     "CASE WHEN v.user_verdict = 'false_positive' THEN 1 ELSE 0 END",
-    "CASE WHEN f.verdict = 'tp' AND v.user_verdict = 'confirmed' THEN 1 ELSE 0 END",
-    f"CASE WHEN f.verdict = 'tp' OR (f.id IS NULL AND ({LLM_ISSUE}) = 1) THEN 1 ELSE 0 END",
+    f"CASE WHEN (f.verdict = 'tp' OR {DIRECT_SUSPECTED}) AND v.user_verdict = 'confirmed' THEN 1 ELSE 0 END",
+    f"CASE WHEN f.verdict = 'tp' OR {DIRECT_SUSPECTED} OR (f.id IS NULL AND ({LLM_ISSUE}) = 1) THEN 1 ELSE 0 END",
     f"CASE WHEN v.provisional = 0 AND TRIM(COALESCE(NULLIF(v.analysis_source, ''), 'static_candidate')) = 'static_candidate' AND NOT ({_FINAL_HUMAN}) AND v.ai_verdict IN ('timeout', 'no_result', 'failed') THEN 1 ELSE 0 END",
-    f"CASE WHEN v.provisional = 0 AND ({LLM_ISSUE}) = 1 AND NOT ({_FINAL_HUMAN}) AND f.id IS NULL THEN 1 ELSE 0 END",
+    f"CASE WHEN v.provisional = 0 AND ({LLM_ISSUE}) = 1 AND NOT ({_FINAL_HUMAN}) AND NOT ({DIRECT_SUSPECTED}) AND f.id IS NULL THEN 1 ELSE 0 END",
     f"CASE WHEN ({LLM_ISSUE}) = 1 AND COALESCE(f.verdict, '') <> 'fp' AND {_VALIDATED} THEN 1 ELSE 0 END",
 )
 
@@ -110,6 +121,7 @@ RESOURCE_TABLES = {
     "events": ("events", "''"),
     "threat_audit_tasks": ("threat_audit_tasks", "status"),
     "threat_pattern_audit_tasks": ("threat_pattern_audit_tasks", "status"),
+    "redline_audit_tasks": ("redline_audit_tasks", "status"),
     "vulnerability_validations": ("validations", "''"),
     "skill_reports": ("skill_reports", "''"),
     "fp_review_jobs": ("fp_review_jobs", "status"),
@@ -195,7 +207,7 @@ def metrics_from_totals(totals: dict) -> ScanIssueMetrics:
     return ScanIssueMetrics(
         **{name: value for name, value in values.items() if name in ScanIssueMetrics.__dataclass_fields__},
         effective_issue_count=values["llm_issue_count"] - values["fp_review_false_positive_count"],
-        suspected_issue_count=values["fp_review_issue_count"],
+        suspected_issue_count=values["fp_review_issue_count"] + values["direct_suspected_issue_count"],
         accuracy=accuracy(values["human_confirmed_count"], values["accuracy_basis_count"]),
     )
 
@@ -274,6 +286,7 @@ class ScanSummariesMixin:
             self.get_threat_pattern_audit_counts_by_engine(scan_id)
             if counts["threat_pattern_audit_tasks"] else {}
         )
+        counts.update(self.get_redline_audit_item_counts(scan_id))
         return counts
 
     def rebuild_scan_summary(self, scan_id: str) -> dict:

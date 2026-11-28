@@ -33,12 +33,15 @@ THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID = "threat_pattern_iterative_audit"
 THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的迭代漏洞挖掘引擎"
 MULTI_VERSION_ENGINE_ID = "multi_version"
 MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎"
+REDLINE_AUDIT_ENGINE_ID = "redline_audit"
+REDLINE_AUDIT_ENGINE_LABEL = "DeepHole网络安全红线排查引擎"
 BUILTIN_MINING_ENGINE_LABELS = {
     STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_AUDIT_ENGINE_ID: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_ID: THREAT_PATTERN_ITERATIVE_AUDIT_ENGINE_LABEL,
     MULTI_VERSION_ENGINE_ID: MULTI_VERSION_ENGINE_LABEL,
+    REDLINE_AUDIT_ENGINE_ID: REDLINE_AUDIT_ENGINE_LABEL,
 }
 
 
@@ -724,6 +727,151 @@ class ThreatPatternAuditTaskDetail(ThreatPatternAuditTask):
     next_task_id: str = ""
 
 
+class RedlineItem(BaseModel):
+    """One admin-managed cybersecurity redline requirement entry."""
+
+    item_id: str
+    code: str
+    security_attribute: str
+    attribute_description: str
+    requirement: str
+    category: str = ""
+    guidance: str = ""
+    remark: str = ""
+    enabled: bool = True
+    sort_order: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class ScanRedlineItem(BaseModel):
+    """Immutable redline entry snapshot captured when a scan is created."""
+
+    item_id: str
+    code: str
+    security_attribute: str
+    attribute_description: str
+    requirement: str
+    category: str = ""
+    guidance: str = ""
+    remark: str = ""
+    sort_order: int = 0
+
+
+class RedlineItemCreateRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=128)
+    security_attribute: str = Field(min_length=1, max_length=500)
+    attribute_description: str = Field(min_length=1, max_length=2000)
+    requirement: str = Field(min_length=1, max_length=4000)
+    category: str = Field(default="", max_length=128)
+    guidance: str = Field(default="", max_length=10000)
+    remark: str = Field(default="", max_length=4000)
+    enabled: bool = True
+
+    @field_validator("code", "security_attribute", "attribute_description", "requirement")
+    @classmethod
+    def _nonblank_required(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("必填字段不能为空")
+        return cleaned
+
+    @field_validator("category", "guidance", "remark", mode="before")
+    @classmethod
+    def _strip_optional(cls, value: object) -> str:
+        return str(value or "").strip()
+
+
+class RedlineItemUpdateRequest(BaseModel):
+    code: str | None = Field(default=None, max_length=128)
+    security_attribute: str | None = Field(default=None, max_length=500)
+    attribute_description: str | None = Field(default=None, max_length=2000)
+    requirement: str | None = Field(default=None, max_length=4000)
+    category: str | None = Field(default=None, max_length=128)
+    guidance: str | None = Field(default=None, max_length=10000)
+    remark: str | None = Field(default=None, max_length=4000)
+    enabled: bool | None = None
+
+    @field_validator("code", "security_attribute", "attribute_description", "requirement")
+    @classmethod
+    def _nonblank_when_provided(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned:
+            raise ValueError("必填字段不能为空")
+        return cleaned
+
+    @field_validator("category", "guidance", "remark", mode="before")
+    @classmethod
+    def _strip_optional_update(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+
+class RedlineBatchEnabledRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=5000)
+    enabled: bool
+
+
+class RedlineBatchDeleteRequest(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=5000)
+
+
+class RedlineListResponse(BaseModel):
+    items: list[RedlineItem] = Field(default_factory=list)
+    total: int = 0
+    enabled_count: int = 0
+    categories: list[str] = Field(default_factory=list)
+    security_attributes: list[str] = Field(default_factory=list)
+
+
+class RedlineSummaryResponse(BaseModel):
+    total_count: int = 0
+    enabled_count: int = 0
+
+
+class RedlineImportResponse(BaseModel):
+    created: int = 0
+    updated: int = 0
+    replaced: int = 0
+    total: int = 0
+    enabled_count: int = 0
+    items: list[RedlineItem] = Field(default_factory=list)
+
+
+class RedlineAuditTask(BaseModel):
+    """One persisted redline item / round audit task."""
+
+    task_id: str
+    scan_id: str = ""
+    redline_item_id: str = ""
+    item_code: str = ""
+    security_attribute: str = ""
+    attribute_description: str = ""
+    requirement: str = ""
+    category: str = ""
+    iteration: int = Field(default=1, ge=1, le=5)
+    max_iterations: int = Field(default=5, ge=1, le=5)
+    parent_task_id: str = ""
+    status: str = "pending"
+    found: bool | None = None
+    stop_reason: str = ""
+    validation_retries: int = Field(default=0, ge=0)
+    result_vuln_indexes: list[int] = Field(default_factory=list)
+    failure_reason: str = ""
+    output_source: OutputSource = Field(default_factory=OutputSource)
+    created_at: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str = ""
+
+
+class RedlineAuditTaskDetail(RedlineAuditTask):
+    next_task_id: str = ""
+
+
 class ThreatAuditFindingSummary(BaseModel):
     """A linked audit finding with its current effective conclusion."""
     vuln_index: int
@@ -754,9 +902,10 @@ class CandidateAuditTaskResult(BaseModel):
 class VulnerabilityAuditSource(BaseModel):
     vuln_index: int = Field(ge=0)
     status: Literal["resolved", "missing", "ambiguous", "unsupported"]
-    kind: Literal["threat_audit", "threat_pattern_audit", "static_candidate"] | None = None
+    kind: Literal["threat_audit", "threat_pattern_audit", "redline_audit", "static_candidate"] | None = None
     threat_task: ThreatAuditTask | None = None
     pattern_task: ThreatPatternAuditTask | None = None
+    redline_task: RedlineAuditTask | None = None
     candidate: ScanCandidate | None = None
 
 
@@ -996,6 +1145,8 @@ class ScanStatus(BaseModel):
     threat_analysis: dict[str, Any] | None = None
     threat_audit_tasks: list[ThreatAuditTask] = []
     threat_pattern_audit_tasks: list[ThreatPatternAuditTask] = Field(default_factory=list)
+    redline_items: list[ScanRedlineItem] = Field(default_factory=list)
+    redline_audit_tasks: list[RedlineAuditTask] = Field(default_factory=list)
     validations: list[VulnerabilityValidation] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
@@ -1029,6 +1180,8 @@ class ScanDetailCounts(BaseModel):
     candidate_audit_failed: int = 0
     vulnerabilities: int = 0
     effective_issue_count: int = 0
+    suspected_issue_count: int = 0
+    direct_suspected_issue_count: int = 0
     human_confirmed_issue_count: int = 0
     validated_issue_count: int = 0
     events: int = 0
@@ -1051,6 +1204,15 @@ class ScanDetailCounts(BaseModel):
     threat_pattern_audit_cancelled: int = 0
     threat_pattern_audit_superseded: int = 0
     threat_pattern_audit_by_engine: dict[str, dict[str, int]] = Field(default_factory=dict)
+    redline_audit_tasks: int = 0
+    redline_audit_items_total: int = 0
+    redline_audit_items_completed: int = 0
+    redline_audit_items_running: int = 0
+    redline_audit_items_queued: int = 0
+    redline_audit_items_pending: int = 0
+    redline_audit_items_failed: int = 0
+    redline_audit_items_cancelled: int = 0
+    redline_audit_findings: int = 0
     validations: int = 0
     skill_reports: int = 0
 
@@ -1091,6 +1253,12 @@ class ThreatAuditTaskPage(BaseModel):
 
 class ThreatPatternAuditTaskPage(BaseModel):
     items: list[ThreatPatternAuditTask] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class RedlineAuditTaskPage(BaseModel):
+    items: list[RedlineAuditTask] = Field(default_factory=list)
     next_cursor: str | None = None
     has_more: bool = False
 
@@ -2123,6 +2291,7 @@ class ScanMeta(BaseModel):
     threat_analysis_method: str = "deephole_threat_analysis"
     threat_analysis_method_selection: ThreatAnalysisMethodSelection | None = None
     mining_engines: list[MiningEngineSelection] = []
+    redline_items: list[ScanRedlineItem] = Field(default_factory=list)
     feedback_ids: list[str] = []
     agent_id: str = ""
     agent_key: str = ""

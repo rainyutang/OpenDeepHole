@@ -138,6 +138,7 @@ test("task filters classify new and legacy types, context fallbacks, and unknown
     ["threat", "threat_audit", { task_type: "vulnerability_mining", task_name: "threat-audit-s-0" }],
     ["pattern", "threat_pattern_audit", { task_type: "vulnerability_mining", task_name: "threat-pattern-audit-s-0" }],
     ["iterative", "threat_pattern_iterative_audit", { task_type: "vulnerability_mining", task_name: "threat-pattern-iterative-audit-s-0" }],
+    ["redline", "redline_audit", { task_type: "vulnerability_mining", task_name: "redline-audit-s-0" }],
     ["review", "fp_review", { task_type: "fp_review", context: { task_type: "audit" } }],
     ["validation-old", "vulnerability_validation", { task_type: "validation" }],
     ["validation-new", "vulnerability_validation", { task_type: "vulnerability_validation" }],
@@ -162,7 +163,7 @@ test("task filters classify new and legacy types, context fallbacks, and unknown
 test("direct business types retain their filter keys independently of task names", async () => {
   const { scanQueueTaskKind, scanQueueTaskTypeLabel } = await server.ssrLoadModule("/src/features/modelPool/presentation.ts");
   const directKinds = ["candidate_audit", "project_audit", "sensitive_clear", "report_audit", "threat_analysis",
-    "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit", "fp_review", "vulnerability_validation", "vulnerability_dedup"];
+    "threat_audit", "threat_pattern_audit", "threat_pattern_iterative_audit", "redline_audit", "fp_review", "vulnerability_validation", "vulnerability_dedup"];
   for (const kind of directKinds) {
     const value = { task_type: ` ${kind.toUpperCase()} `, task_name: "candidate-audit-unrelated-name", context: { task_type: "validation" } };
     assert.equal(scanQueueTaskKind(value), kind);

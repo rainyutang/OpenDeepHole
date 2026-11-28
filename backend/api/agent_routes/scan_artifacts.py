@@ -4,6 +4,7 @@ from fastapi import Query, APIRouter, Depends
 from backend.models import (
     AgentGitHistory,
     HistoryPattern,
+    RedlineAuditTask,
     ThreatAuditTask,
     ThreatPatternAuditTask,
     VulnerabilityPage,
@@ -72,6 +73,18 @@ async def agent_upsert_threat_pattern_audit_task(scan_id: str, body: dict) -> di
 async def agent_list_threat_pattern_audit_tasks(scan_id: str) -> list[ThreatPatternAuditTask]:
     'Return module/pattern audit tasks for scan resume.'
     return await service.agent_list_threat_pattern_audit_tasks(scan_id=scan_id)
+
+
+@router.post('/scan/{scan_id}/redline-audit-task')
+async def agent_upsert_redline_audit_task(scan_id: str, body: dict) -> dict:
+    'Agent creates or updates one redline audit task.'
+    return await service.agent_upsert_redline_audit_task(scan_id=scan_id, body=body)
+
+
+@router.get('/scan/{scan_id}/redline-audit-tasks', response_model=list[RedlineAuditTask])
+async def agent_list_redline_audit_tasks(scan_id: str) -> list[RedlineAuditTask]:
+    'Return redline audit tasks for scan resume.'
+    return await service.agent_list_redline_audit_tasks(scan_id=scan_id)
 
 
 @router.get('/scan/{scan_id}/vulnerabilities', response_model=VulnerabilityPage)

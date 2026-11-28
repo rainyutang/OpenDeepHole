@@ -9,6 +9,7 @@ export interface ScanHistoryProps {
   user: User;
   onLogout: () => void;
   onManageUsers: () => void;
+  onManageRedlines?: () => void;
   onCheckerDashboard: () => void;
   onCheckerCatalog: () => void;
   onReviewNotes?: () => void;

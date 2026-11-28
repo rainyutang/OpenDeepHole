@@ -4,6 +4,8 @@ from __future__ import annotations
 from backend.models import (
     AgentGitHistory,
     HistoryPattern,
+    REDLINE_AUDIT_ENGINE_ID,
+    RedlineAuditTask,
     SkillReport,
     ThreatAnalysisRunStatus,
     ThreatAuditTask,
@@ -231,6 +233,69 @@ async def agent_list_threat_pattern_audit_tasks(scan_id: str) -> list[ThreatPatt
     """Return module/pattern audit tasks for scan resume."""
     store = get_scan_store()
     return await run_store_call(store, "list_threat_pattern_audit_tasks", scan_id)
+
+
+async def agent_upsert_redline_audit_task(scan_id: str, body: dict) -> dict:
+    """Agent creates or updates one redline item/round audit task."""
+    from backend.application import get_runtime
+    from backend.scans.pattern_task_reports import pattern_report_identity
+    try:
+        task = RedlineAuditTask(**body)
+        identity = pattern_report_identity(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid redline audit task: {exc}") from exc
+
+    store = get_scan_store()
+    if task.status == "completed" and not task.result_vuln_indexes:
+        result_indexes = await run_store_call(
+            store,
+            "get_vulnerability_indexes_by_source_task",
+            scan_id,
+            task.task_id,
+        )
+        if result_indexes:
+            task = task.model_copy(update={"result_vuln_indexes": result_indexes})
+    try:
+        task, changed, change_kind = await run_store_call(
+            store,
+            "upsert_redline_audit_task",
+            scan_id,
+            task,
+            return_change_kind=True,
+            **identity,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Scan not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not changed:
+        return {"ok": True, "task": task.model_dump()}
+
+    scan = get_runtime().scans.running_scans.get(scan_id)
+    if scan is not None and (not identity or scan.execution_revision == identity["execution_revision"]):
+        for index, existing in enumerate(scan.redline_audit_tasks):
+            if existing.task_id == task.task_id:
+                scan.redline_audit_tasks[index] = task
+                break
+        else:
+            scan.redline_audit_tasks.append(task)
+
+    from backend.application import publish
+    notice = {"task": task.model_dump()}
+    if identity:
+        notice.update(
+            change=change_kind,
+            execution_revision=identity["execution_revision"],
+            engine_ids=[REDLINE_AUDIT_ENGINE_ID],
+        )
+    publish(scan_id, "redline_audit_task", notice)
+    return {"ok": True, "task": task.model_dump()}
+
+
+async def agent_list_redline_audit_tasks(scan_id: str) -> list[RedlineAuditTask]:
+    """Return redline audit tasks for scan resume."""
+    store = get_scan_store()
+    return await run_store_call(store, "list_redline_audit_tasks", scan_id)
 
 
 async def agent_list_vulnerabilities(

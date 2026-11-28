@@ -19,6 +19,7 @@ const UserManagement = lazy(() => import("./components/UserManagement"));
 const AdminCheckerDashboard = lazy(() => import("./components/AdminCheckerDashboard"));
 const CheckerCatalogPage = lazy(() => import("./components/CheckerCatalogPage"));
 const ReviewNotesPage = lazy(() => import("./components/ReviewNotes"));
+const RedlineManagementPage = lazy(() => import("./components/RedlineManagementPage"));
 
 function RouteFallback() {
   return (
@@ -150,6 +151,7 @@ export default function App() {
         <Route index element={<ScanHistory user={user!} onViewScan={viewScan} onLogout={handleLogout}
           onDownloadAgent={() => navigate("/agents/download")} onAgentConfig={() => navigate("/agents/config")}
           onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
+          onManageRedlines={() => navigate("/admin/redlines")}
           onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")}
           onReviewNotes={() => navigate("/review-notes")} />} />
         <Route path="scans/new" element={<NewScanRoute />} />
@@ -161,6 +163,7 @@ export default function App() {
         <Route path="review-notes" element={<ReviewNotesPage onBack={onBack} />} />
         <Route element={<RequireAuth user={user} admin />}>
           <Route path="admin/users" element={<UserManagement user={user!} onBack={onBack} />} />
+          <Route path="admin/redlines" element={<RedlineManagementPage onBack={onBack} />} />
         </Route>
       </Route>
       <Route path="*" element={<NotFound />} />

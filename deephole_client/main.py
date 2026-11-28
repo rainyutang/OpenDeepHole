@@ -258,6 +258,11 @@ async def _handle_resume_command(msg: dict, config, task_manager, reporter) -> N
                 if isinstance(msg.get("mining_engines"), list)
                 else None
             ),
+            redline_items=(
+                msg.get("redline_items")
+                if isinstance(msg.get("redline_items"), list)
+                else None
+            ),
             retry_candidates=msg.get("retry_candidates"),
             retry_total_candidates=msg.get("retry_total_candidates"),
             retry_processed_offset=int(msg.get("retry_processed_offset") or 0),
@@ -380,6 +385,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             mining_engines=(
                 msg.get("mining_engines")
                 if isinstance(msg.get("mining_engines"), list)
+                else None
+            ),
+            redline_items=(
+                msg.get("redline_items")
+                if isinstance(msg.get("redline_items"), list)
                 else None
             ),
             codex_model_ids=(

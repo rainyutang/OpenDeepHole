@@ -7,8 +7,8 @@ from typing import Literal, get_args
 TaskKind = Literal[
     "candidate_audit", "project_audit", "sensitive_clear", "report_audit",
     "threat_analysis", "threat_audit", "threat_pattern_audit",
-    "threat_pattern_iterative_audit", "fp_review", "vulnerability_validation",
-    "vulnerability_dedup", "vulnerability_mining", "other",
+    "threat_pattern_iterative_audit", "redline_audit", "fp_review",
+    "vulnerability_validation", "vulnerability_dedup", "vulnerability_mining", "other",
 ]
 TASK_KINDS = frozenset(get_args(TaskKind))
 MINING_PREFIXES = (
@@ -18,6 +18,7 @@ MINING_PREFIXES = (
     ("threat-audit-", "threat_audit"),
     ("threat-pattern-iterative-audit-", "threat_pattern_iterative_audit"),
     ("threat-pattern-audit-", "threat_pattern_audit"),
+    ("redline-audit-", "redline_audit"),
 )
 TYPE_ALIASES = {"audit": "candidate_audit", "validation": "vulnerability_validation"}
 

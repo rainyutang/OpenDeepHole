@@ -27,6 +27,7 @@ await Promise.all([
   "/src/components/AdminCheckerDashboard.tsx",
   "/src/components/CheckerCatalogPage.tsx",
   "/src/components/ReviewNotes.tsx",
+  "/src/components/RedlineManagementPage.tsx",
 ].map((mod) => server.ssrLoadModule(mod)));
 const { ThreatAnalysisPanel } = await server.ssrLoadModule("/src/features/threatAnalysis/index.ts");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
@@ -78,6 +79,8 @@ function installApi(intercept = () => undefined) {
     if (url === "/api/auth/login") return response(config, { token: "jwt", user });
     if (url === "/api/announcements" || url.endsWith("/checkers") || url.endsWith("/checkers/catalog") || url === "/api/agents") return response(config, []);
     if (url === "/api/mining-engines") return response(config, { engines: [] });
+    if (url === "/api/redlines/summary") return response(config, { total_count: 0, enabled_count: 0 });
+    if (url === "/api/admin/redlines") return response(config, { items: [], total: 0, enabled_count: 0 });
     if (url === "/api/v2/scans") return response(config, { ...emptyPage, items: [{ scan_id: "s", scan_name: "Test scan", product: "Product",
       status: "complete", created_at: "2026-10-29T00:00:00Z", suspected_issue_count: 0, confirmed_vulnerability_count: 0 }] });
     if (url.endsWith("/fp-review/overview") || url.endsWith("/threat-analysis")) return response(config, null);
@@ -86,7 +89,7 @@ function installApi(intercept = () => undefined) {
       threat_analysis_enabled: true, detail_counts: {}, mining_engines: [{ engine_id: "threat_audit", enabled: true }] });
     if (url.endsWith("/index-status")) return response(config, { status: "skipped" });
     if (url.endsWith("/git_history")) return response(config, []);
-    if (/\/(candidates|vulnerabilities|events|event-history|threat-audit-tasks|threat-pattern-audit-tasks|validations|tasks)$/.test(url)) return response(config, emptyPage);
+    if (/\/(candidates|vulnerabilities|events|event-history|threat-audit-tasks|threat-pattern-audit-tasks|redline-audit-tasks|validations|tasks)$/.test(url)) return response(config, emptyPage);
     if (url === "/api/v2/checker-dashboard") return response(config, {
       checkers: [], products: [], has_unconfigured_product: false,
       summary: { scan_count: 0, suspected_issue_count: 0, human_confirmed_count: 0, ticket_submitted_count: 0 },

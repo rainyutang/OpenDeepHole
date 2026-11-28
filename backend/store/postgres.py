@@ -601,6 +601,7 @@ def _sqlite_schema() -> list[str]:
             not in {
                 "idx_scans_user_scan_name_unique",
                 "storage_idx_checker_totals_suspected",
+                "storage_idx_checker_totals_direct_suspected",
             }
             and str(row[0]) != "trigger"
         ]
@@ -804,6 +805,11 @@ class PostgresScanStore(SqliteScanStore):
                     "CREATE INDEX IF NOT EXISTS storage_idx_checker_totals_suspected "
                     "ON scan_checker_totals(scan_id, fp_review_issue_count) "
                     "WHERE fp_review_issue_count > 0"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS storage_idx_checker_totals_direct_suspected "
+                    "ON scan_checker_totals(scan_id, direct_suspected_issue_count) "
+                    "WHERE direct_suspected_issue_count > 0"
                 )
             if legacy_data_needed:
                 connection.execute(

@@ -1,7 +1,9 @@
 import type { FpReviewResult } from "../../types/fpReview";
 import type { OutputSource, Vulnerability } from "../../types/issues";
+import { isRedlineAuditEngine } from "../../miningEngines";
 import { compactVulnerabilityReport } from "../../vulnerabilityReport";
 import {
+  engineId,
   isFinalFpProblem,
   severityLabel,
   vulnerabilityFunctionLabel,
@@ -65,6 +67,7 @@ export function resolvedIssueDisplayVuln(
   vuln: Vulnerability,
   fpReviewResult?: FpReviewResult | null,
 ): Vulnerability {
+  if (isRedlineAuditEngine(engineId(vuln))) return vuln;
   if (!hasRegeneratedFpReport(fpReviewResult)) return vuln;
   const regenerated = fpReviewResult.vulnerability_report.trim();
   const headerUpdates = parseCompactReportHeader(regenerated);
@@ -79,6 +82,7 @@ export function vulnerabilityReportSource(
   vuln: Vulnerability,
   fpReviewResult?: FpReviewResult | null,
 ): OutputSource | undefined {
+  if (isRedlineAuditEngine(engineId(vuln))) return vuln.output_source;
   if (hasRegeneratedFpReport(fpReviewResult) && hasSourceMetadata(fpReviewResult.output_source)) {
     return fpReviewResult.output_source;
   }
@@ -90,7 +94,7 @@ export function vulnerabilityReportContent(
   locationOnly = false,
   fpReviewResult?: FpReviewResult | null,
 ): string {
-  if (hasRegeneratedFpReport(fpReviewResult)) {
+  if (!isRedlineAuditEngine(engineId(vuln)) && hasRegeneratedFpReport(fpReviewResult)) {
     return `${fpReviewResult.vulnerability_report.trim()}\n`;
   }
   const existing = vuln.vulnerability_report?.trim();

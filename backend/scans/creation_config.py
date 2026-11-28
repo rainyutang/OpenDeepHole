@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from deephole_client.scan_modes import (
     COMPACT_THREAT_ANALYSIS_METHOD_ID,
+    REDLINE_AUDIT_ENGINE_ID,
     SCAN_MODE_CUSTOM,
     SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_QUICK,
@@ -18,6 +19,7 @@ from backend.models import (
     FpReviewMethodSelection,
     MiningEngineSelection,
     MultiVersionTarget,
+    ScanRedlineItem,
     ThreatAnalysisMethodSelection,
     User,
 )
@@ -56,6 +58,7 @@ class ResolvedScanConfiguration:
     validated_checker_names: list[str]
     checker_packages: list[dict[str, str]]
     mining_engine_selections: list[MiningEngineSelection]
+    redline_items: list[ScanRedlineItem]
     code_graph_mcp: AgentMcpConfig | None
     knowledge_base_mcp: AgentMcpConfig | None
 
@@ -67,6 +70,7 @@ def resolve_creation_configuration(
     checker_names: list[str] | None,
     *,
     knowledge_base_settings: dict | None = None,
+    enabled_redline_items: list[ScanRedlineItem] | None = None,
 ) -> ResolvedScanConfiguration:
     requested_scan_mode = _normalize_scan_mode(body.scan_mode)
     if requested_scan_mode == SCAN_MODE_MULTI_VERSION:
@@ -338,6 +342,23 @@ def resolve_creation_configuration(
             else []
         )
         checker_packages = _checker_packages_for(validated_checker_names)
+    redline_engine_enabled = any(
+        item.enabled and item.engine_id == REDLINE_AUDIT_ENGINE_ID
+        for item in mining_engine_selections
+    )
+    redline_items: list[ScanRedlineItem] = []
+    if redline_engine_enabled:
+        if scan_mode != SCAN_MODE_CUSTOM:
+            raise ApplicationError(
+                status_code=422,
+                detail="DeepHole网络安全红线排查引擎仅支持在自定义模式中选择",
+            )
+        redline_items = list(enabled_redline_items or [])
+        if not redline_items:
+            raise ApplicationError(
+                status_code=422,
+                detail="管理员尚未启用任何网络安全红线条目，请先在「红线管理」中配置并启用后再运行红线排查",
+            )
     return ResolvedScanConfiguration(
         project_path=project_path,
         code_scan_path=code_scan_path,
@@ -355,6 +376,7 @@ def resolve_creation_configuration(
         validated_checker_names=validated_checker_names,
         checker_packages=checker_packages,
         mining_engine_selections=mining_engine_selections,
+        redline_items=redline_items,
         code_graph_mcp=code_graph_mcp,
         knowledge_base_mcp=knowledge_base_mcp,
     )
