@@ -152,11 +152,11 @@ export function ThreatCoverageView({ data, tree, loading, error, refresh, issues
   const lineCountCaption = !hasLineCount
     ? "历史清单未采集"
     : inventory?.line_count_status === "partial"
-      ? (lineCountedFiles !== null ? `已统计 ${lineCountedFiles.toLocaleString()} 个文件（部分跳过）` : "部分文件未统计行数")
+      ? (lineCountedFiles !== null ? `已统计 ${lineCountedFiles.toLocaleString()} 个代码文件（部分跳过）` : "部分代码文件未统计行数")
       : inventory?.status !== "complete"
-        ? "已采集文本文件行数"
+        ? "已采集代码文件行数"
         : lineCountedFiles !== null && root && lineCountedFiles < root.files
-          ? `已统计 ${lineCountedFiles.toLocaleString()} 个文本文件`
+          ? `已统计 ${lineCountedFiles.toLocaleString()} 个代码文件`
           : "扫描范围代码总行数";
   const percent = (count: number) => data?.analysis_ready && inventory?.status === "complete" ? coveragePercent(count, root?.files ?? 0) : "—";
   const open = (path: string) => {

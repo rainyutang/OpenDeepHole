@@ -657,13 +657,35 @@ def test_module_threats_only_coverage_and_stored_bundle_guard(audit_scope):
     )
 
 
-def test_inventory_counts_total_lines_skips_binary_and_keeps_complete_tree_on_partial_lines(tmp_path):
+def test_inventory_counts_only_code_file_lines_and_keeps_complete_tree_on_partial_lines(tmp_path):
     root = tmp_path / "project"
     (root / "src").mkdir(parents=True)
+    # Recognized code files across mainstream languages (case-insensitive extensions).
     (root / "src/empty.c").write_bytes(b"")
     (root / "src/single.c").write_bytes(b"int main(void) { return 0; }")
-    (root / "src/multi.c").write_bytes(b"line1\nline2\r\nline3\n")
+    (root / "src/multi.CPP").write_bytes(b"line1\nline2\r\nline3\n")
     (root / "src/utf16.h").write_bytes("int a;\nint b;".encode("utf-16"))
+    (root / "src/boot.S").write_bytes(b"nop\nret\n")
+    (root / "src/service.py").write_bytes(b"def ok():\n    return True\n")
+    (root / "src/app.ets").write_bytes(b"export const x = 1;\n")
+    (root / "src/api.ts").write_bytes(b"export type ID = string;\n")
+    (root / "src/helper.sh").write_bytes(b"#!/bin/sh\necho ok\n")
+    (root / "src/schema.proto").write_bytes(b"syntax = \"proto3\";\n")
+    # Binary content masquerading with a code extension is skipped without marking partial.
+    (root / "src/corrupt.c").write_bytes(b"header\x00binary\nbytes\n")
+    # Non-code text files (docs, configs, markup, build files, compiler deps) and binaries stay in entries
+    # but are excluded from line counting.
+    (root / "README").write_bytes(b"readme1\nreadme2\n")
+    (root / "README.md").write_bytes(b"# title\nbody\n")
+    (root / "notes.txt").write_bytes(b"note1\nnote2\n")
+    (root / "package.json").write_bytes(b"{\n  \"name\": \"demo\"\n}\n")
+    (root / "config.yaml").write_bytes(b"a: 1\nb: 2\n")
+    (root / "settings.ini").write_bytes(b"[core]\nx=1\n")
+    (root / "index.html").write_bytes(b"<html>\n<body>hi</body>\n</html>\n")
+    (root / "style.css").write_bytes(b"body {\n  color: red;\n}\n")
+    (root / "Makefile").write_bytes(b"all:\n\techo hi\n")
+    (root / "CMakeLists.txt").write_bytes(b"cmake_minimum_required(VERSION 3.20)\n")
+    (root / "src/single.d").write_bytes(b"single.o: single.c\n")
     (root / "src/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
     (root / "src/blob.dat").write_bytes(b"header\x00binary\nbytes\n")
 
@@ -673,14 +695,31 @@ def test_inventory_counts_total_lines_skips_binary_and_keeps_complete_tree_on_pa
     )
     validated = ScanFileInventory.model_validate(result)
     assert validated.status == "complete"
-    assert validated.total_lines == 0 + 1 + 3 + 2
-    assert validated.line_counted_files == 4
+    entry_paths = {entry.path for entry in validated.entries if entry.kind == "file"}
+    assert {"README", "README.md", "package.json", "Makefile", "src/single.d", "src/logo.png"} <= entry_paths
+    # Counted code files: empty.c(0) + single.c(1) + multi.CPP(3) + utf16.h(2) + boot.S(2)
+    # + service.py(2) + app.ets(1) + api.ts(1) + helper.sh(2) + schema.proto(1) = 15 lines across 10 files.
+    assert validated.total_lines == 15
+    assert validated.line_counted_files == 10
     assert validated.line_count_status == "complete"
     dumped = validated.model_dump(mode="json", exclude_none=True)
-    assert dumped["total_lines"] == 6
+    assert dumped["total_lines"] == 15
     assert all("lines" not in entry for entry in dumped["entries"])
 
-    # Oversized text files mark line_count_status as partial without downgrading file inventory status.
+    # Oversized non-code text files are ignored before stat/read and do not mark line_count_status partial.
+    (root / "huge.json").write_bytes(b"{\n" + b"\"k\": 1,\n" * 64 + b"}\n")
+    still_complete = collector.collect_file_inventory(
+        inventory(project_path=str(root), scan_root=str(root)),
+        excluded=(), cancel_event=threading.Event(), stop_event=threading.Event(),
+        max_line_count_file_bytes=64,
+    )
+    validated_still_complete = ScanFileInventory.model_validate(still_complete)
+    assert validated_still_complete.status == "complete"
+    assert validated_still_complete.line_count_status == "complete"
+    assert validated_still_complete.total_lines == 15
+    assert validated_still_complete.line_counted_files == 10
+
+    # Oversized code files mark line_count_status as partial without downgrading file inventory status.
     (root / "src/big.c").write_bytes(b"a\n" * 64)
     partial_lines = collector.collect_file_inventory(
         inventory(project_path=str(root), scan_root=str(root)),
@@ -690,8 +729,23 @@ def test_inventory_counts_total_lines_skips_binary_and_keeps_complete_tree_on_pa
     validated_partial = ScanFileInventory.model_validate(partial_lines)
     assert validated_partial.status == "complete"
     assert validated_partial.line_count_status == "partial"
-    assert validated_partial.total_lines == 6
-    assert validated_partial.line_counted_files == 4
+    assert validated_partial.total_lines == 15
+    assert validated_partial.line_counted_files == 10
+
+    # A directory with only non-code files reports zero code lines and complete status.
+    docs_only = tmp_path / "docs_only"
+    docs_only.mkdir()
+    (docs_only / "README.md").write_text("# docs\nline2\n", encoding="utf-8")
+    (docs_only / "data.json").write_text("{\"a\": 1}\n", encoding="utf-8")
+    docs_result = collector.collect_file_inventory(
+        inventory(project_path=str(docs_only), scan_root=str(docs_only)),
+        excluded=(), cancel_event=threading.Event(), stop_event=threading.Event(),
+    )
+    validated_docs = ScanFileInventory.model_validate(docs_result)
+    assert validated_docs.status == "complete"
+    assert validated_docs.total_lines == 0
+    assert validated_docs.line_counted_files == 0
+    assert validated_docs.line_count_status == "complete"
 
     # Historical snapshots without line counts validate cleanly and omit null fields.
     legacy = ScanFileInventory.model_validate(inventory()).model_dump(mode="json", exclude_none=True)

@@ -649,7 +649,7 @@ test("coverage stats displays total module lines right after scanned files witho
   data.inventory.line_count_status = "complete";
   await act(async () => root.update(component("s", 2)));
   assert.equal(text(statCards()[1].findByType("strong")), (890).toLocaleString());
-  assert.equal(text(statCards()[1].findByType("small")), "已统计 3 个文本文件");
+  assert.equal(text(statCards()[1].findByType("small")), "已统计 3 个代码文件");
 
   data = fixture();
   data.inventory.total_lines = 500;
@@ -657,5 +657,22 @@ test("coverage stats displays total module lines right after scanned files witho
   data.inventory.line_count_status = "partial";
   await act(async () => root.update(component("s", 3)));
   assert.equal(text(statCards()[1].findByType("strong")), (500).toLocaleString());
-  assert.equal(text(statCards()[1].findByType("small")), "已统计 2 个文件（部分跳过）");
+  assert.equal(text(statCards()[1].findByType("small")), "已统计 2 个代码文件（部分跳过）");
+
+  data = fixture();
+  data.inventory.status = "partial";
+  data.inventory.total_lines = 300;
+  data.inventory.line_counted_files = 2;
+  data.inventory.line_count_status = "complete";
+  await act(async () => root.update(component("s", 4)));
+  assert.equal(text(statCards()[1].findByType("strong")), (300).toLocaleString());
+  assert.equal(text(statCards()[1].findByType("small")), "已采集代码文件行数");
+
+  data = fixture();
+  data.inventory.total_lines = 0;
+  data.inventory.line_counted_files = 0;
+  data.inventory.line_count_status = "complete";
+  await act(async () => root.update(component("s", 5)));
+  assert.equal(text(statCards()[1].findByType("strong")), "0");
+  assert.equal(text(statCards()[1].findByType("small")), "已统计 0 个代码文件");
 });

@@ -25,20 +25,50 @@ logger = logging.getLogger(__name__)
 MAX_LINE_COUNT_FILE_BYTES = 16 * 1024 * 1024
 DEFAULT_LINE_COUNT_TIMEOUT_SECONDS = 60.0
 _LINE_COUNT_CHUNK_BYTES = 65536
-_BINARY_EXTENSIONS = frozenset({
-    ".7z", ".a", ".avi", ".bin", ".bmp", ".bz2", ".class", ".db", ".db-shm",
-    ".db-wal", ".dll", ".dylib", ".elf", ".exe", ".gif", ".gz", ".ico", ".jar",
-    ".jpeg", ".jpg", ".lib", ".mov", ".mp3", ".mp4", ".o", ".obj", ".otf",
-    ".pdf", ".png", ".pyc", ".pyo", ".rar", ".so", ".sqlite", ".sqlite3",
-    ".tar", ".ttf", ".war", ".wasm", ".wav", ".webp", ".whl", ".woff",
-    ".woff2", ".xz", ".zip",
+CODE_FILE_EXTENSIONS = frozenset({
+    # C / C++ / Objective-C / CUDA / OpenCL
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".c++",
+    ".hh", ".hpp", ".hxx", ".h++",
+    ".inl", ".ipp", ".tpp", ".txx", ".ixx", ".cppm",
+    ".m", ".mm", ".cu", ".cuh", ".cl",
+    # Assembly
+    ".s", ".asm", ".nasm", ".inc",
+    # Systems / Native
+    ".rs", ".go", ".zig", ".nim",
+    ".v", ".sv", ".svh", ".vhd", ".vhdl",
+    ".ada", ".adb", ".ads", ".f", ".f90", ".f95", ".f03", ".f08", ".for", ".pas", ".dpr",
+    # JVM
+    ".java", ".kt", ".kts", ".scala", ".groovy", ".clj", ".cljs", ".cljc",
+    # .NET
+    ".cs", ".csx", ".fs", ".fsi", ".fsx", ".vb",
+    # Python
+    ".py", ".pyi", ".pyw", ".pyx", ".pxd",
+    # JavaScript / TypeScript / ArkTS / Frontend Components
+    ".js", ".mjs", ".cjs", ".jsx",
+    ".ts", ".mts", ".cts", ".tsx",
+    ".ets", ".vue", ".svelte",
+    # Dynamic / Scripting / Functional / Mobile
+    ".php", ".phtml", ".rb", ".lua", ".pl", ".pm",
+    ".r", ".swift", ".dart", ".ex", ".exs", ".erl", ".hrl",
+    ".hs", ".lhs", ".ml", ".mli", ".elm", ".jl", ".tcl", ".awk", ".sed",
+    # Shell / Command Scripts
+    ".sh", ".bash", ".zsh", ".ksh", ".csh", ".tcsh", ".fish",
+    ".bat", ".cmd", ".ps1", ".psm1",
+    # Query / Interface / Smart Contract / Shader
+    ".sql", ".proto", ".idl", ".aidl", ".thrift", ".graphql", ".gql", ".sol",
+    ".glsl", ".hlsl", ".wgsl", ".vert", ".frag",
 })
 
 
+def is_code_file(path: Path) -> bool:
+    """Return True when path has a recognized source-code file extension."""
+    return path.suffix.lower() in CODE_FILE_EXTENSIONS
+
+
 def _count_file_lines(path: Path, *, max_bytes: int = MAX_LINE_COUNT_FILE_BYTES) -> tuple[int | None, str]:
-    """Count physical lines in a non-binary file without failing inventory collection."""
-    if path.suffix.lower() in _BINARY_EXTENSIONS:
-        return None, "binary"
+    """Count physical lines in a recognized code file without failing inventory collection."""
+    if not is_code_file(path):
+        return None, "non_code"
     target = io_path(path)
     try:
         size = os.stat(target).st_size
