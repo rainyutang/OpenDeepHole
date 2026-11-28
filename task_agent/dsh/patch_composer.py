@@ -246,7 +246,7 @@ def build_cordis_patch_document(
         insert_rows.append(
             {
                 "id": "odh-tool-gate",
-                "name": str(_TOOL_GATE_PLUGIN_PATH),
+                "name": _TOOL_GATE_PLUGIN_PATH.as_uri(),
                 "config": {"denyAll": True},
             }
         )
@@ -281,7 +281,7 @@ def build_cordis_patch_document(
         insert_rows.append(
             {
                 "id": "odh-tool-gate",
-                "name": str(_TOOL_GATE_PLUGIN_PATH),
+                "name": _TOOL_GATE_PLUGIN_PATH.as_uri(),
                 "config": {
                     "denyAll": False,
                     "askTools": ask_tools,

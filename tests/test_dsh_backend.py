@@ -1106,3 +1106,165 @@ def test_task_service_and_agent_server_dispatch_to_dsh_without_serve_manager(
     assert models_resp["ok"] is True
     assert models_resp["models"][0]["id"] == "mock/coder"
     assert mcp_resp["targets"] == {"knowledge_base": {"name": "kb", "status": "configured"}}
+
+
+def test_platform_runtime_preserves_deepseek_harness_and_discovers_fallback_providers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backend.config as backend_config
+    import task_agent.host as host_mod
+    from deephole_client import llm_runtime
+    from deephole_client.config import load_config
+    from deephole_client.platform_runtime import (
+        configure_platform_runtime,
+        ensure_platform_runtime_configured,
+    )
+
+    # Mirror the exact agent.yaml shape persisted by Web config sync
+    agent_yaml = tmp_path / "agent.yaml"
+    agent_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 11,
+                "agent_name": "win-agent",
+                "base": {
+                    "tool": "deepseek_harness",
+                    "opencode_version": "2",
+                    "executable": "opencode",
+                    "executable_v2": "opencode",
+                    "dsh_executable": "/custom/dsh",
+                    "dsh_profile": "sdk-minimal",
+                    "no_proxy": "10.0.0.0/8",
+                    "opencode_serve_port": None,
+                },
+                "model_pool": {
+                    "models": [
+                        {
+                            "id": "model-6",
+                            "model": "local-oc/DeepSeek-V4.1",
+                            "enabled": True,
+                            "capability": "high",
+                            "weight": 1,
+                            "max_concurrency": 2,
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Place a local opencode.json fallback provider (e.g. imported from OpenCode)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "local-oc": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {
+                            "baseURL": "https://internal.example.com/v1",
+                            "apiKey": "{env:TEST_FALLBACK_DSH_KEY}",
+                        },
+                        "models": {
+                            "DeepSeek-V4.1": {
+                                "limit": {"context": 128000, "output": 16384}
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_FALLBACK_DSH_KEY", "sk-env-expanded-999")
+
+    prev_backend_cfg = backend_config._config
+    prev_host_state = (
+        host_mod._bindings,
+        host_mod._binding_source,
+        host_mod._binding_identity,
+        host_mod._binding_context,
+    )
+    prev_source = llm_runtime._source
+    prev_active = llm_runtime._active
+    prev_staged = llm_runtime._staged_providers
+    prev_config_env = os.environ.get("CONFIG_PATH")
+    try:
+        llm_runtime._source = None
+        llm_runtime._active = None
+        llm_runtime._staged_providers = None
+        backend_config._config = None
+
+        cfg = load_config(agent_yaml)
+        assert cfg.opencode.tool == TOOL_DEEPSEEK_HARNESS
+        assert cfg.opencode.dsh_executable == "/custom/dsh"
+        assert cfg.opencode.dsh_profile == "sdk-minimal"
+
+        llm_runtime.initialize(cfg)
+        ensure_platform_runtime_configured(cfg)
+        assert backend_config.get_config().opencode.tool == TOOL_DEEPSEEK_HARNESS
+        assert backend_config.get_config().opencode.dsh_executable == "/custom/dsh"
+        assert backend_config.get_config().opencode.dsh_profile == "sdk-minimal"
+
+        scan_dir = tmp_path / "scan_run"
+        configure_platform_runtime(cfg, scan_dir)
+        loaded_platform = backend_config.get_config()
+        assert loaded_platform.opencode.tool == TOOL_DEEPSEEK_HARNESS
+        assert loaded_platform.opencode.dsh_executable == "/custom/dsh"
+        assert loaded_platform.opencode.dsh_profile == "sdk-minimal"
+
+        runtime = build_opencode_session_runtime(
+            loaded_platform.opencode,
+            directory=project_dir,
+        )
+        assert runtime.tool == TOOL_DEEPSEEK_HARNESS
+        assert runtime.backend_options["dsh_executable"] == "/custom/dsh"
+        assert "local-oc" in runtime.backend_options["llm_providers"]
+
+        resolved = resolve_dsh_model(
+            "local-oc/DeepSeek-V4.1",
+            llm_providers=runtime.backend_options["llm_providers"],
+        )
+        assert resolved.is_pi_ai is True
+        assert resolved.base_url == "https://internal.example.com/v1"
+        assert resolved.api_key == "sk-env-expanded-999"
+        assert resolved.context_window == 128000
+        assert resolved.max_tokens == 16384
+
+        # Verify staged candidate providers override active providers during reload
+        llm_runtime._staged_providers = {
+            "staged-api": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": "https://staged.example.com/v1", "apiKey": "sk-staged"},
+                "models": {"new-model": {}},
+            }
+        }
+        staged_rt = build_opencode_session_runtime(
+            loaded_platform.opencode,
+            directory=project_dir,
+        )
+        assert "staged-api" in staged_rt.backend_options["llm_providers"]
+        assert "local-oc" in staged_rt.backend_options["llm_providers"]
+
+        # Verify odh-tool-gate uses file:// URI for cross-platform (Windows) ESM loading
+        doc, _env, _skills = build_cordis_patch_document(resolved_model=resolved)
+        gate = next(r for r in doc[0]["insert"] if r.get("id") == "odh-tool-gate")
+        assert gate["name"].startswith("file://")
+    finally:
+        backend_config._config = prev_backend_cfg
+        (
+            host_mod._bindings,
+            host_mod._binding_source,
+            host_mod._binding_identity,
+            host_mod._binding_context,
+        ) = prev_host_state
+        llm_runtime._source = prev_source
+        llm_runtime._active = prev_active
+        llm_runtime._staged_providers = prev_staged
+        if prev_config_env is None:
+            os.environ.pop("CONFIG_PATH", None)
+        else:
+            os.environ["CONFIG_PATH"] = prev_config_env

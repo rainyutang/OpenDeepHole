@@ -51,10 +51,12 @@ class OpenCodeModelConfig(BaseModel):
 
 
 class OpenCodeConfig(BaseModel):
-    tool: Literal["opencode"] = "opencode"
+    tool: Literal["opencode", "deepseek_harness"] = "opencode"
     opencode_version: Literal["1", "2"] = "1"
     executable: str = "opencode"  # OpenCode-compatible executable name or full path
     executable_v2: str = "opencode"  # OpenCode 2.x executable name or full path
+    dsh_executable: str = ""  # Optional custom DeepSeek Harness CLI executable path
+    dsh_profile: str = "sdk-minimal"  # DeepSeek Harness profile (fixed to sdk-minimal)
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = DEFAULT_SESSION_TIMEOUT_SECONDS
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT_SECONDS
@@ -301,10 +303,13 @@ def _normalize_cli_section(section: object) -> None:
         warnings.warn("Legacy OpenCode CLI invocation is no longer supported; using serve", RuntimeWarning)
     tool = str(section.get("tool") or "").strip().lower()
     executable = str(section.get("executable") or "").strip()
-    if tool and tool not in _LEGACY_AI_CLI_TOOLS:
-        warnings.warn(f"Legacy AI tool {tool!r} is no longer supported; using opencode", RuntimeWarning)
     opencode_version = normalize_opencode_version(section.get("opencode_version", "1"))
-    section["tool"] = "opencode"
+    if tool == "deepseek_harness":
+        section["tool"] = "deepseek_harness"
+    else:
+        if tool and tool not in _LEGACY_AI_CLI_TOOLS:
+            warnings.warn(f"Legacy AI tool {tool!r} is no longer supported; using opencode", RuntimeWarning)
+        section["tool"] = "opencode"
     section["opencode_version"] = opencode_version
     section["executable"] = executable or ("nga" if tool == "nga" else "opencode")
     raw_executable_v2 = str(section.get("executable_v2") or "").strip()
@@ -314,6 +319,9 @@ def _normalize_cli_section(section: object) -> None:
         section["executable_v2"] = section["executable"]
     else:
         section["executable_v2"] = "opencode"
+    section["dsh_executable"] = str(section.get("dsh_executable") or "").strip()
+    raw_dsh_profile = str(section.get("dsh_profile") or "sdk-minimal").strip()
+    section["dsh_profile"] = "sdk-minimal" if raw_dsh_profile != "sdk-minimal" else raw_dsh_profile
     models = section.get("models")
     if isinstance(models, list):
         for model in models:

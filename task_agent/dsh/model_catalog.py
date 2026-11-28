@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -183,6 +184,15 @@ def extract_llm_providers(
     return normalized
 
 
+_ENV_PLACEHOLDER_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_placeholders(value: str, env: Mapping[str, str]) -> str:
+    if "{env:" not in value:
+        return value
+    return _ENV_PLACEHOLDER_RE.sub(lambda m: str(env.get(m.group(1), "")), value)
+
+
 def _positive_int(value: object, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
@@ -242,16 +252,32 @@ def resolve_dsh_model(
         limits = model_cfg.get("limit") if isinstance(model_cfg.get("limit"), Mapping) else {}
         merged_headers: dict[str, str] = {}
         if isinstance(options.get("headers"), Mapping):
-            merged_headers.update({str(k): str(v) for k, v in options["headers"].items()})
+            merged_headers.update(
+                {
+                    str(k): _expand_env_placeholders(str(v), effective_env)
+                    for k, v in options["headers"].items()
+                }
+            )
         if isinstance(model_cfg.get("headers"), Mapping):
-            merged_headers.update({str(k): str(v) for k, v in model_cfg["headers"].items()})
+            merged_headers.update(
+                {
+                    str(k): _expand_env_placeholders(str(v), effective_env)
+                    for k, v in model_cfg["headers"].items()
+                }
+            )
         return ResolvedDshModel(
             full_id=f"{provider_id}/{model_id}",
             provider_id=provider_id,
             model_id=model_id,
             is_pi_ai=True,
-            base_url=str(options.get("baseURL") or "").strip(),
-            api_key=str(options.get("apiKey") or ""),
+            base_url=_expand_env_placeholders(
+                str(options.get("baseURL") or "").strip(),
+                effective_env,
+            ),
+            api_key=_expand_env_placeholders(
+                str(options.get("apiKey") or ""),
+                effective_env,
+            ),
             headers=merged_headers,
             timeout_ms=(
                 _positive_int(options.get("timeout"), 0) or None

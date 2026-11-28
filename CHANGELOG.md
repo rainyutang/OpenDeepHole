@@ -2,6 +2,7 @@
 
 ## 2026-11-28
 
+- **修复** 修复客户端切换至 DeepSeek Harness 后平台运行时配置加载回退到 OpenCode 的问题，并补充本地 OpenCode 模型配置兜底发现、热重载草稿模型可见性与 Windows 插件路径兼容
 - **修复** 修复 OpenCode 2.x 常规扫描任务未禁用 Code Mode（`execute`）工具，导致模型在直调 MCP 模式下误通过 `execute` 调用 `codegraph_search`、`codegraph_files` 等工具报 `Unknown tool` 的问题
 - **新增** 底层执行引擎新增 DeepSeek Harness（`sdk-minimal`）支持，可在客户端基础配置及独立任务配置中与 OpenCode 自由切换，复用现有 LLM API、Skills、权限隔离及扫描 MCP 能力
 - **修复** 修复网络安全红线排查引擎进度无法实时刷新及已发现问题未出现在「疑似问题」列表的缺陷，并自动恢复历史滞留的上报记录；同步修复红线扫描整体进度与预计剩余时间统计偏差及管理看板疑似问题汇总漏计问题

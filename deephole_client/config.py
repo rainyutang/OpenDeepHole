@@ -482,11 +482,14 @@ def _upgrade_managed_v6(remote: dict) -> dict:
         base = {}
         migrated["base"] = base
     legacy_tool = str(base.get("tool") or "").strip().lower()
-    executable = str(base.get("executable") or "").strip()
-    if not executable:
-        executable = "nga" if legacy_tool == "nga" else "opencode"
-    base["tool"] = "opencode"
-    base["executable"] = executable
+    if legacy_tool == TOOL_DEEPSEEK_HARNESS:
+        base["tool"] = TOOL_DEEPSEEK_HARNESS
+    else:
+        executable = str(base.get("executable") or "").strip()
+        if not executable:
+            executable = "nga" if legacy_tool == "nga" else "opencode"
+        base["tool"] = "opencode"
+        base["executable"] = executable
 
     model_pool = migrated.get("model_pool")
     if isinstance(model_pool, dict) and isinstance(model_pool.get("models"), list):

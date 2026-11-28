@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 from backend.config import get_config
+from task_agent.config_discovery import merge_discovered_opencode_config
 from task_agent.host import OpenCodeSessionRuntime
 from task_agent.runtime_backend import (
     DEFAULT_DSH_PROFILE,
@@ -33,20 +36,68 @@ def get_global_dsh_home() -> Path:
     return home
 
 
-def _resolved_llm_providers() -> dict[str, Any]:
-    from .llm_runtime import active_providers
+def _discovered_opencode_providers(
+    *,
+    directory: Path,
+    config_paths: Any = None,
+) -> dict[str, Any]:
+    """Read local OpenAI-compatible providers from discovered opencode.json as fallback."""
+    try:
+        merged, _loaded = merge_discovered_opencode_config(
+            executable="opencode",
+            project_dir=directory,
+            configured_paths=config_paths,
+            env=dict(os.environ),
+            platform=sys.platform,
+        )
+    except Exception:
+        return {}
+    raw_providers = merged.get("provider")
+    if not isinstance(raw_providers, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for provider_id, entry in raw_providers.items():
+        if not isinstance(entry, dict):
+            continue
+        options = entry.get("options")
+        models = entry.get("models")
+        if (
+            isinstance(options, dict)
+            and str(options.get("baseURL") or "").strip()
+            and isinstance(models, dict)
+            and models
+        ):
+            result[str(provider_id)] = copy.deepcopy(entry)
+    return result
 
-    providers = active_providers()
+
+def _resolved_llm_providers(
+    *,
+    directory: Path | None = None,
+    config_paths: Any = None,
+) -> dict[str, Any]:
+    from .llm_runtime import effective_providers
+
+    merged: dict[str, Any] = {}
+    if directory is not None:
+        merged.update(
+            _discovered_opencode_providers(
+                directory=directory,
+                config_paths=config_paths,
+            )
+        )
+    providers = effective_providers()
     if providers:
-        return providers
+        merged.update(providers)
+        return merged
     try:
         cfg = get_config()
         raw = getattr(cfg, "llm_providers", None)
         if isinstance(raw, dict):
-            return copy.deepcopy(raw)
+            merged.update(copy.deepcopy(raw))
     except Exception:
         pass
-    return {}
+    return merged
 
 
 def build_dsh_session_runtime(
@@ -81,7 +132,11 @@ def build_dsh_session_runtime(
     workspace = get_global_opencode_workspace()
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     dsh_home = get_global_dsh_home()
-    providers = _resolved_llm_providers()
+    resolved_dir = Path(directory).resolve()
+    providers = _resolved_llm_providers(
+        directory=resolved_dir,
+        config_paths=_config_value(cli_config, "config_paths", None),
+    )
     # Keep OpenCode-compatible provider JSON in config_content so Codex threat
     # analysis (`codex_runtime.py`) and configured limit extraction stay seamless.
     config_content = json.dumps(
@@ -89,7 +144,7 @@ def build_dsh_session_runtime(
         ensure_ascii=False,
     )
     return OpenCodeSessionRuntime(
-        directory=Path(directory).resolve(),
+        directory=resolved_dir,
         tool=TOOL_DEEPSEEK_HARNESS,
         executable=dsh_executable or "dsh",
         opencode_version="1",

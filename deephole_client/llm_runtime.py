@@ -9,6 +9,7 @@ from .config import AgentConfig
 
 _source: AgentConfig | None = None
 _active: AgentConfig | None = None
+_staged_providers: dict | None = None
 
 
 def active_config(config: AgentConfig | None = None) -> AgentConfig | None:
@@ -18,6 +19,13 @@ def active_config(config: AgentConfig | None = None) -> AgentConfig | None:
 
 def active_providers() -> dict:
     return copy.deepcopy(_active.llm_providers) if _active is not None else {}
+
+
+def effective_providers() -> dict:
+    """Return staged candidate providers during reload, otherwise active providers."""
+    if _staged_providers is not None:
+        return copy.deepcopy(_staged_providers)
+    return active_providers()
 
 
 def initialize(config: AgentConfig) -> None:
@@ -65,7 +73,7 @@ async def update(config: AgentConfig) -> None:
 
 
 async def _apply(candidate: AgentConfig, revision: str) -> None:
-    global _active
+    global _active, _staged_providers
     previous = _active
     from task_agent.runtime_backend import (
         TOOL_OPENCODE,
@@ -115,8 +123,12 @@ async def _apply(candidate: AgentConfig, revision: str) -> None:
             await shutdown_runtime_backend(previous_tool)
         configure_opencode_component()
         refresh_global_opencode_config(providers=candidate.llm_providers)
-        runtime = build_opencode_session_runtime(candidate.opencode, directory=Path.cwd())
-        result = await backend_manager.reload_runtime(**runtime.kwargs_for_backend())
+        _staged_providers = copy.deepcopy(candidate.llm_providers)
+        try:
+            runtime = build_opencode_session_runtime(candidate.opencode, directory=Path.cwd())
+            result = await backend_manager.reload_runtime(**runtime.kwargs_for_backend())
+        finally:
+            _staged_providers = None
         visible = {f"{model.provider_id}/{model.model_id}" for model in result.models}
         expected = {
             f"{provider_id}/{model_id}"
