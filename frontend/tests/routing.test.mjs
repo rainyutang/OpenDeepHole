@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after, afterEach, beforeEach } from "node:test";
 import { createElement } from "react";
-import TestRenderer from "react-test-renderer";
+import TestRenderer from "./helpers/reactTestEnv.mjs";
 import { createServer } from "vite";
 
 const { act, create } = TestRenderer;
@@ -20,6 +20,14 @@ const { THREAT_AUDIT_ENGINE_LABEL } = await server.ssrLoadModule("/src/miningEng
 const { default: LoginPage } = await server.ssrLoadModule("/src/components/LoginPage.tsx");
 const { default: AgentConfigPage } = await server.ssrLoadModule("/src/components/AgentConfigPage.tsx");
 const { default: NewScanForm } = await server.ssrLoadModule("/src/components/NewScanForm.tsx");
+await Promise.all([
+  "/src/components/SharedScanView.tsx",
+  "/src/components/AgentDownload.tsx",
+  "/src/components/UserManagement.tsx",
+  "/src/components/AdminCheckerDashboard.tsx",
+  "/src/components/CheckerCatalogPage.tsx",
+  "/src/components/ReviewNotes.tsx",
+].map((mod) => server.ssrLoadModule(mod)));
 const { ThreatAnalysisPanel } = await server.ssrLoadModule("/src/features/threatAnalysis/index.ts");
 const { default: VulnerabilityList } = await server.ssrLoadModule("/src/components/VulnerabilityList.tsx");
 const { ThemeProvider } = await server.ssrLoadModule("/src/theme/ThemeProvider.tsx");
@@ -90,19 +98,30 @@ function installApi(intercept = () => undefined) {
     assert.fail(`Unexpected request: ${url}`);
   };
 }
+async function settle(root) {
+  for (let i = 0; i < 20; i += 1) {
+    if (!content(root.toJSON()).includes("正在加载页面...")) return;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
+}
 async function mount(path = "/") {
   const router = createMemoryRouter([{ path: "*", element: createElement(App) }], { initialEntries: [path] });
   routers.push(router);
   let root;
   await act(async () => { root = create(createElement(ThemeProvider, null, createElement(RouterProvider, { router }))); });
+  await settle(root);
   roots.push(root);
   return { root, router };
 }
-async function go(router, to) { await act(async () => { await router.navigate(to); }); }
+async function go(router, to) {
+  await act(async () => { await router.navigate(to); });
+  if (roots.length) await settle(roots.at(-1));
+}
 async function click(root, label) {
   const node = root.root.findAllByType("button").find((node) => content(node) === label);
   assert.ok(node, `Missing button: ${label}`);
   await act(async () => node.props.onClick());
+  await settle(root);
 }
 function sidebar(root) { return root.root.findByProps({ "aria-label": "扫描详情导航" }); }
 async function select(root, label) {

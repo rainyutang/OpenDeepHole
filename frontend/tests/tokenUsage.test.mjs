@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { createElement } from "react";
-import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
+import { act, create } from "./helpers/reactTestEnv.mjs";
 
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const { ScanTokenUsagePanel } = await server.ssrLoadModule("/src/components/ScanTokenUsagePanel.tsx");
@@ -21,8 +21,11 @@ function text(value) {
   return Array.isArray(value) ? value.map(text).join("") : value?.children ? text(value.children) : "";
 }
 function render(value, inspect) {
-  const root = TestRenderer.create(createElement(ScanTokenUsagePanel, { usage: value }));
-  try { inspect(root); } finally { root.unmount(); }
+  let root;
+  act(() => {
+    root = create(createElement(ScanTokenUsagePanel, { usage: value }));
+  });
+  try { inspect(root); } finally { act(() => { root.unmount(); }); }
 }
 
 test("category table shows sorted totals, all counters, percentages and completeness", () => {

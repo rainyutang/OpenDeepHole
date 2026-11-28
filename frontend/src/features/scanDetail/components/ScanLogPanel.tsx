@@ -5,7 +5,7 @@ import { EventLine } from "./taskUi";
 interface Props {
   logOpen: boolean;
   setLogOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  logRef: React.RefObject<HTMLDivElement>;
+  logRef: React.RefObject<HTMLDivElement | null>;
   logEvents: ScanEvent[];
   truncated: boolean;
   allLogEvents: ScanEvent[];

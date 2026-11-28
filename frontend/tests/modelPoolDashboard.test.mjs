@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { createElement } from "react";
-import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
+import { act, create } from "./helpers/reactTestEnv.mjs";
 
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const { ModelPoolDashboard } = await server.ssrLoadModule("/src/components/ScanStatus.tsx");
@@ -25,19 +25,20 @@ function text(node) {
 
 test("resume, restart, repeated SSE and page reload display the backend lifetime counters", () => {
   let current = pool();
-  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: current }));
+  let root;
+  act(() => { root = create(createElement(ModelPoolDashboard, { pool: current })); });
   try {
     const resumed = pool({ execution_revision: 2, agent_session_id: "second",
       updated_at: "2026-10-14T00:00:01.001Z" });
     current = runtime.selectOpenCodePoolSnapshot(current, resumed);
-    root.update(createElement(ModelPoolDashboard, { pool: current }));
+    act(() => { root.update(createElement(ModelPoolDashboard, { pool: current })); });
     assert.match(text(root.toJSON()), /累计任务5成功4失败1/);
     const increment = pool({ execution_revision: 2, agent_session_id: "second",
       updated_at: "2026-10-14T00:00:01.002Z",
       models: [{ id: "m", total: 7, success: 5, failure: 1, timeout: 1, avg_duration_seconds: 100 / 7 }] });
     for (const event of [increment, increment, resumed]) {
       current = runtime.selectOpenCodePoolSnapshot(current, event);
-      root.update(createElement(ModelPoolDashboard, { pool: current }));
+      act(() => { root.update(createElement(ModelPoolDashboard, { pool: current })); });
       assert.match(text(root.toJSON()), /累计任务7成功5失败1超时\/取消1/);
       const cells = root.root.findAllByType("tr")[1].findAllByType("td");
       assert.equal(text(cells[5]), "7");
@@ -47,7 +48,7 @@ test("resume, restart, repeated SSE and page reload display the backend lifetime
     const reloaded = runtime.normalizeOpenCodePool(JSON.parse(JSON.stringify(increment)));
     assert.deepEqual(runtime.selectOpenCodePoolSnapshot(null, reloaded).models, current.models);
   } finally {
-    root.unmount();
+    act(() => { root.unmount(); });
   }
 });
 
@@ -66,17 +67,18 @@ test("historical models contribute counters while live rows and a new scan remai
     { id: "removed", total: 5, success: 4, failure: 1, enabled: false, running: 0, max_concurrency: 1, active_tasks: [] },
     { id: "new", total: 2, success: 1, running: 1, max_concurrency: 3, active_tasks: [{ task_id: "active" }] },
   ] });
-  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: value }));
+  let root;
+  act(() => { root = create(createElement(ModelPoolDashboard, { pool: value })); });
   try {
     assert.match(text(root.toJSON()), /运行中1排队中0累计任务7/);
     const rows = root.root.findAllByType("tr").slice(1);
     assert.equal(text(rows[0].findAllByType("td")[2]), "禁用");
     assert.equal(text(rows[0].findAllByType("td")[4]), "0/1");
     assert.equal(text(rows[1].findAllByType("td")[4]), "1/3");
-    root.update(createElement(ModelPoolDashboard, { pool: pool({ scope_id: "other", models: [] }) }));
+    act(() => { root.update(createElement(ModelPoolDashboard, { pool: pool({ scope_id: "other", models: [] }) })); });
     assert.match(text(root.toJSON()), /累计任务0成功0失败0/);
   } finally {
-    root.unmount();
+    act(() => { root.unmount(); });
   }
 });
 
@@ -106,7 +108,8 @@ test("planned tasks are hidden from model pool dashboard while queued and runnin
       { id: "m", total: 5, success: 4, failure: 1, running: 1, max_concurrency: 2, active_tasks: [{ task_id: "active-1", file: "src/running.c", line: 12 }] },
     ],
   });
-  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: value }));
+  let root;
+  act(() => { root = create(createElement(ModelPoolDashboard, { pool: value })); });
   try {
     const rendered = text(root.toJSON());
     assert.doesNotMatch(rendered, /计划中/);
@@ -117,7 +120,7 @@ test("planned tasks are hidden from model pool dashboard while queued and runnin
     assert.match(rendered, /src\/queued\.c:88/);
     assert.match(rendered, /src\/running\.c:12/);
   } finally {
-    root.unmount();
+    act(() => { root.unmount(); });
   }
 });
 
@@ -173,7 +176,8 @@ test("model pool dashboard surfaces circuit cooldown, half-open probe, cross-sca
       },
     ],
   });
-  const root = TestRenderer.create(createElement(ModelPoolDashboard, { pool: value }));
+  let root;
+  act(() => { root = create(createElement(ModelPoolDashboard, { pool: value })); });
   try {
     const rendered = text(root.toJSON());
     assert.match(rendered, /前序尝试未通过，正在等待其他未尝试模型释放并发额度。/);
@@ -185,6 +189,6 @@ test("model pool dashboard surfaces circuit cooldown, half-open probe, cross-sca
     assert.match(text(rows[2].findAllByType("td")[2]), /权限隔离中/);
     assert.match(text(rows[2].findAllByType("td")[3]), /权限拒绝/);
   } finally {
-    root.unmount();
+    act(() => { root.unmount(); });
   }
 });

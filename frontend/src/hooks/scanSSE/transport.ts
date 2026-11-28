@@ -33,7 +33,7 @@ import {
 } from './protocol';
 
 import type { StateResource } from './refreshState';
-import type { MutableRefObject, Dispatch, SetStateAction } from 'react';
+import type { RefObject, Dispatch, SetStateAction } from 'react';
 
 import { createScanEventBatcher } from './eventBatching';
 import { createScanResourceCoordinator } from './resourceCoordinator';
@@ -51,14 +51,14 @@ export function connectScanStream({
   refreshState,
 }: {
   scanId: string;
-  handlersRef: MutableRefObject<ScanSSEHandlers>;
-  stateSettersRef: MutableRefObject<SSEStateSetters>;
-  activeScanIdRef: MutableRefObject<string>;
+  handlersRef: RefObject<ScanSSEHandlers>;
+  stateSettersRef: RefObject<SSEStateSetters>;
+  activeScanIdRef: RefObject<string>;
   setConnected: Dispatch<SetStateAction<boolean>>;
   setOverviewFailed: Dispatch<SetStateAction<boolean>>;
   setFailedResources: Dispatch<SetStateAction<Set<ScanDetailResource>>>;
-  requestStateRef: MutableRefObject<(resources: readonly StateResource[]) => void>;
-  requestDetailsRef: MutableRefObject<(resources: readonly ScanDetailResource[]) => void>;
+  requestStateRef: RefObject<(resources: readonly StateResource[]) => void>;
+  requestDetailsRef: RefObject<(resources: readonly ScanDetailResource[]) => void>;
   refreshState: () => void;
 }) {
   setOverviewFailed(false);

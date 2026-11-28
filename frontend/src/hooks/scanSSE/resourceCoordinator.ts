@@ -11,14 +11,14 @@ import type { FpReviewJob } from "../../types/fpReview";
 import { ScanSSEHandlers, SSEStateSetters } from './protocol';
 import { refreshFullState, STATE_RESOURCES } from './refreshState';
 import type { StateResource } from './refreshState';
-import type { MutableRefObject, Dispatch, SetStateAction } from 'react';
+import type { RefObject, Dispatch, SetStateAction } from 'react';
 interface StreamLifetime { disposed: boolean }
 
 export function createScanResourceCoordinator({ scanId, handlersRef, stateSettersRef, activeScanIdRef, lifetime, setOverviewFailed, setFailedResources, pendingExecutionRevision }: {
   scanId: string;
-  handlersRef: MutableRefObject<ScanSSEHandlers>;
-  stateSettersRef: MutableRefObject<SSEStateSetters>;
-  activeScanIdRef: MutableRefObject<string>;
+  handlersRef: RefObject<ScanSSEHandlers>;
+  stateSettersRef: RefObject<SSEStateSetters>;
+  activeScanIdRef: RefObject<string>;
   lifetime: StreamLifetime;
   setOverviewFailed: Dispatch<SetStateAction<boolean>>;
   setFailedResources: Dispatch<SetStateAction<Set<ScanDetailResource>>>;

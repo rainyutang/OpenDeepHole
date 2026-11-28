@@ -4,10 +4,10 @@ import { isOlderScanExecution, scanExecutionRevision } from "../../scanRuntime/s
 import type { ScanEvent } from "../../types/scans";
 import { ScanStatusEvent, ScanSSEHandlers, SSEStateSetters } from './protocol';
 
-import type { MutableRefObject } from 'react';
+import type { RefObject } from 'react';
 interface StreamLifetime { disposed: boolean }
 
-export function createScanEventBatcher({ handlersRef, stateSettersRef, lifetime }: { handlersRef: MutableRefObject<ScanSSEHandlers>; stateSettersRef: MutableRefObject<SSEStateSetters>; lifetime: StreamLifetime }) {
+export function createScanEventBatcher({ handlersRef, stateSettersRef, lifetime }: { handlersRef: RefObject<ScanSSEHandlers>; stateSettersRef: RefObject<SSEStateSetters>; lifetime: StreamLifetime }) {
   let eventFlushTimer: number | null = null;
   let queuedEvents: ScanEvent[] = [];
   let statusFlushTimer: number | null = null;

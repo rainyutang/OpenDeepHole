@@ -9,7 +9,7 @@ Web 服务和 Agent 可以运行在不同机器上。服务端应保留完整源
 | 位置 | 依赖 |
 | --- | --- |
 | Web 服务 | Python，建议 3.12；安装 `requirements.txt` |
-| 前端构建 | Node.js 20、npm；依赖由 `frontend/package-lock.json` 固定 |
+| 前端构建 | Node.js 22.12+（或 24）、npm；依赖由 `frontend/package-lock.json` 固定 |
 | Agent | Python，建议 3.12；安装 `requirements-agent.txt`，其中包含 Semgrep 和 tree-sitter |
 | Agent 代码索引 | 支持 JSON 输出的 Universal Ctags |
 | Agent 模型调用 | 可用的 OpenCode 兼容程序、Provider 配置与模型凭据 |

@@ -29,7 +29,7 @@ Agent 通过 WebSocket 接收任务，通过 HTTP 上报结果；浏览器通过
 
 ## 快速开始
 
-以下从完整源码仓库启动服务，命令在仓库根目录执行。准备 Python（建议 3.12）、Node.js 20 和 npm；Agent 还需要支持 JSON 输出的 Universal Ctags，以及已配置模型访问凭据的 OpenCode 兼容程序。
+以下从完整源码仓库启动服务，命令在仓库根目录执行。准备 Python（建议 3.12）、Node.js 22.12+（或 24）和 npm；Agent 还需要支持 JSON 输出的 Universal Ctags，以及已配置模型访问凭据的 OpenCode 兼容程序。
 
 ### 1. 启动 Web 服务
 

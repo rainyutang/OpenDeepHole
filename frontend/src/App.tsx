@@ -1,23 +1,35 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from "react-router";
 import { getStoredUser, isAuthenticated, logout, setPublicScanAccess } from "./api/client";
 import type { PublicScanAccess } from "./api/client";
 import { legacyRoute, loginDestination, parsePublicScanAccess, parseScanRoute, scanPath } from "./routing";
 import type { ScanRouteState } from "./routing";
-import ScanStatusView from "./components/ScanStatus";
-import SharedScanView from "./components/SharedScanView";
 import ScanHistory from "./components/ScanHistory";
-import AgentDownload from "./components/AgentDownload";
-import AgentConfigPage from "./components/AgentConfigPage";
-import NewScanForm from "./components/NewScanForm";
 import LoginPage from "./components/LoginPage";
 import RegisterPage from "./components/RegisterPage";
-import UserManagement from "./components/UserManagement";
-import AdminCheckerDashboard from "./components/AdminCheckerDashboard";
-import CheckerCatalogPage from "./components/CheckerCatalogPage";
-import ReviewNotesPage from "./components/ReviewNotes";
 import RuntimeErrorBoundary from "./components/RuntimeErrorBoundary";
 import type { User } from "./types";
+
+const ScanStatusView = lazy(() => import("./components/ScanStatus"));
+const SharedScanView = lazy(() => import("./components/SharedScanView"));
+const AgentDownload = lazy(() => import("./components/AgentDownload"));
+const AgentConfigPage = lazy(() => import("./components/AgentConfigPage"));
+const NewScanForm = lazy(() => import("./components/NewScanForm"));
+const UserManagement = lazy(() => import("./components/UserManagement"));
+const AdminCheckerDashboard = lazy(() => import("./components/AdminCheckerDashboard"));
+const CheckerCatalogPage = lazy(() => import("./components/CheckerCatalogPage"));
+const ReviewNotesPage = lazy(() => import("./components/ReviewNotes"));
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-900 p-6 text-slate-300">
+      <div className="flex items-center gap-3 text-sm">
+        <span className="page-spinner inline-block h-5 w-5 animate-spin rounded-full border-2" aria-hidden="true" />
+        <span>正在加载页面...</span>
+      </div>
+    </div>
+  );
+}
 
 export { parsePublicScanAccess } from "./routing";
 
@@ -128,28 +140,30 @@ export default function App() {
     : register ? <RegisterPage onRegister={handleLogin} onGoLogin={() => navigate("/login", { state: location.state })} />
       : <LoginPage onLogin={handleLogin} onGoRegister={() => navigate("/register", { state: location.state })} />;
 
-  return <Routes>
-    <Route path="login" element={authPage(false)} />
-    <Route path="register" element={authPage(true)} />
-    <Route path="shared-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
-    <Route path="public-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
-    <Route element={<RequireAuth user={user} />}>
-      <Route index element={<ScanHistory user={user!} onViewScan={viewScan} onLogout={handleLogout}
-        onDownloadAgent={() => navigate("/agents/download")} onAgentConfig={() => navigate("/agents/config")}
-        onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
-        onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")}
-        onReviewNotes={() => navigate("/review-notes")} />} />
-      <Route path="scans/new" element={<NewScanRoute />} />
-      <Route path="scans/:scanId/:section?" element={<ScanDetailRoute />} />
-      <Route path="agents/download" element={<AgentDownload onBack={onBack} />} />
-      <Route path="agents/config" element={<AgentConfigRoute />} />
-      <Route path="dashboard" element={<AdminCheckerDashboard user={user!} onBack={onBack} onViewScan={viewScan} />} />
-      <Route path="checkers" element={<CheckerCatalogPage onBack={onBack} />} />
-      <Route path="review-notes" element={<ReviewNotesPage onBack={onBack} />} />
-      <Route element={<RequireAuth user={user} admin />}>
-        <Route path="admin/users" element={<UserManagement user={user!} onBack={onBack} />} />
+  return <Suspense fallback={<RouteFallback />}>
+    <Routes>
+      <Route path="login" element={authPage(false)} />
+      <Route path="register" element={authPage(true)} />
+      <Route path="shared-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
+      <Route path="public-scan/:scanId/:section?" element={<ScanDetailRoute access={publicAccess} publicView />} />
+      <Route element={<RequireAuth user={user} />}>
+        <Route index element={<ScanHistory user={user!} onViewScan={viewScan} onLogout={handleLogout}
+          onDownloadAgent={() => navigate("/agents/download")} onAgentConfig={() => navigate("/agents/config")}
+          onNewScan={() => navigate("/scans/new")} onManageUsers={() => navigate("/admin/users")}
+          onCheckerDashboard={() => navigate("/dashboard")} onCheckerCatalog={() => navigate("/checkers")}
+          onReviewNotes={() => navigate("/review-notes")} />} />
+        <Route path="scans/new" element={<NewScanRoute />} />
+        <Route path="scans/:scanId/:section?" element={<ScanDetailRoute />} />
+        <Route path="agents/download" element={<AgentDownload onBack={onBack} />} />
+        <Route path="agents/config" element={<AgentConfigRoute />} />
+        <Route path="dashboard" element={<AdminCheckerDashboard user={user!} onBack={onBack} onViewScan={viewScan} />} />
+        <Route path="checkers" element={<CheckerCatalogPage onBack={onBack} />} />
+        <Route path="review-notes" element={<ReviewNotesPage onBack={onBack} />} />
+        <Route element={<RequireAuth user={user} admin />}>
+          <Route path="admin/users" element={<UserManagement user={user!} onBack={onBack} />} />
+        </Route>
       </Route>
-    </Route>
-    <Route path="*" element={<NotFound />} />
-  </Routes>;
+      <Route path="*" element={<NotFound />} />
+    </Routes>
+  </Suspense>;
 }

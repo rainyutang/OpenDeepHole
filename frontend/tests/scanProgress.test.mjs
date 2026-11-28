@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { createElement } from "react";
-import TestRenderer from "react-test-renderer";
 import { createServer } from "vite";
+import { act, create } from "./helpers/reactTestEnv.mjs";
 
 const server = await createServer({ appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
 const progress = await server.ssrLoadModule("/src/scanProgress.ts");
@@ -23,9 +23,14 @@ function text(node) {
   return (Array.isArray(node) ? node : node?.children ?? []).map(text).join("");
 }
 function render(value, active = progress.hasActiveScanProgress(value)) {
-  const root = TestRenderer.create(createElement(ScanProgressPanel, { scan: value, active }));
+  let root;
+  act(() => {
+    root = create(createElement(ScanProgressPanel, { scan: value, active }));
+  });
   const result = { text: text(root.toJSON()), bar: root.root.findByProps({ role: "progressbar" }).props };
-  root.unmount();
+  act(() => {
+    root.unmount();
+  });
   return result;
 }
 

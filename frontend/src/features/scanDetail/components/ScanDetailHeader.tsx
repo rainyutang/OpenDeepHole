@@ -22,7 +22,7 @@ interface Props {
   handleContinue: () => Promise<void>;
   continuing: boolean;
   continuableCount: number;
-  exportMenuRef: React.RefObject<HTMLDivElement>;
+  exportMenuRef: React.RefObject<HTMLDivElement | null>;
   setExportMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
   exportingReport: ReportExportFormat | null;
   exportMenuOpen: boolean;

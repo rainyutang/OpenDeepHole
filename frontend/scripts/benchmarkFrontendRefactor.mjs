@@ -42,7 +42,9 @@ async function loadModules() {
       };
     } finally { await server.close(); }
   }
-  const { build } = await import("esbuild");
+  const { rolldown } = await import("rolldown");
+  const { default: babel } = await import("@rolldown/plugin-babel");
+  const { reactCompilerPreset } = await import("@vitejs/plugin-react");
   const directory = await mkdtemp(path.join(tmpdir(), "deephole-benchmark-modules-"));
   try {
     // One local-source ESM module removes Vite SSR's per-import live-binding
@@ -50,29 +52,53 @@ async function loadModules() {
     // test renderer. Development JSX keeps React Profiler measurements enabled.
     await symlink(path.join(rootPath, "node_modules"), path.join(directory, "node_modules"),
       process.platform === "win32" ? "junction" : "dir");
+    const entryFile = path.join(directory, "benchmark-components.ts");
+    const resolveSrc = (rel) => JSON.stringify(path.join(rootPath, rel));
+    await writeFile(entryFile, `
+      import * as client from ${resolveSrc("src/api/client.ts")};
+      export { client };
+      export { default as ScanStatus } from ${resolveSrc("src/components/ScanStatus.tsx")};
+      export { default as VulnerabilityList } from ${resolveSrc("src/components/VulnerabilityList.tsx")};
+      export { ScanProgressPanel } from ${resolveSrc("src/components/ScanProgressPanel.tsx")};
+      export { ThemeProvider } from ${resolveSrc("src/theme/ThemeProvider.tsx")};
+    `);
     const outfile = path.join(directory, "components.mjs");
-    await build({
-      stdin: { contents: `
-        import * as client from "./src/api/client.ts";
-        export { client };
-        export { default as ScanStatus } from "./src/components/ScanStatus.tsx";
-        export { default as VulnerabilityList } from "./src/components/VulnerabilityList.tsx";
-        export { ScanProgressPanel } from "./src/components/ScanProgressPanel.tsx";
-        export { ThemeProvider } from "./src/theme/ThemeProvider.tsx";
-      `, resolveDir: rootPath, sourcefile: "benchmark-components.ts" },
-      outfile, bundle: true, format: "esm", platform: "node", packages: "external",
-      target: "es2022", jsx: "automatic", jsxDev: true, loader: { ".css": "empty" },
-      logLevel: "silent", sourcemap: "inline",
+    const bundle = await rolldown({
+      input: entryFile,
+      cwd: rootPath,
+      platform: "node",
+      external: (id) => !id.startsWith(".") && !path.isAbsolute(id) && !id.startsWith("\0"),
+      transform: { jsx: { runtime: "automatic", development: true } },
+      plugins: [
+        { name: "empty-css", load(id) { return id.endsWith(".css") ? { code: "", moduleType: "js" } : null; } },
+        await babel({ presets: [reactCompilerPreset()] }),
+      ],
+      onwarn() {},
     });
+    try {
+      await bundle.write({ file: outfile, format: "esm", sourcemap: "inline" });
+    } finally {
+      await bundle.close();
+    }
     return await import(pathToFileURL(outfile).href);
   } finally { await rm(directory, { recursive: true }); }
 }
 
 async function sample(scenario) {
   assert.equal(typeof global.gc, "function", "--sample requires node --expose-gc");
-  const { createElement, Profiler } = await import("react");
+  // Disable React 19 dev-only DevTools Performance Tracks (performance.measure +
+  // structuredClone of large prop diffs) before importing react-test-renderer so
+  // the benchmark measures rendering rather than dev-only DevTools serialization.
+  const originalMeasure = performance.measure;
+  const originalGlobalMeasure = globalThis.performance?.measure;
+  Object.defineProperty(performance, "measure", { value: undefined, configurable: true });
+  if (globalThis.performance) {
+    Object.defineProperty(globalThis.performance, "measure", { value: undefined, configurable: true });
+  }
+  const { act, createElement, Profiler } = await import("react");
   const { default: TestRenderer } = await import("react-test-renderer");
-  const { act, create } = TestRenderer;
+  const { create } = TestRenderer;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const streams = [];
   const sse = { opened: 0, closed: 0, events: 0, dispatchMs: 0 };
   const profile = { commits: 0, renderMs: 0 };
@@ -199,14 +225,14 @@ async function sample(scenario) {
             execution_revision: 1, processed_candidates: scenario.issues + burst * 100 + event + 1,
           });
           for (let event = 0; event < 20; event++) streams[0].emit("resource_changed", { resource: "overview" });
-          const deadline = performance.now() + 5000;
-          while (scanProps().processed_candidates !== expectedProcessed
-            || fixture.counters.byPath[overviewUrl] === previousReads) {
-            assert.ok(performance.now() < deadline, "SSE state did not settle within 5 s");
-            await pause(5);
-          }
-          await pause(0);
         });
+        const deadline = performance.now() + 5000;
+        while (scanProps().processed_candidates !== expectedProcessed
+          || fixture.counters.byPath[overviewUrl] === previousReads) {
+          assert.ok(performance.now() < deadline, "SSE state did not settle within 5 s");
+          await act(async () => { await pause(5); });
+        }
+        await act(async () => { await pause(0); });
       });
       assert.equal(fixture.counters.byPath[overviewUrl], previousReads + 1, "Overview invalidations must coalesce");
       assert.equal(scanProps().vulnerabilities.length, scenario.issues, "Overview refresh must retain issue pages");
@@ -231,6 +257,10 @@ async function sample(scenario) {
     if (renderer) await act(async () => renderer.unmount());
     if (client) client.api.defaults.adapter = originalAdapter;
     for (const key of ["window", "document", "localStorage", "EventSource"]) delete globalThis[key];
+    Object.defineProperty(performance, "measure", { value: originalMeasure, configurable: true });
+    if (globalThis.performance) {
+      Object.defineProperty(globalThis.performance, "measure", { value: originalGlobalMeasure, configurable: true });
+    }
   }
 }
 
@@ -269,7 +299,7 @@ if (values.sample) {
     }
     const result = { node: process.version, platform: `${process.platform}/${process.arch}`, logicalCpus: cpus().length,
       repeat, roots, moduleMode: values["module-mode"], methodology: {
-        runtime: `${values["module-mode"] === "bundled" ? "Single esbuild local-source ESM bundle" : "Vite SSR development modules"} + React test renderer; excludes browser paint/layout and real network`,
+        runtime: `${values["module-mode"] === "bundled" ? "Single Rolldown + React Compiler local-source ESM bundle" : "Vite SSR development modules"} + React test renderer; excludes browser paint/layout and real network`,
         completionMs: "Wall time through settled React/HTTP state, including unchanged 75/150 ms batching delays",
         activeCpuMs: "Process user+system CPU per stage, includes rendering and fixture request handling",
         renderMs: "React Profiler actualDuration; overlaps activeCpuMs and synchronous callback times",

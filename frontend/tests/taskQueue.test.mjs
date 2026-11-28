@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
 import { createElement } from "react";
-import TestRenderer from "react-test-renderer";
+import TestRenderer from "./helpers/reactTestEnv.mjs";
 import { createServer } from "vite";
 
 const { act, create } = TestRenderer;

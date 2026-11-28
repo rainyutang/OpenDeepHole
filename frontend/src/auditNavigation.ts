@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { Dispatch, RefObject, SetStateAction } from "react";
 import { getScanFpReviewResult, getScanVulnerabilitiesPage, getScanVulnerabilityAuditSource } from "./api/client";
 import { hasFpReviewRecord } from "./fpReview";
 import { mergeIndexedVulnerabilities } from "./scanRuntime";
@@ -113,7 +113,7 @@ export function mergeAuditTarget(scan: ScanStatus, target: AuditTarget): ScanSta
 
 export function useAuditNavigation(
   scanId: string,
-  scanRef: MutableRefObject<ScanStatus | null>,
+  scanRef: RefObject<ScanStatus | null>,
   setScan: Dispatch<SetStateAction<ScanStatus | null>>,
   onNavigate: (kind: AuditTarget["kind"], engineId?: string) => void,
   fpReview: FpReviewJob | null = null,

@@ -86,7 +86,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({ theme, toggleTheme }), [theme, toggleTheme]);
 
-  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+  return <ThemeContext value={value}>{children}</ThemeContext>;
 }
 
 export function useTheme(): ThemeContextValue {
